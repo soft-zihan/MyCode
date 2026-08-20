@@ -569,6 +569,15 @@ class Agent:
             checkpoint_count=self._checkpoint_store.checkpoint_count,
         ))
         self._turn_output_buffer = []
+        from .trace import trace_event
+        trace_event(
+            "turn.start",
+            turn=self._turn_number,
+            session=self.session_id,
+            sub_agent=self.is_sub_agent,
+            user_preview=user_message[:200],
+        )
+        _turn_t0 = time.time()
         coro = self._chat_openai(user_message) if self.use_openai else self._chat_anthropic(user_message)
         self._current_task = asyncio.create_task(coro)
         try:
@@ -580,6 +589,13 @@ class Agent:
             self._current_task = None
         assistant_text = "".join(self._turn_output_buffer or []).strip()
         self._turn_output_buffer = None
+        trace_event(
+            "turn.end",
+            turn=self._turn_number,
+            aborted=self._aborted,
+            duration_s=round(time.time() - _turn_t0, 2),
+            assistant_preview=assistant_text[:200],
+        )
         # /goal 模式的 verifier 需要最近一轮的助手报告作为证据。
         self._last_assistant_text = assistant_text
         if not self.is_sub_agent and not self._aborted:
@@ -900,11 +916,18 @@ class Agent:
         利用率用最近一次 API 调用的 input tokens / effective_window，
         方便用户判断何时该 /compact。注意：这里全部是 token 数，
         与 /context 表格的字符数（chars）是不同单位。
+
+        尚未发生任何 API 调用时（首轮提示符、/compact 之后、/clear 之后），
+        真实上下文已含系统提示词+记忆+skills，但精确 token 数未知（API 还没
+        上报过），此时显示 "-" 而不是误导性的 0。
         """
-        util = self.last_input_token_count / self.effective_window if self.effective_window else 0.0
+        if self.last_input_token_count > 0:
+            util = self.last_input_token_count / self.effective_window if self.effective_window else 0.0
+            ctx_part = f"ctx: {self.last_input_token_count}/{self.context_window} tokens ({util:.0%})"
+        else:
+            ctx_part = f"ctx: -/{self.context_window} tokens (未知，待首次调用)"
         return (
-            f"model: {self.model} | ctx: {self.last_input_token_count}/{self.context_window} tokens "
-            f"({util:.0%}) | session: {self.total_input_tokens} in / {self.total_output_tokens} out"
+            f"model: {self.model} | {ctx_part} | session: {self.total_input_tokens} in / {self.total_output_tokens} out"
         )
 
     #获取当前的花费，
@@ -1192,6 +1215,13 @@ class Agent:
         else:
             compacted = await self._compact_anthropic(trigger=trigger)
         if compacted:
+            from .trace import trace_event
+            trace_event(
+                "compact",
+                trigger=trigger,
+                messages_after=self._get_message_count(),
+                ctx_tokens=self.last_input_token_count,
+            )
             print_info("Conversation compacted.")
         return compacted
 
@@ -1451,6 +1481,23 @@ class Agent:
     #执行工具入口
 
     async def _execute_tool_call(self, name: str, inp: dict) -> str:
+        from .trace import trace_event, trace_tool_input
+        _tool_t0 = time.time()
+        trace_event("tool.start", tool=name, input=trace_tool_input(inp))
+        try:
+            result = await self._execute_tool_call_inner(name, inp)
+        except Exception as e:
+            trace_event("tool.end", tool=name, error=str(e)[:300], duration_s=round(time.time() - _tool_t0, 2))
+            raise
+        trace_event(
+            "tool.end",
+            tool=name,
+            duration_s=round(time.time() - _tool_t0, 2),
+            result_preview=str(result)[:300],
+        )
+        return result
+
+    async def _execute_tool_call_inner(self, name: str, inp: dict) -> str:
         if name == "compact_context":
             return await self._execute_compact_context_tool(inp)
         if name == "context_restore":
@@ -1926,7 +1973,6 @@ class Agent:
                             if thinking_visible():
                                 if first_thinking:
                                     stop_spinner()
-                                    print_thinking_text("\n  [thinking] ")
                                     first_thinking = False
                                 print_thinking_text(delta.thinking)
                         #第三种，工具参数 JSON 片段：工具调用的参数不是一次性返回，
@@ -2166,7 +2212,6 @@ class Agent:
                 if reasoning and thinking_visible():
                     if first_thinking:
                         stop_spinner()
-                        print_thinking_text("\n  [thinking] ")
                         first_thinking = False
                     print_thinking_text(reasoning)
 

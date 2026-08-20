@@ -60,6 +60,7 @@ def print_welcome() -> None:
     commands.add_row("/cd", "change working directory")
     commands.add_row("/compact", "compact current context")
     commands.add_row("/thinking", "toggle thinking display")
+    commands.add_row("/trace", "view/toggle trace event log")
     commands.add_row("/memory", "list long-term memories")
     commands.add_row("/skills", "list reusable skills")
     commands.add_row("/help", "full command list")
@@ -103,29 +104,42 @@ def print_assistant_text(text: str) -> None:
 _THINKING_WINDOW_LINES = 8
 _thinking_buffer = ""
 _thinking_drawn_rows = 0
+_thinking_started = False
 
 
 def print_thinking_text(text: str) -> None:
     """以暗色斜体渲染模型 thinking 内容，滑动窗口只显示最近 N 行。
 
     不进入任何缓冲区（不影响上下文、不影响助手回复文本）。
+
+    关键点：擦除行数必须按【物理行】计算——长 thinking 行会在终端自动
+    折行，若按逻辑行数上移会擦不干净，导致旧行残留、越堆越多。
     """
-    global _thinking_buffer, _thinking_drawn_rows
+    global _thinking_buffer, _thinking_drawn_rows, _thinking_started
     _thinking_buffer += text
     lines = _thinking_buffer.split("\n")[-_THINKING_WINDOW_LINES:]
-    # 擦除上一次绘制的行
+    width = max(console.width, 20)
+    rendered = [f"  [thinking] {line}" for line in lines]
+    # 每条渲染行占用的物理行数（向上取整，至少 1 行）
+    phys_rows = sum(max(1, -(-cell_len(r) // width)) for r in rendered)
+    # 擦除上一次绘制的物理行
     if _thinking_drawn_rows > 0:
         _safe_stdout_write(f"\033[{_thinking_drawn_rows}A\r\033[J")
-    for line in lines:
-        console.print(Text(f"  [thinking] {line}", style="dim italic"))
-    _thinking_drawn_rows = len(lines)
+    elif not _thinking_started:
+        # 首次绘制前先换行，与 spinner/正文分隔（该分隔行不参与擦除）
+        _safe_stdout_write("\n")
+        _thinking_started = True
+    for r in rendered:
+        console.print(Text(r, style="dim italic"))
+    _thinking_drawn_rows = phys_rows
 
 
 def reset_thinking_window() -> None:
     """每轮新响应开始时重置滑动窗口。"""
-    global _thinking_buffer, _thinking_drawn_rows
+    global _thinking_buffer, _thinking_drawn_rows, _thinking_started
     _thinking_buffer = ""
     _thinking_drawn_rows = 0
+    _thinking_started = False
 
 
 # ─── thinking 显示开关 ──────────────────────────────────────

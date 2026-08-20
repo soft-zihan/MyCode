@@ -73,6 +73,15 @@ def _watch_background(job_id: str) -> None:
     job["exit_code"] = exit_code
     job["done"] = True
     job["end_time"] = _time.time()
+    from agents.trace import trace_event
+    trace_event(
+        "bg.done",
+        job_id=job_id,
+        command=job["command"],
+        exit_code=exit_code,
+        duration_s=round(job["end_time"] - job["start_time"], 2),
+        output_preview=output[:300],
+    )
     if _on_background_done:
         try:
             _on_background_done(job_id, job["command"], output, exit_code)
@@ -104,6 +113,8 @@ def _start_background_shell(command: str) -> str:
         "end_time": None,
     }
     threading.Thread(target=_watch_background, args=(job_id,), daemon=True).start()
+    from agents.trace import trace_event
+    trace_event("bg.start", job_id=job_id, pid=proc.pid, command=command)
     return (
         f"Background command started (job_id={job_id}, pid={proc.pid}). "
         "It is running in the background; you can continue with other work. "

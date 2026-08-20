@@ -63,6 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume", action="store_true", help="Resume last session")
     parser.add_argument("--max-cost", type=float, default=None, help="Max USD spend")
     parser.add_argument("--max-turns", type=int, default=None, help="Max agentic turns")
+    parser.add_argument("--trace", action="store_true", help="Enable JSONL trace logging (~/.bear-code/trace/)")
     parser.add_argument("--help", "-h", action="store_true", help="Show help")
     return parser.parse_args()
 
@@ -199,6 +200,7 @@ REPL_COMMANDS = [
     "/rewind", "/goal", "/context", "/ctx", "/memory", "/skills",
     "/skill-stats", "/skill-eval", "/extract_now", "/skill-feedback",
     "/skill-evolve", "/skill-create", "/fork", "/sessions", "/switch",
+    "/trace",
 ]
 
 
@@ -523,6 +525,26 @@ async def run_repl(agent: Agent) -> None:
             set_thinking_visible(new_state)
             print_info(f"Thinking display: {'ON' if new_state else 'OFF'}")
             continue
+        if inp == "/trace" or inp.startswith("/trace "):
+            # /trace          查看最近 20 条事件
+            # /trace on|off   开关 trace 记录
+            # /trace <n>      查看最近 n 条事件
+            from .trace import set_trace_enabled, trace_enabled, format_recent_events
+            from .ui import console as _console
+            arg = inp[len("/trace"):].strip()
+            if arg == "on":
+                set_trace_enabled(True)
+                print_info("Trace logging: ON")
+            elif arg == "off":
+                set_trace_enabled(False)
+                print_info("Trace logging: OFF")
+            else:
+                n = 20
+                if arg.isdigit():
+                    n = max(1, int(arg))
+                _console.print(format_recent_events(n))
+                print_info(f"Trace is {'ON' if trace_enabled() else 'OFF'} — toggle with /trace on|off")
+            continue
         if inp == "/memory":
             memories = list_memories()
             if not memories:
@@ -687,6 +709,7 @@ Options:
   --resume            Resume the last session
   --max-cost USD      Stop when estimated cost exceeds this amount
   --max-turns N       Stop after N agentic turns
+  --trace             Enable JSONL trace logging (~/.bear-code/trace/)
   --help, -h          Show this help
 
 REPL commands:
@@ -703,6 +726,7 @@ REPL commands:
   /sessions           List saved sessions
   /switch <id>        Switch to a saved session by id
   /context            Visualize context (index/role/label/tokens)
+  /trace [on|off|n]   View recent trace events / toggle trace logging
   /ctx del <spec>     Delete message groups, e.g. /ctx del 1,3,5~10
   /ctx keep <spec>    Keep only the given message groups
   /memory             List saved memories
@@ -740,6 +764,12 @@ Examples:
     # 模型优先使用命令行参数，其次读取 .env 中的 MODEL / MINI_CLAUDE_MODEL，最后回落到默认模型。
     model = _resolve_model(args.model)
     resolved_api_base, resolved_api_key, resolved_use_openai = _resolve_api_config(args.api_base)
+
+    # --trace 开启 JSONL 事件日志（也可用 BEAR_TRACE=1 或 REPL 内 /trace on）。
+    if args.trace:
+        from .trace import set_trace_enabled, trace_path
+        set_trace_enabled(True)
+        print_info(f"Trace logging enabled: {trace_path()}")
 
     # 没有可用 API key 时无法调用模型，直接提示配置方式并退出。
     if not resolved_api_key:

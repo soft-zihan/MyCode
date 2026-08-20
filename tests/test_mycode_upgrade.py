@@ -158,3 +158,21 @@ def test_context_window_default_200k():
     assert agent.context_window == 200000
     assert agent.effective_window == 180000
     assert "/200000" in agent.status_line()
+
+
+def test_status_line_shows_unknown_before_first_call():
+    """首轮 API 调用前 ctx 精确值未知（系统提示词+记忆+skills 已占位），
+    应显示 '-' 而不是误导性的 0。"""
+    agent = _make_agent()
+    assert agent.last_input_token_count == 0
+    line = agent.status_line()
+    assert "ctx: -/" in line
+    assert "ctx: 0/" not in line
+
+
+def test_status_line_shows_tokens_after_api_report():
+    agent = _make_agent()
+    agent.last_input_token_count = 12650
+    line = agent.status_line()
+    assert "ctx: 12650/200000" in line
+    assert "%" in line
