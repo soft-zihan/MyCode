@@ -89,6 +89,16 @@ def _resolve_model(cli_model: str | None) -> str:
     )
 
 
+def _should_abort_on_sigint(agent) -> bool:
+    """Ctrl+C 时是否应中断 agent：仅当 agent 正在处理且尚未被标记中止。
+
+    注意：必须使用 is_processing（基于 asyncio 任务状态），而不是
+    `_output_buffer is not None` —— 后者只在 run_once()（子 Agent）里被设置，
+    在 REPL 顶层 chat 中恒为 None，会导致 Ctrl+C 永远无法打断。
+    """
+    return not agent._aborted and agent.is_processing
+
+
 def _load_env_file() -> None:
     env_path = find_dotenv(usecwd=True)
     if env_path:
@@ -174,7 +184,7 @@ async def run_repl(agent: Agent) -> None:
 
     def handle_sigint(sig, frame):
         nonlocal sigint_count
-        if agent._aborted is False and agent._output_buffer is not None:
+        if _should_abort_on_sigint(agent):
             # Agent is processing
             agent.abort()
             print_interrupted()
