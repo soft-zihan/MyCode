@@ -234,6 +234,17 @@ async def run_repl(agent: Agent) -> None:
             except Exception as e:
                 print_error(str(e))
             continue
+        if inp == "/rewind" or inp.startswith("/rewind "):
+            # /rewind [N]：回退最近 N 轮对话（默认 1），同时恢复被修改的文件。
+            n = 1
+            if inp.startswith("/rewind "):
+                try:
+                    n = int(inp.split(" ", 1)[1].strip())
+                except ValueError:
+                    print_error("Usage: /rewind [N]  (N = number of turns to rewind)")
+                    continue
+            print_info(agent.rewind(n))
+            continue
         if inp == "/memory":
             memories = list_memories()
             if not memories:

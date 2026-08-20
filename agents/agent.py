@@ -15,6 +15,7 @@ import anthropic
 import openai
 
 from agents.mcp_client import McpManager
+from agents.checkpoints import FileCheckpointStore, TurnBoundary
 from agents.memory import MemoryPrefetch, start_memory_prefetch, format_memories_for_injection
 from agents.model_registry import ModelEndpoint, resolve_agent_endpoint, resolve_side_endpoint
 from agents.prompt import build_system_prompt
@@ -147,7 +148,8 @@ class Agent:
                  custom_system_prompt: str | None=None,
                  custom_tools: list[ToolDef] | None=None,
                  is_sub_agent: bool=False,
-                 parent_abort_event: asyncio.Event | None=None,):
+                 parent_abort_event: asyncio.Event | None=None,
+                 checkpoint_store: FileCheckpointStore | None=None,):
         self.permission_mode = permission_mode
         self.thinking = thinking
         self.model = model
@@ -173,6 +175,11 @@ class Agent:
         self.last_input_token_count = 0
         self.current_turns = 0
         self.last_api_call_time = 0
+
+        # /rewind 支持：文件快照存储 + 轮次边界记录。
+        # 子 Agent 与父共享同一个 store，这样子 Agent 改的文件也能被回退。
+        self._checkpoint_store = checkpoint_store or FileCheckpointStore(self.session_id)
+        self._turn_boundaries: list[TurnBoundary] = []
 
 
         self._aborted = False
@@ -436,6 +443,7 @@ class Agent:
             is_sub_agent=True,
             permission_mode="plan" if self.permission_mode == "plan" else "bypassPermissions",
             parent_abort_event=self._abort_event,
+            checkpoint_store=self._checkpoint_store,
         )
 
     def set_confirm_fn(self, fn:Callable[[str], Awaitable[bool]]) -> None:
@@ -512,6 +520,13 @@ class Agent:
         self._abort_event.clear()
         # 轮次计数递增，用于记忆召回冷却衰减。
         self._turn_number += 1
+        # /rewind 支持：在用户消息追加【之前】记录轮次边界，
+        # 这样边界 message_count 指向上一轮完整结束的位置（tool_use/tool_result 配对完整）。
+        self._turn_boundaries.append(TurnBoundary(
+            turn=self._turn_number,
+            message_count=self._get_message_count(),
+            checkpoint_count=self._checkpoint_store.checkpoint_count,
+        ))
         self._turn_output_buffer = []
         coro = self._chat_openai(user_message) if self.use_openai else self._chat_anthropic(user_message)
         self._current_task = asyncio.create_task(coro)
@@ -860,7 +875,51 @@ class Agent:
             self._openai_messages = _sanitize_for_utf8(data["openaiMessages"])
         if isinstance(data.get("foldedSessionMemories"), list):
             self._folded_session_memories = _sanitize_for_utf8(data["foldedSessionMemories"])
+        # 恢复 checkpoint 元数据（快照文件仍在磁盘上）。
+        if isinstance(data.get("checkpointStore"), dict):
+            self._checkpoint_store.restore_state(data["checkpointStore"])
+        if isinstance(data.get("turnBoundaries"), list):
+            self._turn_boundaries = [
+                TurnBoundary(**b) for b in data["turnBoundaries"]
+                if isinstance(b, dict) and {"turn", "message_count", "checkpoint_count"} <= set(b)
+            ]
         print_info(f"Session restored ({self._get_message_count()} messages).")
+
+    #/rewind：回退对话 N 轮，同时把被修改的文件恢复到对应轮次开始时的状态。
+    def rewind(self, n: int = 1) -> str:
+        if not self._turn_boundaries:
+            return "Nothing to rewind (no completed turns yet)."
+        n = max(1, n)
+        idx = len(self._turn_boundaries) - n
+        if idx < 0:
+            return f"Cannot rewind {n} turns; only {len(self._turn_boundaries)} turns recorded."
+
+        boundary = self._turn_boundaries[idx]
+
+        # 1. 截断消息历史到边界记录的消息数（边界在用户消息追加前记录，配对完整）。
+        if self.use_openai:
+            self._openai_messages = self._openai_messages[:boundary.message_count]
+        else:
+            self._anthropic_messages = self._anthropic_messages[:boundary.message_count]
+
+        # 2. 回滚边界之后被修改/新建的文件。
+        file_results = self._checkpoint_store.restore_after(boundary.checkpoint_count)
+
+        # 3. 清理 read_file_state，避免对已恢复文件报"外部修改"。
+        for path_key in file_results:
+            self._read_file_state.pop(path_key, None)
+
+        # 4. 丢弃边界之后的轮次边界记录。
+        self._turn_boundaries = self._turn_boundaries[:idx]
+
+        restored = sum(1 for v in file_results.values() if v == "restored")
+        deleted = sum(1 for v in file_results.values() if v == "deleted")
+        parts = [f"Rewound {n} turn(s). Messages now: {self._get_message_count()}."]
+        if restored:
+            parts.append(f"Restored {restored} file(s).")
+        if deleted:
+            parts.append(f"Deleted {deleted} newly-created file(s).")
+        return " ".join(parts)
 
 
 
@@ -943,6 +1002,12 @@ class Agent:
                 "anthropicMessages": _sanitize_for_utf8(self._anthropic_messages) if not self.use_openai else None,
                 "openaiMessages": _sanitize_for_utf8(self._openai_messages) if self.use_openai else None,
                 "foldedSessionMemories": _sanitize_for_utf8(self._folded_session_memories),
+                # /rewind 支持：快照元数据 + 轮次边界随 session 落盘。
+                "checkpointStore": self._checkpoint_store.to_dict(),
+                "turnBoundaries": [
+                    {"turn": b.turn, "message_count": b.message_count, "checkpoint_count": b.checkpoint_count}
+                    for b in self._turn_boundaries
+                ],
             })
         except Exception:
             pass
@@ -1207,7 +1272,7 @@ class Agent:
             # Route MCP tool calls to the MCP manager
         if self._mcp_manager.is_mcp_tool(name):
             return await self._mcp_manager.call_tool(name, inp)
-        result = await execute_tool(name, inp, self._read_file_state)
+        result = await execute_tool(name, inp, self._read_file_state, self._checkpoint_store)
         if name in {"skill_create", "skill_evolve"}:
             try:
                 parsed = json.loads(result)

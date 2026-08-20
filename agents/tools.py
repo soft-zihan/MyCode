@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from tqdm.utils import IS_WIN
 
@@ -705,7 +706,8 @@ def check_permission(
 # 'agent' 和 'skill' 这两个工具在 agent.py 中处理，以避免循环依赖。"
 
 async def execute_tool(
-    name: str, inp: dict, read_file_state: dict[str, float] | None = None
+    name: str, inp: dict, read_file_state: dict[str, float] | None = None,
+    checkpoint_store: Any | None = None,
 ) -> str:
     if name == "read_file":
         result = _read_file(inp)
@@ -797,6 +799,14 @@ async def execute_tool(
 
     if not handler:
         return f"Unknown tool: {name}"
+
+    # /rewind 支持：写/编辑文件【之前】先拍快照，记录修改前的内容。
+    if name in ("write_file", "edit_file") and checkpoint_store is not None:
+        try:
+            target = _resolve_tool_path(inp.get("file_path", ""), must_exist=(name == "edit_file"))
+            checkpoint_store.snapshot(target)
+        except Exception:
+            pass
 
     result = _truncate_result(handler(inp))
 
