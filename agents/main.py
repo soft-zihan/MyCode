@@ -27,7 +27,8 @@ from .ui import (
     print_skill_entries,
     print_warning,
     print_context_rows,
-    print_markdown,
+    set_thinking_visible,
+    thinking_visible,
 )
 from .session import load_session, get_latest_session_id
 from .memory import list_memories
@@ -189,6 +190,76 @@ def _expand_at_references(text: str) -> tuple[str, list[str]]:
     return _AT_REF_RE.sub(_sub, text), notes
 
 
+# ─── Tab 补全（readline）───────────────────────────────────
+
+REPL_COMMANDS = [
+    "/clear", "/plan", "/cost", "/compact", "/cd", "/help", "/thinking",
+    "/rewind", "/goal", "/context", "/ctx", "/memory", "/skills",
+    "/skill-stats", "/skill-eval", "/extract_now", "/skill-feedback",
+    "/skill-evolve", "/skill-create",
+]
+
+
+def _complete_at_path(word: str) -> list[str]:
+    """@ 前缀的文件/目录路径补全候选。
+
+    规则：以最后一个路径分量作为待补全前缀，在其父目录里匹配。
+    以 "/" 结尾时则列出该目录内容。目录候选追加 "/"。
+    """
+    raw = word[1:]
+    expanded = os.path.expanduser(raw)
+    if raw.endswith("/"):
+        parent, prefix = Path(expanded), ""
+    else:
+        p = Path(expanded)
+        parent, prefix = p.parent, p.name
+    try:
+        entries = sorted(parent.iterdir())
+    except OSError:
+        return []
+    matches = []
+    for p in entries:
+        if p.name.startswith("."):
+            continue
+        if not p.name.startswith(prefix):
+            continue
+        matches.append(f"@{p}/" if p.is_dir() else f"@{p}")
+    return matches
+
+
+def _repl_completer(text: str, state: int):
+    """readline 补全：/ 开头补全命令，@ 开头补全路径。"""
+    try:
+        import readline
+
+        line = readline.get_line_buffer()
+        start = readline.get_begidx()
+        prefix_is_word_start = start == 0 or (start > 0 and line[start - 1] in " \t")
+        if text.startswith("/") and prefix_is_word_start:
+            candidates = [c for c in REPL_COMMANDS if c.startswith(text)]
+        elif text.startswith("@"):
+            candidates = _complete_at_path(text)
+        else:
+            candidates = []
+    except Exception:
+        candidates = []
+    return candidates[state] if state < len(candidates) else None
+
+
+def _setup_readline() -> None:
+    """启用 Tab 补全（/ 命令与 @ 路径）。非 TTY 或无 readline 时静默跳过。"""
+    try:
+        import readline
+    except ImportError:
+        return
+    try:
+        readline.set_completer_delims(" \t\n;|&")
+        readline.set_completer(_repl_completer)
+        readline.parse_and_bind("tab: complete")
+    except Exception:
+        pass
+
+
 async def run_repl(agent: Agent) -> None:
     """Interactive REPL loop."""
 
@@ -245,6 +316,7 @@ async def run_repl(agent: Agent) -> None:
             print_user_prompt(agent.status_line())
 
     signal.signal(signal.SIGINT, handle_sigint)
+    _setup_readline()
     print_welcome()
 
     while True:
@@ -353,6 +425,21 @@ async def run_repl(agent: Agent) -> None:
                    if state.status != "achieved" else "")
             )
             continue
+        if inp == "/help":
+            cmds = "\n".join(f"  {c}" for c in REPL_COMMANDS)
+            print_info(
+                "REPL commands:\n" + cmds +
+                "\n\nTips:\n"
+                "  @path            引用文件/目录，内容自动注入本轮输入\n"
+                "  Tab              补全 / 命令与 @ 路径\n"
+                "  /help            显示本帮助；完整说明见 --help"
+            )
+            continue
+        if inp == "/thinking":
+            new_state = not thinking_visible()
+            set_thinking_visible(new_state)
+            print_info(f"Thinking display: {'ON' if new_state else 'OFF'}")
+            continue
         if inp == "/memory":
             memories = list_memories()
             if not memories:
@@ -381,14 +468,6 @@ async def run_repl(agent: Agent) -> None:
                 continue
             agent._refresh_runtime_system_prompt()
             print_info(f"Changed working directory to: {new_dir}")
-            continue
-        if inp == "/md":
-            # /md：用 rich Markdown 渲染最近一条助手回复。
-            text = (agent._last_assistant_text or "").strip()
-            if not text:
-                print_info("No assistant reply to render yet.")
-            else:
-                print_markdown(text)
             continue
         if inp == "/skills":
             skills = discover_skills()
@@ -477,6 +556,13 @@ async def run_repl(agent: Agent) -> None:
                     if "abort" not in str(e).lower():
                         print_error(str(e))
                 continue
+            # 既不是内置命令也不是可调用 skill：报错而不是发给模型，
+            # 避免 /ls 这类输入被当成对话浪费 token。想问“ls 是什么”请用自然语言。
+            print_error(
+                f"Unknown command: /{cmd_name}. Type /help for the command list, "
+                "or write it as a natural-language question to ask the model."
+            )
+            continue
 
         # Normal chat
         # @path 引用展开：把 @文件/@目录 的内容注入本轮输入。
@@ -526,7 +612,8 @@ REPL commands:
   /cost               Show token usage and cost
   /compact            Manually compact conversation
   /cd [path]          Change working directory (no arg = show current)
-  /md                 Render the last assistant reply as Markdown
+  /help               Show REPL command list
+  /thinking           Toggle thinking display (default OFF)
   /rewind [N]         Rewind last N turns (default 1), restoring changed files
   /goal <goal>        Autonomous goal mode with verifier loop
   /context            Visualize context (index/role/label/chars)
@@ -544,8 +631,10 @@ REPL commands:
 
 Tips:
   @path               Reference a file/dir in your prompt, e.g. "summarize @README.md"
+  Tab                 Autocomplete / commands and @ paths
   BEAR_CONTEXT_WINDOW=N            Override the model context window (tokens)
   BEAR_AUTO_COMPACT_THRESHOLD=0.9  Auto-compact when context reaches this fraction
+  BEAR_MD_RENDER=0                 Disable auto Markdown re-render after streaming
 
 Examples:
   mini-claude "fix the bug in src/app.ts"

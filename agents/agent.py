@@ -40,7 +40,7 @@ from agents.tools import ToolDef, tool_definitions, execute_tool, CONCURRENCY_SA
     get_active_tool_definitions
 from agents.ui import print_info, print_divider, print_assistant_text, print_sub_agent_start, print_sub_agent_end, \
     start_spinner, stop_spinner, print_cost, print_tool_call, print_tool_result, print_confirmation, print_retry, \
-    print_error, print_thinking_text
+    print_error, print_thinking_text, thinking_visible, md_track_begin, md_track_feed, md_track_flush
 
 
 # 指数退避重试
@@ -619,6 +619,9 @@ class Agent:
             self._output_buffer.append(text)
         else:
             print_assistant_text(text)
+            # 主 Agent 的正文同步喂入 Markdown 自动渲染跟踪（流式结束后重渲染）。
+            if not self.is_sub_agent:
+                md_track_feed(text)
 
     def _build_fold_guidance_section(self) -> str:
         if self._custom_system_prompt is not None:
@@ -891,12 +894,13 @@ class Agent:
         """REPL 提示符上方的状态行：模型名 + token 累计 + 上下文利用率。
 
         利用率用最近一次 API 调用的 input tokens / effective_window，
-        方便用户判断何时该 /compact。
+        方便用户判断何时该 /compact。注意：这里全部是 token 数，
+        与 /context 表格的字符数（chars）是不同单位。
         """
         util = self.last_input_token_count / self.effective_window if self.effective_window else 0.0
         return (
-            f"model: {self.model} | ctx: {self.last_input_token_count}/{self.effective_window} "
-            f"({util:.0%}) | tokens: {self.total_input_tokens} in / {self.total_output_tokens} out"
+            f"model: {self.model} | ctx: {self.last_input_token_count}/{self.effective_window} tokens "
+            f"({util:.0%}) | session: {self.total_input_tokens} in / {self.total_output_tokens} out"
         )
 
     #获取当前的花费，
@@ -1718,6 +1722,7 @@ class Agent:
             # 没有工具调用，说明模型已经给出最终回复，本轮对话结束。
             if not tool_uses:
                 if not self.is_sub_agent:
+                    md_track_flush()  # 流式结束：擦除原文，自动重渲染 Markdown
                     print_cost(self.total_input_tokens, self.total_output_tokens)
                 break
 
@@ -1849,6 +1854,8 @@ class Agent:
 
             first_text = True
             first_thinking = True
+            if not self.is_sub_agent:
+                md_track_begin()
 
             tool_blocks_by_index: dict[int, dict] = {}
 
@@ -1878,14 +1885,16 @@ class Agent:
                                 first_text = False
                             self._emit_text(delta.text)
                         #第二种，thinking 内容：
-                        #如果模型返回思考内容，用暗色斜体单独渲染（可区分于正文），
-                        #且不进入 _turn_output_buffer，避免污染助手回复文本。
+                        #默认不展示（对齐 Claude Code / Codex CLI 的做法），
+                        #用 /thinking 打开后才以暗色斜体渲染；thinking 从不进入
+                        #消息历史，也不进入 _turn_output_buffer。
                         elif hasattr(delta, 'thinking'):
-                            if first_thinking:
-                                stop_spinner()
-                                print_thinking_text("\n  [thinking] ")
-                                first_thinking = False
-                            print_thinking_text(delta.thinking)
+                            if thinking_visible():
+                                if first_thinking:
+                                    stop_spinner()
+                                    print_thinking_text("\n  [thinking] ")
+                                    first_thinking = False
+                                print_thinking_text(delta.thinking)
                         #第三种，工具参数 JSON 片段：工具调用的参数不是一次性返回，
                         # 而是一段一段返回，所以这里不断拼接到 input_json。
                         elif hasattr(delta, 'partial_json'):
@@ -1980,6 +1989,7 @@ class Agent:
 
             if not tool_calls:
                 if not self.is_sub_agent:
+                    md_track_flush()  # 流式结束：擦除原文，自动重渲染 Markdown
                     print_cost(self.total_input_tokens, self.total_output_tokens)
                 break
 
@@ -2098,6 +2108,8 @@ class Agent:
             content = ""
             first_text = True
             first_thinking = True
+            if not self.is_sub_agent:
+                md_track_begin()
             tool_calls: dict[int, dict] = {}
             finish_reason = ""
             usage = None
@@ -2114,9 +2126,9 @@ class Agent:
                 delta = chunk.choices[0].delta
 
                 # OpenAI-compatible 模型的思考内容（DeepSeek 等用 reasoning_content 字段）。
-                # 用暗色斜体渲染，不进入 content，也不进入输出缓冲区。
+                # 默认不展示（/thinking 打开后才显示）；不进入 content，也不进入输出缓冲区。
                 reasoning = getattr(delta, "reasoning_content", None)
-                if reasoning:
+                if reasoning and thinking_visible():
                     if first_thinking:
                         stop_spinner()
                         print_thinking_text("\n  [thinking] ")

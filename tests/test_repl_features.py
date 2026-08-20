@@ -112,6 +112,8 @@ def test_status_line_contains_model_and_tokens():
     assert "1234" in line and "567" in line
     assert "890" in line
     assert "%" in line  # 利用率
+    assert "tokens" in line  # 单位标注
+    assert "session:" in line  # 会话累计标注
 
 
 def test_context_window_env_override(monkeypatch):

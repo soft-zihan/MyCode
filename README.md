@@ -370,12 +370,16 @@ agents/skill_evolution.py
 | `/ctx del N [N2 ...]` | 删除指定消息组（支持批量：`/ctx del 1,3,5~10`） |
 | `/ctx keep N [N2 ...]` | 只保留指定消息组，其余删除 |
 | `/cd [path]` | 切换工作目录（Memory/Skills/规则按 cwd 隔离，切换后自动刷新 prompt） |
-| `/md` | 用 rich 渲染最近一条助手回复为 Markdown |
+| `/help` | 显示 REPL 命令列表 |
+| `/thinking` | 开关 thinking 显示（默认关闭，对齐 Claude Code / Codex CLI 惯例） |
 
 输入提示：
 
-- 提示符上方状态行实时显示：当前模型、上下文 token/窗口（利用率）、累计 in/out tokens。
+- 提示符上方状态行实时显示：当前模型、当前上下文 token/窗口（利用率）、会话累计 in/out tokens（注意：单位是 token，`/context` 表格显示的是字符数）。
 - 输入中用 `@路径` 引用文件/目录，内容会自动注入本轮输入（单文件上限 32KB）。
+- Tab 键自动补全 `/` 命令与 `@` 路径。
+- 流式输出结束后自动擦除原文并用 rich 重渲染 Markdown（`BEAR_MD_RENDER=0` 可关闭）。
+- `/` 开头但不是已知命令也不是可调用 skill 时直接报错，不会发给模型。
 
 ## Skills 是什么
 
