@@ -4,10 +4,20 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from .frontmatter import parse_frontmatter
 from .tools import tool_definitions, ToolDef
+
+
+def get_agent_model_ref_env(agent_type: str) -> str:
+    """读取 BEAR_MODEL_<TYPE> 环境变量（端点 ID 或裸模型名），未配置返回空串。
+
+    与 model_registry.get_agent_model_ref 行为一致；此处内联以避免循环导入。
+    """
+    sanitized = "".join(ch.upper() if ch.isalnum() else "_" for ch in agent_type)
+    return os.environ.get(f"BEAR_MODEL_{sanitized}", "").strip()
 
 # ─── Read-only tools (for explore and plan agents) ──────────
 
@@ -120,6 +130,8 @@ def _load_agents_from_dir(directory: Path, agents: dict[str, dict]) -> None:
                 "description": meta.get("description", ""),
                 "allowed_tools": allowed_tools,
                 "system_prompt": result.body,
+                # 自定义代理可在 frontmatter 中声明 model: 字段来指定模型。
+                "model": (meta.get("model") or "").strip() or None,
             }
         except Exception:
             # 单个自定义代理文件解析失败时不影响整个程序启动或其他代理加载。
@@ -129,7 +141,14 @@ def _load_agents_from_dir(directory: Path, agents: dict[str, dict]) -> None:
 
 
 def get_sub_agent_config(agent_type: str) -> dict:
-    """根据代理类型生成 Agent 运行时需要的 system_prompt 和 tools 配置。"""
+    """根据代理类型生成 Agent 运行时需要的 system_prompt、tools 和 model_ref 配置。
+
+    model_ref 是“端点 ID 或裸模型名”的引用，真正解析成完整端点在
+    agent.py 里通过 model_registry 完成。优先级：
+      1. 自定义代理 frontmatter 中的 model: 字段
+      2. 环境变量 BEAR_MODEL_<TYPE>
+      3. 空串（继承父 Agent 端点）
+    """
     custom = _discover_custom_agents().get(agent_type)
     if custom:
         if custom["allowed_tools"]:
@@ -138,17 +157,19 @@ def get_sub_agent_config(agent_type: str) -> dict:
         else:
             # 不允许子代理再调用 agent 工具，避免递归创建子代理导致控制流复杂化。
             tools = [t for t in tool_definitions if t["name"] != "agent"]
-        return {"system_prompt": custom["system_prompt"], "tools": tools}
+        model_ref = custom.get("model") or get_agent_model_ref_env(agent_type)
+        return {"system_prompt": custom["system_prompt"], "tools": tools, "model_ref": model_ref}
 
     # 内置 explore / plan 使用相同的只读工具集合。
     read_only = [t for t in tool_definitions if t["name"] in READ_ONLY_TOOLS]
+    model_ref = get_agent_model_ref_env(agent_type)
 
     if agent_type == "explore":
-        return {"system_prompt": EXPLORE_PROMPT, "tools": read_only}
+        return {"system_prompt": EXPLORE_PROMPT, "tools": read_only, "model_ref": model_ref}
     elif agent_type == "plan":
-        return {"system_prompt": PLAN_PROMPT, "tools": read_only}
+        return {"system_prompt": PLAN_PROMPT, "tools": read_only, "model_ref": model_ref}
     else:  # general
-        return {"system_prompt": GENERAL_PROMPT, "tools": [t for t in tool_definitions if t["name"] != "agent"]}
+        return {"system_prompt": GENERAL_PROMPT, "tools": [t for t in tool_definitions if t["name"] != "agent"], "model_ref": model_ref}
 
 
 # ─── 可用的agent类型(for system prompt) ──────────────

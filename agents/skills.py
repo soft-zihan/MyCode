@@ -32,6 +32,8 @@ class SkillDefinition:
     prompt_template: str = ""
     source: str = "project"  # "project" or "user"
     skill_dir: str = ""
+    # fork 模式下子 Agent 的模型引用（端点 ID 或裸模型名）；空串表示继承父端点。
+    model: str = ""
 
 
 # skills 只在首次读取时扫描磁盘，后续复用缓存；修改 skill 后需要重启或 reset。
@@ -57,6 +59,7 @@ def execute_skill(skill_name:str, args:object)-> dict | None:
         "context": skill.context,
         "source": skill.source,
         "skill_dir": skill.skill_dir,
+        "model": skill.model,
     }
 
 
@@ -145,6 +148,7 @@ def _parse_skill_file(file_path: Path, source: str, skill_dir: str) -> SkillDefi
             prompt_template=result.body,
             source=source,
             skill_dir=skill_dir,
+            model=str(meta.get("model") or "").strip(),
         )
 
     except Exception:

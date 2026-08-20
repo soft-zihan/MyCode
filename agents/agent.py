@@ -16,6 +16,7 @@ import openai
 
 from agents.mcp_client import McpManager
 from agents.memory import MemoryPrefetch, start_memory_prefetch, format_memories_for_injection
+from agents.model_registry import ModelEndpoint, resolve_agent_endpoint, resolve_side_endpoint
 from agents.prompt import build_system_prompt
 from agents.session_memory import (
     FOLD_SESSION_MEMORY_SYSTEM,
@@ -157,6 +158,12 @@ class Agent:
         self.max_turns = max_turns
         self.confirm_fn = confirm_fn
         self._custom_system_prompt = custom_system_prompt
+        # 保存连接信息，供模型注册表构造主端点、派生子 Agent 端点使用。
+        self._api_base = api_base
+        self._anthropic_base_url = anthropic_base_url
+        self._api_key = api_key
+        # side query 独立端点客户端缓存：(cache_key, (client, model, use_openai))
+        self._side_client_cache: tuple[tuple, tuple] | None = None
         self.effective_window=_get_context_windows(model) -20000
         self.session_id = uuid.uuid4().hex[:8]
         self.session_start_time= time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
@@ -299,10 +306,49 @@ class Agent:
         return self._current_task is not None and not self._current_task.done()
 
     #大模型调用的工厂方法,构建一个用于记忆召回（memory recall）的 sideQuery 可调用对象，兼容anthropic, openai。
+    def _get_side_client(self):
+        """解析 side query 专用端点（BEAR_SIDE_MODEL），返回 (client, model, use_openai)。
+
+        未配置或解析结果与主端点完全一致时返回 None，表示复用主客户端。
+        独立端点的客户端按 (model, base_url, protocol) 缓存，避免重复创建。
+        """
+        endpoint = resolve_side_endpoint(primary=self._primary_endpoint())
+        primary_base = self._api_base if self.use_openai else self._anthropic_base_url
+        if (endpoint.model == self.model
+                and endpoint.base_url == primary_base
+                and endpoint.use_openai == self.use_openai):
+            return None
+        cache_key = (endpoint.model, endpoint.base_url, endpoint.use_openai)
+        cached = getattr(self, "_side_client_cache", None)
+        if cached and cached[0] == cache_key:
+            return cached[1]
+        if endpoint.use_openai:
+            client = openai.AsyncOpenAI(base_url=endpoint.base_url, api_key=endpoint.api_key)
+        else:
+            kwargs: dict[str, Any] = {}
+            if endpoint.api_key:
+                kwargs["api_key"] = endpoint.api_key
+            if endpoint.base_url:
+                kwargs["base_url"] = endpoint.base_url
+            client = anthropic.AsyncAnthropic(**kwargs)
+        result = (client, endpoint.model, endpoint.use_openai)
+        self._side_client_cache = (cache_key, result)
+        return result
+
     def _build_side_query(self, *, max_tokens: int = 256):
-        if self._anthropic_client:
-            client = self._anthropic_client
-            model = self.model
+        # 优先使用 BEAR_SIDE_MODEL 路由出的独立端点（如便宜的小模型），
+        # 未配置时回退到主客户端。
+        side = self._get_side_client()
+        if side is not None:
+            client, model, use_openai = side
+        elif self._anthropic_client:
+            client, model, use_openai = self._anthropic_client, self.model, False
+        elif self._openai_client:
+            client, model, use_openai = self._openai_client, self.model, True
+        else:
+            return None
+
+        if not use_openai:
             async def _sq(system:str, user_message:str)->str:
 
                 resp = await client.messages.create(
@@ -320,34 +366,31 @@ class Agent:
                     )
                 return text
             return _sq
-        if self._openai_client:
-            client = self._openai_client
-            model = self.model
-            async def _sq_openai(system:str, user_message:str)->str:
-                resp = await client.chat.completions.create(
-                    model=model,
-                    max_tokens=max(1, int(max_tokens)),
-                    messages=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user_message},
-                    ],
 
+        async def _sq_openai(system:str, user_message:str)->str:
+            resp = await client.chat.completions.create(
+                model=model,
+                max_tokens=max(1, int(max_tokens)),
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_message},
+                ],
+
+            )
+            if not resp.choices:
+                logging.warning("side_query returned no OpenAI-compatible choices: model=%s", model)
+                return ""
+            choice = resp.choices[0]
+            content = choice.message.content or ""
+            if not content.strip():
+                logging.warning(
+                    "side_query returned empty OpenAI-compatible response: model=%s finish_reason=%s message=%s",
+                    model,
+                    getattr(choice, "finish_reason", ""),
+                    choice.message,
                 )
-                if not resp.choices:
-                    logging.warning("side_query returned no OpenAI-compatible choices: model=%s", model)
-                    return ""
-                choice = resp.choices[0]
-                content = choice.message.content or ""
-                if not content.strip():
-                    logging.warning(
-                        "side_query returned empty OpenAI-compatible response: model=%s finish_reason=%s message=%s",
-                        model,
-                        getattr(choice, "finish_reason", ""),
-                        choice.message,
-                    )
-                return content
-            return _sq_openai
-        return None
+            return content
+        return _sq_openai
     #异步任务取消（Abort）
     def abort(self) -> None:
         self._aborted = True
@@ -363,6 +406,34 @@ class Agent:
         if self._parent_abort_event is not None and self._parent_abort_event.is_set():
             return True
         return False
+
+    def _primary_endpoint(self) -> ModelEndpoint:
+        """把当前 Agent 的连接信息包装成主端点，供模型注册表路由使用。"""
+        return ModelEndpoint(
+            model=self.model,
+            base_url=self._api_base if self.use_openai else self._anthropic_base_url,
+            api_key=self._api_key,
+            use_openai=self.use_openai,
+        )
+
+    def _spawn_sub_agent(self, *, system_prompt: str, tools: list[ToolDef], model_ref: str, label: str) -> "Agent":
+        """按模型注册表解析出子 Agent 应使用的端点，并构造子 Agent 实例。
+
+        model_ref 为端点 ID 或裸模型名；为空则继承父端点。解析出的端点若与父端点
+        协议不同（openai vs anthropic），会以该端点自己的协议构造客户端。
+        """
+        endpoint = resolve_agent_endpoint(label, model_ref=model_ref, primary=self._primary_endpoint())
+        return Agent(
+            model=endpoint.model,
+            api_base=endpoint.base_url if endpoint.use_openai else None,
+            anthropic_base_url=None if endpoint.use_openai else endpoint.base_url,
+            api_key=endpoint.api_key,
+            custom_system_prompt=system_prompt,
+            custom_tools=tools,
+            is_sub_agent=True,
+            permission_mode="plan" if self.permission_mode == "plan" else "bypassPermissions",
+            parent_abort_event=self._abort_event,
+        )
 
     def set_confirm_fn(self, fn:Callable[[str], Awaitable[bool]]) -> None:
         self.confirm_fn = fn
@@ -1166,14 +1237,11 @@ class Agent:
             )
 
             print_sub_agent_start("skill-fork", inp.get("skill_name", ""))
-            sub_agent = Agent(
-                model=self.model,
-                api_base=str(self._openai_client.base_url) if self.use_openai and self._openai_client else None,
-                custom_system_prompt=result["prompt"],
-                custom_tools=tools,
-                is_sub_agent=True,
-                permission_mode="plan" if self.permission_mode == "plan" else "bypassPermissions",
-                parent_abort_event=self._abort_event,
+            sub_agent = self._spawn_sub_agent(
+                system_prompt=result["prompt"],
+                tools=tools,
+                model_ref=str(result.get("model") or ""),
+                label="skill-fork",
             )
             try:
                 sub_result = await sub_agent.run_once(inp.get("args") or "Execute this skill task.")
@@ -1284,14 +1352,11 @@ class Agent:
 
         config = get_sub_agent_config(agent_type)
 
-        sub_agent = Agent(
-            model=self.model,
-            api_base=str(self._openai_client.base_url) if self.use_openai and self._openai_client else None,
-            custom_system_prompt=config["system_prompt"],
-            custom_tools=config["tools"],
-            is_sub_agent=True,
-            permission_mode="plan" if self.permission_mode == "plan" else "bypassPermissions",
-            parent_abort_event=self._abort_event,
+        sub_agent = self._spawn_sub_agent(
+            system_prompt=config["system_prompt"],
+            tools=config["tools"],
+            model_ref=config.get("model_ref", ""),
+            label=agent_type,
         )
         try:
             result = await sub_agent.run_once(prompt)
