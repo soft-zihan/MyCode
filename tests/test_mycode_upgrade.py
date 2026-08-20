@@ -27,7 +27,10 @@ def _make_agent(**kwargs):
 
 # ─── session fork ───────────────────────────────────────────
 
-def test_fork_creates_independent_branch():
+def test_fork_creates_independent_branch(tmp_path, monkeypatch):
+    # 重定向会话/检查点目录，避免污染真实的 ~/.bear-code/
+    monkeypatch.setenv("BEAR_SESSION_DIR", str(tmp_path / "sessions"))
+    monkeypatch.setenv("BEAR_CHECKPOINT_DIR", str(tmp_path / "checkpoints"))
     agent = _make_agent()
     agent._openai_messages.append({"role": "user", "content": "hello"})
     old_id = agent.session_id
@@ -38,7 +41,9 @@ def test_fork_creates_independent_branch():
     assert agent._openai_messages[-1]["content"] == "hello"
 
 
-def test_fork_messages_are_deep_copies():
+def test_fork_messages_are_deep_copies(tmp_path, monkeypatch):
+    monkeypatch.setenv("BEAR_SESSION_DIR", str(tmp_path / "sessions"))
+    monkeypatch.setenv("BEAR_CHECKPOINT_DIR", str(tmp_path / "checkpoints"))
     agent = _make_agent()
     agent._openai_messages.append({"role": "user", "content": "hello"})
     before = agent._openai_messages
@@ -48,7 +53,8 @@ def test_fork_messages_are_deep_copies():
     assert {"role": "user", "content": "new"} not in before
 
 
-def test_checkpoint_fork_copies_snapshots(tmp_path):
+def test_checkpoint_fork_copies_snapshots(tmp_path, monkeypatch):
+    monkeypatch.setenv("BEAR_CHECKPOINT_DIR", str(tmp_path / "checkpoints"))
     store = FileCheckpointStore("fork-src-test")
     f = tmp_path / "a.txt"
     f.write_text("v1")

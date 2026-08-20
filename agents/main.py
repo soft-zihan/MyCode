@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 from dotenv import find_dotenv, load_dotenv
 
 from .agent import Agent
-from .session import list_sessions, load_session, get_latest_session_id
+from .session import list_sessions, load_session, get_latest_session_id, delete_session, clean_sessions
 from .tools import set_background_done_callback
 from .ui import (
     print_welcome,
@@ -30,6 +30,7 @@ from .ui import (
     print_skill_entries,
     print_warning,
     print_context_rows,
+    print_session_rows,
     set_thinking_visible,
     thinking_visible,
 )
@@ -394,14 +395,32 @@ async def run_repl(agent: Agent) -> None:
         if inp == "/fork":
             print_info(agent.fork_session())
             continue
-        if inp == "/sessions":
+        if inp == "/sessions" or inp.startswith("/sessions "):
+            # /sessions              表格列出所有会话（当前会话 * 高亮）
+            # /sessions rm <id>      删除指定会话
+            # /sessions clean        清理测试残留（cwd 在临时目录的会话）
+            sub = inp[len("/sessions"):].strip()
+            if sub.startswith("rm "):
+                target = sub[3:].strip()
+                if not target:
+                    print_error("Usage: /sessions rm <session_id>")
+                elif target == agent.session_id:
+                    print_error("Cannot delete the current session. /switch to another one first.")
+                elif delete_session(target):
+                    print_info(f"Deleted session {target}.")
+                else:
+                    print_error(f"Session not found: {target}")
+                continue
+            if sub == "clean":
+                deleted = clean_sessions(only_tmp=True)
+                print_info(f"Cleaned {deleted} test/temp session(s).")
+                continue
             sessions = list_sessions()
             if not sessions:
                 print_info("No saved sessions.")
             else:
                 sessions.sort(key=lambda s: s.get("startTime", ""), reverse=True)
-                lines = [f"  {s.get('id')}  {s.get('startTime','')}  msgs={s.get('messageCount',0)}  cwd={s.get('cwd','')}" for s in sessions[:20]]
-                print_info("Sessions (newest first):\n" + "\n".join(lines))
+                print_session_rows(sessions[:30], current_id=agent.session_id)
             continue
         if inp.startswith("/switch"):
             target = inp[len("/switch"):].strip()

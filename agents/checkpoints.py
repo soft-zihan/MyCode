@@ -18,12 +18,18 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 
 def _checkpoint_root() -> Path:
+    """检查点根目录。默认 ~/.bear-code/checkpoints/，
+    可用 BEAR_CHECKPOINT_DIR 重定向（测试用，避免污染真实目录）。"""
+    override = os.environ.get("BEAR_CHECKPOINT_DIR", "").strip()
+    if override:
+        return Path(override)
     return Path.home() / ".bear-code" / "checkpoints"
 
 

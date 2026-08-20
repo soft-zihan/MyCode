@@ -7,6 +7,7 @@ import re
 import sys
 import threading
 import time
+from pathlib import Path
 
 from rich import box
 from rich.align import Align
@@ -502,6 +503,73 @@ def print_memory_entries(memories: list[object]) -> None:
             _safe_text(getattr(m, "description", "")),
         )
     console.print(Panel(table, title="[bold cyan]Memories[/bold cyan]", border_style="cyan", box=box.ROUNDED))
+
+
+def _shorten_path(path: str, max_len: int = 44) -> str:
+    """把绝对路径缩写：HOME 前缀换 ~；过长时优先保留末尾的路径分量
+    （项目名最重要），从前往后逐段丢弃，前缀加 …。"""
+    home = str(Path.home())
+    if path.startswith(home):
+        path = "~" + path[len(home):]
+    if len(path) <= max_len:
+        return path
+    # 从末尾逐段保留，直到放不下为止
+    parts = path.split("/")
+    kept: list[str] = []
+    for seg in reversed(parts):
+        candidate = ("/".join([seg] + kept))
+        if len(candidate) + 1 > max_len and kept:
+            break
+        kept.insert(0, seg)
+    return "…/" + "/".join(kept)
+
+
+def _relative_time(iso_time: str) -> str:
+    """ISO8601(UTC) 时间转相对显示：just now / 5m ago / 3h ago / 2d ago。"""
+    try:
+        from datetime import datetime, timezone
+        t = datetime.strptime(iso_time, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        delta = (datetime.now(timezone.utc) - t).total_seconds()
+    except (ValueError, TypeError):
+        return iso_time or "?"
+    if delta < 60:
+        return "just now"
+    if delta < 3600:
+        return f"{int(delta // 60)}m ago"
+    if delta < 86400:
+        return f"{int(delta // 3600)}h ago"
+    return f"{int(delta // 86400)}d ago"
+
+
+def print_session_rows(sessions: list[dict], current_id: str | None = None) -> None:
+    """渲染 /sessions 表格：ID / 时间 / 消息数 / 模型 / 工作目录。
+
+    当前会话用 * 标记并高亮；cwd 缩写避免撑爆表格。
+    """
+    table = Table(box=box.ROUNDED, header_style="bold cyan", border_style="cyan")
+    table.add_column("", no_wrap=True)  # 当前会话标记列
+    table.add_column("ID", style="bold #f6c177", no_wrap=True)
+    table.add_column("When", style="cyan", no_wrap=True)
+    table.add_column("Msgs", justify="right", no_wrap=True)
+    table.add_column("Model", style="dim", no_wrap=True)
+    table.add_column("Working dir", style="white")
+    for s in sessions:
+        sid = s.get("id", "")
+        is_current = sid == current_id
+        table.add_row(
+            "[bold green]*[/bold green]" if is_current else "",
+            ("[bold green]" if is_current else "") + _safe_text(sid) + ("[/bold green]" if is_current else ""),
+            _relative_time(s.get("startTime", "")),
+            str(s.get("messageCount", 0)),
+            _safe_text(s.get("model", "")),
+            _safe_text(_shorten_path(s.get("cwd", ""))),
+        )
+    console.print(Panel(
+        table,
+        title=f"[bold cyan]Sessions[/bold cyan] ({len(sessions)})",
+        subtitle="[dim]/switch <id> 切换 · /sessions rm <id> 删除 · /sessions clean 清理测试残留[/dim]",
+        border_style="cyan", box=box.ROUNDED,
+    ))
 
 
 def print_skill_entries(skills: list[object]) -> None:
