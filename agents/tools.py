@@ -424,7 +424,9 @@ def _grep_search(inp: dict) -> str:
 
     if not IS_WIN:
         try:
-            args = ["grep", "--line-number", "--color=never", "-r"]
+            # -E 启用扩展正则（ERE），让 |、( ) 等与 Python re 后备分支行为一致。
+            # 工具描述承诺 regex pattern，模型常写 A|B，默认 BRE 会把 | 当字面字符。
+            args = ["grep", "--line-number", "--color=never", "-r", "-E"]
             if include:
                 args.append(f"--include={include}")
             args.extend(["--", pattern, path])
