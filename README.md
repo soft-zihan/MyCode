@@ -150,6 +150,10 @@ BEAR_MODEL_GENERAL=deepseek-v4-pro
 
 # side query 路由（记忆召回/会话折叠/skill 进化等轻量调用）
 BEAR_SIDE_MODEL=deepseek-v4-pro
+
+# 上下文窗口与自动压缩（可选）
+BEAR_CONTEXT_WINDOW=200000        # 覆盖模型上下文窗口（token）
+BEAR_AUTO_COMPACT_THRESHOLD=0.9   # 上下文达到该比例时自动压缩（默认 0.7）
 ```
 
 自定义子 Agent 也可以在 `.bear/agents/<name>.md` frontmatter 里写 `model: <模型名>` 自行配置，无需环境变量。
@@ -363,8 +367,15 @@ agents/skill_evolution.py
 | `/rewind [N]` | 回退最近 N 轮对话（默认 1），同时恢复被修改的文件 |
 | `/goal <目标>` | 自主目标模式：提炼成功标准 → 确认 → 执行+verifier 验证循环 |
 | `/context` | 可视化上下文（index/role/内容摘要/字符数） |
-| `/ctx del N [N2 ...]` | 删除指定消息组（保持 tool_use/tool_result 配对完整） |
+| `/ctx del N [N2 ...]` | 删除指定消息组（支持批量：`/ctx del 1,3,5~10`） |
 | `/ctx keep N [N2 ...]` | 只保留指定消息组，其余删除 |
+| `/cd [path]` | 切换工作目录（Memory/Skills/规则按 cwd 隔离，切换后自动刷新 prompt） |
+| `/md` | 用 rich 渲染最近一条助手回复为 Markdown |
+
+输入提示：
+
+- 提示符上方状态行实时显示：当前模型、上下文 token/窗口（利用率）、累计 in/out tokens。
+- 输入中用 `@路径` 引用文件/目录，内容会自动注入本轮输入（单文件上限 32KB）。
 
 ## Skills 是什么
 

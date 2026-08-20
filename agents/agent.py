@@ -40,7 +40,7 @@ from agents.tools import ToolDef, tool_definitions, execute_tool, CONCURRENCY_SA
     get_active_tool_definitions
 from agents.ui import print_info, print_divider, print_assistant_text, print_sub_agent_start, print_sub_agent_end, \
     start_spinner, stop_spinner, print_cost, print_tool_call, print_tool_result, print_confirmation, print_retry, \
-    print_error
+    print_error, print_thinking_text
 
 
 # 指数退避重试
@@ -101,6 +101,32 @@ MODEL_CONTEXT = {
 
 def _get_context_windows(model:str)->int:
     return MODEL_CONTEXT.get(model, 200000)
+
+
+def _resolve_context_window(model: str) -> int:
+    """上下文窗口：优先 BEAR_CONTEXT_WINDOW 环境变量，其次内置表，最后默认 200000。"""
+    raw = os.environ.get("BEAR_CONTEXT_WINDOW", "").strip()
+    if raw:
+        try:
+            v = int(raw)
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    return _get_context_windows(model)
+
+
+def _resolve_auto_compact_threshold() -> float:
+    """自动压缩阈值：优先 BEAR_AUTO_COMPACT_THRESHOLD（0~1），默认 AUTO_COMPACT_THRESHOLD。"""
+    raw = os.environ.get("BEAR_AUTO_COMPACT_THRESHOLD", "").strip()
+    if raw:
+        try:
+            v = float(raw)
+            if 0 < v <= 1:
+                return v
+        except ValueError:
+            pass
+    return AUTO_COMPACT_THRESHOLD
 
 
 #多层级压缩常数
@@ -172,7 +198,8 @@ class Agent:
         self._api_key = api_key
         # side query 独立端点客户端缓存：(cache_key, (client, model, use_openai))
         self._side_client_cache: tuple[tuple, tuple] | None = None
-        self.effective_window=_get_context_windows(model) -20000
+        self.effective_window = _resolve_context_window(model) - 20000
+        self.auto_compact_threshold = _resolve_auto_compact_threshold()
         self.session_id = uuid.uuid4().hex[:8]
         self.session_start_time= time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
 
@@ -860,6 +887,18 @@ class Agent:
         print_info(
             f"Tokens: {self.total_input_tokens} in / {self.total_output_tokens} out\n  Estimated cost: ${total:.4f}{budget_info}{turn_info}")
 
+    def status_line(self) -> str:
+        """REPL 提示符上方的状态行：模型名 + token 累计 + 上下文利用率。
+
+        利用率用最近一次 API 调用的 input tokens / effective_window，
+        方便用户判断何时该 /compact。
+        """
+        util = self.last_input_token_count / self.effective_window if self.effective_window else 0.0
+        return (
+            f"model: {self.model} | ctx: {self.last_input_token_count}/{self.effective_window} "
+            f"({util:.0%}) | tokens: {self.total_input_tokens} in / {self.total_output_tokens} out"
+        )
+
     #获取当前的花费，
     def _get_current_cost_usd(self) -> float:
         return (self.total_input_tokens / 1_000_000) * 3 + (self.total_output_tokens / 1_000_000) * 15
@@ -1106,7 +1145,7 @@ class Agent:
 
     #自动压缩
     async def _check_and_compact(self)->None:
-        if self.last_input_token_count > self.effective_window * AUTO_COMPACT_THRESHOLD:
+        if self.last_input_token_count > self.effective_window * self.auto_compact_threshold:
             print_info("Context window filling up, compacting conversation...")
             await self._compact_conversation(trigger="auto")
 
@@ -1809,6 +1848,7 @@ class Agent:
                 create_params["thinking"]={"type": "enabled", "budget_tokens": max_output - 1}
 
             first_text = True
+            first_thinking = True
 
             tool_blocks_by_index: dict[int, dict] = {}
 
@@ -1838,13 +1878,14 @@ class Agent:
                                 first_text = False
                             self._emit_text(delta.text)
                         #第二种，thinking 内容：
-                        #如果模型返回思考内容，也输出出来，并在开头加：[thinking]
+                        #如果模型返回思考内容，用暗色斜体单独渲染（可区分于正文），
+                        #且不进入 _turn_output_buffer，避免污染助手回复文本。
                         elif hasattr(delta, 'thinking'):
-                            if first_text:
+                            if first_thinking:
                                 stop_spinner()
-                                self._emit_text("\n  [thinking] ")
-                                first_text = False
-                            self._emit_text(delta.thinking)
+                                print_thinking_text("\n  [thinking] ")
+                                first_thinking = False
+                            print_thinking_text(delta.thinking)
                         #第三种，工具参数 JSON 片段：工具调用的参数不是一次性返回，
                         # 而是一段一段返回，所以这里不断拼接到 input_json。
                         elif hasattr(delta, 'partial_json'):
@@ -2056,6 +2097,7 @@ class Agent:
 
             content = ""
             first_text = True
+            first_thinking = True
             tool_calls: dict[int, dict] = {}
             finish_reason = ""
             usage = None
@@ -2070,6 +2112,16 @@ class Agent:
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
+
+                # OpenAI-compatible 模型的思考内容（DeepSeek 等用 reasoning_content 字段）。
+                # 用暗色斜体渲染，不进入 content，也不进入输出缓冲区。
+                reasoning = getattr(delta, "reasoning_content", None)
+                if reasoning:
+                    if first_thinking:
+                        stop_spinner()
+                        print_thinking_text("\n  [thinking] ")
+                        first_thinking = False
+                    print_thinking_text(reasoning)
 
                 if delta and delta.content:
                     if first_text:

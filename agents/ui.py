@@ -73,12 +73,26 @@ def print_welcome() -> None:
     console.print()
 
 
-def print_user_prompt() -> None:
+def print_user_prompt(status: str = "") -> None:
+    if status:
+        console.print(f"\n[dim]{_safe_text(status)}[/dim]", end="")
     console.print("\n[bold #f6c177]Bear[/bold #f6c177][bold cyan]Code[/bold cyan] [dim]❯[/dim] ", end="")
 
 
 def print_assistant_text(text: str) -> None:
     _safe_stdout_write(text)
+
+
+def print_thinking_text(text: str) -> None:
+    """以暗色斜体渲染模型 thinking 内容（与正文区分，且不进入任何缓冲区）。"""
+    console.print(Text(_safe_text(text), style="dim italic"), end="")
+
+
+def print_markdown(text: str) -> None:
+    """用 rich 渲染 Markdown（/md 重放最近一条助手回复）。"""
+    from rich.markdown import Markdown
+
+    console.print(Markdown(_safe_text(text)))
 
 
 def print_tool_call(name: str, inp: dict) -> None:

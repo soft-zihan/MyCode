@@ -182,3 +182,32 @@ def keep_only_groups(messages: list[dict], indexes: list[int], use_openai: bool)
         keep.add(0)
     kept = [m for i, m in enumerate(messages) if i in keep]
     return kept, len(messages) - len(kept)
+
+
+# ─── 批量索引表达式解析 ─────────────────────────────────────
+
+def parse_index_spec(spec: str) -> list[int]:
+    """解析批量索引表达式，如 "1,3,5~10"、"1 3 5-10"、"2,4~6 9"。
+
+    支持逗号/空格混合分隔，`~` 或 `-` 表示闭区间范围。
+    返回去重升序列表；非法 token 抛 ValueError。
+    """
+    indexes: set[int] = set()
+    for tok in spec.replace(",", " ").split():
+        tok = tok.strip()
+        if not tok:
+            continue
+        sep = None
+        if "~" in tok:
+            sep = "~"
+        elif "-" in tok and not tok.lstrip("-").isdigit():
+            sep = "-"  # 仅当不是负数字面量时，"-" 才视为范围分隔符
+        if sep is None:
+            indexes.add(int(tok))  # 非法字符在此抛 ValueError
+            continue
+        lo_s, hi_s = tok.split(sep, 1)
+        lo, hi = int(lo_s), int(hi_s)
+        if lo > hi:
+            lo, hi = hi, lo
+        indexes.update(range(lo, hi + 1))
+    return sorted(indexes)

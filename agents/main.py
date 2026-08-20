@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 import signal
 import sys
+from pathlib import Path
 from urllib.parse import urlparse
 
 from dotenv import find_dotenv, load_dotenv
@@ -25,6 +27,7 @@ from .ui import (
     print_skill_entries,
     print_warning,
     print_context_rows,
+    print_markdown,
 )
 from .session import load_session, get_latest_session_id
 from .memory import list_memories
@@ -144,6 +147,48 @@ def _resolve_api_config(cli_api_base: str | None) -> tuple[str | None, str | Non
     return None, None, False
 
 
+# ─── @ 文件引用展开 ─────────────────────────────────────────
+
+_AT_REF_RE = re.compile(r"@([\w./~-][\w./~\-]*)")
+_AT_REF_MAX_BYTES = 32 * 1024  # 单个引用文件最多注入 32KB，避免撑爆上下文
+
+
+def _expand_at_references(text: str) -> tuple[str, list[str]]:
+    """把输入中的 @path 展开为文件内容块。
+
+    返回 (新文本, 展开说明列表)。规则：
+    - 相对路径基于当前 cwd 解析，支持 ~ 展开。
+    - 文件存在且 ≤32KB：注入 "<file path>\\n内容\\n</file>" 块。
+    - 目录：注入其一级条目列表。
+    - 不存在：保留原样（可能是邮箱或模型上下文里的普通 @）。
+    """
+    notes: list[str] = []
+
+    def _sub(m: re.Match) -> str:
+        raw = m.group(1)
+        path = Path(os.path.expanduser(raw))
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        try:
+            if path.is_file():
+                size = path.stat().st_size
+                if size > _AT_REF_MAX_BYTES:
+                    notes.append(f"@{raw}: file too large ({size} bytes), use read_file instead")
+                    return m.group(0)
+                content = path.read_text(encoding="utf-8", errors="replace")
+                notes.append(f"@{raw}: injected {size} bytes")
+                return f"\n<file path=\"{path}\">\n{content}\n</file>\n"
+            if path.is_dir():
+                entries = sorted(p.name + ("/" if p.is_dir() else "") for p in path.iterdir())
+                notes.append(f"@{raw}: directory listing ({len(entries)} entries)")
+                return f"\n<directory path=\"{path}\">\n" + "\n".join(entries) + "\n</directory>\n"
+        except OSError:
+            pass
+        return m.group(0)  # 不存在或不可读：保留原样
+
+    return _AT_REF_RE.sub(_sub, text), notes
+
+
 async def run_repl(agent: Agent) -> None:
     """Interactive REPL loop."""
 
@@ -190,20 +235,20 @@ async def run_repl(agent: Agent) -> None:
             agent.abort()
             print_interrupted()
             sigint_count = 0
-            print_user_prompt()
+            print_user_prompt(agent.status_line())
         else:
             sigint_count += 1
             if sigint_count >= 2:
                 print_goodbye()
                 sys.exit(0)
             print_warning("Press Ctrl+C again to exit.")
-            print_user_prompt()
+            print_user_prompt(agent.status_line())
 
     signal.signal(signal.SIGINT, handle_sigint)
     print_welcome()
 
     while True:
-        print_user_prompt()
+        print_user_prompt(agent.status_line())
         try:
             line = input()
         except (EOFError, KeyboardInterrupt):
@@ -255,17 +300,20 @@ async def run_repl(agent: Agent) -> None:
                 print_context_rows(rows)
             continue
         if inp.startswith("/ctx del") or inp.startswith("/ctx keep"):
-            # /ctx del N [N2 ...]：删除指定消息组（保持工具配对完整）。
-            # /ctx keep N [N2 ...]：只保留指定消息组。
+            # /ctx del <spec>：删除指定消息组（保持工具配对完整）。
+            # /ctx keep <spec>：只保留指定消息组。
+            # spec 支持批量表达式：1,3,5~10（逗号/空格混合，~ 或 - 表示范围）。
+            from .context_edit import parse_index_spec
+
             action = "del" if inp.startswith("/ctx del") else "keep"
             rest = inp.split(None, 2)[2] if len(inp.split(None, 2)) > 2 else ""
             try:
-                indexes = [int(x) for x in rest.split()]
+                indexes = parse_index_spec(rest)
             except ValueError:
-                print_error(f"Usage: /ctx {action} <index> [index2 ...]")
+                print_error(f"Usage: /ctx {action} <index> [index2 ...]  e.g. /ctx {action} 1,3,5~10")
                 continue
             if not indexes:
-                print_error(f"Usage: /ctx {action} <index> [index2 ...]")
+                print_error(f"Usage: /ctx {action} <index> [index2 ...]  e.g. /ctx {action} 1,3,5~10")
                 continue
             if action == "del":
                 print_info(agent.delete_context_messages(indexes))
@@ -311,6 +359,36 @@ async def run_repl(agent: Agent) -> None:
                 print_info("No memories saved yet.")
             else:
                 print_memory_entries(memories)
+            continue
+        if inp == "/cd" or inp.startswith("/cd "):
+            # /cd <path>：切换工作目录。Memory/Skills/规则都按 cwd 隔离，
+            # 切换后刷新 system prompt 让模型看到新的工作目录与项目规则。
+            target = inp[len("/cd"):].strip() if inp.startswith("/cd ") else ""
+            if not target:
+                print_info(f"Current directory: {Path.cwd()}")
+                continue
+            new_dir = Path(os.path.expanduser(target))
+            if not new_dir.is_absolute():
+                new_dir = Path.cwd() / new_dir
+            try:
+                new_dir = new_dir.resolve()
+                if not new_dir.is_dir():
+                    print_error(f"Not a directory: {new_dir}")
+                    continue
+                os.chdir(new_dir)
+            except OSError as e:
+                print_error(f"Cannot change directory: {e}")
+                continue
+            agent._refresh_runtime_system_prompt()
+            print_info(f"Changed working directory to: {new_dir}")
+            continue
+        if inp == "/md":
+            # /md：用 rich Markdown 渲染最近一条助手回复。
+            text = (agent._last_assistant_text or "").strip()
+            if not text:
+                print_info("No assistant reply to render yet.")
+            else:
+                print_markdown(text)
             continue
         if inp == "/skills":
             skills = discover_skills()
@@ -401,8 +479,12 @@ async def run_repl(agent: Agent) -> None:
                 continue
 
         # Normal chat
+        # @path 引用展开：把 @文件/@目录 的内容注入本轮输入。
+        expanded, ref_notes = _expand_at_references(inp)
+        for note in ref_notes:
+            print_info(note)
         try:
-            await agent.chat(inp)
+            await agent.chat(expanded)
         except Exception as e:
             if "abort" not in str(e).lower():
                 print_error(str(e))
@@ -443,6 +525,13 @@ REPL commands:
   /plan               Toggle plan mode (read-only <-> normal)
   /cost               Show token usage and cost
   /compact            Manually compact conversation
+  /cd [path]          Change working directory (no arg = show current)
+  /md                 Render the last assistant reply as Markdown
+  /rewind [N]         Rewind last N turns (default 1), restoring changed files
+  /goal <goal>        Autonomous goal mode with verifier loop
+  /context            Visualize context (index/role/label/chars)
+  /ctx del <spec>     Delete message groups, e.g. /ctx del 1,3,5~10
+  /ctx keep <spec>    Keep only the given message groups
   /memory             List saved memories
   /skills             List available skills
   /skill-stats        Show skill usage and evolution stats
@@ -452,6 +541,11 @@ REPL commands:
   /skill-evolve       Evolve a skill: /skill-evolve <skill> <durable lesson>
   /skill-create       Create a skill: /skill-create <name> | <description> | <when-to-use> | <instructions>
   /<skill-name>       Invoke a skill (e.g. /commit "fix types")
+
+Tips:
+  @path               Reference a file/dir in your prompt, e.g. "summarize @README.md"
+  BEAR_CONTEXT_WINDOW=N            Override the model context window (tokens)
+  BEAR_AUTO_COMPACT_THRESHOLD=0.9  Auto-compact when context reaches this fraction
 
 Examples:
   mini-claude "fix the bug in src/app.ts"
