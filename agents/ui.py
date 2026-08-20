@@ -7,6 +7,7 @@ import re
 import sys
 import threading
 import time
+import json
 from pathlib import Path
 
 from rich import box
@@ -568,6 +569,65 @@ def print_session_rows(sessions: list[dict], current_id: str | None = None) -> N
         table,
         title=f"[bold cyan]Sessions[/bold cyan] ({len(sessions)})",
         subtitle="[dim]/switch <id> 切换 · /sessions rm <id> 删除 · /sessions clean 清理测试残留[/dim]",
+        border_style="cyan", box=box.ROUNDED,
+    ))
+
+
+# ─── trace 事件表格 ─────────────────────────────────────────
+
+# 事件类型 → (颜色, 摘要字段优先级)。摘要从事件里挑最有信息量的字段展示。
+_TRACE_KIND_STYLE = {
+    "turn.start": ("bold cyan", ["user_preview"]),
+    "turn.end": ("cyan", ["assistant_preview", "aborted"]),
+    "tool.start": ("bold yellow", ["tool", "input"]),
+    "tool.end": ("yellow", ["tool", "result_preview", "error"]),
+    "bg.start": ("bold magenta", ["job_id", "command"]),
+    "bg.done": ("magenta", ["job_id", "exit_code", "command"]),
+    "compact": ("bold green", ["trigger", "messages_after"]),
+}
+
+
+def _trace_summary(kind: str, event: dict, max_len: int = 60) -> str:
+    """从事件字段里挑最有信息量的内容做单行摘要。"""
+    _, fields = _TRACE_KIND_STYLE.get(kind, ("white", []))
+    parts = []
+    for f in fields:
+        if f in event and event[f] not in (None, ""):
+            v = event[f]
+            if isinstance(v, bool):
+                parts.append(f"{f}={v}")
+            else:
+                parts.append(str(v))
+    if not parts:
+        rest = {k: v for k, v in event.items() if k not in ("ts", "kind")}
+        parts.append(json.dumps(rest, ensure_ascii=False, default=str))
+    text = " · ".join(parts).replace("\n", " ")
+    return text if len(text) <= max_len else text[:max_len] + "…"
+
+
+def print_trace_rows(events: list[dict], trace_file: str, enabled: bool) -> None:
+    """渲染 /trace 事件表格：时间 / 类型 / 耗时 / 摘要，免翻日志文件。"""
+    table = Table(box=box.ROUNDED, header_style="bold cyan", border_style="cyan")
+    table.add_column("Time", style="dim", no_wrap=True)
+    table.add_column("Event", no_wrap=True)
+    table.add_column("Dur", justify="right", no_wrap=True, style="dim")
+    table.add_column("Detail", style="white")
+    for e in events:
+        kind = e.get("kind", "?")
+        style, _ = _TRACE_KIND_STYLE.get(kind, ("white", []))
+        ts = e.get("ts", "")[11:23]
+        dur = e.get("duration_s")
+        table.add_row(
+            _safe_text(ts),
+            f"[{style}]{_safe_text(kind)}[/{style}]",
+            f"{dur}s" if dur is not None else "",
+            _safe_text(_trace_summary(kind, e)),
+        )
+    state = "[bold green]ON[/bold green]" if enabled else "[dim]OFF[/dim]"
+    console.print(Panel(
+        table,
+        title=f"[bold cyan]Trace[/bold cyan] ({len(events)} events, logging {state})",
+        subtitle=f"[dim]{_safe_text(trace_file)} · /trace on|off 开关 · /trace <n> 看更多[/dim]",
         border_style="cyan", box=box.ROUNDED,
     ))
 

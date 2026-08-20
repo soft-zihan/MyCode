@@ -545,11 +545,11 @@ async def run_repl(agent: Agent) -> None:
             print_info(f"Thinking display: {'ON' if new_state else 'OFF'}")
             continue
         if inp == "/trace" or inp.startswith("/trace "):
-            # /trace          查看最近 20 条事件
+            # /trace          表格查看最近 20 条事件
             # /trace on|off   开关 trace 记录
             # /trace <n>      查看最近 n 条事件
-            from .trace import set_trace_enabled, trace_enabled, format_recent_events
-            from .ui import console as _console
+            from .trace import set_trace_enabled, trace_enabled, recent_events, trace_path
+            from .ui import print_trace_rows
             arg = inp[len("/trace"):].strip()
             if arg == "on":
                 set_trace_enabled(True)
@@ -561,8 +561,7 @@ async def run_repl(agent: Agent) -> None:
                 n = 20
                 if arg.isdigit():
                     n = max(1, int(arg))
-                _console.print(format_recent_events(n))
-                print_info(f"Trace is {'ON' if trace_enabled() else 'OFF'} — toggle with /trace on|off")
+                print_trace_rows(recent_events(n), str(trace_path()), trace_enabled())
             continue
         if inp == "/memory":
             memories = list_memories()

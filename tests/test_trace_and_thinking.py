@@ -74,6 +74,35 @@ def test_format_recent_events_empty(tmp_path, monkeypatch):
     assert "no events yet" in text
 
 
+def test_trace_summary_picks_fields():
+    # 已知事件类型按字段优先级摘要；未知类型回退到 JSON。
+    s = ui._trace_summary("tool.end", {"tool": "read_file", "result_preview": "ok"})
+    assert "read_file" in s and "ok" in s
+    s2 = ui._trace_summary("unknown.kind", {"a": 1})
+    assert '"a"' in s2
+
+
+def test_trace_summary_truncates_long_text():
+    s = ui._trace_summary("turn.start", {"user_preview": "x" * 500}, max_len=60)
+    assert len(s) <= 61 and s.endswith("…")
+
+
+def test_print_trace_rows_renders_table(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BEAR_TRACE_DIR", str(tmp_path))
+    trace.set_trace_enabled(True)
+    try:
+        trace.trace_event("turn.start", turn=1, user_preview="hi")
+        trace.trace_event("tool.end", tool="run_shell", duration_s=0.4, result_preview="done")
+        ui.print_trace_rows(trace.recent_events(10), str(trace.trace_path()), True)
+    finally:
+        trace.set_trace_enabled(False)
+    out = capsys.readouterr().out
+    assert "Trace" in out
+    assert "turn.start" in out
+    assert "run_shell" in out
+    assert "0.4s" in out
+
+
 # ─── thinking 滑动窗口：物理行擦除 ──────────────────────────
 
 def _reset_thinking():
