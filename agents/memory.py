@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .frontmatter import parse_frontmatter, format_frontmatter
+from .ui import print_warning
 from typing import Callable
 # side query 是一个异步函数：输入 system prompt 和 user prompt，返回模型文本。
 # 这里标成 Any 是为了避免在运行时引入复杂 Awaitable 类型约束。
@@ -67,10 +68,15 @@ def _get_index_path() -> Path:
 
 
 def _slugify(text: str) -> str:
-    """把记忆名称转成适合文件名的短 slug。"""
-    s = re.sub(r"[^a-z0-9]+", "_", text.lower())
+    """把记忆名称转成适合文件名的短 slug。
+
+    保留字母数字和 CJK 字符（中文记忆名很常见）；如果结果为空
+    （如纯符号名称），用名称 hash 兜底，避免所有此类记忆挤进同一个
+    `{type}_.md` 文件互相覆盖。
+    """
+    s = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "_", text.lower())
     s = s.strip("_")
-    return s[:40]
+    return s[:40] or hashlib.md5(text.encode()).hexdigest()[:8]
 
 
 
@@ -152,8 +158,11 @@ def load_memory_index() -> str:
     lines = content.split("\n")
     if len(lines) > MAX_INDEX_LINES:
         content = "\n".join(lines[:MAX_INDEX_LINES]) + "\n\n[... truncated, too many memory entries ...]"
-    if len(content.encode()) > MAX_INDEX_BYTES:
-        content = content[:MAX_INDEX_BYTES] + "\n\n[... truncated, index too large ...]"
+    # 按字节截断时必须保证截断点落在字符边界上，不能切半个多字节字符。
+    encoded = content.encode()
+    if len(encoded) > MAX_INDEX_BYTES:
+        cut = encoded[:MAX_INDEX_BYTES]
+        content = cut.decode(errors="ignore") + "\n\n[... truncated, index too large ...]"
     return content
 
 
@@ -246,7 +255,9 @@ SELECT_MEMORIES_PROMPT = """You are selecting memories that will be useful to an
 
 Return a JSON object with a "selected_memories" array of filenames for the memories that will clearly be useful (up to 5). Only include memories that you are certain will be helpful based on their name and description.
 - If you are unsure if a memory will be useful, do not include it.
-- If no memories would clearly be useful, return an empty array."""
+- If no memories would clearly be useful, return an empty array.
+
+IMPORTANT: Do NOT answer the user's query. Do NOT explain. Respond with ONLY the JSON object, nothing else. Example: {"selected_memories": ["project_build.md"]}"""
 
 
 class RelevantMemory:
@@ -305,22 +316,29 @@ async def select_relevant_memories(
 
         # side query 可能返回解释文本，这里只提取其中的 JSON 对象。
         match = re.search(r"\{[\s\S]*\}", text)
-        if not match:
-            return []
-
-        # 解析 JSON，拿到被选中的 memory 文件名。
-        parsed = json.loads(match.group(0))
-        selected_filenames = set(parsed.get("selected_memories", []))
-        # 根据文件名筛选候选 memory，最多取 5 个。
-        selected = [h for h in candidates if h.filename in selected_filenames][:5]
+        selected_filenames: list[str] = []
+        if match:
+            try:
+                parsed = json.loads(match.group(0))
+                selected_filenames = parsed.get("selected_memories", [])
+            except Exception:
+                selected_filenames = []
+        if not selected_filenames:
+            # 兜底：模型没按 JSON 返回时，若回复里直接出现了候选文件名，
+            # 也视为选中（按候选顺序），避免一次格式偏差导致召回全空。
+            selected_filenames = [h.filename for h in candidates if h.filename in text]
+        # 按 LLM 返回的顺序（相关性排序）取候选，最多 5 个。
+        by_name = {h.filename: h for h in candidates}
+        selected = [by_name[n] for n in selected_filenames if n in by_name][:5]
 
         result: list[RelevantMemory] = []
         for h in selected:
             # 读取每个选中的 memory 文件内容。
             content = Path(h.file_path).read_text()
-            # 如果文件太大，就截断，避免单条记忆占用过多上下文。
-            if len(content.encode()) > MAX_MEMORY_BYTES_PER_FILE:
-                content = content[:MAX_MEMORY_BYTES_PER_FILE] + "\n\n[... truncated, memory file too large ...]"
+            # 如果文件太大，就按字节截断（保证不切半个多字节字符）。
+            encoded = content.encode()
+            if len(encoded) > MAX_MEMORY_BYTES_PER_FILE:
+                content = encoded[:MAX_MEMORY_BYTES_PER_FILE].decode(errors="ignore") + "\n\n[... truncated, memory file too large ...]"
 
             # 根据 memory 修改时间生成提示头；旧记忆会附带 freshness warning。
             freshness = memory_freshness_warning(h.mtime_ms)
@@ -338,7 +356,7 @@ async def select_relevant_memories(
         # 召回失败不应该影响主对话；取消类错误直接静默。
         if "cancel" in str(e).lower():
             return []
-        print(f"[memory] semantic recall failed: {e}")
+        print_warning(f"[memory] semantic recall failed: {e}")
         return []
 
 
@@ -367,10 +385,16 @@ def start_memory_prefetch(
 
     返回值不是 memory 内容，而是 MemoryPrefetch 句柄。
     Agent 主循环后续会检查任务是否完成，完成后再把 memory 注入当前消息。
+    already_surfaced 是"仍在冷却期内"的 memory 路径集合（由调用方按
+    轮次衰减计算），冷却到期后会重新参与召回。
     """
 
-    # 只有多词输入才触发 memory 预取，避免每个短命令都消耗一次 side query。
-    if not re.search(r"\s", query.strip()):
+    # 触发条件：含空格的多词输入，或足够长的单串输入（中文等 CJK 文本
+    # 通常不含空格，用长度门控保证中文 query 也能触发召回）。
+    q = query.strip()
+    if not q:
+        return None
+    if not re.search(r"\s", q) and len(q) < 4:
         return None
 
     # 当前 session 的 memory 使用量不能超过预算。

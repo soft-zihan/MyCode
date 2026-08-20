@@ -207,8 +207,11 @@ class Agent:
         self._mcp_initialized = False
 
         #记忆回溯
-        #记忆agent已经回答过的信息
-        self._already_surfaced_memories: set[str] = set()
+        #记录每条 memory 最近一次被注入的轮次，用于冷却衰减：
+        #冷却期内不再重复召回，冷却到期后允许重新召回（替代整会话封杀）。
+        self._memory_surfaced_at: dict[str, int] = {}
+        #当前对话轮次计数（每次 chat() +1）
+        self._turn_number = 0
         #当前会话占用的字节数
         self._session_memory_bytes = 0
 
@@ -507,6 +510,8 @@ class Agent:
         self._aborted = False
         # 新一轮对话开始时清除中止信号，避免上一轮的中止状态影响本轮。
         self._abort_event.clear()
+        # 轮次计数递增，用于记忆召回冷却衰减。
+        self._turn_number += 1
         self._turn_output_buffer = []
         coro = self._chat_openai(user_message) if self.use_openai else self._chat_anthropic(user_message)
         self._current_task = asyncio.create_task(coro)
@@ -913,6 +918,17 @@ class Agent:
 
     def _get_message_count(self) -> int:
         return len(self._openai_messages) if self.use_openai else len(self._anthropic_messages)
+
+    # 记忆注入后的冷却轮数：冷却期内同一条 memory 不再参与召回，
+    # 到期后自动解禁（替代旧的"整会话封杀"，避免长会话中记忆永久失效）。
+    MEMORY_RECALL_COOLDOWN_TURNS = 5
+
+    def _cooled_memory_paths(self) -> set[str]:
+        """返回仍在冷却期内的 memory 路径集合。"""
+        return {
+            path for path, turn in self._memory_surfaced_at.items()
+            if self._turn_number - turn < self.MEMORY_RECALL_COOLDOWN_TURNS
+        }
 
     def _auto_save(self) -> None:
         try:
@@ -1385,7 +1401,7 @@ class Agent:
             if sq:
                 memory_prefetch = start_memory_prefetch(
                     user_message, sq,
-                    self._already_surfaced_memories, self._session_memory_bytes,
+                    self._cooled_memory_paths(), self._session_memory_bytes,
                 )
         while True:
             # 外部请求中止时（含父 Agent 传播的中止），结束整个 agent loop。
@@ -1396,7 +1412,10 @@ class Agent:
             # 每轮调用模型前尝试压缩上下文，避免消息历史过长。
             self._run_compression_pipeline()
 
-            # 如果记忆预取任务已经完成，就把取回来的 memory 内容追加到最后一条用户消息里。
+            # 如果记忆预取任务已经完成，就把取回来的 memory 注入消息历史。
+            # Anthropic API 要求 user/assistant 严格交替，不能追加连续的 user 消息，
+            # 因此合并进最后一条 user 消息。注入只发生在每次 API 调用之前，此时最后
+            # 一条消息尚未发送，不存在"改写已发送消息"的竞态。
             # consumed 用来保证同一批 memory 只注入一次。
             if memory_prefetch and memory_prefetch.settled and not memory_prefetch.consumed:
                 memory_prefetch.consumed = True
@@ -1415,12 +1434,12 @@ class Agent:
                                 # list 是可变对象，append 会直接修改 last["content"] 指向的列表。
                                 content.append({"type": "text", "text": injection_text})
                         else:
-                            # 如果最后一条不是 user message，就单独追加一条用户消息承载 memory。
+                            # 最后一条是 assistant 消息时，追加独立 user 消息承载 memory。
                             self._anthropic_messages.append({"role": "user", "content": injection_text})
 
                         for m in memories:
-                            # 记录本 session 已经注入过的 memory，后续检索时可避免重复 surfaced。
-                            self._already_surfaced_memories.add(m.path)
+                            # 记录注入轮次，进入冷却期；冷却到期后允许再次召回。
+                            self._memory_surfaced_at[m.path] = self._turn_number
                             self._session_memory_bytes += m.size
                 except:
                     # memory 注入失败不应该中断主对话流程。
@@ -1677,7 +1696,7 @@ class Agent:
             if sq:
                 memory_prefetch = start_memory_prefetch(
                     user_message, sq,
-                    self._already_surfaced_memories, self._session_memory_bytes,
+                    self._cooled_memory_paths(), self._session_memory_bytes,
                 )
 
         while True:
@@ -1686,7 +1705,8 @@ class Agent:
                 break
 
             self._run_compression_pipeline()
-            # memory 预取完成后注入到最后一条 user 消息
+            # memory 预取完成后注入。OpenAI API 允许连续 user 消息，因此追加
+            # 独立用户消息而非改写已发送消息，避免注入竞态。
             if memory_prefetch and memory_prefetch.settled and not memory_prefetch.consumed:
                 memory_prefetch.consumed = True
                 try:
@@ -1694,15 +1714,10 @@ class Agent:
                     if memories:
                         injection_text = format_memories_for_injection(memories)
                         injection_text = _safe_utf8_text(injection_text)
-                        last = self._openai_messages[-1] if self._openai_messages else None
-
-                        if last and last.get("role") == "user":
-                            last["content"] = (last.get("content") or "") + "\n\n" + injection_text
-                        else:
-                            self._openai_messages.append({"role": "user", "content": injection_text})
+                        self._openai_messages.append({"role": "user", "content": injection_text})
 
                         for m in memories:
-                            self._already_surfaced_memories.add(m.path)
+                            self._memory_surfaced_at[m.path] = self._turn_number
                             self._session_memory_bytes += len(m.content.encode())
                 except Exception:
                     pass
