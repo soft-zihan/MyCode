@@ -925,6 +925,46 @@ class Agent:
             parts.append(f"Deleted {deleted} newly-created file(s).")
         return " ".join(parts)
 
+    #/context：返回上下文描述行（index/role/label/chars），供 REPL 渲染表格。
+    def describe_context(self) -> list[dict]:
+        from .context_edit import describe_messages
+
+        messages = self._openai_messages if self.use_openai else self._anthropic_messages
+        return describe_messages(messages, self.use_openai)
+
+    #/ctx del N [N2 ...]：删除指定 index 所属的消息组（保持工具配对完整）。
+    def delete_context_messages(self, indexes: list[int]) -> str:
+        from .context_edit import delete_message_group
+
+        if self.use_openai:
+            messages = self._openai_messages
+        else:
+            messages = self._anthropic_messages
+        total_deleted = 0
+        for idx in sorted(set(indexes)):
+            messages, deleted = delete_message_group(messages, idx, self.use_openai)
+            total_deleted += deleted
+        if self.use_openai:
+            self._openai_messages = messages
+        else:
+            self._anthropic_messages = self._normalize_anthropic_messages(messages)
+        return f"Deleted {total_deleted} message(s). Context now: {self._get_message_count()} messages."
+
+    #/ctx keep N [N2 ...]：只保留指定组（+ system prompt），其余删除。
+    def keep_context_messages(self, indexes: list[int]) -> str:
+        from .context_edit import keep_only_groups
+
+        if self.use_openai:
+            messages = self._openai_messages
+        else:
+            messages = self._anthropic_messages
+        kept, deleted = keep_only_groups(messages, indexes, self.use_openai)
+        if self.use_openai:
+            self._openai_messages = kept
+        else:
+            self._anthropic_messages = self._normalize_anthropic_messages(kept)
+        return f"Kept {len(kept)} message(s), removed {deleted}. Context now: {self._get_message_count()} messages."
+
 
 
 #整理 Anthropic 的历史消息，修正部分角色错误，并丢弃不合法的工具调用消息。

@@ -309,6 +309,27 @@ def print_sub_agent_end(agent_type: str, _description: str) -> None:
     ))
 
 
+def print_context_rows(rows: list[dict]) -> None:
+    """渲染 /context 表格：index / role / label / chars。"""
+    table = Table(box=box.ROUNDED, header_style="bold cyan", border_style="cyan")
+    table.add_column("#", style="bold #f6c177", no_wrap=True)
+    table.add_column("Role", style="cyan", no_wrap=True)
+    table.add_column("Content", style="white")
+    table.add_column("Chars", style="dim", justify="right", no_wrap=True)
+    total = 0
+    for r in rows:
+        chars = int(r.get("chars", 0))
+        total += chars
+        table.add_row(
+            str(r.get("index", "")),
+            _safe_text(r.get("role", "")),
+            _safe_text(r.get("label", "")),
+            str(chars),
+        )
+    console.print(Panel(table, title=f"[bold cyan]Context[/bold cyan] ({len(rows)} messages, {total} chars)",
+                        border_style="cyan", box=box.ROUNDED))
+
+
 def print_memory_entries(memories: list[object]) -> None:
     table = Table(box=box.ROUNDED, header_style="bold cyan", border_style="cyan")
     table.add_column("Type", style="bold #f6c177", no_wrap=True)

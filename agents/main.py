@@ -24,6 +24,7 @@ from .ui import (
     print_memory_entries,
     print_skill_entries,
     print_warning,
+    print_context_rows,
 )
 from .session import load_session, get_latest_session_id
 from .memory import list_memories
@@ -244,6 +245,32 @@ async def run_repl(agent: Agent) -> None:
                     print_error("Usage: /rewind [N]  (N = number of turns to rewind)")
                     continue
             print_info(agent.rewind(n))
+            continue
+        if inp == "/context":
+            # /context：可视化当前上下文（index/role/内容摘要/字符数）。
+            rows = agent.describe_context()
+            if not rows:
+                print_info("Context is empty.")
+            else:
+                print_context_rows(rows)
+            continue
+        if inp.startswith("/ctx del") or inp.startswith("/ctx keep"):
+            # /ctx del N [N2 ...]：删除指定消息组（保持工具配对完整）。
+            # /ctx keep N [N2 ...]：只保留指定消息组。
+            action = "del" if inp.startswith("/ctx del") else "keep"
+            rest = inp.split(None, 2)[2] if len(inp.split(None, 2)) > 2 else ""
+            try:
+                indexes = [int(x) for x in rest.split()]
+            except ValueError:
+                print_error(f"Usage: /ctx {action} <index> [index2 ...]")
+                continue
+            if not indexes:
+                print_error(f"Usage: /ctx {action} <index> [index2 ...]")
+                continue
+            if action == "del":
+                print_info(agent.delete_context_messages(indexes))
+            else:
+                print_info(agent.keep_context_messages(indexes))
             continue
         if inp.startswith("/goal"):
             # /goal <目标>：提炼成功标准 → 用户确认 → 自主执行+验证循环。
