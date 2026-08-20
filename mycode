@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# My Code launcher — 从任意目录启动，工作区为当前文件夹。
+# 用法：mycode [options] [prompt]   或   MyCode [options] [prompt]
+# 安装：运行  ./scripts/install-mycode.sh
+
+# 定位项目根目录（本脚本所在目录）。
+# 通过符号链接启动时 BASH_SOURCE 指向链接位置，需先解析到真实路径。
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  case "$SOURCE" in
+    /*) ;;
+    *) SOURCE="$DIR/$SOURCE" ;;
+  esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+
+# 优先用项目自带 venv 的 python（探测哪个装了依赖），回退到 python3
+PY="python3"
+for cand in "$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/.venv-1/bin/python"; do
+  if [ -x "$cand" ] && "$cand" -c "import anthropic" >/dev/null 2>&1; then
+    PY="$cand"
+    break
+  fi
+done
+
+# 让 agents 包可导入（无论从哪里启动），但工作区保持为当前目录
+export PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PY" -m agents.main "$@"

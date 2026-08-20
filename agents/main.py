@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import queue
 import re
 import signal
 import sys
@@ -14,6 +15,8 @@ from urllib.parse import urlparse
 from dotenv import find_dotenv, load_dotenv
 
 from .agent import Agent
+from .session import list_sessions, load_session, get_latest_session_id
+from .tools import set_background_done_callback
 from .ui import (
     print_welcome,
     print_user_prompt,
@@ -30,7 +33,6 @@ from .ui import (
     set_thinking_visible,
     thinking_visible,
 )
-from .session import load_session, get_latest_session_id
 from .memory import list_memories
 from .skills import (
     create_skill,
@@ -46,8 +48,8 @@ from .online_skill_eval import format_online_skill_eval_async
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="mini-claude",
-        description="Bear Code — a minimal coding agent",
+        prog="mycode",
+        description="My Code — a minimal coding agent",
         add_help=False,
     )
     parser.add_argument("prompt", nargs="*", help="One-shot prompt")
@@ -196,7 +198,7 @@ REPL_COMMANDS = [
     "/clear", "/plan", "/cost", "/compact", "/cd", "/help", "/thinking",
     "/rewind", "/goal", "/context", "/ctx", "/memory", "/skills",
     "/skill-stats", "/skill-eval", "/extract_now", "/skill-feedback",
-    "/skill-evolve", "/skill-create",
+    "/skill-evolve", "/skill-create", "/fork", "/sessions", "/switch",
 ]
 
 
@@ -297,6 +299,15 @@ async def run_repl(agent: Agent) -> None:
 
     agent.set_plan_approval_fn(plan_approval_fn)
 
+    # 后台 shell 完成回调：watcher 线程把结果放进队列，
+    # REPL 每轮输入前检查队列，若有完成的后台任务就自动用其结果发起对话。
+    bg_done_queue: "queue.Queue[tuple]" = queue.Queue()
+
+    def _on_bg_done(job_id: str, command: str, output: str, exit_code: int) -> None:
+        bg_done_queue.put((job_id, command, output, exit_code))
+
+    set_background_done_callback(_on_bg_done)
+
     sigint_count = 0
 
     def handle_sigint(sig, frame):
@@ -320,6 +331,25 @@ async def run_repl(agent: Agent) -> None:
     print_welcome()
 
     while True:
+        # 后台 shell 完成自动勾起对话：消费队列里的完成事件，
+        # 把结果作为新一轮用户输入发给模型，让模型基于结果继续。
+        while not bg_done_queue.empty():
+            try:
+                job_id, command, output, exit_code = bg_done_queue.get_nowait()
+            except queue.Empty:
+                break
+            print_info(f"Background job {job_id} finished (exit {exit_code}).")
+            followup = (
+                f"[Background shell job {job_id} finished]\n"
+                f"Command: {command}\nExit code: {exit_code}\nOutput:\n{output}\n\n"
+                "Review this result and continue the task accordingly."
+            )
+            try:
+                await agent.chat(followup)
+            except Exception as e:
+                if "abort" not in str(e).lower():
+                    print_error(str(e))
+
         print_user_prompt(agent.status_line())
         try:
             line = input()
@@ -336,7 +366,51 @@ async def run_repl(agent: Agent) -> None:
             print_goodbye()
             break
 
+        # ! 前缀：直接执行 shell 命令（不经过模型），输出打印后回到提示符。
+        # 用户想在对话中自己跑命令时用这个，避免 /ls 被当成对话发给模型。
+        if inp.startswith("!"):
+            command = inp[1:].strip()
+            if not command:
+                print_error("Usage: !<command>  e.g. !ls -la")
+                continue
+            from .tools import _run_shell
+            from .ui import console as _console
+            result = _run_shell({"command": command, "timeout": 30000})
+            _console.print(result)
+            continue
+
         # REPL commands
+        if inp == "/fork":
+            print_info(agent.fork_session())
+            continue
+        if inp == "/sessions":
+            sessions = list_sessions()
+            if not sessions:
+                print_info("No saved sessions.")
+            else:
+                sessions.sort(key=lambda s: s.get("startTime", ""), reverse=True)
+                lines = [f"  {s.get('id')}  {s.get('startTime','')}  msgs={s.get('messageCount',0)}  cwd={s.get('cwd','')}" for s in sessions[:20]]
+                print_info("Sessions (newest first):\n" + "\n".join(lines))
+            continue
+        if inp.startswith("/switch"):
+            target = inp[len("/switch"):].strip()
+            if not target:
+                print_error("Usage: /switch <session_id>  (see /sessions)")
+                continue
+            session = load_session(target)
+            if not session:
+                print_error(f"Session not found: {target}")
+                continue
+            agent.session_id = target
+            agent.restore_session({
+                "anthropicMessages": session.get("anthropicMessages"),
+                "openaiMessages": session.get("openaiMessages"),
+                "foldedSessionMemories": session.get("foldedSessionMemories"),
+                "checkpointStore": session.get("checkpointStore"),
+                "turnBoundaries": session.get("turnBoundaries"),
+                "contextStore": session.get("contextStore"),
+            })
+            continue
         if inp == "/clear":
             agent.clear_history()
             continue
@@ -589,9 +663,9 @@ def main() -> None:
     _load_env_file()
 
     if args.help:
-        # 自定义帮助文本，展示 Bear Code 支持的启动参数和 REPL 内置命令。
+        # 自定义帮助文本，展示 My Code 支持的启动参数和 REPL 内置命令。
         print("""
-Usage: bear-code [options] [prompt]
+Usage: mycode [options] [prompt]
 
 Options:
   --yolo, -y          Skip all confirmation prompts (bypassPermissions mode)
@@ -616,7 +690,10 @@ REPL commands:
   /thinking           Toggle thinking display (default OFF)
   /rewind [N]         Rewind last N turns (default 1), restoring changed files
   /goal <goal>        Autonomous goal mode with verifier loop
-  /context            Visualize context (index/role/label/chars)
+  /fork               Fork current session into a new independent branch
+  /sessions           List saved sessions
+  /switch <id>        Switch to a saved session by id
+  /context            Visualize context (index/role/label/tokens)
   /ctx del <spec>     Delete message groups, e.g. /ctx del 1,3,5~10
   /ctx keep <spec>    Keep only the given message groups
   /memory             List saved memories
@@ -631,20 +708,21 @@ REPL commands:
 
 Tips:
   @path               Reference a file/dir in your prompt, e.g. "summarize @README.md"
+  !command            Run a shell command directly in the REPL, e.g. !ls -la
   Tab                 Autocomplete / commands and @ paths
   BEAR_CONTEXT_WINDOW=N            Override the model context window (tokens)
   BEAR_AUTO_COMPACT_THRESHOLD=0.9  Auto-compact when context reaches this fraction
   BEAR_MD_RENDER=0                 Disable auto Markdown re-render after streaming
 
 Examples:
-  mini-claude "fix the bug in src/app.ts"
-  mini-claude --yolo "run all tests and fix failures"
-  mini-claude --plan "how would you refactor this?"
-  mini-claude --max-cost 0.50 --max-turns 20 "implement feature X"
-  MODEL=deepseek-chat APIKEY=sk-xxx API=https://api.deepseek.com/anthropic mini-claude "hello"
-  MODEL=gpt-4o OPENAI_API_KEY=sk-xxx OPENAI_BASE_URL=https://aihubmix.com/v1 mini-claude "hello"
-  mini-claude --resume
-  mini-claude  # starts interactive REPL
+  mycode "fix the bug in src/app.ts"
+  mycode --yolo "run all tests and fix failures"
+  mycode --plan "how would you refactor this?"
+  mycode --max-cost 0.50 --max-turns 20 "implement feature X"
+  MODEL=deepseek-chat APIKEY=sk-xxx API=https://api.deepseek.com/anthropic mycode "hello"
+  MODEL=gpt-4o OPENAI_API_KEY=sk-xxx OPENAI_BASE_URL=https://aihubmix.com/v1 mycode "hello"
+  mycode --resume
+  mycode  # starts interactive REPL
 """)
         sys.exit(0)
 

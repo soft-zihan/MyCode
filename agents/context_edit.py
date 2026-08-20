@@ -34,6 +34,35 @@ def _msg_chars(msg: dict) -> int:
     return len(str(content))
 
 
+def estimate_tokens(text: str) -> int:
+    """粗略估算 token 数（统一用 token 计数展示）。
+
+    启发式：CJK 字符约 1 字符 ≈ 0.7 token，其余约 4 字符 ≈ 1 token。
+    精确值只有 API 上报的 usage 才有，这里用于 /context 的per-message 展示。
+    """
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    other = len(text) - cjk
+    return int(cjk * 0.7 + other / 4)
+
+
+def _msg_tokens(msg: dict) -> int:
+    """估算一条消息内容的 token 数。"""
+    content = msg.get("content")
+    if content is None:
+        if msg.get("tool_calls"):
+            return estimate_tokens("".join(str(tc.get("function", {}).get("arguments", "")) for tc in msg["tool_calls"]))
+        return 0
+    if isinstance(content, str):
+        return estimate_tokens(content)
+    if isinstance(content, list):
+        total = 0
+        for block in content:
+            if isinstance(block, dict):
+                total += estimate_tokens(str(block.get("text") or block.get("input") or block.get("content") or ""))
+        return total
+    return estimate_tokens(str(content))
+
+
 def _msg_label(msg: dict) -> str:
     """给消息生成一个简短标签（工具名/摘要）。"""
     role = msg.get("role", "?")
@@ -67,7 +96,7 @@ def _msg_label(msg: dict) -> str:
 
 
 def describe_messages(messages: list[dict], use_openai: bool) -> list[dict]:
-    """生成上下文表格行：index / role / label / chars。"""
+    """生成上下文表格行：index / role / label / chars / tokens。"""
     rows = []
     for i, msg in enumerate(messages):
         role = msg.get("role", "?")
@@ -81,6 +110,7 @@ def describe_messages(messages: list[dict], use_openai: bool) -> list[dict]:
             "role": role,
             "label": label,
             "chars": _msg_chars(msg),
+            "tokens": _msg_tokens(msg),
         })
     return rows
 

@@ -16,7 +16,7 @@ from .tools import get_deferred_tool_names
 # ─── System prompt template (embedded) ──────────────────────
 
 SYSTEM_PROMPT_TEMPLATE = """\
-You are  Bear Code, a lightweight coding assistant CLI.
+You are  My Code, a lightweight coding assistant CLI.
 You are an interactive agent that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.
 
 IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.
@@ -91,6 +91,7 @@ Working directory: {{cwd}}
 Date: {{date}}
 Platform: {{platform}}
 Shell: {{shell}}
+{{workspace_structure}}
 {{git_context}}
 {{claude_md}}
 {{memory}}
@@ -207,6 +208,28 @@ def get_git_context() -> str:
         return ""
 
 
+def build_workspace_structure() -> str:
+    """列出工作区第一层文件结构，作为环境信息发给模型。
+
+    只列一层（目录带 / 后缀），跳过隐藏文件与常见噪音目录，
+    最多 100 条，避免大仓库撑爆 prompt。
+    """
+    _SKIP = {"node_modules", "__pycache__", ".git", ".venv", "venv", "dist", "build", ".idea", ".DS_Store"}
+    try:
+        entries = []
+        for p in sorted(Path.cwd().iterdir()):
+            if p.name.startswith(".") or p.name in _SKIP:
+                continue
+            entries.append(p.name + "/" if p.is_dir() else p.name)
+            if len(entries) >= 100:
+                break
+        if not entries:
+            return ""
+        return "\nWorkspace structure (top level):\n" + "\n".join(entries)
+    except OSError:
+        return ""
+
+
 def build_system_prompt() -> str:
     """Build the full system prompt from embedded template + dynamic context."""
     from datetime import date
@@ -218,6 +241,7 @@ def build_system_prompt() -> str:
     memory_section = build_memory_prompt_section()
     skills_section = build_skill_descriptions()
     agent_section = build_agent_descriptions()
+    workspace_structure = build_workspace_structure()
 
     deferred_names = get_deferred_tool_names()
     deferred_section = (
@@ -230,6 +254,7 @@ def build_system_prompt() -> str:
         "{{date}}": today,
         "{{platform}}": plat,
         "{{shell}}": shell,
+        "{{workspace_structure}}": workspace_structure,
         "{{git_context}}": git_context,
         "{{claude_md}}": claude_md,
         "{{memory}}": memory_section,

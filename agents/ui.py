@@ -42,7 +42,7 @@ COOKIE_BEAR = r"""
 
 
 def print_welcome() -> None:
-    title = Text("Bear Code", style="bold #f6c177")
+    title = Text("My Code", style="bold #f6c177")
     subtitle = Text("Evolvable Coding Agent CLI", style="bold cyan")
     cookie = Text(COOKIE_BEAR, style="bold #d19a66")
 
@@ -50,11 +50,20 @@ def print_welcome() -> None:
     commands.add_column(style="bold cyan", no_wrap=True)
     commands.add_column(style="dim")
     commands.add_row("/plan", "read-only planning workflow")
-    commands.add_row("/skills", "list reusable skills")
-    commands.add_row("/skill-create", "create a reusable skill")
-    commands.add_row("/skill-stats", "show skill evolution stats")
-    commands.add_row("/memory", "list long-term memories")
+    commands.add_row("/goal", "autonomous goal mode with verifier")
+    commands.add_row("/context", "visualize context messages")
+    commands.add_row("/ctx del/keep", "delete/keep message groups")
+    commands.add_row("/rewind", "rewind turns + restore files")
+    commands.add_row("/fork", "fork current session (branch)")
+    commands.add_row("/sessions", "list saved sessions")
+    commands.add_row("/switch", "switch to another session")
+    commands.add_row("/cd", "change working directory")
     commands.add_row("/compact", "compact current context")
+    commands.add_row("/thinking", "toggle thinking display")
+    commands.add_row("/memory", "list long-term memories")
+    commands.add_row("/skills", "list reusable skills")
+    commands.add_row("/help", "full command list")
+    commands.add_row("!cmd", "run shell command directly")
     commands.add_row("exit", "quit the session")
 
     body = Table.grid()
@@ -67,7 +76,7 @@ def print_welcome() -> None:
     console.print()
     console.print(Panel(
         body,
-        title="[bold #f6c177] bear cookie ready [/bold #f6c177]",
+        title="[bold #f6c177] my code ready [/bold #f6c177]",
         subtitle="[dim]Type your request below[/dim]",
         border_style="#d19a66",
         box=box.ROUNDED,
@@ -79,16 +88,44 @@ def print_welcome() -> None:
 def print_user_prompt(status: str = "") -> None:
     if status:
         console.print(f"\n[dim]{_safe_text(status)}[/dim]", end="")
-    console.print("\n[bold #f6c177]Bear[/bold #f6c177][bold cyan]Code[/bold cyan] [dim]❯[/dim] ", end="")
+    console.print("\n[bold #f6c177]My[/bold #f6c177][bold cyan]Code[/bold cyan] [dim]❯[/dim] ", end="")
 
 
 def print_assistant_text(text: str) -> None:
     _safe_stdout_write(text)
 
 
+# ─── thinking 滑动窗口显示 ─────────────────────────────────
+# 只保留最近 N 行 thinking，避免超长 thinking 刷屏翻不回去。
+# 实现：累积增量文本 → 按行切分 → 只渲染最后 N 行 → 每次增量到来时
+# 用 ANSI 转义擦除已绘制的行再重绘，形成"可滑动窗口"效果。
+
+_THINKING_WINDOW_LINES = 8
+_thinking_buffer = ""
+_thinking_drawn_rows = 0
+
+
 def print_thinking_text(text: str) -> None:
-    """以暗色斜体渲染模型 thinking 内容（与正文区分，且不进入任何缓冲区）。"""
-    console.print(Text(_safe_text(text), style="dim italic"), end="")
+    """以暗色斜体渲染模型 thinking 内容，滑动窗口只显示最近 N 行。
+
+    不进入任何缓冲区（不影响上下文、不影响助手回复文本）。
+    """
+    global _thinking_buffer, _thinking_drawn_rows
+    _thinking_buffer += text
+    lines = _thinking_buffer.split("\n")[-_THINKING_WINDOW_LINES:]
+    # 擦除上一次绘制的行
+    if _thinking_drawn_rows > 0:
+        _safe_stdout_write(f"\033[{_thinking_drawn_rows}A\r\033[J")
+    for line in lines:
+        console.print(Text(f"  [thinking] {line}", style="dim italic"))
+    _thinking_drawn_rows = len(lines)
+
+
+def reset_thinking_window() -> None:
+    """每轮新响应开始时重置滑动窗口。"""
+    global _thinking_buffer, _thinking_drawn_rows
+    _thinking_buffer = ""
+    _thinking_drawn_rows = 0
 
 
 # ─── thinking 显示开关 ──────────────────────────────────────
@@ -418,24 +455,24 @@ def print_sub_agent_end(agent_type: str, _description: str) -> None:
 
 
 def print_context_rows(rows: list[dict]) -> None:
-    """渲染 /context 表格：index / role / label / chars。"""
+    """渲染 /context 表格：index / role / label / tokens（统一 token 计数）。"""
     table = Table(box=box.ROUNDED, header_style="bold cyan", border_style="cyan")
     table.add_column("#", style="bold #f6c177", no_wrap=True)
     table.add_column("Role", style="cyan", no_wrap=True)
     table.add_column("Content", style="white")
-    table.add_column("Chars", style="dim", justify="right", no_wrap=True)
+    table.add_column("Tokens", style="dim", justify="right", no_wrap=True)
     total = 0
     for r in rows:
-        chars = int(r.get("chars", 0))
-        total += chars
+        tokens = int(r.get("tokens", 0))
+        total += tokens
         table.add_row(
             str(r.get("index", "")),
             _safe_text(r.get("role", "")),
             _safe_text(r.get("label", "")),
-            str(chars),
+            str(tokens),
         )
-    console.print(Panel(table, title=f"[bold cyan]Context[/bold cyan] ({len(rows)} messages, {total} chars)",
-                        subtitle="[dim]chars = 字符数；token 用量见提示符上方状态行[/dim]",
+    console.print(Panel(table, title=f"[bold cyan]Context[/bold cyan] ({len(rows)} messages, ~{total} tokens)",
+                        subtitle="[dim]tokens 为估算值；精确值见状态行（API 上报）[/dim]",
                         border_style="cyan", box=box.ROUNDED))
 
 

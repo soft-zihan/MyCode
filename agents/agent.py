@@ -40,7 +40,8 @@ from agents.tools import ToolDef, tool_definitions, execute_tool, CONCURRENCY_SA
     get_active_tool_definitions
 from agents.ui import print_info, print_divider, print_assistant_text, print_sub_agent_start, print_sub_agent_end, \
     start_spinner, stop_spinner, print_cost, print_tool_call, print_tool_result, print_confirmation, print_retry, \
-    print_error, print_thinking_text, thinking_visible, md_track_begin, md_track_feed, md_track_flush
+    print_error, print_thinking_text, thinking_visible, md_track_begin, md_track_feed, md_track_flush, \
+    reset_thinking_window
 
 
 # 指数退避重试
@@ -198,7 +199,10 @@ class Agent:
         self._api_key = api_key
         # side query 独立端点客户端缓存：(cache_key, (client, model, use_openai))
         self._side_client_cache: tuple[tuple, tuple] | None = None
-        self.effective_window = _resolve_context_window(model) - 20000
+        # 上下文窗口统一用 token 计数。context_window 是模型完整窗口（默认 200k），
+        # effective_window 预留输出余量后用于压缩阈值计算。
+        self.context_window = _resolve_context_window(model)
+        self.effective_window = self.context_window - 20000
         self.auto_compact_threshold = _resolve_auto_compact_threshold()
         self.session_id = uuid.uuid4().hex[:8]
         self.session_start_time= time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
@@ -899,7 +903,7 @@ class Agent:
         """
         util = self.last_input_token_count / self.effective_window if self.effective_window else 0.0
         return (
-            f"model: {self.model} | ctx: {self.last_input_token_count}/{self.effective_window} tokens "
+            f"model: {self.model} | ctx: {self.last_input_token_count}/{self.context_window} tokens "
             f"({util:.0%}) | session: {self.total_input_tokens} in / {self.total_output_tokens} out"
         )
 
@@ -978,6 +982,35 @@ class Agent:
         if deleted:
             parts.append(f"Deleted {deleted} newly-created file(s).")
         return " ".join(parts)
+
+    #/fork：从当前会话创建一个完全相同的分支（新 session_id），并切换过去。
+    def fork_session(self) -> str:
+        """深拷贝当前会话状态到新 session，形成独立分支。
+
+        复制内容：消息历史、折叠记忆、文件快照、轮次边界、ACE 存储。
+        fork 后两个会话完全独立，各自的 /rewind 互不影响。
+        原会话已自动保存（_auto_save），可通过 /switch 切回。
+        """
+        self._auto_save()  # 确保原会话最新状态已落盘
+        old_id = self.session_id
+        new_id = uuid.uuid4().hex[:8]
+        self.session_id = new_id
+        self.session_start_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        # 深拷贝消息历史（避免两个会话共享同一 list 对象）
+        if self.use_openai:
+            self._openai_messages = json.loads(json.dumps(self._openai_messages, default=str))
+        else:
+            self._anthropic_messages = json.loads(json.dumps(self._anthropic_messages, default=str))
+        self._folded_session_memories = json.loads(json.dumps(self._folded_session_memories, default=str))
+        self._turn_boundaries = [TurnBoundary(b.turn, b.message_count, b.checkpoint_count) for b in self._turn_boundaries]
+        # fork 文件快照存储（复制快照文件 + 元数据）
+        self._checkpoint_store = self._checkpoint_store.fork(new_id)
+        # fork ACE 存储
+        new_store = ContextStore()
+        new_store.restore_state(json.loads(json.dumps(self._context_store.to_dict(), default=str)))
+        self._context_store = new_store
+        self._auto_save()  # 新分支落盘
+        return f"Forked session {old_id} -> {new_id}. You are now on the new branch."
 
     #/context：返回上下文描述行（index/role/label/chars），供 REPL 渲染表格。
     def describe_context(self) -> list[dict]:
@@ -1855,6 +1888,7 @@ class Agent:
             first_text = True
             first_thinking = True
             if not self.is_sub_agent:
+                reset_thinking_window()
                 md_track_begin()
 
             tool_blocks_by_index: dict[int, dict] = {}
@@ -2109,6 +2143,7 @@ class Agent:
             first_text = True
             first_thinking = True
             if not self.is_sub_agent:
+                reset_thinking_window()
                 md_track_begin()
             tool_calls: dict[int, dict] = {}
             finish_reason = ""

@@ -6,6 +6,8 @@ import json
 import os
 import re
 import subprocess
+import threading
+import time as _time
 from pathlib import Path
 from typing import Any
 
@@ -17,12 +19,120 @@ ToolDef = dict  # Anthropic tool schema dict
 #权限模式
 PermissionMode = str  # "default" | "plan" | "acceptEdits" | "bypassPermissions" | "dontAsk"
 
-READ_TOOLS = {"read_file", "list_files", "grep_search", "compact_context"}
+READ_TOOLS = {"read_file", "list_files", "grep_search", "compact_context", "shell_status"}
 EDIT_TOOLS = {"write_file", "edit_file", "skill_evolve", "skill_create"}
 
 
 #并发安全的工具可以并行运行（只读，无副作用）
-CONCURRENCY_SAFE_TOOLS = {"read_file", "list_files", "grep_search"}
+CONCURRENCY_SAFE_TOOLS = {"read_file", "list_files", "grep_search", "shell_status"}
+
+
+# ─── 后台 shell 任务注册表 ─────────────────────────────────
+# run_shell(background=True) 时把进程放到这里，立即返回 job_id。
+# 一个 watcher 线程等待进程结束，把输出收集起来，并调用 on_done 回调
+# （由 REPL 注入），用于"后台 shell 执行完自动勾起对话"。
+
+_BACKGROUND_JOBS: dict[str, dict[str, Any]] = {}
+_BG_LOCK = threading.Lock()
+_BG_COUNTER = 0
+# REPL 注入的完成回调：fn(job_id, command, output, exit_code) -> None
+_on_background_done: Any = None
+
+
+def set_background_done_callback(fn: Any) -> None:
+    """REPL 启动时注入完成回调，用于后台任务结束后自动发起对话。"""
+    global _on_background_done
+    _on_background_done = fn
+
+
+def _next_job_id() -> str:
+    global _BG_COUNTER
+    with _BG_LOCK:
+        _BG_COUNTER += 1
+        return f"job{_BG_COUNTER}"
+
+
+def _watch_background(job_id: str) -> None:
+    """watcher 线程：等待后台进程结束，收集输出，触发回调。"""
+    job = _BACKGROUND_JOBS.get(job_id)
+    if not job:
+        return
+    proc: subprocess.Popen = job["process"]
+    try:
+        stdout, stderr = proc.communicate()
+    except Exception as e:  # noqa: BLE001
+        stdout, stderr = "", f"watcher error: {e}"
+    exit_code = proc.returncode
+    output = (stdout or "") + (f"\nStderr:\n{stderr}" if stderr else "")
+    if not output.strip():
+        output = "(no output)"
+    # 截断过长输出，避免撑爆上下文
+    if len(output) > 20000:
+        output = output[:20000] + f"\n... (truncated, {len(output)} chars total)"
+    job["output"] = output
+    job["exit_code"] = exit_code
+    job["done"] = True
+    job["end_time"] = _time.time()
+    if _on_background_done:
+        try:
+            _on_background_done(job_id, job["command"], output, exit_code)
+        except Exception:
+            pass
+
+
+def _start_background_shell(command: str) -> str:
+    """启动后台 shell，返回给模型的确认信息。"""
+    try:
+        proc = subprocess.Popen(
+            command,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except Exception as e:  # noqa: BLE001
+        return f"Error starting background command: {e}"
+    job_id = _next_job_id()
+    _BACKGROUND_JOBS[job_id] = {
+        "command": command,
+        "process": proc,
+        "pid": proc.pid,
+        "start_time": _time.time(),
+        "done": False,
+        "output": None,
+        "exit_code": None,
+        "end_time": None,
+    }
+    threading.Thread(target=_watch_background, args=(job_id,), daemon=True).start()
+    return (
+        f"Background command started (job_id={job_id}, pid={proc.pid}). "
+        "It is running in the background; you can continue with other work. "
+        "Use shell_status with this job_id to check progress. "
+        "You will also be notified automatically when it finishes."
+    )
+
+
+def _shell_status(inp: dict) -> str:
+    """查询后台 shell 任务状态。"""
+    job_id = str(inp.get("job_id") or "").strip()
+    with _BG_LOCK:
+        if job_id:
+            job = _BACKGROUND_JOBS.get(job_id)
+            if not job:
+                return f"No background job named '{job_id}'. Active jobs: {', '.join(_BACKGROUND_JOBS) or '(none)'}"
+            jobs = {job_id: job}
+        else:
+            jobs = dict(_BACKGROUND_JOBS)
+    if not jobs:
+        return "No background jobs."
+    lines = []
+    for jid, job in jobs.items():
+        state = "done" if job["done"] else "running"
+        line = f"{jid}: [{state}] {job['command']}"
+        if job["done"]:
+            line += f" (exit {job['exit_code']})\nOutput:\n{job['output']}"
+        lines.append(line)
+    return "\n\n".join(lines)
 
 
 
@@ -106,14 +216,25 @@ tool_definitions: list[ToolDef] = [
     },
     {
         "name": "run_shell",
-        "description": "Execute a shell command and return its output. Use this for running tests, installing packages, git operations, etc.",
+        "description": "Execute a shell command and return its output. Use this for running tests, installing packages, git operations, etc. Set background=true for long-running commands (servers, builds) to run them asynchronously and get a job_id immediately.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "command": {"type": "string", "description": "The shell command to execute"},
-                "timeout": {"type": "number", "description": "Timeout in milliseconds (default: 30000)"},
+                "timeout": {"type": "number", "description": "Timeout in milliseconds (default: 30000, ignored when background=true)"},
+                "background": {"type": "boolean", "description": "If true, run asynchronously and return a job_id immediately (for long-running commands)"},
             },
             "required": ["command"],
+        },
+    },
+    {
+        "name": "shell_status",
+        "description": "Check the status and output of background shell jobs started with run_shell(background=true). Omit job_id to list all background jobs.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string", "description": "The job_id returned by run_shell. Omit to list all jobs."},
+            },
         },
     },
     {
@@ -531,6 +652,9 @@ def get_deferred_tool_names(all_tools: list[ToolDef] | None = None) -> list[str]
 
 #执行shell命令
 def _run_shell(inp: dict) -> str:
+    # background=True 时异步执行，立即返回 job_id，不阻塞对话。
+    if inp.get("background"):
+        return _start_background_shell(inp["command"])
     try:
         timeout_ms = inp.get("timeout", 30000)
         timeout_s = timeout_ms / 1000
@@ -807,6 +931,7 @@ async def execute_tool(
         "list_files": _list_files,
         "grep_search": _grep_search,
         "run_shell": _run_shell,
+        "shell_status": _shell_status,
     }
     handler = handlers.get(name)
 

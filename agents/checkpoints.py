@@ -139,3 +139,22 @@ class FileCheckpointStore:
         snaps = data.get("snapshots") or []
         self._snapshots = [s for s in snaps if isinstance(s, dict)]
         self._existed_before = dict(data.get("existed_before") or {})
+
+    # ── fork（session 分支）────────────────────────────────
+
+    def fork(self, new_session_id: str) -> "FileCheckpointStore":
+        """创建一个完全相同的分支存储：复制全部快照文件与元数据。
+
+        fork 后的两个 store 完全独立，各自的 /rewind 互不影响。
+        """
+        import shutil
+
+        new_store = FileCheckpointStore(new_session_id)
+        for snap in self._snapshots:
+            if snap.get("snapshot"):
+                src = self.dir / snap["snapshot"]
+                if src.exists():
+                    shutil.copy2(src, new_store.dir / snap["snapshot"])
+        new_store._snapshots = [dict(s) for s in self._snapshots]
+        new_store._existed_before = dict(self._existed_before)
+        return new_store
