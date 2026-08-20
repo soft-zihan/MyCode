@@ -180,6 +180,8 @@ class Agent:
         # 子 Agent 与父共享同一个 store，这样子 Agent 改的文件也能被回退。
         self._checkpoint_store = checkpoint_store or FileCheckpointStore(self.session_id)
         self._turn_boundaries: list[TurnBoundary] = []
+        # /goal 模式：最近一轮助手回复文本，供 verifier 作为证据。
+        self._last_assistant_text = ""
 
 
         self._aborted = False
@@ -539,6 +541,8 @@ class Agent:
             self._current_task = None
         assistant_text = "".join(self._turn_output_buffer or []).strip()
         self._turn_output_buffer = None
+        # /goal 模式的 verifier 需要最近一轮的助手报告作为证据。
+        self._last_assistant_text = assistant_text
         if not self.is_sub_agent and not self._aborted:
             self._schedule_background_skill_task(self._run_skill_usage_tracking(original_user_message, assistant_text))
             if ready_skill_extraction_window:
