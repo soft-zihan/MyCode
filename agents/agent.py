@@ -16,6 +16,12 @@ import openai
 
 from agents.mcp_client import McpManager
 from agents.checkpoints import FileCheckpointStore, TurnBoundary
+from agents.context_store import (
+    ContextStore,
+    cleared_placeholder,
+    is_compressed_placeholder,
+    snipped_placeholder,
+)
 from agents.memory import MemoryPrefetch, start_memory_prefetch, format_memories_for_injection
 from agents.model_registry import ModelEndpoint, resolve_agent_endpoint, resolve_side_endpoint
 from agents.prompt import build_system_prompt
@@ -182,6 +188,8 @@ class Agent:
         self._turn_boundaries: list[TurnBoundary] = []
         # /goal 模式：最近一轮助手回复文本，供 verifier 作为证据。
         self._last_assistant_text = ""
+        # ACE 可逆上下文：snip/clear 前原文无损存入，可用 context_restore 取回。
+        self._context_store = ContextStore()
 
 
         self._aborted = False
@@ -887,6 +895,9 @@ class Agent:
                 TurnBoundary(**b) for b in data["turnBoundaries"]
                 if isinstance(b, dict) and {"turn", "message_count", "checkpoint_count"} <= set(b)
             ]
+        # ACE 可逆上下文存储恢复。
+        if isinstance(data.get("contextStore"), dict):
+            self._context_store.restore_state(data["contextStore"])
         print_info(f"Session restored ({self._get_message_count()} messages).")
 
     #/rewind：回退对话 N 轮，同时把被修改的文件恢复到对应轮次开始时的状态。
@@ -940,6 +951,8 @@ class Agent:
             messages = self._openai_messages
         else:
             messages = self._anthropic_messages
+        # ACE：删除前记录被引用的 restore key，删除后不再被引用的才持久 drop。
+        referenced_before = self._referenced_store_keys(messages)
         total_deleted = 0
         for idx in sorted(set(indexes)):
             messages, deleted = delete_message_group(messages, idx, self.use_openai)
@@ -948,7 +961,37 @@ class Agent:
             self._openai_messages = messages
         else:
             self._anthropic_messages = self._normalize_anthropic_messages(messages)
+        self._drop_orphaned_store_entries(referenced_before, messages)
         return f"Deleted {total_deleted} message(s). Context now: {self._get_message_count()} messages."
+
+    @staticmethod
+    def _referenced_store_keys(messages: list[dict]) -> set[str]:
+        """收集消息中占位符携带的 restore key。"""
+        import re as _re
+
+        referenced: set[str] = set()
+        for msg in messages:
+            content = msg.get("content")
+            texts: list[str] = []
+            if isinstance(content, str):
+                texts.append(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and isinstance(block.get("content"), str):
+                        texts.append(block["content"])
+            for text in texts:
+                referenced.update(_re.findall(r"key '([^']+)'", text))
+        return referenced
+
+    def _drop_orphaned_store_entries(self, referenced_before: set[str], kept_messages: list[dict]) -> None:
+        """持久 drop：只 drop 删除前被引用、删除后不再被引用的条目。
+
+        未被任何消息引用的条目（如 /compact 后原文消息已折叠）保持可恢复，
+        避免误伤。
+        """
+        referenced_after = self._referenced_store_keys(kept_messages)
+        for key in referenced_before - referenced_after:
+            self._context_store.mark_dropped(key)
 
     #/ctx keep N [N2 ...]：只保留指定组（+ system prompt），其余删除。
     def keep_context_messages(self, indexes: list[int]) -> str:
@@ -958,11 +1001,14 @@ class Agent:
             messages = self._openai_messages
         else:
             messages = self._anthropic_messages
+        referenced_before = self._referenced_store_keys(messages)
         kept, deleted = keep_only_groups(messages, indexes, self.use_openai)
         if self.use_openai:
             self._openai_messages = kept
         else:
             self._anthropic_messages = self._normalize_anthropic_messages(kept)
+        # ACE：不再被引用的 store 条目持久 drop。
+        self._drop_orphaned_store_entries(referenced_before, kept)
         return f"Kept {len(kept)} message(s), removed {deleted}. Context now: {self._get_message_count()} messages."
 
 
@@ -1052,6 +1098,8 @@ class Agent:
                     {"turn": b.turn, "message_count": b.message_count, "checkpoint_count": b.checkpoint_count}
                     for b in self._turn_boundaries
                 ],
+                # ACE 可逆上下文：raw+abstract 存储随 session 落盘。
+                "contextStore": self._context_store.to_dict(),
             })
         except Exception:
             pass
@@ -1189,7 +1237,7 @@ class Agent:
                 continue
 
             for bindex, block in enumerate(msg["content"]):
-                if isinstance(block, dict) and block.get("type") == "tool_result" and isinstance(block.get("content"), str) and block["content"] != SNIP_PLACEHOLDER:
+                if isinstance(block, dict) and block.get("type") == "tool_result" and isinstance(block.get("content"), str) and not is_compressed_placeholder(block["content"]):
                     tool_use_id = block.get("tool_use_id")
                     # 对每个 tool_result，通过 tool_use_id 反查它来自哪个工具
                     tool_info = self._find_tool_use_by_id(tool_use_id)
@@ -1217,7 +1265,13 @@ class Agent:
 
         for idx in to_snip:
             r = results[idx]
-            self._anthropic_messages[r["mindex"]]["content"][r["bindex"]]["content"] = SNIP_PLACEHOLDER
+            block = self._anthropic_messages[r["mindex"]]["content"][r["bindex"]]
+            original = block["content"]
+            # ACE 可逆：替换前把原文无损存入 store，键用 tool_use_id。
+            key_id = block.get("tool_use_id") or f"{r['mindex']}-{r['bindex']}"
+            key = f"snip:{key_id}"
+            self._context_store.store(key, original)
+            block["content"] = snipped_placeholder(key, self._context_store.get_abstract(key))
 
     def _snip_stale_results_openai(self) -> None:
         utilization = self.last_input_token_count / self.effective_window if self.effective_window else 0
@@ -1225,13 +1279,18 @@ class Agent:
             return
         tool_msgs = []
         for i, msg in enumerate(self._openai_messages):
-            if msg.get("role") == "tool" and isinstance(msg.get("content"), str) and msg["content"] != SNIP_PLACEHOLDER:
+            if msg.get("role") == "tool" and isinstance(msg.get("content"), str) and not is_compressed_placeholder(msg["content"]):
                 tool_msgs.append(i)
         if len(tool_msgs) <= KEEP_RECENT_RESULTS:
             return
         snip_count = len(tool_msgs) - KEEP_RECENT_RESULTS
         for i in range(snip_count):
-            self._openai_messages[tool_msgs[i]]["content"] = SNIP_PLACEHOLDER
+            msg = self._openai_messages[tool_msgs[i]]
+            original = msg["content"]
+            # ACE 可逆：替换前把原文无损存入 store，键用 tool_call_id。
+            key = f"snip:{msg.get('tool_call_id') or tool_msgs[i]}"
+            self._context_store.store(key, original)
+            msg["content"] = snipped_placeholder(key, self._context_store.get_abstract(key))
 
     #微压缩
 
@@ -1247,24 +1306,35 @@ class Agent:
             if msg.get("role")!="user" or not isinstance(msg.get("content"), list):
                 continue
             for bindex, block in enumerate(msg["content"]):
-                if isinstance(block, dict) and block.get("type") == "tool_result" and isinstance(block.get("content"), str) and block["content"] not in (SNIP_PLACEHOLDER, "[Old result cleared]"):
+                if isinstance(block, dict) and block.get("type") == "tool_result" and isinstance(block.get("content"), str) and not is_compressed_placeholder(block["content"]):
                     all_results.append((mindex, bindex))
 
         clear_count = len(all_results) - KEEP_RECENT_RESULTS
         for i in range(max(0, clear_count)):
             mi, bi = all_results[i]
-            self._anthropic_messages[mi]["content"][bi]["content"] = "[Old result cleared]"
+            block = self._anthropic_messages[mi]["content"][bi]
+            original = block["content"]
+            # ACE 可逆：清理前把原文存入 store。
+            key_id = block.get("tool_use_id") or f"{mi}-{bi}"
+            key = f"clear:{key_id}"
+            self._context_store.store(key, original)
+            block["content"] = cleared_placeholder(key)
 
     def _microcompact_openai(self) -> None:
         if not self.last_api_call_time or (time.time() - self.last_api_call_time) < MICROCOMPACT_IDLE_S:
             return
         tool_msgs = []
         for i, msg in enumerate(self._openai_messages):
-            if msg.get("role") == "tool" and isinstance(msg.get("content"), str) and msg["content"] not in (SNIP_PLACEHOLDER, "[Old result cleared]"):
+            if msg.get("role") == "tool" and isinstance(msg.get("content"), str) and not is_compressed_placeholder(msg["content"]):
                 tool_msgs.append(i)
         clear_count = len(tool_msgs) - KEEP_RECENT_RESULTS
         for i in range(max(0, clear_count)):
-            self._openai_messages[tool_msgs[i]]["content"] = "[Old result cleared]"
+            msg = self._openai_messages[tool_msgs[i]]
+            original = msg["content"]
+            # ACE 可逆：清理前把原文存入 store。
+            key = f"clear:{msg.get('tool_call_id') or tool_msgs[i]}"
+            self._context_store.store(key, original)
+            msg["content"] = cleared_placeholder(key)
 
     def _find_tool_use_by_id(self, tool_use_id: int) -> dict | None:
         for msg in self._anthropic_messages:
@@ -1307,6 +1377,8 @@ class Agent:
     async def _execute_tool_call(self, name: str, inp: dict) -> str:
         if name == "compact_context":
             return await self._execute_compact_context_tool(inp)
+        if name == "context_restore":
+            return self._execute_context_restore_tool(inp)
         if name in ("enter_plan_mode", "exit_plan_mode"):
             return await self._execute_plan_mode_tool(name)
         if name == "agent":
@@ -1340,6 +1412,18 @@ class Agent:
             "Continue from the folded memory now present in the conversation context."
             f"{suffix}"
         )
+
+    def _execute_context_restore_tool(self, inp: dict) -> str:
+        """ACE 可逆恢复：按 key 从 ContextStore 取回被 snip/clear 的原文。"""
+        key = str(inp.get("key") or "").strip()
+        if not key:
+            return "Error: 'key' is required. Find it inside the snipped/cleared placeholder text."
+        raw = self._context_store.get_raw(key)
+        if raw is None:
+            available = self._context_store.available_keys()
+            hint = f" Available keys: {', '.join(available[:20])}" if available else " No restorable content is stored."
+            return f"Error: no restorable content for key '{key}'.{hint}"
+        return raw
 
 
     async def _execute_skill_tool(self, inp: dict) -> str:

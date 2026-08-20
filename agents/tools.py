@@ -142,6 +142,17 @@ tool_definitions: list[ToolDef] = [
         },
     },
     {
+        "name": "context_restore",
+        "description": "Recover the original full content of a snipped or cleared tool result from the reversible context store. Use when you see a placeholder like '[Content snipped ... key ...]' and need the original content. The key is given inside the placeholder text.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "The restore key shown in the snipped/cleared placeholder"},
+            },
+            "required": ["key"],
+        },
+    },
+    {
         "name": "memory",
         "description": "Manage persistent project memories. Use action='add' to save a new memory, action='replace' to update an existing one (locate it with a unique substring of its name/filename/description), action='remove' to delete an outdated one. Prefer replace over adding near-duplicates. The MEMORY.md index and modified timestamps are maintained automatically.",
         "input_schema": {
