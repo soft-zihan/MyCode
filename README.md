@@ -9,6 +9,10 @@ Bear Agent 是一个基于 Python 实现的 **自进化 Harness Agent**。它不
 - **自进化 Harness Agent**：从用户反馈中自动抽取可复用规则，新增或合并到 `SKILL.md`，让 Agent 能随着使用持续沉淀能力。
 - **完整 Agent Loop**：模型请求、tool call 解析、权限检查、工具执行、tool result 回写、继续推理、会话保存形成闭环。
 - **OpenAI / Anthropic 双协议**：支持 OpenAI-compatible 和 Anthropic-compatible 接口，便于接入不同模型服务或代理网关。
+- **多模型注册表**：注册任意多个 URL/Key 相互独立的模型端点，主 Agent、子 Agent、side query 按**模型名**路由到对应端点。
+- **可打断与可回退**：Ctrl+C 可打断主/子 Agent；`/rewind` 回退对话的同时恢复被修改的文件（写前快照 + 轮次边界）。
+- **/goal 自主目标模式**：提炼成功标准 → 自主执行 → verifier 逐条判定 → 未达标回灌证据，直到达标或预算用尽。
+- **上下文可视化与可逆压缩**：`/context` 查看上下文构成，`/ctx del/keep` 按工具配对组局部删除；snip/clear 压缩前原文无损入库，模型可用 `context_restore` 随时取回（ACE 式可逆上下文）。
 - **工具系统与权限控制**：支持读写文件、精确编辑、代码搜索、Shell 命令、Skill 调用、子 Agent 和 MCP 工具；Plan Mode 下阻断写操作和 Shell。
 - **Skills 体系**：通过项目级和用户级 `SKILL.md` 保存可复用任务方法，支持检索、调用、inline / fork 执行和版本化演化。
 - **长期 Memory**：按项目路径 hash 隔离记忆，保存用户偏好、项目背景、历史决策和参考资料。
@@ -48,11 +52,20 @@ BearAgent/
 │   ├── skills.py                  # Skills 加载、检索、执行、创建和演化封装
 │   ├── online_skill_evolution.py  # 在线 Skill 抽取和 add/merge/discard 决策
 │   ├── skill_evolution.py         # Skill 落盘、版本快照、审计统计
-│   ├── memory.py                  # 长期记忆系统
+│   ├── memory.py                  # 长期记忆系统（含 memory 工具 add/replace/remove）
 │   ├── mcp_client.py              # MCP stdio JSON-RPC 客户端
 │   ├── subagent.py                # 子 Agent 配置
 │   ├── session.py                 # 会话保存与恢复
+│   ├── model_registry.py          # 多模型端点注册表，按模型名路由
+│   ├── checkpoints.py             # 文件写前快照与轮次边界（/rewind）
+│   ├── goal.py                    # /goal 自主目标循环（标准提炼+verifier）
+│   ├── context_edit.py            # 上下文描述与按工具配对组的局部删除
+│   ├── context_store.py           # ACE 式可逆上下文存储（raw+abstract）
+│   ├── session_memory.py          # 会话记忆折叠 schema 与解析
+│   ├── online_skill_eval.py       # 在线 Skills 评测（replay/规则/LLM judge）
+│   ├── frontmatter.py             # frontmatter 解析器
 │   └── ui.py                      # 终端 UI 输出
+├── tests/                         # pytest 测试（113 例，离线可跑）
 ├── .bear/
 │   ├── skills/                    # 项目级 Skills
 │   └── skill-evolution/           # Skills 自进化审计产物
@@ -114,7 +127,32 @@ MODEL=deepseek-chat
 
 - `API` 或 `--api-base` 路径包含 `/anthropic` 时，按 Anthropic-compatible 调用。
 - 否则有 OpenAI base URL 时，按 OpenAI-compatible 调用。
-- `--model` 会覆盖 `.env` 中的 `MODEL`。
+- `--model` 会覆盖 `.env` 中的 `MODEL`（也支持 `MINI_CLAUDE_MODEL` 变量）。
+
+### 2.5 多模型注册表（可选）
+
+可以注册任意多个 URL/Key 相互独立的模型端点，子 Agent 和 side query 按**模型名**路由：
+
+```env
+# 注册端点：<ID> 只是把三行归为一组的内部标签，可任意起名，想加更多 API 再加一组
+BEAR_ENDPOINT_A_BASE_URL=https://host-a/v1
+BEAR_ENDPOINT_A_API_KEY=sk-aaa
+BEAR_ENDPOINT_A_MODEL=deepseek-v4-pro
+
+BEAR_ENDPOINT_B_BASE_URL=https://host-b/anthropic
+BEAR_ENDPOINT_B_API_KEY=sk-bbb
+BEAR_ENDPOINT_B_MODEL=claude-sonnet-4-6
+
+# 子 Agent 路由：值写【模型名】，注册表自动找到提供该模型的端点
+BEAR_MODEL_EXPLORE=claude-sonnet-4-6
+BEAR_MODEL_PLAN=claude-sonnet-4-6
+BEAR_MODEL_GENERAL=deepseek-v4-pro
+
+# side query 路由（记忆召回/会话折叠/skill 进化等轻量调用）
+BEAR_SIDE_MODEL=deepseek-v4-pro
+```
+
+自定义子 Agent 也可以在 `.bear/agents/<name>.md` frontmatter 里写 `model: <模型名>` 自行配置，无需环境变量。
 
 ### 3. 启动 REPL
 
@@ -317,10 +355,16 @@ agents/skill_evolution.py
 | `/memory` | 列出长期记忆 |
 | `/skills` | 列出可用 Skills |
 | `/skill-stats` | 查看 Skill 使用和演化统计 |
+| `/skill-eval` | 在线 Skills 评测（replay、规则、LLM judge） |
 | `/extract_now [hint]` | 抽取当前 pending window |
 | `/skill-feedback <skill> <rating> [note]` | 记录 Skill 反馈 |
 | `/skill-evolve <skill> <lesson>` | 手动演化 Skill |
 | `/skill-create <name> \| <description> \| <when-to-use> \| <instructions>` | 手动创建 Skill |
+| `/rewind [N]` | 回退最近 N 轮对话（默认 1），同时恢复被修改的文件 |
+| `/goal <目标>` | 自主目标模式：提炼成功标准 → 确认 → 执行+verifier 验证循环 |
+| `/context` | 可视化上下文（index/role/内容摘要/字符数） |
+| `/ctx del N [N2 ...]` | 删除指定消息组（保持 tool_use/tool_result 配对完整） |
+| `/ctx keep N [N2 ...]` | 只保留指定消息组，其余删除 |
 
 ## Skills 是什么
 
@@ -434,6 +478,7 @@ docker run --rm -it \
 | 会话历史 | `~/.bear-code/sessions/` |
 | 大工具结果 | `~/.bear-code/tool-results/` |
 | Plan Mode 计划 | `~/.bear/plans/` |
+| 文件回退快照 | `~/.bear-code/checkpoints/<session_id>/files/` |
 
 ## 文档入口
 
@@ -447,6 +492,14 @@ docker run --rm -it \
 | [技术亮点](wiki/技术亮点.md) | 技术亮点和核心代码讲解 |
 | [Skills 自进化逻辑](wiki/Skills自进化逻辑与实现思路.md) | 自进化设计和实现取舍 |
 | [简历包装](wiki/简历包装.md) | 简历 bullet、面试表达和项目包装 |
+| [升级文档](wiki/升级文档.md) | 2026-08 升级 Step 0–9 的全部改动与实现原理 |
+
+## 测试
+
+```bash
+pip install -r requirements-dev.txt
+.venv/bin/python -m pytest tests/ -q   # 113 例，全部离线，不碰真实数据/API
+```
 
 ## 适合如何使用
 
