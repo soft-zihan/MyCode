@@ -249,15 +249,24 @@ def _repl_completer(text: str, state: int):
 
 
 def _setup_readline() -> None:
-    """启用 Tab 补全（/ 命令与 @ 路径）。非 TTY 或无 readline 时静默跳过。"""
+    """启用 Tab 补全（/ 命令与 @ 路径）。非 TTY 或无 readline 时静默跳过。
+
+    macOS 的 Python readline 底层是 libedit 而非 GNU readline：
+    GNU 语法 "tab: complete" 会被接受但【静默无效】，必须用 libedit 的
+    bind 语法把 Ctrl+I(Tab) 绑到 rl_complete，否则 Tab 完全没反应。
+    """
     try:
         import readline
     except ImportError:
         return
     try:
+        # @ 不在分隔符里，保证 "@path" 作为整体参与补全
         readline.set_completer_delims(" \t\n;|&")
         readline.set_completer(_repl_completer)
-        readline.parse_and_bind("tab: complete")
+        if "libedit" in (getattr(readline, "__doc__", "") or ""):
+            readline.parse_and_bind('bind "^I" rl_complete')
+        else:
+            readline.parse_and_bind("tab: complete")
     except Exception:
         pass
 

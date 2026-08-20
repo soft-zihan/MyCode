@@ -94,3 +94,53 @@ def test_at_path_completion_empty_prefix(tmp_path, monkeypatch):
 def test_repl_commands_include_new_ones():
     for cmd in ("/help", "/thinking", "/cd", "/context", "/goal", "/rewind"):
         assert cmd in REPL_COMMANDS
+
+
+# ─── readline 绑定：macOS libedit 兼容 ─────────────────────
+
+def test_setup_readline_uses_libedit_bind_on_macos(monkeypatch):
+    """macOS 的 readline 是 libedit，GNU 语法 'tab: complete' 静默无效，
+    必须用 bind "^I" rl_complete。验证按后端选择正确语法。"""
+    import agents.main as m
+
+    calls = []
+
+    class FakeReadline:
+        __doc__ = "Importing this module enables command line editing using libedit readline."
+
+        def set_completer_delims(self, d):
+            calls.append(("delims", d))
+
+        def set_completer(self, fn):
+            calls.append(("completer", fn))
+
+        def parse_and_bind(self, s):
+            calls.append(("bind", s))
+
+    monkeypatch.setitem(__import__("sys").modules, "readline", FakeReadline())
+    m._setup_readline()
+    binds = [v for k, v in calls if k == "bind"]
+    assert binds == ['bind "^I" rl_complete']
+
+
+def test_setup_readline_uses_gnu_bind_on_gnu(monkeypatch):
+    import agents.main as m
+
+    calls = []
+
+    class FakeReadline:
+        __doc__ = "Importing this module enables command line editing using GNU readline."
+
+        def set_completer_delims(self, d):
+            calls.append(("delims", d))
+
+        def set_completer(self, fn):
+            calls.append(("completer", fn))
+
+        def parse_and_bind(self, s):
+            calls.append(("bind", s))
+
+    monkeypatch.setitem(__import__("sys").modules, "readline", FakeReadline())
+    m._setup_readline()
+    binds = [v for k, v in calls if k == "bind"]
+    assert binds == ["tab: complete"]
