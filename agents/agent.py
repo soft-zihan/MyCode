@@ -145,7 +145,8 @@ class Agent:
                  confirm_fn:Callable[[str], Awaitable[bool]] | None=None,
                  custom_system_prompt: str | None=None,
                  custom_tools: list[ToolDef] | None=None,
-                 is_sub_agent: bool=False,):
+                 is_sub_agent: bool=False,
+                 parent_abort_event: asyncio.Event | None=None,):
         self.permission_mode = permission_mode
         self.thinking = thinking
         self.model = model
@@ -168,6 +169,10 @@ class Agent:
 
 
         self._aborted = False
+        # 共享中止事件：父 Agent 触发 abort 时置位，子 Agent 在循环检查点读取，
+        # 实现“父打断 → 子立刻退出”的传播，而不只依赖 asyncio 任务取消。
+        self._abort_event = asyncio.Event()
+        self._parent_abort_event = parent_abort_event
         #存储异步任务
         self._current_task:asyncio.Task | None = None
         #权限白名单
@@ -346,8 +351,18 @@ class Agent:
     #异步任务取消（Abort）
     def abort(self) -> None:
         self._aborted = True
+        # 置位共享事件，让正在运行的子 Agent 在下个检查点感知到中止。
+        self._abort_event.set()
         if self._current_task and not self._current_task.done():
             self._current_task.cancel()
+
+    def _abort_requested(self) -> bool:
+        """本 Agent 或任一父级是否已请求中止（用于循环检查点）。"""
+        if self._aborted:
+            return True
+        if self._parent_abort_event is not None and self._parent_abort_event.is_set():
+            return True
+        return False
 
     def set_confirm_fn(self, fn:Callable[[str], Awaitable[bool]]) -> None:
         self.confirm_fn = fn
@@ -419,6 +434,8 @@ class Agent:
             )
 
         self._aborted = False
+        # 新一轮对话开始时清除中止信号，避免上一轮的中止状态影响本轮。
+        self._abort_event.clear()
         self._turn_output_buffer = []
         coro = self._chat_openai(user_message) if self.use_openai else self._chat_anthropic(user_message)
         self._current_task = asyncio.create_task(coro)
@@ -1156,6 +1173,7 @@ class Agent:
                 custom_tools=tools,
                 is_sub_agent=True,
                 permission_mode="plan" if self.permission_mode == "plan" else "bypassPermissions",
+                parent_abort_event=self._abort_event,
             )
             try:
                 sub_result = await sub_agent.run_once(inp.get("args") or "Execute this skill task.")
@@ -1273,12 +1291,15 @@ class Agent:
             custom_tools=config["tools"],
             is_sub_agent=True,
             permission_mode="plan" if self.permission_mode == "plan" else "bypassPermissions",
+            parent_abort_event=self._abort_event,
         )
         try:
             result = await sub_agent.run_once(prompt)
             self.total_input_tokens += result["tokens"]["input"]
             self.total_output_tokens += result["tokens"]["output"]
             print_sub_agent_end(agent_type, description)
+            if sub_agent._aborted:
+                return "(Sub-agent aborted)"
             return result["text"] or "(Sub-agent produced no output)"
         except Exception as e:
             print_sub_agent_end(agent_type, description)
@@ -1302,8 +1323,9 @@ class Agent:
                     self._already_surfaced_memories, self._session_memory_bytes,
                 )
         while True:
-            # 外部请求中止时，结束整个 agent loop。
-            if self._aborted:
+            # 外部请求中止时（含父 Agent 传播的中止），结束整个 agent loop。
+            if self._abort_requested():
+                self._aborted = True
                 break
 
             # 每轮调用模型前尝试压缩上下文，避免消息历史过长。
@@ -1408,7 +1430,8 @@ class Agent:
 
             for tu in tool_uses:
                 # context_break 表示某个工具执行期间清理了上下文，需要停止继续处理本轮剩余工具。
-                if context_break or self._aborted:
+                if context_break or self._abort_requested():
+                    self._aborted = True
                     break
 
                 # 将工具入参转为普通 dict，便于权限检查、打印和实际执行。
@@ -1593,11 +1616,12 @@ class Agent:
                 )
 
         while True:
-            if self._aborted:
+            if self._abort_requested():
+                self._aborted = True
                 break
 
             self._run_compression_pipeline()
-
+            # memory 预取完成后注入到最后一条 user 消息
             if memory_prefetch and memory_prefetch.settled and not memory_prefetch.consumed:
                 memory_prefetch.consumed = True
                 try:
@@ -1650,10 +1674,11 @@ class Agent:
             if budget["exceeded"]:
                 print_info(f"Budget exceeded: {budget['reason']}")
                 break
-
+            # 权限预检 → 按并发安全分批执行
             oai_checked: list[dict] = []
             for tc in tool_calls:
-                if self._aborted:
+                if self._abort_requested():
+                    self._aborted = True
                     break
 
                 if tc.get("type") != "function":
@@ -1692,10 +1717,11 @@ class Agent:
                         oai_batches[-1]["items"].append(ct)
                     else:
                         oai_batches.append({"concurrent": safe, "items": [ct]})
-
+                # 并发安全工具可并行；有依赖的串行
                 oai_context_break = False
                 for batch in oai_batches:
-                    if oai_context_break or self._aborted:
+                    if oai_context_break or self._abort_requested():
+                        self._aborted = True
                         break
 
                     if batch["concurrent"]:
@@ -1731,6 +1757,7 @@ class Agent:
                             )
 
                             if self._context_cleared:
+                            # compact 等操作清空上下文后，把结果当新 user 消息，停止本轮剩余工具
                                 self._context_cleared = False
                                 self._openai_messages.append({"role": "user", "content": res})
                                 oai_context_break = True
@@ -1744,6 +1771,7 @@ class Agent:
             await self._check_and_compact()
 
     async def _call_openai_stream(self) -> dict:
+        # 流式拼 content + tool_calls，最后组装成类似非流式响应的结构
         async def _do():
             stream = await self._openai_client.chat.completions.create(
                 model=self.model,
@@ -1816,6 +1844,7 @@ class Agent:
         return await _with_retry(_do)
 
     async def _confirm_dangerous(self, command: str) -> bool:
+        # 危险命令确认：优先用注入的 confirm_fn，否则阻塞 input
         print_confirmation(command)
         if self.confirm_fn:
             return await self.confirm_fn(command)

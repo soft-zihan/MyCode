@@ -432,6 +432,7 @@ Examples:
                 agent.restore_session({
                     "anthropicMessages": session.get("anthropicMessages"),
                     "openaiMessages": session.get("openaiMessages"),
+                    "foldedSessionMemories": session.get("foldedSessionMemories"),
                 })
             else:
                 print_info("No session found to resume.")
