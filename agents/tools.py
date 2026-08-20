@@ -141,6 +141,30 @@ tool_definitions: list[ToolDef] = [
         },
     },
     {
+        "name": "memory",
+        "description": "Manage persistent project memories. Use action='add' to save a new memory, action='replace' to update an existing one (locate it with a unique substring of its name/filename/description), action='remove' to delete an outdated one. Prefer replace over adding near-duplicates. The MEMORY.md index and modified timestamps are maintained automatically.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["add", "replace", "remove"],
+                    "description": "add: create a new memory; replace: overwrite an existing memory's content; remove: delete a memory",
+                },
+                "name": {"type": "string", "description": "Short memory name (required for add)"},
+                "type": {
+                    "type": "string",
+                    "enum": ["user", "feedback", "project", "reference"],
+                    "description": "Memory category (for add; defaults to project)",
+                },
+                "description": {"type": "string", "description": "One-line description used for recall selection"},
+                "content": {"type": "string", "description": "Memory body (add/replace)"},
+                "match": {"type": "string", "description": "Unique substring of name/filename/description locating the memory (replace/remove)"},
+            },
+            "required": ["action"],
+        },
+    },
+    {
         "name": "skill_evolve",
         "description": "Persist an explicit reusable user correction or workflow preference into an existing skill. Creates a version snapshot before editing the skill.",
         "input_schema": {
@@ -722,6 +746,19 @@ async def execute_tool(
              matches],
             indent=2,
         )
+    if name == "memory":
+        from .memory import memory_tool
+
+        result = memory_tool(
+            action=inp.get("action", ""),
+            name=inp.get("name", ""),
+            type=inp.get("type", ""),
+            description=inp.get("description", ""),
+            content=inp.get("content", ""),
+            match=inp.get("match", ""),
+        )
+        return _truncate_result(json.dumps(result, ensure_ascii=False, indent=2))
+
     if name == "skill_evolve":
         from .skills import evolve_skill
 

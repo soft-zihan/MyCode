@@ -109,7 +109,14 @@ def save_memory(name: str, description: str, type: str, content: str) -> str:
     """保存一条 memory，并刷新 MEMORY.md 索引。"""
     d = get_memory_dir()
     filename = f"{type}_{_slugify(name)}.md"
-    text = format_frontmatter({"name": name, "description": description, "type": type}, content)
+    meta = {
+        "name": name,
+        "description": description,
+        "type": type,
+        # modified 时间戳自动维护，供后续做陈旧记忆清理/衰减。
+        "modified": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    text = format_frontmatter(meta, content)
     (d / filename).write_text(text)
     _update_memory_index()
     return filename
@@ -415,22 +422,20 @@ You have a persistent, file-based memory system at `{memory_dir}`.
 - **project**: Ongoing work, goals, deadlines, decisions
 - **reference**: Pointers to external resources (URLs, tools, dashboards)
 
-## How to Save Memories
-Use the write_file tool to create a memory file with YAML frontmatter:
+## How to Manage Memories
+Use the `memory` tool — do NOT hand-write memory files with write_file.
 
-```markdown
----
-name: memory name
-description: one-line description
-type: user|feedback|project|reference
----
-Memory content here.
-```
+- **add** a new memory:
+  `memory(action="add", name="...", type="user|feedback|project|reference", description="one-line", content="...")`
+- **replace** an existing memory (match by a unique substring of name/filename/description):
+  `memory(action="replace", match="...", content="new content")`
+- **remove** an outdated memory:
+  `memory(action="remove", match="...")`
 
-Save to: `{memory_dir}/`
-Filename format: `{{type}}_{{slugified_name}}.md`
-
-The MEMORY.md index is auto-updated when you write to the memory directory — do NOT update it manually.
+Rules:
+- Prefer updating an existing memory (replace) over adding a near-duplicate. If `add` reports a duplicate or capacity error, consolidate first, then retry.
+- Keep each memory short and focused; the MEMORY.md index is auto-maintained.
+- The `modified` timestamp is updated automatically.
 
 ## What NOT to Save
 - Code patterns or architecture (read the code instead)
@@ -441,3 +446,133 @@ The MEMORY.md index is auto-updated when you write to the memory directory — d
 ## When to Recall
 When the user asks you to remember or recall, or when prior context seems relevant.
 {chr(10) + "## Current Memory Index" + chr(10) + index if index else chr(10) + "(No memories saved yet.)"}"""
+
+
+# ─── Hermes-style memory tool (add / replace / remove) ─────
+
+# 注入安全：记忆内容会被包进 <system-reminder> 注入对话，也可能被
+# parse_frontmatter 解析。禁止能伪造 reminder 边界或 frontmatter 的标记。
+_FORBIDDEN_MARKERS = ("</system-reminder>", "<system-reminder>")
+
+
+def _validate_memory_content(content: str) -> str | None:
+    """基础校验：返回错误消息或 None（通过）。"""
+    body = content.strip()
+    if not body:
+        return "Memory content is empty."
+    lowered = body.lower()
+    for marker in _FORBIDDEN_MARKERS:
+        if marker in lowered:
+            return f"Memory content contains forbidden marker '{marker}' (prompt-injection guard)."
+    if len(body.encode()) > MAX_MEMORY_BYTES_PER_FILE:
+        return (
+            f"Memory content is {len(body.encode())} bytes, exceeding the "
+            f"{MAX_MEMORY_BYTES_PER_FILE}-byte limit. Split it into several "
+            "focused memories instead."
+        )
+    return None
+
+
+def _current_entries_hint() -> str:
+    """容量超限/匹配失败时，把现有条目列表返回给模型，要求先合并/删除再重试。"""
+    entries = list_memories()
+    if not entries:
+        return ""
+    lines = ["Current memory entries:"]
+    for e in entries:
+        lines.append(f"- {e.filename} (name: {e.name}, type: {e.type}) — {e.description}")
+    return "\n".join(lines)
+
+
+def _find_entry_by_match(match: str) -> tuple[MemoryEntry | None, list[MemoryEntry]]:
+    """按子串匹配 name/filename/description，返回 (唯一命中或 None, 所有命中)。"""
+    needle = match.strip().lower()
+    hits = []
+    for e in list_memories():
+        haystack = f"{e.name}\n{e.filename}\n{e.description}".lower()
+        if needle in haystack:
+            hits.append(e)
+    if len(hits) == 1:
+        return hits[0], hits
+    return None, hits
+
+
+def memory_tool(action: str, **kwargs: Any) -> dict[str, Any]:
+    """
+    Hermes 风格的记忆管理工具。
+
+    - add: 新增一条记忆（容量上限 + 精确去重 + modified 时间戳）。
+    - replace: 用 match 子串定位唯一记忆后整体替换内容。
+    - remove: 用 match 子串定位唯一记忆后删除。
+
+    失败时返回 ok=False + error + 现有条目列表，引导模型先合并/删除再重试。
+    """
+    action = (action or "").strip().lower()
+
+    if action == "add":
+        name = str(kwargs.get("name") or "").strip()
+        mtype = str(kwargs.get("type") or "").strip().lower() or "project"
+        description = str(kwargs.get("description") or "").strip()
+        content = str(kwargs.get("content") or "")
+        if not name:
+            return {"ok": False, "error": "Field 'name' is required for add."}
+        if mtype not in VALID_TYPES:
+            return {"ok": False, "error": f"Invalid type '{mtype}'. Valid types: {sorted(VALID_TYPES)}"}
+        err = _validate_memory_content(content)
+        if err:
+            return {"ok": False, "error": err, "hint": _current_entries_hint()}
+        # 精确去重：内容完全相同（忽略首尾空白）的记忆已存在时拒绝重复添加。
+        new_body = content.strip()
+        for e in list_memories():
+            if e.content.strip() == new_body:
+                return {
+                    "ok": False,
+                    "error": f"Duplicate memory: identical content already exists in {e.filename}. Update it with action=replace instead of adding again.",
+                }
+        filename = save_memory(name, description, mtype, content.strip())
+        return {"ok": True, "action": "add", "filename": filename}
+
+    if action in ("replace", "remove"):
+        match = str(kwargs.get("match") or "").strip()
+        if not match:
+            return {"ok": False, "error": f"Field 'match' is required for {action}."}
+        entry, hits = _find_entry_by_match(match)
+        if entry is None:
+            if not hits:
+                return {
+                    "ok": False,
+                    "error": f"No memory matches '{match}'.",
+                    "hint": _current_entries_hint(),
+                }
+            names = ", ".join(f"{h.filename} ({h.name})" for h in hits)
+            return {
+                "ok": False,
+                "error": f"'{match}' matches {len(hits)} memories: {names}. Use a more specific match string.",
+            }
+
+        if action == "remove":
+            delete_memory(entry.filename)
+            return {"ok": True, "action": "remove", "removed": entry.filename}
+
+        # replace
+        content = str(kwargs.get("content") or "")
+        err = _validate_memory_content(content)
+        if err:
+            return {"ok": False, "error": err}
+        name = str(kwargs.get("name") or "").strip() or entry.name
+        description = str(kwargs.get("description") or "").strip() or entry.description
+        mtype = str(kwargs.get("type") or "").strip().lower() or entry.type
+        if mtype not in VALID_TYPES:
+            mtype = entry.type
+        d = get_memory_dir()
+        meta = {
+            "name": name,
+            "description": description,
+            "type": mtype,
+            "modified": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        (d / entry.filename).write_text(format_frontmatter(meta, content.strip()))
+        _update_memory_index()
+        return {"ok": True, "action": "replace", "filename": entry.filename}
+
+    return {"ok": False, "error": f"Unknown action '{action}'. Valid actions: add, replace, remove."}
