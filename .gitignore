@@ -3,6 +3,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# code-review-graph 代码图谱数据库（本地索引，不入库）
+.code-review-graph/
+
 # C extensions
 *.so
 

@@ -201,7 +201,7 @@ REPL_COMMANDS = [
     "/rewind", "/goal", "/context", "/ctx", "/memory", "/skills",
     "/skill-stats", "/skill-eval", "/extract_now", "/skill-feedback",
     "/skill-evolve", "/skill-create", "/fork", "/sessions", "/switch",
-    "/trace",
+    "/trace", "/graph",
 ]
 
 
@@ -656,6 +656,13 @@ async def run_repl(agent: Agent) -> None:
                 print_info(f"Created skill {result.get('skill')} at {result.get('file')}")
             else:
                 print_error(str(result.get("error") or result))
+            continue
+        if inp == "/graph" or inp.startswith("/graph "):
+            # /graph build|update|status：管理 code-review-graph 代码图谱。
+            # 走 CRG CLI 而非 MCP 工具：MCP 调用无超时保护，构建可能挂死对话循环。
+            from .graph_cmd import run_graph_command
+            from .ui import console as _console
+            _console.print(run_graph_command(inp[len("/graph"):].strip()))
             continue
 
         # Skill invocation: /<skill-name> [args]

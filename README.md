@@ -450,6 +450,29 @@ Bear Code 支持 MCP 外部工具扩展。MCP Server 可以通过 stdio JSON-RPC
 mcp__<serverName>__<toolName>
 ```
 
+### 代码图谱检索（code-review-graph）
+
+Bear Code 预置了 [code-review-graph](https://github.com/tirth8205/code-review-graph)
+（CRG）的 MCP 集成：用 Tree-sitter 把代码库解析成符号/调用/依赖图谱，
+让模型做多跳结构检索（谁调用了 X、改这个文件影响谁），实测可大幅降低
+代码问答的 token 消耗。
+
+```bash
+pip install code-review-graph   # 一次性安装 CLI
+```
+
+在 REPL 中：
+
+```text
+/graph build     全量构建图谱（首次）
+/graph update    增量更新（只重解析变化的文件）
+/graph status    查看图谱统计
+```
+
+构建后重启会话，模型即可自动使用 `mcp__code-review-graph__query_graph_tool`
+等工具。`.mcp.json` 中已配置工具白名单（7 个核心工具）。
+详见 `wiki/代码图谱检索.md`。
+
 ## Docker 运行
 
 构建镜像：
