@@ -71,6 +71,83 @@ def api_delete_session(session_id: str) -> dict[str, bool]:
     return {"success": True}
 
 
+class SessionNameRequest(BaseModel):
+    message: str
+
+
+@app.post("/api/sessions/generate-name")
+async def api_generate_session_name(data: SessionNameRequest) -> dict[str, str]:
+    """Generate a session name from user message using side model."""
+    import httpx
+    from agents.config import load_config
+    
+    config = load_config()
+    
+    # Get side model from routing config
+    side_model_id = config.routing.get('side')
+    if not side_model_id:
+        # Fallback: use first available endpoint
+        if config.endpoints:
+            side_model_id = next(iter(config.endpoints.keys()))
+        else:
+            return {"name": data.message[:20] + "..." if len(data.message) > 20 else data.message}
+    
+    endpoint = config.endpoints.get(side_model_id)
+    if not endpoint:
+        return {"name": data.message[:20] + "..." if len(data.message) > 20 else data.message}
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{endpoint.base_url.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {endpoint.api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": endpoint.model,
+                    "messages": [
+                        {"role": "system", "content": "Generate a concise session title (max 30 chars) from the user's message. Return only the title, no quotes or explanation."},
+                        {"role": "user", "content": data.message}
+                    ],
+                    "max_tokens": 50,
+                    "temperature": 0.3
+                }
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                name = result.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
+                if name:
+                    # Truncate if too long
+                    return {"name": name[:30] if len(name) > 30 else name}
+            
+            # Fallback
+            return {"name": data.message[:20] + "..." if len(data.message) > 20 else data.message}
+    except Exception:
+        return {"name": data.message[:20] + "..." if len(data.message) > 20 else data.message}
+
+
+class SessionUpdateRequest(BaseModel):
+    name: str
+
+
+@app.put("/api/sessions/{session_id}")
+def api_update_session(session_id: str, data: SessionUpdateRequest) -> dict[str, Any]:
+    """Update session metadata (e.g., name)."""
+    session_data = load_session(session_id)
+    if session_data is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    # Update the name in metadata
+    if "metadata" in session_data:
+        session_data["metadata"]["name"] = data.name
+    
+    # Save back
+    save_session(session_id, session_data)
+    return {"success": True, "name": data.name}
+
+
 # ── Memory APIs ───────────────────────────────────────────────────────────────
 
 @app.get("/api/memories")
@@ -825,17 +902,32 @@ async def api_chat(data: ChatMessage) -> dict[str, Any]:
             api_base=api_base,
         )
         
-        # Build context from files
+        # Build context from files and directories
         context = ""
         if data.context_files:
-            for file_path in data.context_files:
+            for item_path in data.context_files:
                 try:
-                    full_path = project_root / file_path
+                    full_path = project_root / item_path
                     if full_path.exists():
-                        content = full_path.read_text(encoding="utf-8")
-                        context += f"\n\n--- {file_path} ---\n{content}"
+                        if full_path.is_dir():
+                            # For directories, list first-level structure
+                            structure = f"\n\n--- {item_path}/ (directory structure) ---\n"
+                            try:
+                                entries = sorted(full_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+                                for entry in entries[:50]:  # Limit to 50 entries
+                                    prefix = "📁 " if entry.is_dir() else "📄 "
+                                    structure += f"{prefix}{entry.name}\n"
+                                if len(entries) > 50:
+                                    structure += f"... and {len(entries) - 50} more entries\n"
+                            except PermissionError:
+                                structure += "(Permission denied)\n"
+                            context += structure
+                        else:
+                            # For files, read content
+                            content = full_path.read_text(encoding="utf-8")
+                            context += f"\n\n--- {item_path} ---\n{content}"
                 except Exception as e:
-                    context += f"\n\n--- {file_path} ---\nError reading file: {e}"
+                    context += f"\n\n--- {item_path} ---\nError reading: {e}"
         
         # Prepare message with context
         full_message = data.message
@@ -899,17 +991,41 @@ async def api_chat_stream(data: ChatMessage):
             api_base=api_base,
         )
         
-        # Build context from files
+        # Restore session if session_id is provided
+        if data.session_id:
+            from agents.session import load_session
+            session_data = load_session(data.session_id)
+            if session_data:
+                agent._openai_messages = session_data.get('openaiMessages', [])
+                agent._anthropic_messages = session_data.get('anthropicMessages', [])
+                agent.session_id = data.session_id
+        
+        # Build context from files and directories
         context = ""
         if data.context_files:
-            for file_path in data.context_files:
+            for item_path in data.context_files:
                 try:
-                    full_path = project_root / file_path
+                    full_path = project_root / item_path
                     if full_path.exists():
-                        content = full_path.read_text(encoding="utf-8")
-                        context += f"\n\n--- {file_path} ---\n{content}"
+                        if full_path.is_dir():
+                            # For directories, list first-level structure
+                            structure = f"\n\n--- {item_path}/ (directory structure) ---\n"
+                            try:
+                                entries = sorted(full_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+                                for entry in entries[:50]:  # Limit to 50 entries
+                                    prefix = "📁 " if entry.is_dir() else "📄 "
+                                    structure += f"{prefix}{entry.name}\n"
+                                if len(entries) > 50:
+                                    structure += f"... and {len(entries) - 50} more entries\n"
+                            except PermissionError:
+                                structure += "(Permission denied)\n"
+                            context += structure
+                        else:
+                            # For files, read content
+                            content = full_path.read_text(encoding="utf-8")
+                            context += f"\n\n--- {item_path} ---\n{content}"
                 except Exception as e:
-                    context += f"\n\n--- {file_path} ---\nError reading file: {e}"
+                    context += f"\n\n--- {item_path} ---\nError reading: {e}"
         
         # Prepare message with context
         full_message = data.message
@@ -920,12 +1036,26 @@ async def api_chat_stream(data: ChatMessage):
             # Start the chat in a background task
             chat_task = asyncio.create_task(agent.chat(full_message))
             
-            # Monitor the output buffer and stream chunks
+            # Monitor both output and thinking buffers
             last_index = 0
+            last_thinking_index = 0
+            final_output = ""
+            final_thinking = ""
+            
             while not chat_task.done():
-                # Check if there's new output
+                # Check thinking buffer first (thinking comes before content)
+                if hasattr(agent, '_turn_thinking_buffer') and agent._turn_thinking_buffer:
+                    current_thinking = "".join(agent._turn_thinking_buffer)
+                    final_thinking = current_thinking  # Keep track of latest
+                    if len(current_thinking) > last_thinking_index:
+                        new_thinking = current_thinking[last_thinking_index:]
+                        yield f"data: {json.dumps({'thinking': new_thinking})}\n\n"
+                        last_thinking_index = len(current_thinking)
+                
+                # Check output buffer
                 if agent._turn_output_buffer:
                     current_text = "".join(agent._turn_output_buffer)
+                    final_output = current_text  # Keep track of latest
                     if len(current_text) > last_index:
                         new_chunk = current_text[last_index:]
                         yield f"data: {json.dumps({'chunk': new_chunk})}\n\n"
@@ -935,12 +1065,15 @@ async def api_chat_stream(data: ChatMessage):
             # Wait for chat to complete
             await chat_task
             
-            # Send any remaining output
-            if agent._turn_output_buffer:
-                final_text = "".join(agent._turn_output_buffer)
-                if len(final_text) > last_index:
-                    new_chunk = final_text[last_index:]
-                    yield f"data: {json.dumps({'chunk': new_chunk})}\n\n"
+            # Send any remaining thinking content (use saved final_thinking)
+            if final_thinking and len(final_thinking) > last_thinking_index:
+                new_thinking = final_thinking[last_thinking_index:]
+                yield f"data: {json.dumps({'thinking': new_thinking})}\n\n"
+            
+            # Send any remaining output (use saved final_output)
+            if final_output and len(final_output) > last_index:
+                new_chunk = final_output[last_index:]
+                yield f"data: {json.dumps({'chunk': new_chunk})}\n\n"
             
             # Send completion event
             yield f"data: {json.dumps({'done': True, 'session_id': agent.session_id})}\n\n"

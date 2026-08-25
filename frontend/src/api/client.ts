@@ -8,6 +8,7 @@ export interface Session {
   model: string;
   cwd: string;
   messageCount: number;
+  name?: string;
 }
 
 export interface SessionDetail {
@@ -91,6 +92,26 @@ export async function fetchSession(id: string): Promise<SessionDetail> {
 export async function deleteSession(id: string): Promise<void> {
   const res = await fetch(`${API_BASE}/sessions/${id}`, { method: 'DELETE' });
   if (!res.ok) throw new Error('Failed to delete session');
+}
+
+export async function generateSessionName(message: string): Promise<string> {
+  const res = await fetch(`${API_BASE}/sessions/generate-name`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message })
+  });
+  if (!res.ok) throw new Error('Failed to generate session name');
+  const data = await res.json();
+  return data.name;
+}
+
+export async function updateSessionName(id: string, name: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/sessions/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name })
+  });
+  if (!res.ok) throw new Error('Failed to update session name');
 }
 
 export async function fetchMemories(): Promise<Memory[]> {

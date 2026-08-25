@@ -246,6 +246,8 @@ class Agent:
         #子agent的输出缓存
         self._output_buffer: list[str] | None=None
         self._turn_output_buffer: list[str] | None = None
+        self._turn_thinking_buffer: list[str] | None = None  # 收集 thinking 内容用于 SSE 传输
+        self._turn_event_buffer: list[dict] | None = None  # 收集工具调用等事件用于 SSE 传输
 
         # 编辑前读取
         self._read_file_state: dict[str, float] ={}
@@ -569,6 +571,8 @@ class Agent:
             checkpoint_count=self._checkpoint_store.checkpoint_count,
         ))
         self._turn_output_buffer = []
+        self._turn_thinking_buffer = []
+        self._turn_event_buffer = []
         from .trace import trace_event
         trace_event(
             "turn.start",
@@ -589,6 +593,8 @@ class Agent:
             self._current_task = None
         assistant_text = "".join(self._turn_output_buffer or []).strip()
         self._turn_output_buffer = None
+        self._turn_thinking_buffer = None
+        self._turn_event_buffer = None
         trace_event(
             "turn.end",
             turn=self._turn_number,
@@ -2207,13 +2213,18 @@ class Agent:
                 delta = chunk.choices[0].delta
 
                 # OpenAI-compatible 模型的思考内容（DeepSeek 等用 reasoning_content 字段）。
-                # 默认不展示（/thinking 打开后才显示）；不进入 content，也不进入输出缓冲区。
+                # 始终收集到 thinking buffer 用于 SSE 传输
                 reasoning = getattr(delta, "reasoning_content", None)
-                if reasoning and thinking_visible():
-                    if first_thinking:
-                        stop_spinner()
-                        first_thinking = False
-                    print_thinking_text(reasoning)
+                if reasoning:
+                    # 始终写入 thinking buffer（用于 SSE 传输到前端）
+                    if self._turn_thinking_buffer is not None:
+                        self._turn_thinking_buffer.append(reasoning)
+                    # 终端显示仅在 thinking_visible() 时
+                    if thinking_visible():
+                        if first_thinking:
+                            stop_spinner()
+                            first_thinking = False
+                        print_thinking_text(reasoning)
 
                 if delta and delta.content:
                     if first_text:

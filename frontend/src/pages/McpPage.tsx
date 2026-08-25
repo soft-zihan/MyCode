@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Server, RefreshCw, Wrench, Cpu } from 'lucide-react';
+import { Server, RefreshCw, Wrench, Cpu, Power } from 'lucide-react';
 import { fetchMcpServers, fetchNativeTools } from '../api/client';
 
 interface McpServer {
@@ -37,6 +37,26 @@ export default function McpPage() {
   const [error, setError] = useState<string | null>(null);
   const [expandedServer, setExpandedServer] = useState<string | null>(null);
   const [expandedNative, setExpandedNative] = useState<boolean>(true);
+  const [disabledServers, setDisabledServers] = useState<Set<string>>(new Set());
+
+  // Load disabled servers from localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem('disabledMcpServers');
+    if (saved) {
+      setDisabledServers(new Set(JSON.parse(saved)));
+    }
+  }, []);
+
+  const toggleServer = (serverName: string) => {
+    const newDisabled = new Set(disabledServers);
+    if (newDisabled.has(serverName)) {
+      newDisabled.delete(serverName);
+    } else {
+      newDisabled.add(serverName);
+    }
+    setDisabledServers(newDisabled);
+    localStorage.setItem('disabledMcpServers', JSON.stringify([...newDisabled]));
+  };
 
   const loadServers = async () => {
     setLoading(true);
@@ -186,7 +206,7 @@ export default function McpPage() {
               const isExpanded = expandedServer === server.name;
               
               return (
-                <div key={server.name} className="p-6 hover:bg-gray-50">
+                <div key={server.name} className={`p-6 hover:bg-gray-50 ${disabledServers.has(server.name) ? 'opacity-50' : ''}`}>
                   <div className="flex items-start">
                     <Server className="w-6 h-6 mr-3 text-green-500 flex-shrink-0 mt-1" />
                     <div className="flex-1">
@@ -194,6 +214,18 @@ export default function McpPage() {
                         <h3 className="text-lg font-semibold text-gray-900">
                           {server.name}
                         </h3>
+                        <button
+                          onClick={() => toggleServer(server.name)}
+                          className={`flex items-center gap-1 px-2 py-1 text-xs rounded transition-colors ${
+                            disabledServers.has(server.name)
+                              ? 'bg-gray-200 text-gray-600 hover:bg-gray-300'
+                              : 'bg-green-100 text-green-700 hover:bg-green-200'
+                          }`}
+                          title={disabledServers.has(server.name) ? 'Enable server' : 'Disable server'}
+                        >
+                          <Power className="w-3 h-3" />
+                          {disabledServers.has(server.name) ? 'Disabled' : 'Enabled'}
+                        </button>
                         {tools && (
                           <button
                             onClick={() => setExpandedServer(isExpanded ? null : server.name)}

@@ -48,9 +48,11 @@ export default function AgentsPage() {
       Object.entries(configData.endpoints).forEach(([id, endpoint]) => {
         const key = `${endpoint.base_url}|${endpoint.api_key}`;
         if (!providerMap.has(key)) {
+          // Use provider_name if set, otherwise fallback to hostname
+          const providerName = endpoint.provider_name || new URL(endpoint.base_url).hostname;
           providerMap.set(key, {
             id: `provider_${providerMap.size}`,
-            name: new URL(endpoint.base_url).hostname,
+            name: providerName,
             base_url: endpoint.base_url,
             api_key: endpoint.api_key,
             models: []

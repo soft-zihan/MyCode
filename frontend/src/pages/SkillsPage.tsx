@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { fetchSkills, fetchSkillEvolutionReport, fetchSkillEvolutionProvenance, fetchSkillEvolutionUsage, deleteSkill, Skill } from '../api/client';
-import { Wrench, RefreshCw, Activity, Edit3, Save, X, User, Folder, ChevronDown, ChevronRight, Trash2, Info } from 'lucide-react';
+import { Wrench, RefreshCw, Activity, Edit3, Save, X, User, Folder, ChevronDown, ChevronRight, Trash2, Info, Power } from 'lucide-react';
 
 interface SkillDetail extends Skill {
   prompt_template?: string;
@@ -21,6 +21,26 @@ export default function SkillsPage() {
   const [activeTab, setActiveTab] = useState<'skills' | 'evolution'>('skills');
   const [filterSource, setFilterSource] = useState<'all' | 'user' | 'project'>('all');
   const [expandedProvenance, setExpandedProvenance] = useState<number | null>(null);
+  const [disabledSkills, setDisabledSkills] = useState<Set<string>>(new Set());
+
+  // Load disabled skills from localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem('disabledSkills');
+    if (saved) {
+      setDisabledSkills(new Set(JSON.parse(saved)));
+    }
+  }, []);
+
+  const toggleSkill = (skillName: string) => {
+    const newDisabled = new Set(disabledSkills);
+    if (newDisabled.has(skillName)) {
+      newDisabled.delete(skillName);
+    } else {
+      newDisabled.add(skillName);
+    }
+    setDisabledSkills(newDisabled);
+    localStorage.setItem('disabledSkills', JSON.stringify([...newDisabled]));
+  };
 
   const loadData = async () => {
     setLoading(true);
@@ -197,7 +217,7 @@ export default function SkillsPage() {
                       selectedSkill?.name === skill.name
                         ? 'bg-blue-50 border-l-2 border-blue-500'
                         : 'hover:bg-gray-50'
-                    }`}
+                    } ${disabledSkills.has(skill.name) ? 'opacity-50' : ''}`}
                   >
                     <div className="flex items-center gap-2 mb-1">
                       {skill.source === 'user' ? (
@@ -206,11 +226,20 @@ export default function SkillsPage() {
                         <Folder className="w-3 h-3 text-green-500" />
                       )}
                       <span className="font-medium text-sm text-gray-900">{skill.name}</span>
-                      <span className={`ml-auto px-1.5 py-0.5 text-xs rounded ${
-                        skill.source === 'user' ? 'bg-purple-100 text-purple-700' : 'bg-green-100 text-green-700'
-                      }`}>
-                        {skill.source}
-                      </span>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleSkill(skill.name);
+                        }}
+                        className={`ml-auto flex items-center gap-1 px-1.5 py-0.5 text-xs rounded transition-colors ${
+                          disabledSkills.has(skill.name)
+                            ? 'bg-gray-200 text-gray-600 hover:bg-gray-300'
+                            : 'bg-green-100 text-green-700 hover:bg-green-200'
+                        }`}
+                        title={disabledSkills.has(skill.name) ? 'Enable skill' : 'Disable skill'}
+                      >
+                        <Power className="w-3 h-3" />
+                      </button>
                     </div>
                     <p className="text-xs text-gray-500 line-clamp-2">{skill.description}</p>
                   </div>

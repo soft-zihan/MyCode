@@ -1,17 +1,18 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { 
   FolderTree, ChevronRight, ChevronDown, File, Folder, X, 
   MessageSquare, Trash2, PanelRight, Send, Clock, Plus,
-  Edit3, Check, Pencil
+  Edit3, Check, Pencil, Brain, Square
 } from 'lucide-react';
 import { 
   fetchWorkspaceTree, fetchWorkspaceFile, WorkspaceNode,
   fetchSessions, deleteSession, Session,
   fetchAgents, fetchConfig, Agent, AppConfig,
   fetchDirectories, DirectoryList,
-  deleteWorkspaceFile, renameWorkspaceFile
+  deleteWorkspaceFile, renameWorkspaceFile,
+  generateSessionName, updateSessionName
 } from '../api/client';
 import Editor from '@monaco-editor/react';
 
@@ -166,11 +167,11 @@ function FileTreeNode({ node, level, onFileSelect, onAddToChat, selectedFile, ed
           </div>
         )}
         
-        {!editMode && !isRenaming && node.type === 'file' && (
+        {!editMode && !isRenaming && (
           <button
             onClick={handleAddToChat}
             className="opacity-0 group-hover:opacity-100 p-1 hover:bg-blue-100 rounded text-blue-500 transition-opacity"
-            title="Add to chat context"
+            title={node.type === 'directory' ? "Add directory structure to context" : "Add to chat context"}
           >
             <Plus className="w-3 h-3" />
           </button>
@@ -202,17 +203,35 @@ interface FileTreeProps {
   onAddToChat: (path: string) => void;
   selectedFile: string | null;
   cwd?: string | null;
+  visible?: boolean;
 }
 
-function FileTree({ onFileSelect, onAddToChat, selectedFile, cwd }: FileTreeProps) {
+function FileTree({ onFileSelect, onAddToChat, selectedFile, cwd, visible }: FileTreeProps) {
   const [tree, setTree] = useState<WorkspaceNode | null>(null);
   const [loading, setLoading] = useState(true);
   const [editMode, setEditMode] = useState(false);
+  const cacheKey = cwd || 'default';
 
-  const loadTree = () => {
+  const loadTree = (forceRefresh = false) => {
+    // Check cache first (unless force refresh)
+    if (!forceRefresh) {
+      const cached = sessionStorage.getItem(`fileTree_${cacheKey}`);
+      if (cached) {
+        try {
+          setTree(JSON.parse(cached));
+          setLoading(false);
+          return;
+        } catch {}
+      }
+    }
+
     setLoading(true);
     fetchWorkspaceTree(cwd || undefined)
-      .then(setTree)
+      .then(data => {
+        setTree(data);
+        // Cache the result
+        sessionStorage.setItem(`fileTree_${cacheKey}`, JSON.stringify(data));
+      })
       .catch(console.error)
       .finally(() => setLoading(false));
   };
@@ -221,7 +240,14 @@ function FileTree({ onFileSelect, onAddToChat, selectedFile, cwd }: FileTreeProp
     loadTree();
   }, [cwd]);
 
-  if (loading) {
+  // Refresh tree when becoming visible (to catch disk changes)
+  useEffect(() => {
+    if (visible) {
+      loadTree(true);
+    }
+  }, [visible]);
+
+  if (loading && !tree) {
     return <div className="p-4 text-sm text-gray-500">Loading...</div>;
   }
 
@@ -464,15 +490,38 @@ function DirectoryPicker({ onSelect, onCancel }: DirectoryPickerProps) {
   );
 }
 
-function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId }: SessionsPanelProps) {
+interface SessionsPanelProps {
+  onSessionSelect: (id: string) => void;
+  onNewSession: (cwd: string) => void;
+  currentSessionId: string | null;
+  visible?: boolean;
+}
+
+function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId, visible }: SessionsPanelProps) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [showDirPicker, setShowDirPicker] = useState(false);
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState<string>('');
 
-  const loadSessions = async () => {
+  const loadSessions = async (forceRefresh = false) => {
+    // Check cache first (unless force refresh)
+    if (!forceRefresh) {
+      const cached = sessionStorage.getItem('sessions');
+      if (cached) {
+        try {
+          setSessions(JSON.parse(cached));
+          setLoading(false);
+          return;
+        } catch {}
+      }
+    }
+
     try {
       const data = await fetchSessions();
       setSessions(data);
+      // Cache the result
+      sessionStorage.setItem('sessions', JSON.stringify(data));
     } catch (err) {
       console.error('Failed to load sessions:', err);
     } finally {
@@ -484,15 +533,53 @@ function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId }: Sess
     loadSessions();
   }, []);
 
+  // Refresh sessions when becoming visible
+  useEffect(() => {
+    if (visible) {
+      loadSessions(true);
+    }
+  }, [visible]);
+
   const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (!confirm('Are you sure you want to delete this session?')) return;
     try {
       await deleteSession(id);
-      setSessions(sessions.filter(s => s.id !== id));
+      const updated = sessions.filter(s => s.id !== id);
+      setSessions(updated);
+      // Update cache
+      sessionStorage.setItem('sessions', JSON.stringify(updated));
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to delete');
     }
+  };
+
+  const handleStartEditName = (session: Session, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setEditingSessionId(session.id);
+    setEditingName(session.name || formatRelativeTime(session.startTime));
+  };
+
+  const handleSaveName = async (sessionId: string) => {
+    if (!editingName.trim()) {
+      setEditingSessionId(null);
+      return;
+    }
+    try {
+      await updateSessionName(sessionId, editingName.trim());
+      const updated = sessions.map(s => 
+        s.id === sessionId ? { ...s, name: editingName.trim() } : s
+      );
+      setSessions(updated);
+      sessionStorage.setItem('sessions', JSON.stringify(updated));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to update name');
+    }
+    setEditingSessionId(null);
+  };
+
+  const handleCancelEdit = () => {
+    setEditingSessionId(null);
   };
 
   const handleDirSelect = (path: string) => {
@@ -537,13 +624,33 @@ function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId }: Sess
               <div className="text-xs font-medium text-gray-600 truncate flex-1" title={cwd}>
                 📁 {cwd.split('/').pop() || cwd}
               </div>
-              <button
-                onClick={() => onNewSession(cwd)}
-                className="p-1 hover:bg-gray-200 rounded text-gray-500 transition-colors"
-                title="New session in this project"
-              >
-                <Plus className="w-3 h-3" />
-              </button>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => onNewSession(cwd)}
+                  className="p-1 hover:bg-gray-200 rounded text-gray-500 transition-colors"
+                  title="New session in this project"
+                >
+                  <Plus className="w-3 h-3" />
+                </button>
+                <button
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    if (!confirm(`Delete all ${projectSessions.length} session(s) in this project?`)) return;
+                    try {
+                      await Promise.all(projectSessions.map(s => deleteSession(s.id)));
+                      const updated = sessions.filter(s => s.cwd !== cwd);
+                      setSessions(updated);
+                      sessionStorage.setItem('sessions', JSON.stringify(updated));
+                    } catch (err) {
+                      alert(err instanceof Error ? err.message : 'Failed to delete');
+                    }
+                  }}
+                  className="p-1 hover:bg-red-100 rounded text-red-400 transition-colors"
+                  title="Delete all sessions in this project"
+                >
+                  <Trash2 className="w-3 h-3" />
+                </button>
+              </div>
             </div>
             {projectSessions.map(session => (
               <div
@@ -557,15 +664,45 @@ function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId }: Sess
               >
                 <div className="flex items-center text-sm text-gray-700 flex-1 min-w-0">
                   <Clock className="w-3 h-3 mr-2 text-gray-400 flex-shrink-0" />
-                  <span className="truncate">{formatRelativeTime(session.startTime)}</span>
+                  {editingSessionId === session.id ? (
+                    <input
+                      type="text"
+                      value={editingName}
+                      onChange={(e) => setEditingName(e.target.value)}
+                      onClick={(e) => e.stopPropagation()}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleSaveName(session.id);
+                        if (e.key === 'Escape') handleCancelEdit();
+                      }}
+                      className="flex-1 px-1 py-0 text-sm border border-blue-400 rounded focus:outline-none"
+                      autoFocus
+                    />
+                  ) : (
+                    <span 
+                      className="truncate cursor-text"
+                      onDoubleClick={(e) => handleStartEditName(session, e)}
+                      title={session.name || formatRelativeTime(session.startTime)}
+                    >
+                      {session.name || formatRelativeTime(session.startTime)}
+                    </span>
+                  )}
                 </div>
-                <button
-                  onClick={(e) => handleDelete(session.id, e)}
-                  className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-100 rounded text-red-500 transition-opacity"
-                  title="Delete session"
-                >
-                  <Trash2 className="w-3 h-3" />
-                </button>
+                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <button
+                    onClick={(e) => handleStartEditName(session, e)}
+                    className="p-1 hover:bg-blue-100 rounded text-blue-500"
+                    title="Edit name"
+                  >
+                    <Pencil className="w-3 h-3" />
+                  </button>
+                  <button
+                    onClick={(e) => handleDelete(session.id, e)}
+                    className="p-1 hover:bg-red-100 rounded text-red-500"
+                    title="Delete session"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -587,6 +724,101 @@ interface ChatMessage {
   isEditing?: boolean;
 }
 
+// Parse thinking content from assistant message
+function parseThinkingContent(content: string): { thinking: string | null; mainContent: string; isThinkingComplete: boolean } {
+  const thinkingMatch = content.match(/<thinking>([\s\S]*?)(<\/thinking>|$)/);
+  
+  if (!thinkingMatch) {
+    return { thinking: null, mainContent: content, isThinkingComplete: false };
+  }
+  
+  const thinking = thinkingMatch[1].trim();
+  const isThinkingComplete = content.includes('</thinking>');
+  const mainContent = content.replace(/<thinking>[\s\S]*?(<\/thinking>|$)/, '').trim();
+  
+  return { thinking, mainContent, isThinkingComplete };
+}
+
+// Thinking display component - defined OUTSIDE parent to preserve state across re-renders
+function ThinkingBlock({ thinking, isStreaming, isComplete }: { thinking: string; isStreaming: boolean; isComplete: boolean }) {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const prevIsStreamingRef = useRef(isStreaming);
+  
+  // Auto-expand when streaming starts, auto-collapse when streaming stops
+  useEffect(() => {
+    const wasStreaming = prevIsStreamingRef.current;
+    
+    if (isStreaming && !isComplete) {
+      // Streaming started or continuing: expand
+      setIsExpanded(true);
+    } else if (wasStreaming && !isStreaming) {
+      // Streaming just stopped: collapse
+      setIsExpanded(false);
+    }
+    
+    prevIsStreamingRef.current = isStreaming;
+  }, [isStreaming, isComplete]);
+  
+  // Auto-scroll when streaming
+  useEffect(() => {
+    if (isStreaming && !isComplete && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [thinking, isStreaming, isComplete]);
+  
+  // Handle manual toggle
+  const handleToggle = () => {
+    setIsExpanded(!isExpanded);
+  };
+  
+  // During streaming, show expanded with scroll
+  if (isStreaming && !isComplete) {
+    return (
+      <div className="mb-3 border border-purple-200 rounded-lg bg-purple-50/50">
+        <div className="flex items-center gap-2 px-3 py-1.5 border-b border-purple-200 bg-purple-100/50 rounded-t-lg">
+          <Brain className="w-3.5 h-3.5 text-purple-600" />
+          <span className="text-xs font-medium text-purple-700">Thinking...</span>
+          <div className="flex-1" />
+          <div className="flex gap-1">
+            <div className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-pulse" />
+            <div className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-pulse" style={{ animationDelay: '0.2s' }} />
+            <div className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-pulse" style={{ animationDelay: '0.4s' }} />
+          </div>
+        </div>
+        <div 
+          ref={scrollRef}
+          className="px-3 py-2 text-xs text-gray-600 overflow-y-auto font-mono whitespace-pre-wrap"
+          style={{ maxHeight: '150px' }}
+        >
+          {thinking}
+        </div>
+      </div>
+    );
+  }
+  
+  // Collapsed state - show as clickable button
+  return (
+    <div className="mb-3">
+      <button
+        onClick={() => setIsExpanded(!isExpanded)}
+        className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-purple-600 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg transition-colors"
+      >
+        <Brain className="w-3.5 h-3.5" />
+        <span>Thinking</span>
+        {isExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+      </button>
+      {isExpanded && (
+        <div className="mt-2 border border-purple-200 rounded-lg bg-purple-50/50">
+          <div className="px-3 py-2 text-xs text-gray-600 overflow-y-auto font-mono whitespace-pre-wrap max-h-60">
+            {thinking}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main Chat Page ───────────────────────────────────────────────────────────
 
 export default function ChatPage() {
@@ -603,6 +835,8 @@ export default function ChatPage() {
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [currentProject, setCurrentProject] = useState<string | null>(null);
   const [currentCwd, setCurrentCwd] = useState<string | null>(null);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -656,23 +890,31 @@ export default function ChatPage() {
     }
   };
 
-  const handleNewSession = (cwd: string) => {
-    // Start a new session - must bind to a project
+  const handleNewSession = (cwd?: string) => {
+    // Start a new session - preserve current project if no cwd provided
+    const projectCwd = cwd || currentCwd || '';
+    if (!projectCwd) {
+      alert('Please select a project first');
+      return;
+    }
     setCurrentSessionId(null);
     setMessages([]);
     setInputValue('');
     setContextFiles([]);
-    setCurrentProject(cwd.split('/').pop() || cwd);
-    setCurrentCwd(cwd);
+    setCurrentProject(projectCwd.split('/').pop() || projectCwd);
+    setCurrentCwd(projectCwd);
     setSidebarTab('sessions');
   };
 
   const handleSendMessage = async () => {
     if (!inputValue.trim()) return;
     
+    const isFirstMessage = messages.length === 0;
+    const userMessageContent = inputValue.trim();
+    
     const userMessage: ChatMessage = {
       role: 'user',
-      content: inputValue.trim(),
+      content: userMessageContent,
       timestamp: new Date().toISOString(),
       contextFiles: [...contextFiles], // Bind context to message
       agent: selectedAgent || undefined,
@@ -692,6 +934,33 @@ export default function ChatPage() {
     };
     setMessages(prev => [...prev, assistantMessage]);
 
+    // Generate session name for first message in new session
+    if (isFirstMessage && !currentSessionId) {
+      try {
+        const name = await generateSessionName(userMessageContent);
+        // Update session name in backend after session is created
+        // We'll do this after the streaming completes
+        setTimeout(async () => {
+          if (currentSessionId) {
+            try {
+              await updateSessionName(currentSessionId, name);
+              // Refresh sessions list
+              sessionStorage.removeItem('sessions');
+            } catch (err) {
+              console.error('Failed to update session name:', err);
+            }
+          }
+        }, 2000);
+      } catch (err) {
+        console.error('Failed to generate session name:', err);
+      }
+    }
+
+    // Set up abort controller for stop functionality
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+    setIsStreaming(true);
+
     try {
       // Call backend streaming API
       const response = await fetch('/api/chat/stream', {
@@ -699,10 +968,12 @@ export default function ChatPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: userMessage.content,
+          session_id: currentSessionId,
           context_files: userMessage.contextFiles,
           agent: userMessage.agent,
           model: userMessage.model,
         }),
+        signal: abortController.signal,
       });
 
       if (!response.ok) {
@@ -716,6 +987,8 @@ export default function ChatPage() {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let accumulatedContent = '';
+      let accumulatedThinking = '';
+      let thinkingClosed = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -729,14 +1002,50 @@ export default function ChatPage() {
             const data = line.slice(6);
             try {
               const parsed = JSON.parse(data);
+              
+              // Handle thinking content
+              if (parsed.thinking) {
+                accumulatedThinking += parsed.thinking;
+                // Build display content: thinking (unclosed if still streaming)
+                const thinkingBlock = thinkingClosed 
+                  ? `<thinking>${accumulatedThinking}</thinking>`
+                  : `<thinking>${accumulatedThinking}`;
+                const displayContent = accumulatedContent 
+                  ? `${thinkingBlock}\n\n${accumulatedContent}`
+                  : thinkingBlock;
+                
+                setMessages(prev => {
+                  const newMessages = [...prev];
+                  newMessages[assistantMessageIndex] = {
+                    ...newMessages[assistantMessageIndex],
+                    content: displayContent,
+                  };
+                  return newMessages;
+                });
+              }
+              
+              // Handle main content
               if (parsed.chunk) {
+                // When we receive main content, close the thinking tag
+                if (!thinkingClosed && accumulatedThinking) {
+                  thinkingClosed = true;
+                }
+                
                 accumulatedContent += parsed.chunk;
+                
+                // Build display content
+                let displayContent = accumulatedContent;
+                if (accumulatedThinking) {
+                  const thinkingBlock = `<thinking>${accumulatedThinking}</thinking>`;
+                  displayContent = `${thinkingBlock}\n\n${accumulatedContent}`;
+                }
+                
                 // Update the assistant message with accumulated content
                 setMessages(prev => {
                   const newMessages = [...prev];
                   newMessages[assistantMessageIndex] = {
                     ...newMessages[assistantMessageIndex],
-                    content: accumulatedContent,
+                    content: displayContent,
                   };
                   return newMessages;
                 });
@@ -748,17 +1057,33 @@ export default function ChatPage() {
         }
       }
     } catch (error) {
-      const errorMessage = `Error: ${error instanceof Error ? error.message : 'Failed to get response'}`;
-      setMessages(prev => {
-        const newMessages = [...prev];
-        newMessages[assistantMessageIndex] = {
-          ...newMessages[assistantMessageIndex],
-          content: errorMessage,
-        };
-        return newMessages;
-      });
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        // User stopped the stream - keep whatever content we have
+        console.log('Stream aborted by user');
+      } else {
+        const errorMessage = `Error: ${error instanceof Error ? error.message : 'Failed to get response'}`;
+        setMessages(prev => {
+          const newMessages = [...prev];
+          newMessages[assistantMessageIndex] = {
+            ...newMessages[assistantMessageIndex],
+            content: errorMessage,
+          };
+          return newMessages;
+        });
+      }
+    } finally {
+      setIsStreaming(false);
+      abortControllerRef.current = null;
     }
   };
+
+  const handleStopStreaming = useCallback(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+      setIsStreaming(false);
+    }
+  }, []);
 
   const handleEditMessage = (index: number) => {
     const msg = messages[index];
@@ -784,24 +1109,26 @@ export default function ChatPage() {
   return (
     <div className="h-full flex">
       {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col bg-white">
+      <div className="flex-1 flex flex-col bg-white min-w-0">
         {/* Chat Header */}
-        <div className="px-4 py-3 border-b border-gray-200 bg-white flex items-center justify-between">
-          <div className="flex items-center">
-            <MessageSquare className="w-5 h-5 mr-2 text-blue-500" />
-            <h1 className="text-lg font-semibold text-gray-900">Chat</h1>
-            <span className="ml-3 px-2 py-0.5 bg-blue-50 text-blue-700 text-xs font-medium rounded border border-blue-200">
-              {currentProject}
-            </span>
+        <div className="px-3 md:px-4 py-3 border-b border-gray-200 bg-white flex items-center justify-between">
+          <div className="flex items-center min-w-0 flex-1">
+            <MessageSquare className="w-5 h-5 mr-2 text-blue-500 flex-shrink-0" />
+            <h1 className="text-base md:text-lg font-semibold text-gray-900 truncate">Chat</h1>
+            {currentProject && (
+              <span className="ml-2 px-2 py-0.5 bg-blue-50 text-blue-700 text-xs font-medium rounded border border-blue-200 truncate max-w-[120px] md:max-w-none">
+                {currentProject}
+              </span>
+            )}
             {currentSessionId && (
-              <span className="ml-2 px-2 py-0.5 bg-gray-50 text-gray-500 text-xs rounded border border-gray-200">
+              <span className="ml-2 px-2 py-0.5 bg-gray-50 text-gray-500 text-xs rounded border border-gray-200 hidden md:inline">
                 #{currentSessionId}
               </span>
             )}
           </div>
           <button
             onClick={() => setSidebarOpen(!sidebarOpen)}
-            className={`p-2 rounded hover:bg-gray-100 transition-colors ${
+            className={`p-2 rounded hover:bg-gray-100 transition-colors flex-shrink-0 ${
               sidebarOpen ? 'text-blue-600' : 'text-gray-500'
             }`}
             title={sidebarOpen ? 'Close sidebar' : 'Open sidebar'}
@@ -851,10 +1178,31 @@ export default function ChatPage() {
                       }`}
                     >
                       {msg.role === 'assistant' ? (
-                        <div className="prose prose-sm max-w-none prose-pre:bg-gray-800 prose-pre:text-gray-100 prose-code:bg-gray-200 prose-code:px-1 prose-code:py-0.5 prose-code:rounded">
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                            {msg.content}
-                          </ReactMarkdown>
+                        <div>
+                          {(() => {
+                            const { thinking, mainContent, isThinkingComplete } = parseThinkingContent(msg.content);
+                            // Thinking is streaming only if: overall streaming AND this is last message AND thinking not complete
+                            const isThinkingStreaming = isStreaming && idx === messages.length - 1 && !isThinkingComplete;
+                            
+                            return (
+                              <>
+                                {thinking && (
+                                  <ThinkingBlock 
+                                    thinking={thinking} 
+                                    isStreaming={isThinkingStreaming}
+                                    isComplete={isThinkingComplete}
+                                  />
+                                )}
+                                {mainContent && (
+                                  <div className="prose prose-sm max-w-none prose-pre:bg-gray-800 prose-pre:text-gray-100 prose-code:bg-gray-200 prose-code:px-1 prose-code:py-0.5 prose-code:rounded">
+                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                      {mainContent}
+                                    </ReactMarkdown>
+                                  </div>
+                                )}
+                              </>
+                            );
+                          })()}
                         </div>
                       ) : (
                         <pre className="whitespace-pre-wrap text-sm font-sans">{msg.content}</pre>
@@ -893,13 +1241,23 @@ export default function ChatPage() {
               className="flex-1 resize-none border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               rows={2}
             />
-            <button
-              onClick={handleSendMessage}
-              disabled={!inputValue.trim()}
-              className="p-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              <Send className="w-5 h-5" />
-            </button>
+            {isStreaming ? (
+              <button
+                onClick={handleStopStreaming}
+                className="p-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors"
+                title="Stop generation"
+              >
+                <Square className="w-5 h-5" />
+              </button>
+            ) : (
+              <button
+                onClick={handleSendMessage}
+                disabled={!inputValue.trim()}
+                className="p-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                <Send className="w-5 h-5" />
+              </button>
+            )}
           </div>
           {/* Context Files */}
           {contextFiles.length > 0 && (
@@ -982,22 +1340,24 @@ export default function ChatPage() {
           </div>
 
           {/* Sidebar Content */}
-          <div className="flex-1 overflow-hidden">
-            {sidebarTab === 'files' && (
+          <div className="flex-1 overflow-hidden relative">
+            <div className={`absolute inset-0 ${sidebarTab === 'files' ? 'visible' : 'invisible hidden'}`}>
               <FileTree
                 onFileSelect={setSelectedFile}
                 onAddToChat={handleAddToChat}
                 selectedFile={selectedFile}
                 cwd={currentCwd}
+                visible={sidebarTab === 'files'}
               />
-            )}
-            {sidebarTab === 'sessions' && (
+            </div>
+            <div className={`absolute inset-0 ${sidebarTab === 'sessions' ? 'visible' : 'invisible hidden'}`}>
               <SessionsPanel
                 onSessionSelect={handleSessionSelect}
                 onNewSession={handleNewSession}
                 currentSessionId={currentSessionId}
+                visible={sidebarTab === 'sessions'}
               />
-            )}
+            </div>
           </div>
         </div>
       )}

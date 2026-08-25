@@ -21,36 +21,63 @@ function Navigation() {
   ];
 
   return (
-    <nav className="w-64 bg-gray-900 text-white flex flex-col">
-      <div className="p-6 border-b border-gray-700">
-        <h1 className="text-2xl font-bold">MyCode</h1>
-        <p className="text-sm text-gray-400 mt-1">Visual Interface</p>
-      </div>
-      <div className="flex-1 py-4">
-        {navItems.map(item => {
-          const Icon = item.icon;
-          const isActive = location.pathname === item.path;
-          return (
-            <Link
-              key={item.path}
-              to={item.path}
-              className={`flex items-center px-6 py-3 text-sm transition-colors ${
-                isActive
-                  ? 'bg-gray-800 text-white border-r-2 border-blue-500'
-                  : 'text-gray-400 hover:bg-gray-800 hover:text-white'
-              }`}
-            >
-              <Icon className="w-5 h-5 mr-3" />
-              {item.label}
-            </Link>
-          );
-        })}
-      </div>
-      <div className="p-4 border-t border-gray-700 text-xs text-gray-500">
-        <div>Backend: localhost:8000</div>
-        <div>Frontend: localhost:5173</div>
-      </div>
-    </nav>
+    <>
+      {/* Desktop sidebar */}
+      <nav className="hidden md:flex w-64 bg-gray-900 text-white flex-col">
+        <div className="p-6 border-b border-gray-700">
+          <h1 className="text-2xl font-bold">MyCode</h1>
+          <p className="text-sm text-gray-400 mt-1">Visual Interface</p>
+        </div>
+        <div className="flex-1 py-4">
+          {navItems.map(item => {
+            const Icon = item.icon;
+            const isActive = location.pathname === item.path;
+            return (
+              <Link
+                key={item.path}
+                to={item.path}
+                className={`flex items-center px-6 py-3 text-sm transition-colors ${
+                  isActive
+                    ? 'bg-gray-800 text-white border-r-2 border-blue-500'
+                    : 'text-gray-400 hover:bg-gray-800 hover:text-white'
+                }`}
+              >
+                <Icon className="w-5 h-5 mr-3" />
+                {item.label}
+              </Link>
+            );
+          })}
+        </div>
+        <div className="p-4 border-t border-gray-700 text-xs text-gray-500">
+          <div>Backend: localhost:8000</div>
+          <div>Frontend: localhost:5173</div>
+        </div>
+      </nav>
+
+      {/* Mobile top navigation */}
+      <nav className="md:hidden bg-gray-900 border-b border-gray-700">
+        <div className="flex justify-around items-center">
+          {navItems.map(item => {
+            const Icon = item.icon;
+            const isActive = location.pathname === item.path;
+            return (
+              <Link
+                key={item.path}
+                to={item.path}
+                className={`flex flex-col items-center justify-center py-3 px-2 min-w-0 flex-1 ${
+                  isActive
+                    ? 'text-blue-500'
+                    : 'text-gray-400'
+                }`}
+              >
+                <Icon className="w-5 h-5" />
+                <span className="text-xs mt-1 truncate">{item.label}</span>
+              </Link>
+            );
+          })}
+        </div>
+      </nav>
+    </>
   );
 }
 

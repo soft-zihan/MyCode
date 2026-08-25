@@ -24,6 +24,7 @@ class ModelEndpointConfig:
     base_url: str
     api_key: str
     context_window: int = 128000
+    provider_name: str = ""  # User-friendly name for the provider
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -35,6 +36,7 @@ class ModelEndpointConfig:
             base_url=data.get("base_url", ""),
             api_key=data.get("api_key", ""),
             context_window=data.get("context_window", 128000),
+            provider_name=data.get("provider_name", ""),
         )
 
 
