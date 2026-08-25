@@ -227,6 +227,23 @@ web/out/
 .env*.local
 test_providers.py
 
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.env*.local
+
+# Config files with secrets
+.bear-code/
+config.json
+*.key
+*.pem
+
 # Internal analysis artifacts (not learning material)
 analysis/
 analysis_progress.md
+
+paper/
+.playwright-mcp/
+.idea/
+.bear/
