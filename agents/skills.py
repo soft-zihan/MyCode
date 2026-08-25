@@ -89,6 +89,9 @@ def discover_skills() -> list[SkillDefinition]:
     # 用户级 skills 优先级最高：~/.bear/skills/<name>/SKILL.md
     user_dir = Path.home() / ".bear" / "skills"
     _load_skills_from_dir(user_dir, "user", skills)
+    # 用户级 skills（agents 目录）：~/.agents/skills/<name>/SKILL.md
+    agents_dir = Path.home() / ".agents" / "skills"
+    _load_skills_from_dir(agents_dir, "user", skills, overwrite=False)
     # 项目级 skills 优先级较低：<cwd>/.bear/skills/<name>/SKILL.md
     project_dir = Path.cwd() / ".bear" / "skills"
     _load_skills_from_dir(project_dir, "project", skills, overwrite=False)
