@@ -10,6 +10,117 @@ from typing import Any
 MAX_TRANSCRIPT_CHARS = 80_000
 MAX_BLOCK_CHARS = 12_000
 
+# 文件操作提取模式
+FILE_OP_PATTERNS = {
+    "read": [
+        r'read_file\s+path="?([^"\s]+)"?',
+        r'read_file\s+"?([^"\s]+)"?',
+        r'list_files\s+(?:path|dir|directory)="?([^"\s]+)"?',
+        r'grep_search\s+(?:path|dir|directory)="?([^"\s]+)"?',
+    ],
+    "write": [
+        r'write_file\s+path="?([^"\s]+)"?',
+        r'edit_file\s+path="?([^"\s]+)"?',
+        r'create_file\s+path="?([^"\s]+)"?',
+    ],
+}
+
+
+def extract_file_ops(messages: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    """从消息中提取文件操作（readFiles, modifiedFiles）。
+
+    Returns:
+        (read_files, modified_files) 两个去重后的列表
+    """
+    read_files: set[str] = set()
+    modified_files: set[str] = set()
+
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+
+        # 检查 tool 结果
+        if msg.get("role") == "tool":
+            content = _content_text(msg.get("content"))
+            for pattern in FILE_OP_PATTERNS["read"]:
+                for match in re.finditer(pattern, content):
+                    path = match.group(1).strip()
+                    if path and not path.startswith("{"):
+                        read_files.add(path)
+            for pattern in FILE_OP_PATTERNS["write"]:
+                for match in re.finditer(pattern, content):
+                    path = match.group(1).strip()
+                    if path and not path.startswith("{"):
+                        modified_files.add(path)
+
+        # 检查 tool_calls (OpenAI 格式)
+        tool_calls = msg.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function") or {}
+                fn_name = fn.get("name", "")
+                fn_args = fn.get("arguments", "")
+                if fn_name in ("read_file", "list_files", "grep_search"):
+                    # 尝试从 arguments 提取路径
+                    path_match = re.search(r'"(?:path|dir|directory)"\s*:\s*"([^"]+)"', fn_args)
+                    if path_match:
+                        read_files.add(path_match.group(1))
+                elif fn_name in ("write_file", "edit_file", "create_file"):
+                    path_match = re.search(r'"path"\s*:\s*"([^"]+)"', fn_args)
+                    if path_match:
+                        modified_files.add(path_match.group(1))
+
+        # 检查 Anthropic 格式 tool_use
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    tool_name = block.get("name", "")
+                    tool_input = block.get("input", {})
+                    if tool_name in ("read_file", "list_files", "grep_search"):
+                        path = tool_input.get("path") or tool_input.get("dir") or tool_input.get("directory")
+                        if path:
+                            read_files.add(path)
+                    elif tool_name in ("write_file", "edit_file", "create_file"):
+                        path = tool_input.get("path")
+                        if path:
+                            modified_files.add(path)
+
+    return list(read_files), list(modified_files)
+
+
+def merge_file_tracking(
+    current_read: list[str],
+    current_modified: list[str],
+    previous: dict[str, Any] | None,
+) -> tuple[list[str], list[str]]:
+    """合并当前和之前的文件追踪记录。
+
+    Args:
+        current_read: 当前轮次读取的文件
+        current_modified: 当前轮次修改的文件
+        previous: 之前的 folded memory（可能包含 details.readFiles/modifiedFiles）
+
+    Returns:
+        合并后的 (read_files, modified_files)
+    """
+    read_set = set(current_read)
+    modified_set = set(current_modified)
+
+    if previous and "details" in previous:
+        details = previous["details"]
+        if isinstance(details, dict):
+            prev_read = details.get("readFiles", [])
+            prev_modified = details.get("modifiedFiles", [])
+            if isinstance(prev_read, list):
+                read_set.update(prev_read)
+            if isinstance(prev_modified, list):
+                modified_set.update(prev_modified)
+
+    return list(read_set), list(modified_set)
+
 
 FOLD_SESSION_MEMORY_SYSTEM = """You compact an AI coding agent session into structured session memory.
 

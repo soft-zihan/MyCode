@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 import json
 import os
+import time
 
 
 def session_dir() -> Path:
@@ -108,3 +109,111 @@ def get_latest_session_id() -> str | None:
         return None
     sessions.sort(key=lambda s: s.get("startTime", ""), reverse=True)
     return sessions[0].get("id")
+
+
+# ─── Branch Summary (Phase 3.2) ───────────────────────────────────────────────
+
+
+def generate_branch_summary(
+    entries: list[dict[str, Any]],
+    common_ancestor_id: str | None = None,
+) -> dict[str, Any]:
+    """生成分支摘要，保留离开分支时的经验。
+
+    Args:
+        entries: 当前分支的对话条目列表
+        common_ancestor_id: 共同祖先的 entry id（摘要到此为止）
+
+    Returns:
+        branch_summary 条目，包含摘要信息
+    """
+    entries_to_summarize = []
+    for entry in entries:
+        if entry.get("id") == common_ancestor_id:
+            break
+        entries_to_summarize.append(entry)
+
+    # 提取关键信息
+    user_messages = []
+    assistant_messages = []
+    tool_calls = []
+
+    for entry in entries_to_summarize:
+        role = entry.get("role", "")
+        content = entry.get("content", "")
+        if role == "user":
+            user_messages.append(content[:200] if isinstance(content, str) else str(content)[:200])
+        elif role == "assistant":
+            assistant_messages.append(content[:200] if isinstance(content, str) else str(content)[:200])
+
+        # 提取工具调用
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    tool_calls.append({
+                        "name": block.get("name", ""),
+                        "input": str(block.get("input", ""))[:100],
+                    })
+
+    summary = {
+        "type": "branch_summary",
+        "timestamp": time.time(),
+        "from_id": entries[0].get("id") if entries else None,
+        "to_id": common_ancestor_id,
+        "summary": {
+            "user_turns": len(user_messages),
+            "assistant_turns": len(assistant_messages),
+            "tool_calls": len(tool_calls),
+            "key_user_requests": user_messages[:3],  # 前 3 个用户请求
+            "key_actions": assistant_messages[:3],    # 前 3 个助手回复
+            "tools_used": list({tc["name"] for tc in tool_calls})[:10],  # 去重后的工具列表
+        },
+    }
+
+    return summary
+
+
+def save_branch_summary(session_id: str, branch_summary: dict[str, Any]) -> None:
+    """保存分支摘要到会话文件。"""
+    data = load_session(session_id)
+    if data is None:
+        return
+
+    if "branch_summaries" not in data:
+        data["branch_summaries"] = []
+
+    data["branch_summaries"].append(branch_summary)
+    save_session(session_id, data)
+
+
+def load_branch_summaries(session_id: str) -> list[dict[str, Any]]:
+    """加载会话的分支摘要列表。"""
+    data = load_session(session_id)
+    if data is None:
+        return []
+    return data.get("branch_summaries", [])
+
+
+def format_branch_summary_for_injection(summaries: list[dict[str, Any]]) -> str:
+    """格式化分支摘要，用于注入到新分支的上下文。"""
+    if not summaries:
+        return ""
+
+    parts = ["<branch-history>"]
+    parts.append("Previous branch activity (for context):")
+
+    for i, s in enumerate(summaries[-3:]):  # 最近 3 个分支摘要
+        summary = s.get("summary", {})
+        parts.append(f"\n[Branch {i+1}]")
+        parts.append(f"- User requests: {summary.get('user_turns', 0)} turns")
+        parts.append(f"- Actions taken: {summary.get('assistant_turns', 0)} turns")
+        parts.append(f"- Tools used: {', '.join(summary.get('tools_used', [])[:5])}")
+
+        key_requests = summary.get("key_user_requests", [])
+        if key_requests:
+            parts.append(f"- Key requests: {key_requests[0][:100]}...")
+
+    parts.append("\nUse this history to maintain continuity with previous branch work.")
+    parts.append("</branch-history>")
+
+    return "\n".join(parts)
