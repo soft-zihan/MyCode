@@ -121,6 +121,11 @@ def save_memory(name: str, description: str, type: str, content: str) -> str:
         "type": type,
         # modified 时间戳自动维护，供后续做陈旧记忆清理/衰减。
         "modified": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        # usage tracking 字段（供进化联动使用）
+        "recall_count": 0,
+        "last_recalled": "",
+        "success_associated": 0,
+        "status": "active",
     }
     text = format_frontmatter(meta, content)
     (d / filename).write_text(text)
@@ -600,3 +605,168 @@ def memory_tool(action: str, **kwargs: Any) -> dict[str, Any]:
         return {"ok": True, "action": "replace", "filename": entry.filename}
 
     return {"ok": False, "error": f"Unknown action '{action}'. Valid actions: add, replace, remove."}
+
+
+# ─── Memory Usage Tracking (for evolution linkage) ────────────────────────────
+
+
+def record_memory_recall(filename: str) -> None:
+    """记录 memory 被召回一次。"""
+    d = get_memory_dir()
+    fpath = d / filename
+    if not fpath.is_file():
+        return
+    try:
+        raw = fpath.read_text()
+        result = parse_frontmatter(raw)
+        meta = result.meta
+        meta["recall_count"] = int(meta.get("recall_count", 0)) + 1
+        meta["last_recalled"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        fpath.write_text(format_frontmatter(meta, result.body))
+    except Exception:
+        pass
+
+
+def record_memory_success(filename: str) -> None:
+    """记录 memory 召回后任务成功。"""
+    d = get_memory_dir()
+    fpath = d / filename
+    if not fpath.is_file():
+        return
+    try:
+        raw = fpath.read_text()
+        result = parse_frontmatter(raw)
+        meta = result.meta
+        meta["success_associated"] = int(meta.get("success_associated", 0)) + 1
+        fpath.write_text(format_frontmatter(meta, result.body))
+    except Exception:
+        pass
+
+
+def get_memory_usage_stats(filename: str) -> dict[str, Any]:
+    """获取 memory 的 usage tracking 统计。"""
+    d = get_memory_dir()
+    fpath = d / filename
+    if not fpath.is_file():
+        return {}
+    try:
+        raw = fpath.read_text()
+        result = parse_frontmatter(raw)
+        meta = result.meta
+        return {
+            "recall_count": int(meta.get("recall_count", 0)),
+            "last_recalled": meta.get("last_recalled", ""),
+            "success_associated": int(meta.get("success_associated", 0)),
+            "status": meta.get("status", "active"),
+        }
+    except Exception:
+        return {}
+
+
+def maybe_promote_or_archive_memory(
+    filename: str,
+    *,
+    promote_threshold: int = 20,
+    promote_success_rate: float = 0.6,
+    archive_days: int = 30,
+) -> dict[str, Any]:
+    """根据 usage tracking 自动提权或归档 memory。
+
+    高频成功关联 → 提权（priority=high）
+    长期未用 → 归档（status=archived）
+
+    Returns:
+        {"action": "promote" | "archive" | "none", "reason": str}
+    """
+    stats = get_memory_usage_stats(filename)
+    if not stats:
+        return {"action": "none", "reason": "memory not found"}
+
+    recall_count = stats.get("recall_count", 0)
+    success_associated = stats.get("success_associated", 0)
+    last_recalled = stats.get("last_recalled", "")
+    status = stats.get("status", "active")
+
+    # 归档检查
+    if status != "archived" and recall_count == 0 and last_recalled:
+        try:
+            last_dt = datetime.fromisoformat(last_recalled.replace("Z", "+00:00"))
+            days_since = (datetime.now(timezone.utc) - last_dt).days
+            if days_since > archive_days:
+                _set_memory_status(filename, "archived")
+                from .trace import trace_event
+                trace_event(
+                    "memory.archive",
+                    filename=filename,
+                    days_since_last_recalled=days_since,
+                )
+                return {"action": "archive", "reason": f"not recalled for {days_since} days"}
+        except Exception:
+            pass
+
+    # 提权检查
+    if recall_count >= promote_threshold:
+        success_rate = success_associated / recall_count if recall_count > 0 else 0
+        if success_rate >= promote_success_rate:
+            _set_memory_priority(filename, "high")
+            from .trace import trace_event
+            trace_event(
+                "memory.promote",
+                filename=filename,
+                recall_count=recall_count,
+                success_rate=success_rate,
+            )
+            return {"action": "promote", "reason": f"high usage ({recall_count} recalls, {success_rate:.0%} success)"}
+
+    return {"action": "none", "reason": "thresholds not met"}
+
+
+def _set_memory_status(filename: str, status: str) -> None:
+    """设置 memory 的 status 字段。"""
+    d = get_memory_dir()
+    fpath = d / filename
+    if not fpath.is_file():
+        return
+    try:
+        raw = fpath.read_text()
+        result = parse_frontmatter(raw)
+        result.meta["status"] = status
+        fpath.write_text(format_frontmatter(result.meta, result.body))
+    except Exception:
+        pass
+
+
+def _set_memory_priority(filename: str, priority: str) -> None:
+    """设置 memory 的 priority 字段。"""
+    d = get_memory_dir()
+    fpath = d / filename
+    if not fpath.is_file():
+        return
+    try:
+        raw = fpath.read_text()
+        result = parse_frontmatter(raw)
+        result.meta["priority"] = priority
+        fpath.write_text(format_frontmatter(result.meta, result.body))
+    except Exception:
+        pass
+
+
+def maintenance_all_memories() -> dict[str, Any]:
+    """对所有 memory 执行 maintenance（提权/归档检查）。"""
+    d = get_memory_dir()
+    results: list[dict[str, Any]] = []
+    for f in d.glob("*.md"):
+        if f.name == "MEMORY.md":
+            continue
+        result = maybe_promote_or_archive_memory(f.name)
+        if result.get("action") != "none":
+            results.append({"filename": f.name, **result})
+
+    from .trace import trace_event
+    trace_event(
+        "memory.maintenance",
+        total_checked=len(list(d.glob("*.md"))) - 1,
+        actions_taken=len(results),
+    )
+
+    return {"checked": len(list(d.glob("*.md"))) - 1, "actions": results}

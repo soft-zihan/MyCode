@@ -34,6 +34,10 @@ class SkillDefinition:
     skill_dir: str = ""
     # fork 模式下子 Agent 的模型引用（端点 ID 或裸模型名）；空串表示继承父端点。
     model: str = ""
+    # 可执行 skill 标记（包含 pyproject.toml）
+    executable: bool = False
+    # 可执行 skill 的 import name
+    import_name: str = ""
 
 
 # skills 只在首次读取时扫描磁盘，后续复用缓存；修改 skill 后需要重启或 reset。
@@ -97,7 +101,32 @@ def discover_skills() -> list[SkillDefinition]:
     _load_skills_from_dir(project_dir, "project", skills, overwrite=False)
 
     _cached_skills = list(skills.values())
+
+    # 加载可执行 skills
+    _load_executable_skills(_cached_skills)
+
     return _cached_skills
+
+
+def _load_executable_skills(skills: list[SkillDefinition]) -> None:
+    """加载所有可执行 skills 到命名空间。"""
+    executable_dirs = [
+        Path(s.skill_dir) for s in skills
+        if s.executable and s.skill_dir
+    ]
+    if not executable_dirs:
+        return
+
+    from .executable_skills import load_executable_skills
+    result = load_executable_skills(executable_dirs)
+
+    from .trace import trace_event
+    trace_event(
+        "executable_skills.loaded",
+        total=result.get("total", 0),
+        loaded=result.get("loaded", 0),
+        failed=result.get("failed", 0),
+    )
 
 def _load_skills_from_dir( base_dir: Path, source: str, skills:dict[str, SkillDefinition], overwrite: bool = True) -> None:
     # 只加载目录形式的 skill，不加载 .bear/skills/foo.md 这种单文件形式。
@@ -129,6 +158,12 @@ def _parse_skill_file(file_path: Path, source: str, skill_dir: str) -> SkillDefi
         user_invocable = meta.get("user-invocable", "true") != "false"
         context = "fork" if meta.get("context") == "fork" else "inline"
 
+        # 检测是否为可执行 skill（包含 pyproject.toml）
+        from .executable_skills import is_executable_skill, get_import_name
+        skill_dir_path = Path(skill_dir)
+        executable = is_executable_skill(skill_dir_path)
+        import_name = get_import_name(name) if executable else ""
+
         allowed_tools: list[str] | None = None
         if "allowed-tools" in meta:
             raw_tools = meta["allowed-tools"]
@@ -152,6 +187,8 @@ def _parse_skill_file(file_path: Path, source: str, skill_dir: str) -> SkillDefi
             source=source,
             skill_dir=skill_dir,
             model=str(meta.get("model") or "").strip(),
+            executable=executable,
+            import_name=import_name,
         )
 
     except Exception:
