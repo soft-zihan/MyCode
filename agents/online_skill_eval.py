@@ -1167,12 +1167,118 @@ def _write_champion_skill_file(path: Path, snapshot: dict[str, Any]) -> None:
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
+def _auto_activate_enabled() -> bool:
+    """检查是否启用 champion 自动激活。
+
+    环境变量 BEAR_SKILL_AUTO_ACTIVATE=1 启用。
+    默认关闭（观察模式），需显式开启。
+    """
+    import os
+    return os.environ.get("BEAR_SKILL_AUTO_ACTIVATE", "").strip() in ("1", "true", "yes")
+
+
+def _activate_champion(skill_name: str, snapshot: dict[str, Any], lineage_id: str) -> dict[str, Any]:
+    """将 champion 版本激活为 active skill。
+
+    复制 champion SKILL.md 到 active skill 位置，并记录激活事件。
+
+    Returns:
+        {"activated": bool, "path": str, "reason": str}
+    """
+    from .trace import trace_event
+
+    # 查找 active skill 路径
+    active_path = _find_active_skill_path(skill_name)
+    if not active_path:
+        return {
+            "activated": False,
+            "path": "",
+            "reason": f"active skill file not found for {skill_name}",
+        }
+
+    # 备份当前 active 版本
+    backup_path = active_path.with_suffix(".md.bak")
+    if active_path.is_file():
+        backup_path.write_text(active_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    # 写入 champion 版本
+    _write_champion_skill_file(active_path, snapshot)
+
+    trace_event(
+        "champion.activate",
+        skill=skill_name,
+        lineage_id=lineage_id,
+        path=str(active_path),
+        backup_path=str(backup_path),
+    )
+
+    return {
+        "activated": True,
+        "path": str(active_path),
+        "reason": "champion promoted and activated",
+    }
+
+
+def _find_active_skill_path(skill_name: str) -> Path | None:
+    """查找 active skill 文件路径。"""
+    from pathlib import Path
+
+    # 项目级 skill
+    project_path = Path.cwd() / ".bear" / "skills" / skill_name / "SKILL.md"
+    if project_path.is_file():
+        return project_path
+
+    # 用户级 skill
+    user_path = Path.home() / ".bear" / "skills" / skill_name / "SKILL.md"
+    if user_path.is_file():
+        return user_path
+
+    # 返回项目级路径（用于创建）
+    return project_path
+
+
+def _check_historical_retention(
+    *,
+    candidate_score: float,
+    champion_score: float,
+    candidate_hard: int,
+    champion_hard: int,
+) -> dict[str, Any]:
+    """检查候选版本是否在旧 replay 样本上退化（historical retention check）。
+
+    借鉴 HCL (arXiv:2605.09998) 的 guarded harness evolution：
+    Continual Evaluator 检查 current improvement + historical retention + validity。
+
+    Returns:
+        {"passed": bool, "reason": str, "delta": float}
+    """
+    delta = candidate_score - champion_score
+    if delta < 0:
+        return {
+            "passed": False,
+            "reason": f"candidate regresses on historical replay (delta={delta:.4f})",
+            "delta": delta,
+        }
+    if candidate_hard > champion_hard:
+        return {
+            "passed": False,
+            "reason": f"candidate introduces {candidate_hard - champion_hard} new hard failure(s)",
+            "delta": delta,
+        }
+    return {
+        "passed": True,
+        "reason": "candidate preserves or improves historical replay performance",
+        "delta": delta,
+    }
+
+
 def _promotion_decision(
     *,
     status: str,
     candidate: dict[str, Any],
     champion: dict[str, Any],
     min_score_delta: float = DEFAULT_MIN_SCORE_DELTA,
+    auto_activate: bool = False,
 ) -> dict[str, Any]:
     if status in {"unobserved", "incubating", "pruned"}:
         return {
@@ -1182,6 +1288,7 @@ def _promotion_decision(
             "champion_before": champion,
             "candidate": candidate,
             "min_score_delta": min_score_delta,
+            "auto_activate": auto_activate,
         }
     if status == "watch":
         return {
@@ -1191,6 +1298,7 @@ def _promotion_decision(
             "champion_before": champion,
             "candidate": candidate,
             "min_score_delta": min_score_delta,
+            "auto_activate": auto_activate,
         }
 
     previous_summary = champion.get("summary") if isinstance(champion.get("summary"), dict) else {}
@@ -1202,12 +1310,36 @@ def _promotion_decision(
             "champion_before": {},
             "candidate": candidate,
             "min_score_delta": min_score_delta,
+            "auto_activate": auto_activate,
+            "retention_check": {"passed": True, "reason": "no previous champion to regress against"},
         }
 
     candidate_score = float(candidate.get("average_score", 0.0) or 0.0)
     champion_score = float(previous_summary.get("average_score", 0.0) or 0.0)
     candidate_hard = int(candidate.get("hard_failures", 0) or 0)
     champion_hard = int(previous_summary.get("hard_failures", 0) or 0)
+
+    # Historical retention check (HCL-style guarded evolution)
+    retention = _check_historical_retention(
+        candidate_score=candidate_score,
+        champion_score=champion_score,
+        candidate_hard=candidate_hard,
+        champion_hard=champion_hard,
+    )
+
+    if not retention["passed"]:
+        return {
+            "promoted": False,
+            "status": "rejected",
+            "reason": f"failed retention check: {retention['reason']}",
+            "champion_before": champion,
+            "candidate": candidate,
+            "min_score_delta": min_score_delta,
+            "auto_activate": auto_activate,
+            "retention_check": retention,
+        }
+
+    # Standard promotion gate
     promoted = bool(
         candidate_score >= champion_score + float(min_score_delta)
         and candidate_hard <= champion_hard
@@ -1223,6 +1355,8 @@ def _promotion_decision(
         "champion_before": champion,
         "candidate": candidate,
         "min_score_delta": min_score_delta,
+        "auto_activate": auto_activate,
+        "retention_check": retention,
     }
 
 
@@ -1326,6 +1460,7 @@ def _persist_eval_artifacts(
         status=status,
         candidate=promotion_candidate,
         champion=champion_before,
+        auto_activate=_auto_activate_enabled(),
     )
     if promotion.get("promoted"):
         _set_champion(
@@ -1339,6 +1474,9 @@ def _persist_eval_artifacts(
                 "updated_at": _utc_now(),
             },
         )
+        # Auto-activate: copy champion to active skill file
+        if promotion.get("auto_activate"):
+            _activate_champion(skill_name, promotion_snapshot, lineage_id)
 
     summary = {
         "run_id": run_id,
