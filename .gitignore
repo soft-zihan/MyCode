@@ -247,3 +247,15 @@ paper/
 .playwright-mcp/
 .idea/
 .bear/
+
+# Project learning (cloned repos for reference)
+project-learning/
+
+# Runtime PID and log files
+.backend.pid
+.frontend.pid
+.backend.log
+.frontend.log
+
+# OS files
+.DS_Store

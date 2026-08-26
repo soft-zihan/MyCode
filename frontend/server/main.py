@@ -20,7 +20,7 @@ import asyncio
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from agents.session import list_sessions, load_session, delete_session
+from agents.session import list_sessions, load_session, save_session, delete_session
 from agents.memory import list_memories, save_memory, delete_memory, get_memory_dir
 from agents.skills import discover_skills, get_skill_by_name, skill_stats
 from agents.trace import recent_events, trace_enabled, set_trace_enabled, trace_path
@@ -129,23 +129,44 @@ async def api_generate_session_name(data: SessionNameRequest) -> dict[str, str]:
 
 
 class SessionUpdateRequest(BaseModel):
-    name: str
+    name: str | None = None
+    frontendMessages: list[dict[str, Any]] | None = None
 
 
 @app.put("/api/sessions/{session_id}")
 def api_update_session(session_id: str, data: SessionUpdateRequest) -> dict[str, Any]:
-    """Update session metadata (e.g., name)."""
+    """Update session metadata (e.g., name) or save frontend-processed messages."""
     session_data = load_session(session_id)
     if session_data is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    # Update the name in metadata
-    if "metadata" in session_data:
+    if data.name is not None:
         session_data["metadata"]["name"] = data.name
     
-    # Save back
+    # Save frontend-processed messages for lossless restore
+    if data.frontendMessages is not None:
+        session_data["frontendMessages"] = data.frontendMessages
+    
     save_session(session_id, session_data)
-    return {"success": True, "name": data.name}
+    return {"success": True}
+
+
+class RevertRequest(BaseModel):
+    file_path: str
+    old_content: str
+
+
+@app.post("/api/revert")
+def api_revert_file(data: RevertRequest) -> dict[str, Any]:
+    """Revert a file to its previous content (from snapshot)."""
+    try:
+        from agents.tools import _resolve_tool_path
+        target = _resolve_tool_path(data.file_path, must_exist=False)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(data.old_content)
+        return {"success": True, "file_path": data.file_path}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── Memory APIs ───────────────────────────────────────────────────────────────
@@ -347,14 +368,10 @@ def api_skill_stats() -> dict[str, Any]:
 
 @app.delete("/api/skills/{skill_name}")
 def api_delete_skill(skill_name: str) -> dict[str, Any]:
-    """Delete a skill (only user-level skills can be deleted)."""
+    """Delete a skill (user and project-level skills can be deleted)."""
     skill = get_skill_by_name(skill_name)
     if skill is None:
         raise HTTPException(status_code=404, detail="Skill not found")
-    
-    source = getattr(skill, 'source', 'project')
-    if source != 'user':
-        raise HTTPException(status_code=400, detail="Only user-level skills can be deleted")
     
     skill_dir = getattr(skill, 'skill_dir', '')
     if not skill_dir:
@@ -725,6 +742,37 @@ def api_workspace_delete_file(path: str, cwd: str | None = None) -> dict[str, An
         raise HTTPException(status_code=500, detail=f"Failed to delete: {str(e)}")
 
 
+class CreateFileRequest(BaseModel):
+    path: str
+    cwd: str | None = None
+
+
+@app.post("/api/workspace/create")
+def api_workspace_create_file(data: CreateFileRequest) -> dict[str, Any]:
+    """Create a new file (and parent directories if needed)."""
+    workspace_path = Path(data.cwd) if data.cwd else Path.cwd()
+    file_path = workspace_path / data.path
+
+    if not data.path or not data.path.strip():
+        raise HTTPException(status_code=400, detail="File name cannot be empty")
+
+    # Security check: ensure path is within workspace
+    try:
+        file_path.resolve().relative_to(workspace_path.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    if file_path.exists():
+        raise HTTPException(status_code=400, detail="File already exists")
+
+    try:
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.touch()
+        return {"success": True, "path": str(file_path.relative_to(workspace_path))}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create file: {str(e)}")
+
+
 class RenameRequest(BaseModel):
     old_path: str
     new_name: str
@@ -1033,47 +1081,31 @@ async def api_chat_stream(data: ChatMessage):
             full_message = f"{data.message}\n\nContext files:{context}"
         
         async def generate():
-            # Start the chat in a background task
-            chat_task = asyncio.create_task(agent.chat(full_message))
-            
-            # Monitor both output and thinking buffers
-            last_index = 0
-            last_thinking_index = 0
-            final_output = ""
-            final_thinking = ""
-            
-            while not chat_task.done():
-                # Check thinking buffer first (thinking comes before content)
-                if hasattr(agent, '_turn_thinking_buffer') and agent._turn_thinking_buffer:
-                    current_thinking = "".join(agent._turn_thinking_buffer)
-                    final_thinking = current_thinking  # Keep track of latest
-                    if len(current_thinking) > last_thinking_index:
-                        new_thinking = current_thinking[last_thinking_index:]
-                        yield f"data: {json.dumps({'thinking': new_thinking})}\n\n"
-                        last_thinking_index = len(current_thinking)
-                
-                # Check output buffer
-                if agent._turn_output_buffer:
-                    current_text = "".join(agent._turn_output_buffer)
-                    final_output = current_text  # Keep track of latest
-                    if len(current_text) > last_index:
-                        new_chunk = current_text[last_index:]
-                        yield f"data: {json.dumps({'chunk': new_chunk})}\n\n"
-                        last_index = len(current_text)
-                await asyncio.sleep(0.05)
-            
-            # Wait for chat to complete
-            await chat_task
-            
-            # Send any remaining thinking content (use saved final_thinking)
-            if final_thinking and len(final_thinking) > last_thinking_index:
-                new_thinking = final_thinking[last_thinking_index:]
-                yield f"data: {json.dumps({'thinking': new_thinking})}\n\n"
-            
-            # Send any remaining output (use saved final_output)
-            if final_output and len(final_output) > last_index:
-                new_chunk = final_output[last_index:]
-                yield f"data: {json.dumps({'chunk': new_chunk})}\n\n"
+            # 使用新的事件流机制
+            try:
+                async for event in agent.chat_stream(full_message):
+                    event_type = event.get("type")
+                    
+                    if event_type == "thinking":
+                        yield f"data: {json.dumps({'thinking': event.get('content', '')})}\n\n"
+                    elif event_type == "text":
+                        yield f"data: {json.dumps({'chunk': event.get('content', '')})}\n\n"
+                    elif event_type == "tool_call":
+                        yield f"data: {json.dumps({'tool_call': {'name': event.get('name', ''), 'input': event.get('input', {})}})}\n\n"
+                    elif event_type == "tool_result":
+                        tool_event = {'name': event.get('name', ''), 'result': event.get('result', '')}
+                        if event.get('snapshot'):
+                            tool_event['snapshot'] = event['snapshot']
+                        yield f"data: {json.dumps({'tool_result': tool_event})}\n\n"
+                    elif event_type == "sub_agent_start":
+                        yield f"data: {json.dumps({'sub_agent_start': {'agent_type': event.get('agent_type', ''), 'description': event.get('description', '')}})}\n\n"
+                    elif event_type == "sub_agent_end":
+                        yield f"data: {json.dumps({'sub_agent_end': {'agent_type': event.get('agent_type', ''), 'description': event.get('description', '')}})}\n\n"
+                    elif event_type == "info":
+                        yield f"data: {json.dumps({'info': event.get('message', '')})}\n\n"
+            finally:
+                # 确保session被保存
+                agent._auto_save()
             
             # Send completion event
             yield f"data: {json.dumps({'done': True, 'session_id': agent.session_id})}\n\n"

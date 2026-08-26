@@ -34,3 +34,53 @@ code {
 ::-webkit-scrollbar-thumb:hover {
   background: #555;
 }
+
+/* Code block styling - dark background with light text */
+.prose pre,
+.prose :where(pre) {
+  background-color: #1f2937 !important;
+  color: #f3f4f6 !important;
+  border-radius: 0.375rem;
+  padding: 0.75rem;
+  margin: 0.5rem 0;
+  overflow-x: auto;
+}
+
+.prose pre code,
+.prose :where(pre) code,
+.prose pre :where(code),
+.prose :where(pre) :where(code) {
+  background-color: transparent !important;
+  color: #f3f4f6 !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+  font-size: 0.875rem !important;
+}
+
+/* Inline code styling (code NOT inside pre) */
+.prose :where(:not(pre) > code) {
+  background-color: #e5e7eb !important;
+  color: #1f2937 !important;
+  padding: 0.125rem 0.375rem !important;
+  border-radius: 0.25rem !important;
+  font-size: 0.875rem !important;
+}
+
+/* Code block language label */
+.prose pre code::before {
+  content: none !important;
+}
+
+/* Collapsible tool sections */
+details > summary::-webkit-details-marker {
+  display: none;
+}
+
+details > summary {
+  list-style: none;
+}
+
+details > summary::marker {
+  display: none;
+  content: '';
+}

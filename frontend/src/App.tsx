@@ -13,10 +13,10 @@ function Navigation() {
   
   const navItems = [
     { path: '/', label: 'Chat', icon: MessageSquare },
+    { path: '/mcp', label: 'Tools', icon: Server },
     { path: '/agents', label: 'Agents', icon: Bot },
     { path: '/memory', label: 'Memory', icon: Database },
     { path: '/skills', label: 'Skills', icon: Wrench },
-    { path: '/mcp', label: 'MCP', icon: Server },
     { path: '/trace', label: 'Trace', icon: Activity },
   ];
 

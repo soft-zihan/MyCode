@@ -248,6 +248,9 @@ class Agent:
         self._turn_output_buffer: list[str] | None = None
         self._turn_thinking_buffer: list[str] | None = None  # 收集 thinking 内容用于 SSE 传输
         self._turn_event_buffer: list[dict] | None = None  # 收集工具调用等事件用于 SSE 传输
+        
+        # 流式事件队列（用于前端 chat_stream）
+        self._stream_event_queue: asyncio.Queue | None = None
 
         # 编辑前读取
         self._read_file_state: dict[str, float] ={}
@@ -541,10 +544,16 @@ class Agent:
         if not self._mcp_initialized and not self.is_sub_agent:
             self._mcp_initialized = True
             try:
-                await self._mcp_manager.load_and_connect()
+                # 使用 asyncio.wait_for 添加总超时，避免 MCP 初始化卡住整个聊天
+                await asyncio.wait_for(
+                    self._mcp_manager.load_and_connect(),
+                    timeout=30.0  # 总超时 30 秒
+                )
                 mcp_defs = self._mcp_manager.get_tool_definitions()
                 if mcp_defs:
                     self.tools = self.tools + mcp_defs
+            except asyncio.TimeoutError:
+                print_error("MCP init timeout (30s) - continuing without MCP tools")
             except Exception as e:
                 print_error(f"MCP init failed: {e}")
 
@@ -573,6 +582,9 @@ class Agent:
         self._turn_output_buffer = []
         self._turn_thinking_buffer = []
         self._turn_event_buffer = []
+        # 如果是流式模式，初始化事件队列
+        if self._stream_event_queue is not None:
+            pass  # 队列已在 chat_stream 中初始化
         from .trace import trace_event
         trace_event(
             "turn.start",
@@ -595,6 +607,9 @@ class Agent:
         self._turn_output_buffer = None
         self._turn_thinking_buffer = None
         self._turn_event_buffer = None
+        # 流式模式下，发送完成事件
+        if self._stream_event_queue is not None:
+            await self._stream_event_queue.put({"type": "done"})
         trace_event(
             "turn.end",
             turn=self._turn_number,
@@ -617,7 +632,42 @@ class Agent:
             print_divider()
             self._auto_save()
 
-
+    async def chat_stream(self, user_message: str):
+        """
+        流式聊天接口，用于前端 SSE 传输。
+        返回一个异步生成器，yield 出事件字典供前端处理。
+        """
+        # 初始化事件队列
+        self._stream_event_queue = asyncio.Queue()
+        
+        # 启动后台任务执行 chat
+        async def _run_chat():
+            try:
+                await self.chat(user_message)
+            except Exception as e:
+                # 发送错误事件
+                await self._stream_event_queue.put({
+                    "type": "error",
+                    "message": str(e)
+                })
+            finally:
+                # 确保发送完成事件
+                await self._stream_event_queue.put({"type": "done"})
+        
+        # 创建后台任务
+        task = asyncio.create_task(_run_chat())
+        
+        # 从队列中读取事件并 yield
+        while True:
+            event = await self._stream_event_queue.get()
+            yield event
+            if event.get("type") == "done":
+                break
+        
+        # 等待任务完成
+        await task
+        # 清理队列
+        self._stream_event_queue = None
 
    #执行一次对话，收集本轮模型输出文本，并返回本轮消耗的 token 数
     async def run_once(self, prompt:str)->None:
@@ -648,6 +698,9 @@ class Agent:
             # 主 Agent 的正文同步喂入 Markdown 自动渲染跟踪（流式结束后重渲染）。
             if not self.is_sub_agent:
                 md_track_feed(text)
+        # 流式模式：推送文本事件到队列供前端 SSE 消费
+        if self._stream_event_queue is not None:
+            asyncio.create_task(self._stream_event_queue.put({"type": "text", "content": text}))
 
     def _build_fold_guidance_section(self) -> str:
         if self._custom_system_prompt is not None:
@@ -1687,6 +1740,9 @@ class Agent:
         description = inp.get("description", "sub-agent task")
         prompt = inp.get("prompt", "")
         print_sub_agent_start(agent_type, description)
+        # 流式模式：推送 sub_agent_start 事件到队列
+        if self._stream_event_queue is not None:
+            asyncio.create_task(self._stream_event_queue.put({"type": "sub_agent_start", "agent_type": agent_type, "description": description}))
 
         config = get_sub_agent_config(agent_type)
 
@@ -1701,11 +1757,17 @@ class Agent:
             self.total_input_tokens += result["tokens"]["input"]
             self.total_output_tokens += result["tokens"]["output"]
             print_sub_agent_end(agent_type, description)
+            # 流式模式：推送 sub_agent_end 事件到队列
+            if self._stream_event_queue is not None:
+                asyncio.create_task(self._stream_event_queue.put({"type": "sub_agent_end", "agent_type": agent_type, "description": description}))
             if sub_agent._aborted:
                 return "(Sub-agent aborted)"
             return result["text"] or "(Sub-agent produced no output)"
         except Exception as e:
             print_sub_agent_end(agent_type, description)
+            # 流式模式：推送 sub_agent_end 事件到队列
+            if self._stream_event_queue is not None:
+                asyncio.create_task(self._stream_event_queue.put({"type": "sub_agent_end", "agent_type": agent_type, "description": description}))
             return f"Sub-agent error: {e}"
 
 #--------------Anthropic 后端---------------
@@ -1844,6 +1906,9 @@ class Agent:
                 # 将工具入参转为普通 dict，便于权限检查、打印和实际执行。
                 inp = dict(tu.input) if hasattr(tu, "items") else tu.input
                 print_tool_call(tu.name, inp)
+                # 流式模式：推送 tool_call 事件到队列
+                if self._stream_event_queue is not None:
+                    asyncio.create_task(self._stream_event_queue.put({"type": "tool_call", "name": tu.name, "input": inp}))
 
                 # 如果这个工具已经在流式阶段提前开始执行，这里只需要等待它完成并收集结果。
                 early_task = early_executions.get(tu.id)
@@ -1855,6 +1920,9 @@ class Agent:
                     raw = _safe_utf8_text(raw)
                     res = self._persist_large_result(tu.name, raw)
                     print_tool_result(tu.name, res)
+                    # 流式模式：推送 tool_result 事件到队列
+                    if self._stream_event_queue is not None:
+                        await self._stream_event_queue.put({"type": "tool_result", "name": tu.name, "result": res})
                     self._record_tool_outcome(tu.name, not self._looks_like_tool_failure(tu.name, raw, res))
                     tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": res})
                     continue
@@ -1888,6 +1956,9 @@ class Agent:
                 raw = _safe_utf8_text(raw)
                 res = self._persist_large_result(tu.name, raw)
                 print_tool_result(tu.name, res)
+                # 流式模式：推送 tool_result 事件到队列
+                if self._stream_event_queue is not None:
+                    await self._stream_event_queue.put({"type": "tool_result", "name": tu.name, "result": res})
                 self._record_tool_outcome(tu.name, not self._looks_like_tool_failure(tu.name, raw, res))
 
                 if self._context_cleared:
@@ -1976,6 +2047,9 @@ class Agent:
                         #用 /thinking 打开后才以暗色斜体渲染；thinking 从不进入
                         #消息历史，也不进入 _turn_output_buffer。
                         elif hasattr(delta, 'thinking'):
+                            # 流式模式：推送 thinking 事件到队列
+                            if self._stream_event_queue is not None:
+                                asyncio.create_task(self._stream_event_queue.put({"type": "thinking", "content": delta.thinking}))
                             if thinking_visible():
                                 if first_thinking:
                                     stop_spinner()
@@ -2101,6 +2175,9 @@ class Agent:
                     inp = {}
 
                 print_tool_call(fn_name, inp)
+                # 流式模式：推送 tool_call 事件到队列
+                if self._stream_event_queue is not None:
+                    asyncio.create_task(self._stream_event_queue.put({"type": "tool_call", "name": fn_name, "input": inp}))
 
                 perm = check_permission(fn_name, inp, self.permission_mode, self._plan_file_path)
 
@@ -2140,6 +2217,9 @@ class Agent:
                             raw = _safe_utf8_text(raw)
                             res = self._persist_large_result(ct_item["fn"], raw)
                             print_tool_result(ct_item["fn"], res)
+                            # 流式模式：推送 tool_result 事件到队列
+                            if self._stream_event_queue is not None:
+                                await self._stream_event_queue.put({"type": "tool_result", "name": ct_item["fn"], "result": res})
                             return ct_item, res
 
                         results = await asyncio.gather(*[_run_oai_safe(ct) for ct in batch["items"]])
@@ -2161,6 +2241,9 @@ class Agent:
                             raw = _safe_utf8_text(raw)
                             res = self._persist_large_result(ct["fn"], raw)
                             print_tool_result(ct["fn"], res)
+                            # 流式模式：推送 tool_result 事件到队列
+                            if self._stream_event_queue is not None:
+                                await self._stream_event_queue.put({"type": "tool_result", "name": ct["fn"], "result": res})
                             self._record_tool_outcome(
                                 ct["fn"],
                                 not self._looks_like_tool_failure(ct["fn"], raw, res),
@@ -2219,6 +2302,9 @@ class Agent:
                     # 始终写入 thinking buffer（用于 SSE 传输到前端）
                     if self._turn_thinking_buffer is not None:
                         self._turn_thinking_buffer.append(reasoning)
+                    # 流式模式：推送 thinking 事件到队列
+                    if self._stream_event_queue is not None:
+                        asyncio.create_task(self._stream_event_queue.put({"type": "thinking", "content": reasoning}))
                     # 终端显示仅在 thinking_visible() 时
                     if thinking_visible():
                         if first_thinking:

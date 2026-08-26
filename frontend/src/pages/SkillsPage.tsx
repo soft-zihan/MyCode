@@ -213,7 +213,7 @@ export default function SkillsPage() {
                   <div
                     key={skill.name}
                     onClick={() => handleSkillClick(skill)}
-                    className={`p-3 cursor-pointer transition-colors ${
+                    className={`p-3 cursor-pointer transition-colors group ${
                       selectedSkill?.name === skill.name
                         ? 'bg-blue-50 border-l-2 border-blue-500'
                         : 'hover:bg-gray-50'
@@ -226,20 +226,29 @@ export default function SkillsPage() {
                         <Folder className="w-3 h-3 text-green-500" />
                       )}
                       <span className="font-medium text-sm text-gray-900">{skill.name}</span>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          toggleSkill(skill.name);
-                        }}
-                        className={`ml-auto flex items-center gap-1 px-1.5 py-0.5 text-xs rounded transition-colors ${
-                          disabledSkills.has(skill.name)
-                            ? 'bg-gray-200 text-gray-600 hover:bg-gray-300'
-                            : 'bg-green-100 text-green-700 hover:bg-green-200'
-                        }`}
-                        title={disabledSkills.has(skill.name) ? 'Enable skill' : 'Disable skill'}
-                      >
-                        <Power className="w-3 h-3" />
-                      </button>
+                      <div className="ml-auto flex items-center gap-1">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleSkill(skill.name);
+                          }}
+                          className={`flex items-center gap-1 px-1.5 py-0.5 text-xs rounded transition-colors ${
+                            disabledSkills.has(skill.name)
+                              ? 'bg-gray-200 text-gray-600 hover:bg-gray-300'
+                              : 'bg-green-100 text-green-700 hover:bg-green-200'
+                          }`}
+                          title={disabledSkills.has(skill.name) ? 'Enable skill' : 'Disable skill'}
+                        >
+                          <Power className="w-3 h-3" />
+                        </button>
+                        <button
+                          onClick={(e) => handleDelete(skill.name, e)}
+                          className="flex items-center px-1.5 py-0.5 text-xs rounded text-red-400 hover:bg-red-100 hover:text-red-600 transition-colors opacity-0 group-hover:opacity-100"
+                          title="Delete skill"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
                     </div>
                     <p className="text-xs text-gray-500 line-clamp-2">{skill.description}</p>
                   </div>
@@ -291,15 +300,13 @@ export default function SkillsPage() {
                             <Edit3 className="w-4 h-4 mr-1" />
                             Edit
                           </button>
-                          {selectedSkill.source === 'user' && (
-                            <button
-                              onClick={(e) => handleDelete(selectedSkill.name, e)}
-                              className="flex items-center px-3 py-1.5 bg-red-500 text-white text-sm rounded hover:bg-red-600"
-                            >
-                              <Trash2 className="w-4 h-4 mr-1" />
-                              Delete
-                            </button>
-                          )}
+                          <button
+                            onClick={(e) => handleDelete(selectedSkill.name, e)}
+                            className="flex items-center px-3 py-1.5 bg-red-500 text-white text-sm rounded hover:bg-red-600"
+                          >
+                            <Trash2 className="w-4 h-4 mr-1" />
+                            Delete
+                          </button>
                         </>
                       )}
                     </div>

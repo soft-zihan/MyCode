@@ -336,42 +336,44 @@ agents/skill_evolution.py
 
 ### CLI 参数
 
-| 参数 | 功能 |
-|------|------|
-| `--model`, `-m` | 指定模型，覆盖 `.env` 中的 `MODEL` |
-| `--api-base` | 覆盖 API base URL |
-| `--plan` | 只读规划模式 |
+
+| 参数             | 功能                                        |
+| ------------------ | --------------------------------------------- |
+| `--model`, `-m`  | 指定模型，覆盖`.env` 中的 `MODEL`           |
+| `--api-base`     | 覆盖 API base URL                           |
+| `--plan`         | 只读规划模式                                |
 | `--accept-edits` | 自动允许编辑类操作，推荐用于自动沉淀 Skills |
-| `--yolo`, `-y` | 跳过确认 |
-| `--dont-ask` | 自动拒绝需要确认的操作，适合 CI |
-| `--resume` | 恢复最近会话 |
-| `--max-cost` | 费用上限 |
-| `--max-turns` | 最大 agentic turns |
+| `--yolo`, `-y`   | 跳过确认                                    |
+| `--dont-ask`     | 自动拒绝需要确认的操作，适合 CI             |
+| `--resume`       | 恢复最近会话                                |
+| `--max-cost`     | 费用上限                                    |
+| `--max-turns`    | 最大 agentic turns                          |
 
 ### REPL 命令
 
-| 命令 | 功能 |
-|------|------|
-| `/clear` | 清空对话历史 |
-| `/plan` | 切换 Plan Mode |
-| `/cost` | 显示 token 和费用估算 |
-| `/compact` | 手动压缩上下文 |
-| `/memory` | 列出长期记忆 |
-| `/skills` | 列出可用 Skills |
-| `/skill-stats` | 查看 Skill 使用和演化统计 |
-| `/skill-eval` | 在线 Skills 评测（replay、规则、LLM judge） |
-| `/extract_now [hint]` | 抽取当前 pending window |
-| `/skill-feedback <skill> <rating> [note]` | 记录 Skill 反馈 |
-| `/skill-evolve <skill> <lesson>` | 手动演化 Skill |
-| `/skill-create <name> \| <description> \| <when-to-use> \| <instructions>` | 手动创建 Skill |
-| `/rewind [N]` | 回退最近 N 轮对话（默认 1），同时恢复被修改的文件 |
-| `/goal <目标>` | 自主目标模式：提炼成功标准 → 确认 → 执行+verifier 验证循环 |
-| `/context` | 可视化上下文（index/role/内容摘要/字符数） |
-| `/ctx del N [N2 ...]` | 删除指定消息组（支持批量：`/ctx del 1,3,5~10`） |
-| `/ctx keep N [N2 ...]` | 只保留指定消息组，其余删除 |
-| `/cd [path]` | 切换工作目录（Memory/Skills/规则按 cwd 隔离，切换后自动刷新 prompt） |
-| `/help` | 显示 REPL 命令列表 |
-| `/thinking` | 开关 thinking 显示（默认关闭，对齐 Claude Code / Codex CLI 惯例） |
+
+| 命令                                                                    | 功能                                                                 |
+| ------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `/clear`                                                                | 清空对话历史                                                         |
+| `/plan`                                                                 | 切换 Plan Mode                                                       |
+| `/cost`                                                                 | 显示 token 和费用估算                                                |
+| `/compact`                                                              | 手动压缩上下文                                                       |
+| `/memory`                                                               | 列出长期记忆                                                         |
+| `/skills`                                                               | 列出可用 Skills                                                      |
+| `/skill-stats`                                                          | 查看 Skill 使用和演化统计                                            |
+| `/skill-eval`                                                           | 在线 Skills 评测（replay、规则、LLM judge）                          |
+| `/extract_now [hint]`                                                   | 抽取当前 pending window                                              |
+| `/skill-feedback <skill> <rating> [note]`                               | 记录 Skill 反馈                                                      |
+| `/skill-evolve <skill> <lesson>`                                        | 手动演化 Skill                                                       |
+| `/skill-create <name> | <description> | <when-to-use> | <instructions>` | 手动创建 Skill                                                       |
+| `/rewind [N]`                                                           | 回退最近 N 轮对话（默认 1），同时恢复被修改的文件                    |
+| `/goal <目标>`                                                          | 自主目标模式：提炼成功标准 → 确认 → 执行+verifier 验证循环         |
+| `/context`                                                              | 可视化上下文（index/role/内容摘要/字符数）                           |
+| `/ctx del N [N2 ...]`                                                   | 删除指定消息组（支持批量：`/ctx del 1,3,5~10`）                      |
+| `/ctx keep N [N2 ...]`                                                  | 只保留指定消息组，其余删除                                           |
+| `/cd [path]`                                                            | 切换工作目录（Memory/Skills/规则按 cwd 隔离，切换后自动刷新 prompt） |
+| `/help`                                                                 | 显示 REPL 命令列表                                                   |
+| `/thinking`                                                             | 开关 thinking 显示（默认关闭，对齐 Claude Code / Codex CLI 惯例）    |
 
 输入提示：
 
@@ -413,10 +415,11 @@ context: inline
 
 Skill 和 Memory 的区别：
 
-| 类型 | 保存内容 |
-|------|----------|
+
+| 类型   | 保存内容                               |
+| -------- | ---------------------------------------- |
 | Memory | 用户偏好、项目事实、历史决策、参考资料 |
-| Skill | 可复用任务流程、输出规范、领域方法 |
+| Skill  | 可复用任务流程、输出规范、领域方法     |
 
 ## MCP 支持
 
@@ -449,29 +452,6 @@ Bear Code 支持 MCP 外部工具扩展。MCP Server 可以通过 stdio JSON-RPC
 ```text
 mcp__<serverName>__<toolName>
 ```
-
-### 代码图谱检索（code-review-graph）
-
-Bear Code 预置了 [code-review-graph](https://github.com/tirth8205/code-review-graph)
-（CRG）的 MCP 集成：用 Tree-sitter 把代码库解析成符号/调用/依赖图谱，
-让模型做多跳结构检索（谁调用了 X、改这个文件影响谁），实测可大幅降低
-代码问答的 token 消耗。
-
-```bash
-pip install code-review-graph   # 一次性安装 CLI
-```
-
-在 REPL 中：
-
-```text
-/graph build     全量构建图谱（首次）
-/graph update    增量更新（只重解析变化的文件）
-/graph status    查看图谱统计
-```
-
-构建后重启会话，模型即可自动使用 `mcp__code-review-graph__query_graph_tool`
-等工具。`.mcp.json` 中已配置工具白名单（7 个核心工具）。
-详见 `wiki/代码图谱检索.md`。
 
 ## Docker 运行
 
@@ -507,30 +487,32 @@ docker run --rm -it \
 
 ## 重要数据路径
 
-| 数据 | 路径 |
-|------|------|
-| 项目级 Skills | `.bear/skills/<skill_name>/SKILL.md` |
-| 用户级 Skills | `~/.bear/skills/<skill_name>/SKILL.md` |
-| Skills 自进化审计 | `.bear/skill-evolution/` |
-| 长期记忆 | `~/.BearCode/projects/<project_hash>/memory/` |
-| 会话历史 | `~/.bear-code/sessions/` |
-| 大工具结果 | `~/.bear-code/tool-results/` |
-| Plan Mode 计划 | `~/.bear/plans/` |
-| 文件回退快照 | `~/.bear-code/checkpoints/<session_id>/files/` |
+
+| 数据              | 路径                                           |
+| ------------------- | ------------------------------------------------ |
+| 项目级 Skills     | `.bear/skills/<skill_name>/SKILL.md`           |
+| 用户级 Skills     | `~/.bear/skills/<skill_name>/SKILL.md`         |
+| Skills 自进化审计 | `.bear/skill-evolution/`                       |
+| 长期记忆          | `~/.BearCode/projects/<project_hash>/memory/`  |
+| 会话历史          | `~/.bear-code/sessions/`                       |
+| 大工具结果        | `~/.bear-code/tool-results/`                   |
+| Plan Mode 计划    | `~/.bear/plans/`                               |
+| 文件回退快照      | `~/.bear-code/checkpoints/<session_id>/files/` |
 
 ## 文档入口
 
 更完整的学习和展示材料在 `wiki/`：
 
-| 文档 | 内容 |
-|------|------|
-| [学习说明](wiki/从0到1学习了解项目.md) | 面向学习者的完整项目说明 |
-| [架构设计](wiki/架构设计.md) | 系统分层、主链路、模块边界和数据流 |
-| [核心源码阅读指南](wiki/核心源码阅读指南.md) | 按源码顺序学习 Agent Loop、工具、Skills、Memory、MCP 和自进化 |
-| [技术亮点](wiki/技术亮点.md) | 技术亮点和核心代码讲解 |
-| [Skills 自进化逻辑](wiki/Skills自进化逻辑与实现思路.md) | 自进化设计和实现取舍 |
-| [简历包装](wiki/简历包装.md) | 简历 bullet、面试表达和项目包装 |
-| [升级文档](wiki/升级文档.md) | 2026-08 升级 Step 0–9 的全部改动与实现原理 |
+
+| 文档                                                    | 内容                                                          |
+| --------------------------------------------------------- | --------------------------------------------------------------- |
+| [学习说明](wiki/从0到1学习了解项目.md)                  | 面向学习者的完整项目说明                                      |
+| [架构设计](wiki/架构设计.md)                            | 系统分层、主链路、模块边界和数据流                            |
+| [核心源码阅读指南](wiki/核心源码阅读指南.md)            | 按源码顺序学习 Agent Loop、工具、Skills、Memory、MCP 和自进化 |
+| [技术亮点](wiki/技术亮点.md)                            | 技术亮点和核心代码讲解                                        |
+| [Skills 自进化逻辑](wiki/Skills自进化逻辑与实现思路.md) | 自进化设计和实现取舍                                          |
+| [简历包装](wiki/简历包装.md)                            | 简历 bullet、面试表达和项目包装                               |
+| [升级文档](wiki/升级文档.md)                            | 2026-08 升级 Step 0–9 的全部改动与实现原理                   |
 
 ## 测试
 

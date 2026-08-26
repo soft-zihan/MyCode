@@ -114,6 +114,15 @@ export async function updateSessionName(id: string, name: string): Promise<void>
   if (!res.ok) throw new Error('Failed to update session name');
 }
 
+export async function saveSessionMessages(id: string, messages: any[]): Promise<void> {
+  const res = await fetch(`${API_BASE}/sessions/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ frontendMessages: messages })
+  });
+  if (!res.ok) throw new Error('Failed to save session messages');
+}
+
 export async function fetchMemories(): Promise<Memory[]> {
   const res = await fetch(`${API_BASE}/memories`);
   if (!res.ok) throw new Error('Failed to fetch memories');
@@ -228,6 +237,19 @@ export async function deleteWorkspaceFile(path: string, cwd?: string): Promise<{
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Delete failed' }));
     throw new Error(err.detail || 'Delete failed');
+  }
+  return res.json();
+}
+
+export async function createWorkspaceFile(path: string, cwd?: string): Promise<{ success: boolean; path: string }> {
+  const res = await fetch(`${API_BASE}/workspace/create`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path, cwd }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Create failed' }));
+    throw new Error(err.detail || 'Create failed');
   }
   return res.json();
 }
