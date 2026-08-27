@@ -26,6 +26,22 @@ Bear Agent 是一个基于 Python 实现的 **自进化 Harness Agent**。它不
   - **Memory Seam**：Memory 存储抽象（文件/SQLite）
   - **Skill Seam**：Skill 存储抽象（文件型）
 
+## 评估框架（v2.1 计划中）
+
+BearCode 计划集成 5 个开源 benchmark 建立完整的评估体系：
+
+| Benchmark | 任务数 | 评估维度 |
+|-----------|--------|---------|
+| **SWE-bench Lite** | 300 | 真实 GitHub issue 修复 |
+| **HumanEval** | 164 | 代码生成 |
+| **MBPP** | 500 | 基础 Python 编程 |
+| **SkillsBench** | 80+ | Skill 调用效果 |
+| **Aider Edit** | 225 | 代码编辑 |
+
+评估框架使用 **Inspect AI**（评估运行器）+ **Langfuse**（可观测性）。
+
+详见 `wiki/MyCode升级进化方案v2.1.md`。
+
 ## 项目架构
 
 ![Bear Agent 总体架构](wiki/assets/architecture/01-overall-architecture.svg)
