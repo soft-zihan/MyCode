@@ -19,6 +19,12 @@ Bear Agent 是一个基于 Python 实现的 **自进化 Harness Agent**。它不
 - **MCP 外部工具扩展**：自研 stdio JSON-RPC MCP Client，把外部 MCP Server 工具包装为 `mcp__server__tool`。
 - **子 Agent**：支持 `explore`、`plan`、`general` 以及自定义子 Agent，用隔离上下文完成探索、规划或局部任务。
 - **会话恢复和上下文压缩**：自动保存 session，支持 `--resume`、`/compact`，并对大工具结果做截断或持久化。
+- **可插拔后端架构（Capability Seam）**：借鉴 Pi 的 Capability Seam 模式，5 个核心功能模块抽象为可替换接口，支持多种后端实现：
+  - **Session Seam**：会话存储抽象（JSON/JSONL/内存）
+  - **Compaction Seam**：压缩策略抽象（四级可逆/单级/自定义）
+  - **Provider Seam**：LLM Provider 抽象（OpenAI/Anthropic/自定义）
+  - **Memory Seam**：Memory 存储抽象（文件/SQLite）
+  - **Skill Seam**：Skill 存储抽象（文件型）
 
 ## 项目架构
 
@@ -47,6 +53,13 @@ BearAgent/
 ├── agents/
 │   ├── main.py                    # CLI 入口、REPL、参数解析
 │   ├── agent.py                   # Agent Runtime、模型调用、工具调度、上下文压缩
+│   ├── options.py                 # AgentOptions 配置数据类
+│   ├── seams/                     # Capability Seam 接口定义（v0.2 新增）
+│   │   ├── session.py             # Session Seam 接口 + 实现
+│   │   ├── compaction.py          # Compaction Seam 接口 + 实现
+│   │   ├── provider.py            # Provider Seam 接口 + 实现
+│   │   ├── memory.py              # Memory Seam 接口 + 实现
+│   │   └── skill.py               # Skill Seam 接口 + 实现
 │   ├── tools.py                   # 内置工具和权限系统
 │   ├── prompt.py                  # System prompt 动态构建
 │   ├── skills.py                  # Skills 加载、检索、执行、创建和演化封装
@@ -65,7 +78,7 @@ BearAgent/
 │   ├── online_skill_eval.py       # 在线 Skills 评测（replay/规则/LLM judge）
 │   ├── frontmatter.py             # frontmatter 解析器
 │   └── ui.py                      # 终端 UI 输出
-├── tests/                         # pytest 测试（113 例，离线可跑）
+├── tests/                         # pytest 测试（307 例，离线可跑）
 ├── .bear/
 │   ├── skills/                    # 项目级 Skills
 │   └── skill-evolution/           # Skills 自进化审计产物
