@@ -18,12 +18,14 @@ from .compaction import (
     FourLevelCompaction,
     SingleLevelCompaction,
 )
+from .compaction_default import DefaultCompactionStrategy
 from .provider import (
     StreamEvent,
     Provider,
     OpenAIProvider,
     AnthropicProvider,
 )
+from .provider_default import DefaultProvider
 from .memory import (
     MemoryEntry,
     MemoryStore,
@@ -47,10 +49,12 @@ __all__ = [
     "CompactionStrategy",
     "FourLevelCompaction",
     "SingleLevelCompaction",
+    "DefaultCompactionStrategy",
     "StreamEvent",
     "Provider",
     "OpenAIProvider",
     "AnthropicProvider",
+    "DefaultProvider",
     "MemoryEntry",
     "MemoryStore",
     "FileMemoryStore",

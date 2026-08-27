@@ -184,7 +184,9 @@ class Agent:
                  parent_abort_event: asyncio.Event | None=None,
                  checkpoint_store: FileCheckpointStore | None=None,
                  session_storage: Any | None=None,
-                 options: Any | None=None,):
+                 options: Any | None=None,
+                 compaction_strategy: Any | None=None,
+                 provider: Any | None=None,):
         # 如果提供了 options，则从中提取参数
         if options is not None:
             from agents.options import AgentOptions
@@ -204,6 +206,8 @@ class Agent:
                 parent_abort_event = options.parent_abort_event
                 checkpoint_store = options.checkpoint_store
                 session_storage = options.session_storage
+                # 从 extra 中提取 compaction_strategy
+                compaction_strategy = options.extra.get("compaction_strategy", compaction_strategy)
         
         self.permission_mode = permission_mode
         self.thinking = thinking
@@ -236,6 +240,22 @@ class Agent:
         else:
             from agents.seams.session_adapter import LegacySessionStorage
             self._session_storage = LegacySessionStorage(self.session_id)
+        
+        # Compaction Strategy (Capability Seam)
+        # 如果未提供，则使用默认压缩策略
+        if compaction_strategy is not None:
+            self._compaction_strategy = compaction_strategy
+        else:
+            from agents.seams.compaction_default import DefaultCompactionStrategy
+            self._compaction_strategy = DefaultCompactionStrategy(self)
+        
+        # Provider (Capability Seam)
+        # 如果未提供，则使用默认 Provider
+        if provider is not None:
+            self._provider = provider
+        else:
+            from agents.seams.provider_default import DefaultProvider
+            self._provider = DefaultProvider(self)
 
         self.total_input_tokens = 0
         self.total_output_tokens = 0
@@ -340,6 +360,14 @@ class Agent:
     def get_session_storage(self) -> Any:
         """获取会话存储后端。"""
         return self._session_storage
+    
+    def get_compaction_strategy(self) -> Any:
+        """获取压缩策略。"""
+        return self._compaction_strategy
+    
+    def get_provider(self) -> Any:
+        """获取 LLM Provider。"""
+        return self._provider
 
     #判断返回模型的思考模式
     def _resolve_thinking_mode(self) -> str:
