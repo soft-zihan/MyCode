@@ -186,7 +186,9 @@ class Agent:
                  session_storage: Any | None=None,
                  options: Any | None=None,
                  compaction_strategy: Any | None=None,
-                 provider: Any | None=None,):
+                 provider: Any | None=None,
+                 memory_store: Any | None=None,
+                 skill_store: Any | None=None,):
         # 如果提供了 options，则从中提取参数
         if options is not None:
             from agents.options import AgentOptions
@@ -256,6 +258,22 @@ class Agent:
         else:
             from agents.seams.provider_default import DefaultProvider
             self._provider = DefaultProvider(self)
+        
+        # Memory Store (Capability Seam)
+        # 如果未提供，则使用默认 Memory Store
+        if memory_store is not None:
+            self._memory_store = memory_store
+        else:
+            from agents.seams.memory_default import DefaultMemoryStore
+            self._memory_store = DefaultMemoryStore()
+        
+        # Skill Store (Capability Seam)
+        # 如果未提供，则使用默认 Skill Store
+        if skill_store is not None:
+            self._skill_store = skill_store
+        else:
+            from agents.seams.skill_default import DefaultSkillStore
+            self._skill_store = DefaultSkillStore()
 
         self.total_input_tokens = 0
         self.total_output_tokens = 0
@@ -368,6 +386,14 @@ class Agent:
     def get_provider(self) -> Any:
         """获取 LLM Provider。"""
         return self._provider
+    
+    def get_memory_store(self) -> Any:
+        """获取 Memory Store。"""
+        return self._memory_store
+    
+    def get_skill_store(self) -> Any:
+        """获取 Skill Store。"""
+        return self._skill_store
 
     #判断返回模型的思考模式
     def _resolve_thinking_mode(self) -> str:
