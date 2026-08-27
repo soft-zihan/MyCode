@@ -1633,15 +1633,22 @@ class Agent:
         trace_event("tool.start", tool=name, input=trace_tool_input(inp))
         try:
             result = await self._execute_tool_call_inner(name, inp)
+            trace_event(
+                "tool.end",
+                tool=name,
+                success=True,
+                duration_s=round(time.time() - _tool_t0, 2),
+                result_preview=str(result)[:300],
+            )
         except Exception as e:
-            trace_event("tool.end", tool=name, error=str(e)[:300], duration_s=round(time.time() - _tool_t0, 2))
+            trace_event(
+                "tool.end",
+                tool=name,
+                success=False,
+                error_message=str(e)[:300],
+                duration_s=round(time.time() - _tool_t0, 2),
+            )
             raise
-        trace_event(
-            "tool.end",
-            tool=name,
-            duration_s=round(time.time() - _tool_t0, 2),
-            result_preview=str(result)[:300],
-        )
         return result
 
     async def _execute_tool_call_inner(self, name: str, inp: dict) -> str:
@@ -2082,6 +2089,9 @@ class Agent:
         return {"type": _safe_utf8_text(block.type)}
 
     async def _call_anthropic_stream(self, on_tool_block_complete=None):
+        from .trace import trace_event
+        _model_t0 = time.time()
+        trace_event("model.start", model=self.model, provider="anthropic")
 
         async def _do():
             max_output =  _get_max_output_tokens(self.model)
@@ -2102,77 +2112,99 @@ class Agent:
             if not self.is_sub_agent:
                 reset_thinking_window()
                 md_track_begin()
-
             tool_blocks_by_index: dict[int, dict] = {}
 
-            async with self._anthropic_client.messages.stream(**create_params)as stream:
-                async for event in stream:
-                    if not hasattr(event, 'type'):
-                        continue
-                    # 当事件是工具调用开始：
-                    if event.type == "content_block_start":
-                        cb = getattr(event, 'content_block', None)
-                        #如果 block 类型是 tool_use，就记录这个工具调用：
-                        if cb and getattr(cb, 'type', None) == "tool_use":
-                            #因为工具参数 JSON 是流式分片返回的，所以先准备一个空字符串 input_json。
-                            tool_blocks_by_index[event.index]= {
-                                "id": cb.id, "name": cb.name, "input_json": "",
-                            }
-                    #当事件是内容增量，分三种情况。
-                    elif event.type == "content_block_delta":
-                        delta = event.delta
-                        # 第一种，普通文本：模型输出正文时，
-                        # 调用 _emit_text()。如果是普通交互，就打印；
-                        # 如果是 run_once()，就写入 _output_buffer。
-                        if hasattr(delta, "text"):
-                            if first_text:
-                                stop_spinner()
-                                self._emit_text("\n")
-                                first_text = False
-                            self._emit_text(delta.text)
-                        #第二种，thinking 内容：
-                        #默认不展示（对齐 Claude Code / Codex CLI 的做法），
-                        #用 /thinking 打开后才以暗色斜体渲染；thinking 从不进入
-                        #消息历史，也不进入 _turn_output_buffer。
-                        elif hasattr(delta, 'thinking'):
-                            # 流式模式：推送 thinking 事件到队列
-                            if self._stream_event_queue is not None:
-                                asyncio.create_task(self._stream_event_queue.put({"type": "thinking", "content": delta.thinking}))
-                            if thinking_visible():
-                                if first_thinking:
+            try:
+                async with self._anthropic_client.messages.stream(**create_params)as stream:
+                    async for event in stream:
+                        if not hasattr(event, 'type'):
+                            continue
+                        # 当事件是工具调用开始：
+                        if event.type == "content_block_start":
+                            cb = getattr(event, 'content_block', None)
+                            #如果 block 类型是 tool_use，就记录这个工具调用：
+                            if cb and getattr(cb, 'type', None) == "tool_use":
+                                #因为工具参数 JSON 是流式分片返回的，所以先准备一个空字符串 input_json。
+                                tool_blocks_by_index[event.index]= {
+                                    "id": cb.id, "name": cb.name, "input_json": "",
+                                }
+                        #当事件是内容增量，分三种情况。
+                        elif event.type == "content_block_delta":
+                            delta = event.delta
+                            # 第一种，普通文本：模型输出正文时，
+                            # 调用 _emit_text()。如果是普通交互，就打印；
+                            # 如果是 run_once()，就写入 _turn_output_buffer。
+                            if hasattr(delta, "text"):
+                                if first_text:
                                     stop_spinner()
-                                    first_thinking = False
-                                print_thinking_text(delta.thinking)
-                        #第三种，工具参数 JSON 片段：工具调用的参数不是一次性返回，
-                        # 而是一段一段返回，所以这里不断拼接到 input_json。
-                        elif hasattr(delta, 'partial_json'):
-                            tb = tool_blocks_by_index.get(event.index)
-                            if tb:
-                                tb["input_json"] += _safe_utf8_text(delta.partial_json)
-                    #当一个 content block 结束：
-                    #如果结束的是之前记录的工具调用，就把拼好的 JSON 解析出来：
-                    elif event.type == "content_block_stop":
-                        tb = tool_blocks_by_index.pop(event.index, None)
-                        if tb and on_tool_block_complete:
-                            import json as _json
-                            try:
-                                parsed = _json.loads(tb["input_json"] or "{}")
-                            except Exception:
-                                parsed = {}
-                            #然后调用回调：
-                            #这个回调的作用通常是：工具调用一完整，
-                            # 就可以提前开始执行工具，不必等整条 assistant 消息全部结束。
-                            on_tool_block_complete({
-                                "type": "tool_use", "id": _safe_utf8_text(tb["id"]),
-                                "name": _safe_utf8_text(tb["name"]), "input": _sanitize_for_utf8(parsed),
-                            })
-                final_message = await stream.get_final_message()
+                                    self._emit_text("\n")
+                                    first_text = False
+                                self._emit_text(delta.text)
+                            #第二种，thinking 内容：
+                            #默认不展示（对齐 Claude Code / Codex CLI 的做法），
+                            #用 /thinking 打开后才以暗色斜体渲染；thinking 从不进入
+                            #消息历史，也不进入 _turn_output_buffer。
+                            elif hasattr(delta, 'thinking'):
+                                # 流式模式：推送 thinking 事件到队列
+                                if self._stream_event_queue is not None:
+                                    asyncio.create_task(self._stream_event_queue.put({"type": "thinking", "content": delta.thinking}))
+                                if thinking_visible():
+                                    if first_thinking:
+                                        stop_spinner()
+                                        first_thinking = False
+                                    print_thinking_text(delta.thinking)
+                            #第三种，工具参数 JSON 片段：工具调用的参数不是一次性返回，
+                            # 而是一段一段返回，所以这里不断拼接到 input_json。
+                            elif hasattr(delta, 'partial_json'):
+                                tb = tool_blocks_by_index.get(event.index)
+                                if tb:
+                                    tb["input_json"] += _safe_utf8_text(delta.partial_json)
+                        #当一个 content block 结束：
+                        #如果结束的是之前记录的工具调用，就把拼好的 JSON 解析出来：
+                        elif event.type == "content_block_stop":
+                            tb = tool_blocks_by_index.pop(event.index, None)
+                            if tb and on_tool_block_complete:
+                                import json as _json
+                                try:
+                                    parsed = _json.loads(tb["input_json"] or "{}")
+                                except Exception:
+                                    parsed = {}
+                                #然后调用回调：
+                                #这个回调的作用通常是：工具调用一完整，
+                                # 就可以提前开始执行工具，不必等整条 assistant 消息全部结束。
+                                on_tool_block_complete({
+                                    "type": "tool_use", "id": _safe_utf8_text(tb["id"]),
+                                    "name": _safe_utf8_text(tb["name"]), "input": _sanitize_for_utf8(parsed),
+                                })
+                    final_message = await stream.get_final_message()
+
+            except Exception as e:
+                raise
 
             #过滤思考的message（因为 thinking 内容一般不应该进入历史消息，否则后续上下文会变大，也可能不符合 API 消息格式要求。）
             final_message.content = [b for b in final_message.content if b.type != "thinking"]
             return final_message
 #调用 _do()，如果遇到可重试错误，就由 _with_retry() 负责重试。
-        return await _with_retry(_do)
+        try:
+            result = await _with_retry(_do)
+            trace_event(
+                "model.end",
+                model=self.model,
+                provider="anthropic",
+                success=True,
+                duration_s=round(time.time() - _model_t0, 2),
+            )
+            return result
+        except Exception as e:
+            trace_event(
+                "model.end",
+                model=self.model,
+                provider="anthropic",
+                success=False,
+                error_message=str(e)[:300],
+                duration_s=round(time.time() - _model_t0, 2),
+            )
+            raise
 
     #openAI后端
 
@@ -2352,6 +2384,10 @@ class Agent:
             await self._check_and_compact()
 
     async def _call_openai_stream(self) -> dict:
+        from .trace import trace_event
+        _model_t0 = time.time()
+        trace_event("model.start", model=self.model, provider="openai")
+
         # 流式拼 content + tool_calls，最后组装成类似非流式响应的结构
         async def _do():
             stream = await self._openai_client.chat.completions.create(
@@ -2443,7 +2479,26 @@ class Agent:
                 "usage": usage or {"prompt_tokens": 0, "completion_tokens": 0},
             }
 
-        return await _with_retry(_do)
+        try:
+            result = await _with_retry(_do)
+            trace_event(
+                "model.end",
+                model=self.model,
+                provider="openai",
+                success=True,
+                duration_s=round(time.time() - _model_t0, 2),
+            )
+            return result
+        except Exception as e:
+            trace_event(
+                "model.end",
+                model=self.model,
+                provider="openai",
+                success=False,
+                error_message=str(e)[:300],
+                duration_s=round(time.time() - _model_t0, 2),
+            )
+            raise
 
     async def _confirm_dangerous(self, command: str) -> bool:
         # 危险命令确认：优先用注入的 confirm_fn，否则阻塞 input
