@@ -182,7 +182,29 @@ class Agent:
                  custom_tools: list[ToolDef] | None=None,
                  is_sub_agent: bool=False,
                  parent_abort_event: asyncio.Event | None=None,
-                 checkpoint_store: FileCheckpointStore | None=None,):
+                 checkpoint_store: FileCheckpointStore | None=None,
+                 session_storage: Any | None=None,
+                 options: Any | None=None,):
+        # 如果提供了 options，则从中提取参数
+        if options is not None:
+            from agents.options import AgentOptions
+            if isinstance(options, AgentOptions):
+                permission_mode = options.permission_mode
+                model = options.model
+                api_base = options.api_base
+                anthropic_base_url = options.anthropic_base_url
+                api_key = options.api_key
+                thinking = options.thinking
+                max_cost_usd = options.max_cost_usd
+                max_turns = options.max_turns
+                confirm_fn = options.confirm_fn
+                custom_system_prompt = options.custom_system_prompt
+                custom_tools = options.custom_tools
+                is_sub_agent = options.is_sub_agent
+                parent_abort_event = options.parent_abort_event
+                checkpoint_store = options.checkpoint_store
+                session_storage = options.session_storage
+        
         self.permission_mode = permission_mode
         self.thinking = thinking
         self.model = model
@@ -206,6 +228,14 @@ class Agent:
         self.auto_compact_threshold = _resolve_auto_compact_threshold()
         self.session_id = uuid.uuid4().hex[:8]
         self.session_start_time= time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
+        
+        # Session Storage (Capability Seam)
+        # 如果未提供，则使用 LegacySessionStorage 适配器
+        if session_storage is not None:
+            self._session_storage = session_storage
+        else:
+            from agents.seams.session_adapter import LegacySessionStorage
+            self._session_storage = LegacySessionStorage(self.session_id)
 
         self.total_input_tokens = 0
         self.total_output_tokens = 0
@@ -306,6 +336,10 @@ class Agent:
             self._openai_client = None
 
         self._refresh_runtime_system_prompt()
+
+    def get_session_storage(self) -> Any:
+        """获取会话存储后端。"""
+        return self._session_storage
 
     #判断返回模型的思考模式
     def _resolve_thinking_mode(self) -> str:
