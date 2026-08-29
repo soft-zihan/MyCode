@@ -147,8 +147,9 @@ IMPORTANT:
 1. First, understand the problem by reading relevant code in /testbed
 2. Locate the bug or missing feature
 3. Implement a fix
-4. Test your fix if possible
+4. If tests can run easily (dependencies already installed), verify your fix. Otherwise, skip testing.
 5. Make sure your changes are minimal and focused
+6. DO NOT spend time installing dependencies or setting up test environments
 
 Do NOT modify test files. Only fix the source code."""
 
