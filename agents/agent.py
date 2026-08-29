@@ -210,7 +210,6 @@ class Agent:
         self.permission_mode = permission_mode
         self.thinking = thinking
         self.model = model
-        self.use_openai = bool(api_base)
         self.is_sub_agent = is_sub_agent
         self.tools = custom_tools or tool_definitions
         self.max_cost_usd = max_cost_usd
@@ -901,7 +900,7 @@ class Agent:
         return ""
 
     def _recent_dialog_messages(self, *, max_messages: int = 8) -> list[dict[str, str]]:
-        raw_messages = self._openai_messages if self.use_openai else self._anthropic_messages
+        raw_messages = self._openai_messages
         out: list[dict[str, str]] = []
         for msg in raw_messages:
             if not isinstance(msg, dict):
