@@ -11,8 +11,6 @@ import time as _time
 from pathlib import Path
 from typing import Any
 
-from tqdm.utils import IS_WIN
-
 from agents.memory import get_memory_dir
 
 ToolDef = dict  # OpenAI tool schema dict
