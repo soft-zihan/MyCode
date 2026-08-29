@@ -108,6 +108,10 @@ sys.path.insert(0, '/workspace')
 
 os.chdir('/testbed')
 
+# 开启 trace 记录
+from agents.trace import set_trace_enabled
+set_trace_enabled(True)
+
 from agents.agent import Agent
 
 async def main():
