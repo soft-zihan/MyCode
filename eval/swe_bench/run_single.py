@@ -106,9 +106,6 @@ import json
 import os
 sys.path.insert(0, '/workspace')
 
-# 禁用跨会话记忆注入（测试环境）
-os.environ["BEAR_DISABLE_CROSS_SESSION_MEMORY"] = "1"
-
 os.chdir('/testbed')
 
 from agents.agent import Agent
