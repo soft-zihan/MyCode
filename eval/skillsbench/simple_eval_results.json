@@ -1,0 +1,14 @@
+{
+  "no-skill": [
+    {"task": "travel-planning", "duration": 211.7, "skills_available": 0},
+    {"task": "offer-letter-generator", "duration": 37.2, "skills_available": 0},
+    {"task": "dialogue-parser", "duration": 62.3, "skills_available": 0},
+    {"task": "citation-check", "duration": 552.7, "skills_available": 0}
+  ],
+  "human-skill": [],
+  "summary": {
+    "total_tasks_completed": 4,
+    "avg_duration": 216.0,
+    "total_duration": 863.9
+  }
+}

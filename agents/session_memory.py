@@ -232,18 +232,6 @@ def build_openai_transcript(messages: list[dict[str, Any]]) -> str:
     return _clip("\n\n".join(parts), MAX_TRANSCRIPT_CHARS)
 
 
-def build_anthropic_transcript(messages: list[dict[str, Any]]) -> str:
-    parts: list[str] = []
-    for i, msg in enumerate(messages):
-        if not isinstance(msg, dict):
-            continue
-        role = str(msg.get("role") or "unknown")
-        text = _content_text(msg.get("content"))
-        if text:
-            parts.append(f"## Message {i} ({role})\n{_clip(text)}")
-    return _clip("\n\n".join(parts), MAX_TRANSCRIPT_CHARS)
-
-
 def build_folding_user_prompt(transcript: str) -> str:
     return (
         "Compact the following coding-agent conversation into the required structured session memory JSON.\n\n"

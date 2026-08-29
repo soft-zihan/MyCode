@@ -44,21 +44,12 @@ _FIELDS = ("BASE_URL", "API_KEY", "MODEL")
 
 @dataclass(frozen=True)
 class ModelEndpoint:
-    """一个完整的模型端点：模型名 + base url + api key + 协议。"""
+    """一个完整的模型端点：模型名 + base url + api key。"""
 
     model: str
     base_url: str | None
     api_key: str | None
-    use_openai: bool = True  # False 表示 Anthropic-compatible 协议
-
-
-def _is_anthropic_compatible_base_url(base_url: str | None) -> bool:
-    """与 main.py 一致的协议判断：路径以 /anthropic 结尾则走 Anthropic 协议。"""
-    if not base_url:
-        return False
-    parsed = urlparse(base_url)
-    path = (parsed.path or "").lower().rstrip("/")
-    return path.endswith("/anthropic") or "/anthropic/" in path
+    use_openai: bool = True
 
 
 def discover_endpoints() -> dict[str, ModelEndpoint]:
@@ -90,7 +81,7 @@ def discover_endpoints() -> dict[str, ModelEndpoint]:
             model=model,
             base_url=base,
             api_key=api_key,
-            use_openai=not _is_anthropic_compatible_base_url(base),
+            use_openai=True,
         )
     return endpoints
 

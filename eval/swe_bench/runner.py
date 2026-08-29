@@ -66,51 +66,52 @@ class SWEBenchRunner:
 
         start_time = time.time()
 
-        # 克隆并切换到指定 commit
-        repo_dir = self.workspace / repo.replace("/", "__")
-        if not repo_dir.exists():
-            print(f"Cloning {repo}...")
-            subprocess.run(
-                ["git", "clone", f"https://github.com/{repo}.git", str(repo_dir)],
-                check=True,
-                capture_output=True,
-            )
+        # 每个任务使用独立的仓库目录
+        repo_dir = self.workspace / f"{repo.replace('/', '__')}_{instance_id}"
+        
+        # 清理已存在的目录
+        if repo_dir.exists():
+            import shutil
+            shutil.rmtree(repo_dir)
 
-        # 切换到指定 commit
-        try:
-            subprocess.run(
-                ["git", "checkout", base_commit],
-                cwd=repo_dir,
-                check=True,
-                capture_output=True,
-            )
-        except subprocess.CalledProcessError:
-            # 如果 checkout 失败，尝试 fetch 后再 checkout
-            print(f"Fetching {base_commit}...")
-            subprocess.run(
-                ["git", "fetch", "origin", base_commit],
-                cwd=repo_dir,
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["git", "checkout", base_commit],
-                cwd=repo_dir,
-                check=True,
-                capture_output=True,
-            )
+        print(f"Cloning {repo} at {base_commit[:8]}...")
+        for attempt in range(3):
+            try:
+                subprocess.run(
+                    ["git", "clone", "--depth=1", f"https://github.com/{repo}.git", str(repo_dir)],
+                    check=True,
+                    capture_output=True,
+                    timeout=120,
+                )
+                break
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+                if attempt < 2:
+                    print(f"  Clone attempt {attempt+1} failed, retrying...")
+                    if repo_dir.exists():
+                        import shutil
+                        shutil.rmtree(repo_dir)
+                    import time as _time
+                    _time.sleep(2)
+                else:
+                    raise
+
+        # 获取指定 commit
+        subprocess.run(
+            ["git", "fetch", "--depth=1", "origin", base_commit],
+            cwd=repo_dir,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "checkout", base_commit],
+            cwd=repo_dir,
+            check=True,
+            capture_output=True,
+        )
 
         # 保存当前目录并切换到仓库目录
         original_cwd = os.getcwd()
         os.chdir(repo_dir)
-
-        # 创建 Agent
-        agent = Agent(
-            model=self.model,
-            api_base=self.api_base,
-            api_key=self.api_key,
-            permission_mode="bypassPermissions",  # 评测模式，跳过权限确认
-        )
 
         # 构建 prompt
         prompt = f"""You are debugging a real GitHub issue. Please fix the following problem:
@@ -126,26 +127,54 @@ IMPORTANT:
 
 Do NOT modify test files. Only fix the source code."""
 
-        # 运行 Agent
+        # 运行 Agent（带重试）
         print(f"Running agent...")
-        try:
-            await agent.run_once(prompt)
-            result = "Agent completed"
-            success = True
-            error = None
-        except Exception as e:
-            result = str(e)
-            success = False
-            error = str(e)
-            print(f"Error: {e}")
-        finally:
-            # 恢复原始目录
-            os.chdir(original_cwd)
-            # 清理 Agent 资源，避免后台任务异常
+        max_retries = 3
+        result = None
+        success = False
+        error = None
+
+        for attempt in range(max_retries):
             try:
-                agent.abort()
-            except Exception:
-                pass
+                # 每次重试创建新的 Agent
+                agent = Agent(
+                    model=self.model,
+                    api_base=self.api_base,
+                    api_key=self.api_key,
+                    permission_mode="bypassPermissions",
+                    is_sub_agent=True,  # 抑制 UI 输出（spinner/thinking 动画）
+                )
+                await agent.run_once(prompt)
+                result = "Agent completed"
+                success = True
+                error = None
+                break
+            except Exception as e:
+                error_msg = str(e)
+                print(f"Attempt {attempt + 1}/{max_retries} failed: {error_msg[:100]}")
+
+                # 记录错误
+                trace_event(
+                    "error",
+                    error_type="agent_error",
+                    error_message=error_msg[:300],
+                    attempt=attempt + 1,
+                    instance_id=instance_id,
+                )
+
+                # 如果是网络错误，等待后重试
+                if "Broken pipe" in error_msg or "Connection" in error_msg or "timeout" in error_msg.lower():
+                    wait_time = 5 * (attempt + 1)
+                    print(f"Network error, waiting {wait_time}s before retry...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    # 非网络错误，不重试
+                    break
+            finally:
+                try:
+                    agent.abort()
+                except Exception:
+                    pass
 
         end_time = time.time()
         duration = end_time - start_time
@@ -163,6 +192,9 @@ Do NOT modify test files. Only fix the source code."""
             patch_size=len(patch) if patch else 0,
             error=error,
         )
+
+        # 恢复原始目录
+        os.chdir(original_cwd)
 
         return {
             "instance_id": instance_id,
@@ -191,13 +223,57 @@ Do NOT modify test files. Only fix the source code."""
     async def run_batch(self, tasks: list[dict]) -> list[dict]:
         """批量运行任务"""
         results = []
+        total = len(tasks)
+        
         for i, task in enumerate(tasks, 1):
-            print(f"\n[{i}/{len(tasks)}] Running task...")
-            result = await self.run_task(task)
-            results.append(result)
-
-            # 保存中间结果
-            self._save_checkpoint(results)
+            task_start = time.time()
+            print(f"\n{'='*60}")
+            print(f"[{i}/{total}] 开始任务: {task['instance_id']}")
+            print(f"{'='*60}")
+            
+            try:
+                result = await asyncio.wait_for(
+                    self.run_task(task),
+                    timeout=1800  # 每个任务最多 30 分钟
+                )
+                results.append(result)
+                
+                # 立即保存 checkpoint
+                self._save_checkpoint(results)
+                
+                # 打印进度
+                task_duration = time.time() - task_start
+                status = "✅ 成功" if result["success"] else "❌ 失败"
+                print(f"\n[{i}/{total}] {status} | 耗时: {task_duration:.1f}s | Patch: {len(result.get('patch', ''))} bytes")
+                
+                # 打印汇总
+                success_count = sum(1 for r in results if r["success"])
+                print(f"进度: {success_count}/{i} 成功 | 平均耗时: {sum(r['duration'] for r in results)/i:.1f}s")
+                
+            except asyncio.TimeoutError:
+                print(f"\n[{i}/{total}] ⏰ 超时（超过10分钟）")
+                results.append({
+                    "instance_id": task["instance_id"],
+                    "repo": task["repo"],
+                    "success": False,
+                    "duration": 600,
+                    "patch": "",
+                    "error": "Task timeout (10 minutes)",
+                    "agent_result": "Timeout",
+                })
+                self._save_checkpoint(results)
+            except Exception as e:
+                print(f"\n[{i}/{total}] 💥 异常: {str(e)[:100]}")
+                results.append({
+                    "instance_id": task["instance_id"],
+                    "repo": task["repo"],
+                    "success": False,
+                    "duration": time.time() - task_start,
+                    "patch": "",
+                    "error": str(e),
+                    "agent_result": str(e),
+                })
+                self._save_checkpoint(results)
 
         return results
 
@@ -236,7 +312,18 @@ async def main():
 
     # 运行评测
     runner = SWEBenchRunner(model="deepseek-v4-flash")
-    results = await runner.run_batch(tasks)
+    
+    try:
+        results = await runner.run_batch(tasks)
+    except Exception as e:
+        print(f"\n💥 评测中断: {e}")
+        # 从 checkpoint 恢复结果
+        checkpoint_path = Path(__file__).parent / "checkpoint.json"
+        if checkpoint_path.exists():
+            results = json.loads(checkpoint_path.read_text())
+            print(f"从 checkpoint 恢复 {len(results)} 个任务结果")
+        else:
+            results = []
 
     # 生成报告
     report = {
@@ -244,11 +331,13 @@ async def main():
         "model": "deepseek-v4-flash",
         "benchmark": "SWE-bench Lite",
         "total_tasks": len(tasks),
+        "completed_tasks": len(results),
         "results": results,
         "summary": {
             "success_count": sum(1 for r in results if r["success"]),
             "failure_count": sum(1 for r in results if not r["success"]),
-            "avg_duration": sum(r["duration"] for r in results) / len(results),
+            "avg_duration": sum(r["duration"] for r in results) / len(results) if results else 0,
+            "total_duration": sum(r["duration"] for r in results),
         },
     }
 
@@ -256,10 +345,11 @@ async def main():
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False))
 
     print(f"\n{'='*60}")
-    print(f"Evaluation complete!")
-    print(f"Success: {report['summary']['success_count']}/{len(tasks)}")
-    print(f"Avg duration: {report['summary']['avg_duration']:.1f}s")
-    print(f"Report: {report_path}")
+    print(f"评测完成!")
+    print(f"成功: {report['summary']['success_count']}/{len(results)}")
+    print(f"平均耗时: {report['summary']['avg_duration']:.1f}s")
+    print(f"总耗时: {report['summary']['total_duration']:.1f}s")
+    print(f"报告: {report_path}")
     print(f"Trace: {trace_path()}")
     print(f"{'='*60}")
 

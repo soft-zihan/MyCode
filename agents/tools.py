@@ -15,7 +15,7 @@ from tqdm.utils import IS_WIN
 
 from agents.memory import get_memory_dir
 
-ToolDef = dict  # Anthropic tool schema dict
+ToolDef = dict  # OpenAI tool schema dict
 #权限模式
 PermissionMode = str  # "default" | "plan" | "acceptEdits" | "bypassPermissions" | "dontAsk"
 
@@ -166,11 +166,13 @@ def get_active_tool_definitions(all_tools: list[ToolDef] | None = None) -> list[
 tool_definitions: list[ToolDef] = [
     {
         "name": "read_file",
-        "description": "Read the contents of a file. Returns the file content with line numbers.",
+        "description": "Read the contents of a file. Returns the file content with line numbers. Use offset and limit to read specific line ranges for large files.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "file_path": {"type": "string", "description": "The path to the file to read"},
+                "offset": {"type": "integer", "description": "Line number to start reading from (1-indexed, default: 1)"},
+                "limit": {"type": "integer", "description": "Maximum number of lines to read (default: all lines)"},
             },
             "required": ["file_path"],
         },
@@ -418,20 +420,57 @@ def _resolve_tool_path(raw_path: str, *, must_exist: bool = True) -> Path:
 #读取文件并且在读取文件的基础上添加行号
 def _read_file(inp:dict) -> str:
     try:
-        path = _resolve_tool_path(inp["file_path"])
-        content = path.read_text(errors="replace")
+        from .runtime import get_runtime, DockerRuntime
+        rt = get_runtime()
+        
+        # Docker 模式下直接使用原始路径
+        if isinstance(rt, DockerRuntime):
+            path_str = inp["file_path"]
+        else:
+            path_str = str(_resolve_tool_path(inp["file_path"]))
+        
+        content = rt.read_file(path_str)
         lines = content.split("\n")
-        numbered = "\n".join(f"{i + 1:4d} | {line}" for i, line in enumerate(lines))
+        
+        # 支持 offset 和 limit 参数
+        offset = inp.get("offset", 1) - 1  # 转换为0索引
+        limit = inp.get("limit")
+        
+        if offset > 0 or limit is not None:
+            if limit is not None:
+                lines = lines[offset:offset + limit]
+            else:
+                lines = lines[offset:]
+            start_line = offset + 1
+        else:
+            start_line = 1
+        
+        numbered = "\n".join(f"{start_line + i:4d} | {line}" for i, line in enumerate(lines))
+        
+        # 如果使用了 offset/limit，添加提示
+        if offset > 0 or limit is not None:
+            total_lines = len(content.split("\n"))
+            shown_end = start_line + len(lines) - 1
+            if shown_end < total_lines:
+                numbered += f"\n\n... ({total_lines - shown_end} more lines, use offset={shown_end + 1} to continue)"
+        
         return numbered
     except Exception as e:
         return f"Error reading file: {e}"
 
 def _write_file(inp:dict) -> str:
     try:
-        path = _resolve_tool_path(inp["file_path"], must_exist=False)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(inp["content"])
-        _auto_update_memory_index(str(path))
+        from .runtime import get_runtime, DockerRuntime
+        rt = get_runtime()
+        
+        # Docker 模式下直接使用原始路径
+        if isinstance(rt, DockerRuntime):
+            path_str = inp["file_path"]
+        else:
+            path_str = str(_resolve_tool_path(inp["file_path"], must_exist=False))
+        
+        rt.write_file(path_str, inp["content"])
+        _auto_update_memory_index(path_str)
         lines = inp["content"].split("\n")
         line_count = len(lines)
         preview = "\n".join(f"{i + 1:4d} | {l}" for i, l in enumerate(lines[:30]))
@@ -501,8 +540,16 @@ def _generate_diff(old_content: str, old_string: str, new_string: str) -> str:
 #编辑文件
 def _edit_file(inp: dict) -> str:
     try:
-        path = _resolve_tool_path(inp["file_path"])
-        content = path.read_text(errors="replace")
+        from .runtime import get_runtime, DockerRuntime
+        rt = get_runtime()
+        
+        # Docker 模式下直接使用原始路径
+        if isinstance(rt, DockerRuntime):
+            path_str = inp["file_path"]
+        else:
+            path_str = str(_resolve_tool_path(inp["file_path"]))
+        
+        content = rt.read_file(path_str)
 
         actual = _find_actual_string(content, inp["old_string"])
         if not actual:
@@ -513,7 +560,7 @@ def _edit_file(inp: dict) -> str:
             return f"Error: old_string found {occurrences} times in {inp['file_path']}. Must be unique."
 
         new_content = content.replace(actual, inp["new_string"], 1)
-        path.write_text(new_content)
+        rt.write_file(path_str, new_content)
 
         diff = _generate_diff(content, actual, inp["new_string"])
 
@@ -526,22 +573,20 @@ def _edit_file(inp: dict) -> str:
 
 def _list_files(inp: dict) -> str:
     try:
-        base = _resolve_tool_path(inp.get("path") or ".")
+        from .runtime import get_runtime, DockerRuntime
+        rt = get_runtime()
+        
+        # Docker 模式下直接使用原始路径
+        if isinstance(rt, DockerRuntime):
+            base = inp.get("path") or "."
+        else:
+            base = str(_resolve_tool_path(inp.get("path") or "."))
+        
         pattern = inp["pattern"]
-        files = []
-        for p in base.glob(pattern):
-            if p.is_file():
-                rel = str(p.relative_to(base) if base != Path(".") else p)
-
-                if "node_modules" in rel or ".git" in rel.split(os.sep):
-                    continue
-                files.append(rel)
-                if len(files) >= 200:
-                    break
+        files = rt.list_files(base, pattern)
         if not files:
             return "No files found matching the pattern."
         result = "\n".join(files[:200])
-
         if len(files) > 200:
             result += f"\n...and {len(files) - 200} more files are found ..."
         return result
@@ -550,34 +595,26 @@ def _list_files(inp: dict) -> str:
 
 
 def _grep_search(inp: dict) -> str:
+    from .runtime import get_runtime, DockerRuntime
+    rt = get_runtime()
     pattern = inp["pattern"]
-    path = str(_resolve_tool_path(inp.get("path") or "."))
+    
+    # Docker 模式下直接使用原始路径
+    if isinstance(rt, DockerRuntime):
+        path = inp.get("path") or "."
+    else:
+        path = str(_resolve_tool_path(inp.get("path") or "."))
+    
     include = inp.get("include")
 
-    if not IS_WIN:
-        try:
-            # -E 启用扩展正则（ERE），让 |、( ) 等与 Python re 后备分支行为一致。
-            # 工具描述承诺 regex pattern，模型常写 A|B，默认 BRE 会把 | 当字面字符。
-            args = ["grep", "--line-number", "--color=never", "-r", "-E"]
-            if include:
-                args.append(f"--include={include}")
-            args.extend(["--", pattern, path])
-
-            result = subprocess.run(
-                args, capture_output=True, text=True, timeout=10
-            )
-            if result.returncode == 1:
-                return "No matches found."
-            if result.returncode == 0:
-                lines = [l for l in result.stdout.split("\n") if l]
-                output = "\n".join(lines[:100])
-                if len(lines) >100:
-                    output += f"\n... and {len(lines) - 100} more matches"
-                return output
-        except Exception:
-            pass
-
-    return _grep_python(pattern, path, include)
+    result = rt.grep_search(pattern, path, include)
+    if not result:
+        return "No matches found."
+    lines = [l for l in result.split("\n") if l]
+    output = "\n".join(lines[:100])
+    if len(lines) > 100:
+        output += f"\n... and {len(lines) - 100} more matches"
+    return output
 
 
 def _grep_python(pattern: str, directory: str, include: str | None) -> str:
@@ -667,21 +704,16 @@ def _run_shell(inp: dict) -> str:
     if inp.get("background"):
         return _start_background_shell(inp["command"])
     try:
+        from .runtime import get_runtime
+        rt = get_runtime()
         timeout_ms = inp.get("timeout", 30000)
         timeout_s = timeout_ms / 1000
-        result = subprocess.run(
-            inp["command"],
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-        )
-        output = result.stdout or ""
-        if result.returncode != 0:
-            stderr = f"\nStderr: {result.stderr}" if result.stderr else ""
-            stdout = f"\nStdout: {result.stdout}" if result.stdout else ""
-            return f"Command failed (exit code {result.returncode}){stdout}{stderr}"
-        return output or "(no output)"
+        exit_code, stdout, stderr = rt.run_command(inp["command"], timeout_s)
+        if exit_code != 0:
+            stderr_msg = f"\nStderr: {stderr}" if stderr else ""
+            stdout_msg = f"\nStdout: {stdout}" if stdout else ""
+            return f"Command failed (exit code {exit_code}){stdout_msg}{stderr_msg}"
+        return stdout or "(no output)"
     except subprocess.TimeoutExpired:
         return f"Command timed out after {inp.get('timeout', 30000)}ms"
     except Exception as e:
@@ -860,16 +892,31 @@ async def execute_tool(
     if name == "read_file":
         result = _read_file(inp)
         if read_file_state is not None and not result.startswith("Error"):
-            abs_path = str(_resolve_tool_path(inp["file_path"]).resolve())
-            try:
-                read_file_state[abs_path] =  os.path.getmtime(abs_path)
-            except OSError:
-                pass
+            from .runtime import get_runtime, DockerRuntime
+            rt = get_runtime()
+            if isinstance(rt, DockerRuntime):
+                abs_path = inp["file_path"]
+                if not abs_path.startswith("/"):
+                    abs_path = f"{rt.workdir}/{abs_path}"
+                read_file_state[abs_path] = 0
+            else:
+                abs_path = str(_resolve_tool_path(inp["file_path"]).resolve())
+                try:
+                    read_file_state[abs_path] = os.path.getmtime(abs_path)
+                except OSError:
+                    pass
         return _truncate_result(result)
 
     if name in ("write_file", "edit_file") and read_file_state is not None:
-        abs_path = str(_resolve_tool_path(inp["file_path"], must_exist=(name == "edit_file")).resolve())
-        if os.path.exists(abs_path):
+        from .runtime import get_runtime, DockerRuntime
+        rt = get_runtime()
+        if isinstance(rt, DockerRuntime):
+            abs_path = inp["file_path"]
+            if not abs_path.startswith("/"):
+                abs_path = f"{rt.workdir}/{abs_path}"
+        else:
+            abs_path = str(_resolve_tool_path(inp["file_path"], must_exist=(name == "edit_file")).resolve())
+        if not isinstance(rt, DockerRuntime) and os.path.exists(abs_path):
             if abs_path not in read_file_state:
                 verb = "writing" if name == "write_file" else "editing"
                 return f"Error: You must read this file before {verb}. Use read_file first to see its current contents."

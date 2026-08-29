@@ -1,11 +1,20 @@
 [
   {
-    "instance_id": "astropy__astropy-12907",
+    "instance_id": "astropy__astropy-14995",
     "repo": "astropy/astropy",
     "success": false,
-    "duration": 279.6413538455963,
-    "patch": "diff --git a/astropy/modeling/separable.py b/astropy/modeling/separable.py\nindex a308e27297..45bea36085 100644\n--- a/astropy/modeling/separable.py\n+++ b/astropy/modeling/separable.py\n@@ -242,7 +242,7 @@ def _cstack(left, right):\n         cright = _coord_matrix(right, 'right', noutp)\n     else:\n         cright = np.zeros((noutp, right.shape[1]))\n-        cright[-right.shape[0]:, -right.shape[1]:] = 1\n+        cright[-right.shape[0]:, -right.shape[1]:] = right\n \n     return np.hstack([cleft, cright])\n \n",
-    "error": "[Errno 32] Broken pipe",
-    "agent_result": "[Errno 32] Broken pipe"
+    "duration": 0.0004990100860595703,
+    "patch": "",
+    "error": "cannot access local variable 'time' where it is not associated with a value",
+    "agent_result": "cannot access local variable 'time' where it is not associated with a value"
+  },
+  {
+    "instance_id": "astropy__astropy-6938",
+    "repo": "astropy/astropy",
+    "success": false,
+    "duration": 0.00016617774963378906,
+    "patch": "",
+    "error": "cannot access local variable 'time' where it is not associated with a value",
+    "agent_result": "cannot access local variable 'time' where it is not associated with a value"
   }
 ]

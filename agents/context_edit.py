@@ -149,47 +149,18 @@ def _openai_group(messages: list[dict], index: int) -> set[int]:
     return group
 
 
-def _anthropic_group(messages: list[dict], index: int) -> set[int]:
-    """Anthropic：assistant(tool_use) 与紧邻 user(tool_result) 成组。"""
-    group = {index}
-    msg = messages[index]
-    content = msg.get("content")
-
-    def has_tool_use(m: dict) -> bool:
-        c = m.get("content")
-        return isinstance(c, list) and any(
-            isinstance(b, dict) and b.get("type") == "tool_use" for b in c
-        )
-
-    def has_tool_result(m: dict) -> bool:
-        c = m.get("content")
-        return isinstance(c, list) and any(
-            isinstance(b, dict) and b.get("type") == "tool_result" for b in c
-        )
-
-    if msg.get("role") == "assistant" and has_tool_use(msg):
-        if index + 1 < len(messages) and has_tool_result(messages[index + 1]):
-            group.add(index + 1)
-    elif has_tool_result(msg):
-        if index - 1 >= 0 and messages[index - 1].get("role") == "assistant" and has_tool_use(messages[index - 1]):
-            group.add(index - 1)
-
-    return group
-
-
-def message_group(messages: list[dict], index: int, use_openai: bool) -> set[int]:
+def message_group(messages: list[dict], index: int, use_openai: bool = True) -> set[int]:
     if not (0 <= index < len(messages)):
         return set()
-    return _openai_group(messages, index) if use_openai else _anthropic_group(messages, index)
+    return _openai_group(messages, index)
 
 
-def delete_message_group(messages: list[dict], index: int, use_openai: bool) -> tuple[list[dict], int]:
+def delete_message_group(messages: list[dict], index: int, use_openai: bool = True) -> tuple[list[dict], int]:
     """删除 index 所属配对组，返回 (新消息列表, 删除条数)。
 
     保护规则：
     - OpenAI 的 index 0（system prompt）不可删除；
-    - 删除后若开头出现连续的同角色消息不做合并（API 可接受），
-      但 Anthropic 侧调用方应随后跑 _normalize_anthropic_messages。
+    - 删除后若开头出现连续的同角色消息不做合并（API 可接受）。
     """
     if not (0 <= index < len(messages)):
         return list(messages), 0

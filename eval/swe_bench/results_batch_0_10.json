@@ -1,0 +1,92 @@
+[
+  {
+    "instance_id": "astropy__astropy-12907",
+    "success": true,
+    "duration": 30.794434785842896,
+    "patch": "diff --git a/astropy/modeling/separable.py b/astropy/modeling/separable.py\nold mode 100755\nnew mode 100644\nindex a308e2729..45bea3608\n--- a/astropy/modeling/separable.py\n+++ b/astropy/modeling/separable.py\n@@ -242,7 +242,7 @@ def _cstack(left, right):\n         cright = _coord_matrix(right, 'right', noutp)\n     else:\n         cright = np.zeros((noutp, right.shape[1]))\n-        cright[-right.shape[0]:, -right.shape[1]:] = 1\n+        cright[-right.shape[0]:, -right.shape[1]:] = right\n \n     return np.hstack([cleft, cright])\n \n",
+    "error": null,
+    "tool_calls": 6,
+    "input_tokens": 79441,
+    "output_tokens": 996
+  },
+  {
+    "instance_id": "astropy__astropy-14182",
+    "success": true,
+    "duration": 217.2022259235382,
+    "patch": "diff --git a/astropy/io/ascii/rst.py b/astropy/io/ascii/rst.py\nold mode 100755\nnew mode 100644\nindex abdeba8ef..06f81c202\n--- a/astropy/io/ascii/rst.py\n+++ b/astropy/io/ascii/rst.py\n@@ -57,10 +57,14 @@ class RST(FixedWidth):\n     data_class = SimpleRSTData\n     header_class = SimpleRSTHeader\n \n-    def __init__(self):\n-        super().__init__(delimiter_pad=None, bookend=False)\n+    def __init__(self, header_rows=None):\n+        super().__init__(delimiter_pad=None, bookend=False, header_rows=header_rows)\n \n     def write(self, lines):\n         lines = super().write(lines)\n-        lines = [lines[1]] + lines + [lines[1]]\n+        # The separator line (position_char line) is at index len(header_rows)\n+        # because super().write() outputs header rows first, then the separator.\n+        header_rows = getattr(self.header, \"header_rows\", [\"name\"])\n+        sep_line = lines[len(header_rows)]\n+        lines = [sep_line] + lines + [sep_line]\n         return lines\n",
+    "error": null,
+    "tool_calls": 21,
+    "input_tokens": 294000,
+    "output_tokens": 10217
+  },
+  {
+    "instance_id": "astropy__astropy-14365",
+    "success": true,
+    "duration": 33.41001486778259,
+    "patch": "diff --git a/astropy/io/ascii/qdp.py b/astropy/io/ascii/qdp.py\nold mode 100755\nnew mode 100644\nindex 83a4f004a..768beb0de\n--- a/astropy/io/ascii/qdp.py\n+++ b/astropy/io/ascii/qdp.py\n@@ -68,7 +68,7 @@ def _line_type(line, delimiter=None):\n     _new_re = rf\"NO({sep}NO)+\"\n     _data_re = rf\"({_decimal_re}|NO|[-+]?nan)({sep}({_decimal_re}|NO|[-+]?nan))*)\"\n     _type_re = rf\"^\\s*((?P<command>{_command_re})|(?P<new>{_new_re})|(?P<data>{_data_re})?\\s*(\\!(?P<comment>.*))?\\s*$\"\n-    _line_type_re = re.compile(_type_re)\n+    _line_type_re = re.compile(_type_re, re.IGNORECASE)\n     line = line.strip()\n     if not line:\n         return \"comment\"\n",
+    "error": null,
+    "tool_calls": 6,
+    "input_tokens": 99603,
+    "output_tokens": 1114
+  },
+  {
+    "instance_id": "astropy__astropy-14995",
+    "success": true,
+    "duration": 55.323911905288696,
+    "patch": "diff --git a/astropy/nddata/mixins/ndarithmetic.py b/astropy/nddata/mixins/ndarithmetic.py\nold mode 100755\nnew mode 100644\nindex 4153dfccb..56a867879\n--- a/astropy/nddata/mixins/ndarithmetic.py\n+++ b/astropy/nddata/mixins/ndarithmetic.py\n@@ -520,7 +520,7 @@ class NDArithmeticMixin:\n         elif self.mask is None and operand is not None:\n             # Make a copy so there is no reference in the result.\n             return deepcopy(operand.mask)\n-        elif operand is None:\n+        elif operand is None or operand.mask is None:\n             return deepcopy(self.mask)\n         else:\n             # Now lets calculate the resulting mask (operation enforces copy)\n",
+    "error": null,
+    "tool_calls": 4,
+    "input_tokens": 44043,
+    "output_tokens": 2717
+  },
+  {
+    "instance_id": "astropy__astropy-6938",
+    "success": true,
+    "duration": 103.0748941898346,
+    "patch": "diff --git a/astropy/io/fits/fitsrec.py b/astropy/io/fits/fitsrec.py\nold mode 100755\nnew mode 100644\nindex 574b4073b..43d5394d8\n--- a/astropy/io/fits/fitsrec.py\n+++ b/astropy/io/fits/fitsrec.py\n@@ -1261,7 +1261,9 @@ class FITS_rec(np.recarray):\n \n         # Replace exponent separator in floating point numbers\n         if 'D' in format:\n-            output_field.replace(encode_ascii('E'), encode_ascii('D'))\n+            output_field[:] = np.char.replace(output_field,\n+                                              encode_ascii('E'),\n+                                              encode_ascii('D'))\n \n \n def _get_recarray_field(array, key):\n",
+    "error": null,
+    "tool_calls": 15,
+    "input_tokens": 158707,
+    "output_tokens": 4469
+  },
+  {
+    "instance_id": "astropy__astropy-7746",
+    "success": true,
+    "duration": 789.0518028736115,
+    "patch": "diff --git a/astropy/wcs/wcs.py b/astropy/wcs/wcs.py\nold mode 100755\nnew mode 100644\nindex d3a06f2b3..5fe41d4a6\n--- a/astropy/wcs/wcs.py\n+++ b/astropy/wcs/wcs.py\n@@ -1220,6 +1220,10 @@ reduce these to 2 dimensions using the naxis kwarg.\n \n             xy = np.hstack([x.reshape((x.size, 1)) for x in axes])\n \n+            # Short-circuit for empty arrays to avoid calling C library\n+            if xy.size == 0:\n+                return [np.empty(axes[0].shape) for _ in range(xy.shape[1])]\n+\n             if ra_dec_order and sky == 'input':\n                 xy = self._denormalize_sky(xy)\n             output = func(xy, origin)\n@@ -1235,6 +1239,11 @@ reduce these to 2 dimensions using the naxis kwarg.\n                 raise ValueError(\n                     \"When providing two arguments, the array must be \"\n                     \"of shape (N, {0})\".format(self.naxis))\n+\n+            # Short-circuit for empty arrays to avoid calling C library\n+            if xy.size == 0:\n+                return np.empty((0, xy.shape[-1]))\n+\n             if ra_dec_order and sky == 'input':\n                 xy = self._denormalize_sky(xy)\n             result = func(xy, origin)\n",
+    "error": null,
+    "tool_calls": 18,
+    "input_tokens": 254576,
+    "output_tokens": 6024
+  },
+  {
+    "instance_id": "django__django-10914",
+    "success": true,
+    "duration": 207.60305380821228,
+    "patch": "diff --git a/django/conf/global_settings.py b/django/conf/global_settings.py\nold mode 100755\nnew mode 100644\nindex acee9887d2..bdeec80610\n--- a/django/conf/global_settings.py\n+++ b/django/conf/global_settings.py\n@@ -304,7 +304,7 @@ FILE_UPLOAD_TEMP_DIR = None\n \n # The numeric mode to set newly-uploaded files to. The value should be a mode\n # you'd pass directly to os.chmod; see https://docs.python.org/library/os.html#files-and-directories.\n-FILE_UPLOAD_PERMISSIONS = None\n+FILE_UPLOAD_PERMISSIONS = 0o644\n \n # The numeric mode to assign to newly-created directories, when uploading files.\n # The value should be a mode as you'd pass to os.chmod;\n",
+    "error": null,
+    "tool_calls": 20,
+    "input_tokens": 218181,
+    "output_tokens": 4520
+  },
+  {
+    "instance_id": "django__django-10924",
+    "success": true,
+    "duration": 191.81759810447693,
+    "patch": "diff --git a/django/db/models/fields/__init__.py b/django/db/models/fields/__init__.py\nold mode 100755\nnew mode 100644\nindex 0c64748ccd..25e7078323\n--- a/django/db/models/fields/__init__.py\n+++ b/django/db/models/fields/__init__.py\n@@ -1663,8 +1663,11 @@ class FilePathField(Field):\n \n     def __init__(self, verbose_name=None, name=None, path='', match=None,\n                  recursive=False, allow_files=True, allow_folders=False, **kwargs):\n-        self.path, self.match, self.recursive = path, match, recursive\n-        self.allow_files, self.allow_folders = allow_files, allow_folders\n+        self.path = path\n+        self.match = match\n+        self.recursive = recursive\n+        self.allow_files = allow_files\n+        self.allow_folders = allow_folders\n         kwargs.setdefault('max_length', 100)\n         super().__init__(verbose_name, name, **kwargs)\n \n@@ -1709,7 +1712,7 @@ class FilePathField(Field):\n \n     def formfield(self, **kwargs):\n         return super().formfield(**{\n-            'path': self.path,\n+            'path': self.path() if callable(self.path) else self.path,\n             'match': self.match,\n             'recursive': self.recursive,\n             'form_class': forms.FilePathField,\n",
+    "error": null,
+    "tool_calls": 33,
+    "input_tokens": 516091,
+    "output_tokens": 6645
+  },
+  {
+    "instance_id": "django__django-11001",
+    "success": true,
+    "duration": 60.5908317565918,
+    "patch": "diff --git a/django/db/models/sql/compiler.py b/django/db/models/sql/compiler.py\nold mode 100755\nnew mode 100644\nindex 7649c39262..57150f96dc\n--- a/django/db/models/sql/compiler.py\n+++ b/django/db/models/sql/compiler.py\n@@ -32,7 +32,7 @@ class SQLCompiler:\n         self.select = None\n         self.annotation_col_map = None\n         self.klass_info = None\n-        self.ordering_parts = re.compile(r'(.*)\\s(ASC|DESC)(.*)')\n+        self.ordering_parts = re.compile(r'(.*)\\s(ASC|DESC)(.*)', re.DOTALL)\n         self._meta_ordering = None\n \n     def setup_query(self):\n",
+    "error": null,
+    "tool_calls": 7,
+    "input_tokens": 69518,
+    "output_tokens": 1531
+  }
+]

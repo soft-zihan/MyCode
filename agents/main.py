@@ -116,40 +116,25 @@ def _load_env_file() -> None:
         load_dotenv(override=False)
 
 
-def _is_anthropic_compatible_base_url(base_url: str | None) -> bool:
-    if not base_url:
-        return False
-    parsed = urlparse(base_url)
-    path = (parsed.path or "").lower().rstrip("/")
-    return path.endswith("/anthropic") or "/anthropic/" in path
-
-
-def _resolve_api_config(cli_api_base: str | None) -> tuple[str | None, str | None, bool]:
+def _resolve_api_config(cli_api_base: str | None) -> tuple[str | None, str | None]:
     generic_api_key = _clean_env(os.environ.get("APIKEY")) or _clean_env(os.environ.get("MINI_CLAUDE_API_KEY"))
     openai_api_key = _clean_env(os.environ.get("OPENAI_API_KEY"))
-    anthropic_api_key = _clean_env(os.environ.get("ANTHROPIC_API_KEY"))
 
     generic_api_base = _clean_env(os.environ.get("API")) or _clean_env(os.environ.get("MINI_CLAUDE_API_BASE"))
     openai_api_base = _clean_env(os.environ.get("OPENAI_BASE_URL"))
-    anthropic_api_base = _clean_env(os.environ.get("ANTHROPIC_BASE_URL"))
 
-    resolved_api_base = _clean_env(cli_api_base) or generic_api_base or openai_api_base or anthropic_api_base
+    resolved_api_base = _clean_env(cli_api_base) or generic_api_base or openai_api_base
 
     if resolved_api_base:
-        if _is_anthropic_compatible_base_url(resolved_api_base):
-            return resolved_api_base, generic_api_key or anthropic_api_key or openai_api_key, False
-        return resolved_api_base, generic_api_key or openai_api_key or anthropic_api_key, True
-
-    if anthropic_api_key or anthropic_api_base:
-        return anthropic_api_base, generic_api_key or anthropic_api_key or openai_api_key, False
+        return resolved_api_base, generic_api_key or openai_api_key
 
     if openai_api_key or openai_api_base:
-        return openai_api_base, generic_api_key or openai_api_key or anthropic_api_key, True
+        return openai_api_base, generic_api_key or openai_api_key
 
     if generic_api_key:
-        return None, generic_api_key, False
+        return None, generic_api_key
 
-    return None, None, False
+    return None, None
 
 
 # ─── @ 文件引用展开 ─────────────────────────────────────────
@@ -433,7 +418,6 @@ async def run_repl(agent: Agent) -> None:
                 continue
             agent.session_id = target
             agent.restore_session({
-                "anthropicMessages": session.get("anthropicMessages"),
                 "openaiMessages": session.get("openaiMessages"),
                 "foldedSessionMemories": session.get("foldedSessionMemories"),
                 "checkpointStore": session.get("checkpointStore"),
@@ -728,7 +712,7 @@ Options:
   --plan              Plan mode: read-only, describe changes without executing
   --accept-edits      Auto-approve file edits, still confirm dangerous shell
   --dont-ask          Auto-deny anything needing confirmation (for CI)
-  --thinking          Enable extended thinking (Anthropic only)
+  --thinking          Enable extended thinking (model-dependent)
   --model, -m         Model to use (default: deepseek-chat, or MODEL env)
   --api-base URL      Override API base URL from CLI or .env
   --resume            Resume the last session
@@ -777,7 +761,7 @@ Examples:
   mycode --yolo "run all tests and fix failures"
   mycode --plan "how would you refactor this?"
   mycode --max-cost 0.50 --max-turns 20 "implement feature X"
-  MODEL=deepseek-chat APIKEY=sk-xxx API=https://api.deepseek.com/anthropic mycode "hello"
+  MODEL=deepseek-chat APIKEY=sk-xxx API=https://api.deepseek.com/v1 mycode "hello"
   MODEL=gpt-4o OPENAI_API_KEY=sk-xxx OPENAI_BASE_URL=https://aihubmix.com/v1 mycode "hello"
   mycode --resume
   mycode  # starts interactive REPL
@@ -788,7 +772,7 @@ Examples:
     permission_mode = _resolve_permission_mode(args)
     # 模型优先使用命令行参数，其次读取 .env 中的 MODEL / MINI_CLAUDE_MODEL，最后回落到默认模型。
     model = _resolve_model(args.model)
-    resolved_api_base, resolved_api_key, resolved_use_openai = _resolve_api_config(args.api_base)
+    resolved_api_base, resolved_api_key = _resolve_api_config(args.api_base)
 
     # --trace 开启 JSONL 事件日志（也可用 BEAR_TRACE=1 或 REPL 内 /trace on）。
     if args.trace:
@@ -806,15 +790,14 @@ Examples:
         )
         sys.exit(1)
 
-    # 创建主 Agent。OpenAI-compatible 和 Anthropic 原生接口使用不同的 base URL 参数名传入。
+    # 创建主 Agent。
     agent = Agent(
         permission_mode=permission_mode,
         model=model,
         thinking=args.thinking,
         max_cost_usd=args.max_cost,
         max_turns=args.max_turns,
-        api_base=resolved_api_base if resolved_use_openai else None,
-        anthropic_base_url=resolved_api_base if not resolved_use_openai else None,
+        api_base=resolved_api_base,
         api_key=resolved_api_key,
     )
 
@@ -826,7 +809,6 @@ Examples:
             session = load_session(session_id)
             if session:
                 agent.restore_session({
-                    "anthropicMessages": session.get("anthropicMessages"),
                     "openaiMessages": session.get("openaiMessages"),
                     "foldedSessionMemories": session.get("foldedSessionMemories"),
                 })
