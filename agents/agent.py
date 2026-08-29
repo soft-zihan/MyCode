@@ -434,7 +434,7 @@ class Agent:
     def is_processing(self)->bool:
         return self._current_task is not None and not self._current_task.done()
 
-    #大模型调用的工厂方法,构建一个用于记忆召回（memory recall）的 sideQuery 可调用对象，兼容anthropic, openai。
+    #大模型调用的工厂方法,构建一个用于记忆召回（memory recall）的 sideQuery 可调用对象。
     def _get_side_client(self):
         """解析 side query 专用端点（BEAR_SIDE_MODEL），返回 (client, model, use_openai)。
 
@@ -442,59 +442,26 @@ class Agent:
         独立端点的客户端按 (model, base_url, protocol) 缓存，避免重复创建。
         """
         endpoint = resolve_side_endpoint(primary=self._primary_endpoint())
-        primary_base = self._api_base if self.use_openai else self._anthropic_base_url
         if (endpoint.model == self.model
-                and endpoint.base_url == primary_base
-                and endpoint.use_openai == self.use_openai):
+                and endpoint.base_url == self._api_base):
             return None
-        cache_key = (endpoint.model, endpoint.base_url, endpoint.use_openai)
+        cache_key = (endpoint.model, endpoint.base_url, True)
         cached = getattr(self, "_side_client_cache", None)
         if cached and cached[0] == cache_key:
             return cached[1]
-        if endpoint.use_openai:
-            client = openai.AsyncOpenAI(base_url=endpoint.base_url, api_key=endpoint.api_key)
-        else:
-            kwargs: dict[str, Any] = {}
-            if endpoint.api_key:
-                kwargs["api_key"] = endpoint.api_key
-            if endpoint.base_url:
-                kwargs["base_url"] = endpoint.base_url
-            client = anthropic.AsyncAnthropic(**kwargs)
-        result = (client, endpoint.model, endpoint.use_openai)
+        client = openai.AsyncOpenAI(base_url=endpoint.base_url, api_key=endpoint.api_key)
+        result = (client, endpoint.model, True)
         self._side_client_cache = (cache_key, result)
         return result
 
     def _build_side_query(self, *, max_tokens: int = 256):
-        # 优先使用 BEAR_SIDE_MODEL 路由出的独立端点（如便宜的小模型），
-        # 未配置时回退到主客户端。
         side = self._get_side_client()
         if side is not None:
             client, model, use_openai = side
-        elif self._anthropic_client:
-            client, model, use_openai = self._anthropic_client, self.model, False
         elif self._openai_client:
             client, model, use_openai = self._openai_client, self.model, True
         else:
             return None
-
-        if not use_openai:
-            async def _sq(system:str, user_message:str)->str:
-
-                resp = await client.messages.create(
-                    model=model, max_tokens=max(1, int(max_tokens)), system=system,
-                messages=[{"role": "user", "content": user_message}],
-                )
-                text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
-                if not text.strip():
-                    block_types = [str(getattr(b, "type", "")) for b in getattr(resp, "content", [])]
-                    logging.warning(
-                        "side_query returned empty Anthropic-compatible response: model=%s stop_reason=%s content_block_types=%s",
-                        getattr(resp, "model", model),
-                        getattr(resp, "stop_reason", ""),
-                        block_types,
-                    )
-                return text
-            return _sq
 
         async def _sq_openai(system:str, user_message:str)->str:
             resp = await client.chat.completions.create(
@@ -540,22 +507,20 @@ class Agent:
         """把当前 Agent 的连接信息包装成主端点，供模型注册表路由使用。"""
         return ModelEndpoint(
             model=self.model,
-            base_url=self._api_base if self.use_openai else self._anthropic_base_url,
+            base_url=self._api_base,
             api_key=self._api_key,
-            use_openai=self.use_openai,
+            use_openai=True,
         )
 
     def _spawn_sub_agent(self, *, system_prompt: str, tools: list[ToolDef], model_ref: str, label: str) -> "Agent":
         """按模型注册表解析出子 Agent 应使用的端点，并构造子 Agent 实例。
 
-        model_ref 为端点 ID 或裸模型名；为空则继承父端点。解析出的端点若与父端点
-        协议不同（openai vs anthropic），会以该端点自己的协议构造客户端。
+        model_ref 为端点 ID 或裸模型名；为空则继承父端点。
         """
         endpoint = resolve_agent_endpoint(label, model_ref=model_ref, primary=self._primary_endpoint())
         return Agent(
             model=endpoint.model,
-            api_base=endpoint.base_url if endpoint.use_openai else None,
-            anthropic_base_url=None if endpoint.use_openai else endpoint.base_url,
+            api_base=endpoint.base_url,
             api_key=endpoint.api_key,
             custom_system_prompt=system_prompt,
             custom_tools=tools,
@@ -595,7 +560,7 @@ class Agent:
             self._pre_plan_mode = None
             self._plan_file_path = None
             self._system_prompt = self._base_system_prompt
-            if self.use_openai and self._openai_messages:
+            if self._openai_messages:
                 self._openai_messages[0]["content"] =self._system_prompt
             print_info(f"Exited plan mode -> {self.permission_mode} mode")
             return self.permission_mode
@@ -799,7 +764,7 @@ class Agent:
         else:
             self._system_prompt = self._base_system_prompt
         self._system_prompt += self._build_fold_guidance_section()
-        if self.use_openai and self._openai_messages:
+        if self._openai_messages:
             self._openai_messages[0]["content"] = self._system_prompt
 
     def _record_tool_outcome(self, tool_name: str, success: bool) -> None:
@@ -1058,7 +1023,6 @@ class Agent:
 
 
     def clear_history(self)->None:
-        self._anthropic_messages = []
         self._openai_messages = []
         self._pending_skill_extraction_window = None
         self._last_retrieved_skill_reference = None
@@ -1068,8 +1032,7 @@ class Agent:
         self._tool_error_streak = 0
         self._same_tool_repeat_count = 0
         self._last_tool_name = ""
-        if self.use_openai:
-            self._openai_messages.append({"role": "system", "content":self._system_prompt})
+        self._openai_messages.append({"role": "system", "content":self._system_prompt})
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.last_input_token_count = 0
@@ -1123,8 +1086,6 @@ class Agent:
 
     #恢复会话信息
     def restore_session(self, data:dict)->None:
-        if data.get("anthropicMessages"):
-            self._anthropic_messages = self._normalize_anthropic_messages(_sanitize_for_utf8(data["anthropicMessages"]))
         if data.get("openaiMessages"):
             self._openai_messages = _sanitize_for_utf8(data["openaiMessages"])
         if isinstance(data.get("foldedSessionMemories"), list):
@@ -1154,10 +1115,7 @@ class Agent:
         boundary = self._turn_boundaries[idx]
 
         # 1. 截断消息历史到边界记录的消息数（边界在用户消息追加前记录，配对完整）。
-        if self.use_openai:
-            self._openai_messages = self._openai_messages[:boundary.message_count]
-        else:
-            self._anthropic_messages = self._anthropic_messages[:boundary.message_count]
+        self._openai_messages = self._openai_messages[:boundary.message_count]
 
         # 2. 回滚边界之后被修改/新建的文件。
         file_results = self._checkpoint_store.restore_after(boundary.checkpoint_count)
@@ -1192,10 +1150,7 @@ class Agent:
         self.session_id = new_id
         self.session_start_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         # 深拷贝消息历史（避免两个会话共享同一 list 对象）
-        if self.use_openai:
-            self._openai_messages = json.loads(json.dumps(self._openai_messages, default=str))
-        else:
-            self._anthropic_messages = json.loads(json.dumps(self._anthropic_messages, default=str))
+        self._openai_messages = json.loads(json.dumps(self._openai_messages, default=str))
         self._folded_session_memories = json.loads(json.dumps(self._folded_session_memories, default=str))
         self._turn_boundaries = [TurnBoundary(b.turn, b.message_count, b.checkpoint_count) for b in self._turn_boundaries]
         # fork 文件快照存储（复制快照文件 + 元数据）
@@ -1211,27 +1166,20 @@ class Agent:
     def describe_context(self) -> list[dict]:
         from .context_edit import describe_messages
 
-        messages = self._openai_messages if self.use_openai else self._anthropic_messages
-        return describe_messages(messages, self.use_openai)
+        return describe_messages(self._openai_messages, True)
 
     #/ctx del N [N2 ...]：删除指定 index 所属的消息组（保持工具配对完整）。
     def delete_context_messages(self, indexes: list[int]) -> str:
         from .context_edit import delete_message_group
 
-        if self.use_openai:
-            messages = self._openai_messages
-        else:
-            messages = self._anthropic_messages
+        messages = self._openai_messages
         # ACE：删除前记录被引用的 restore key，删除后不再被引用的才持久 drop。
         referenced_before = self._referenced_store_keys(messages)
         total_deleted = 0
         for idx in sorted(set(indexes)):
-            messages, deleted = delete_message_group(messages, idx, self.use_openai)
+            messages, deleted = delete_message_group(messages, idx, True)
             total_deleted += deleted
-        if self.use_openai:
-            self._openai_messages = messages
-        else:
-            self._anthropic_messages = self._normalize_anthropic_messages(messages)
+        self._openai_messages = messages
         self._drop_orphaned_store_entries(referenced_before, messages)
         return f"Deleted {total_deleted} message(s). Context now: {self._get_message_count()} messages."
 
@@ -1268,76 +1216,16 @@ class Agent:
     def keep_context_messages(self, indexes: list[int]) -> str:
         from .context_edit import keep_only_groups
 
-        if self.use_openai:
-            messages = self._openai_messages
-        else:
-            messages = self._anthropic_messages
+        messages = self._openai_messages
         referenced_before = self._referenced_store_keys(messages)
-        kept, deleted = keep_only_groups(messages, indexes, self.use_openai)
-        if self.use_openai:
-            self._openai_messages = kept
-        else:
-            self._anthropic_messages = self._normalize_anthropic_messages(kept)
+        kept, deleted = keep_only_groups(messages, indexes, True)
+        self._openai_messages = kept
         # ACE：不再被引用的 store 条目持久 drop。
         self._drop_orphaned_store_entries(referenced_before, kept)
         return f"Kept {len(kept)} message(s), removed {deleted}. Context now: {self._get_message_count()} messages."
 
-
-
-#整理 Anthropic 的历史消息，修正部分角色错误，并丢弃不合法的工具调用消息。
-    def _normalize_anthropic_messages(self, messages: list[dict]) -> list[dict]:
-        role_normalized = []
-        for msg in messages:
-            copied = dict(msg)
-            content = copied.get("content")
-            if copied.get("role") == "user" and isinstance(content, list):
-                if any(isinstance(block, dict) and block.get("type") == "tool_use" for block in content):
-                    copied["role"] = "assistant"
-            role_normalized.append(copied)
-
-        normalized = []
-        i = 0
-        while i < len(role_normalized):
-            msg = role_normalized[i]
-            tool_use_ids = self._anthropic_tool_use_ids(msg)
-            if not tool_use_ids:
-                normalized.append(msg)
-                i += 1
-                continue
-
-            next_msg = role_normalized[i + 1] if i + 1 < len(role_normalized) else None
-            result_ids = self._anthropic_tool_result_ids(next_msg) if next_msg else set()
-            if tool_use_ids.issubset(result_ids):
-                normalized.append(msg)
-                normalized.append(next_msg)
-                i += 2
-                continue
-
-            i += 1
-        return normalized
-
-    @staticmethod
-    def _anthropic_tool_use_ids(msg: dict | None) -> set[str]:
-        if not msg or msg.get("role") != "assistant" or not isinstance(msg.get("content"), list):
-            return set()
-        return {
-            block.get("id")
-            for block in msg["content"]
-            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id")
-        }
-
-    @staticmethod
-    def _anthropic_tool_result_ids(msg: dict | None) -> set[str]:
-        if not msg or msg.get("role") != "user" or not isinstance(msg.get("content"), list):
-            return set()
-        return {
-            block.get("tool_use_id")
-            for block in msg["content"]
-            if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("tool_use_id")
-        }
-
     def _get_message_count(self) -> int:
-        return len(self._openai_messages) if self.use_openai else len(self._anthropic_messages)
+        return len(self._openai_messages)
 
     # 记忆注入后的冷却轮数：冷却期内同一条 memory 不再参与召回，
     # 到期后自动解禁（替代旧的"整会话封杀"，避免长会话中记忆永久失效）。
@@ -1360,8 +1248,7 @@ class Agent:
                     "startTime": self.session_start_time,
                     "messageCount": self._get_message_count(),
                 },
-                "anthropicMessages": _sanitize_for_utf8(self._anthropic_messages) if not self.use_openai else None,
-                "openaiMessages": _sanitize_for_utf8(self._openai_messages) if self.use_openai else None,
+                "openaiMessages": _sanitize_for_utf8(self._openai_messages),
                 "foldedSessionMemories": _sanitize_for_utf8(self._folded_session_memories),
                 # /rewind 支持：快照元数据 + 轮次边界随 session 落盘。
                 "checkpointStore": self._checkpoint_store.to_dict(),
@@ -1382,10 +1269,7 @@ class Agent:
             await self._compact_conversation(trigger="auto")
 
     async def _compact_conversation(self, *, trigger: str = "manual")->bool:
-        if self.use_openai:
-            compacted = await self._compact_openai(trigger=trigger)
-        else:
-            compacted = await self._compact_anthropic(trigger=trigger)
+        compacted = await self._compact_openai(trigger=trigger)
         if compacted:
             from .trace import trace_event
             trace_event(
@@ -1396,21 +1280,6 @@ class Agent:
             )
             print_info("Conversation compacted.")
         return compacted
-
-    async def _compact_anthropic(self, *, trigger: str)->bool:
-        if len (self._anthropic_messages)<4:
-            return False
-
-        transcript = build_anthropic_transcript(_sanitize_for_utf8(self._anthropic_messages))
-        if not transcript.strip():
-            return False
-        memory = await self._generate_folded_session_memory(transcript)
-        self._record_folded_session_memory(trigger, memory)
-        self._record_fold_event()
-        self._anthropic_messages = [{"role": "user", "content": format_folded_memory(memory)}]
-        self.last_input_token_count = 0
-        self._refresh_runtime_system_prompt()
-        return True
 
     async def _compact_openai(self, *, trigger: str)->bool:
         if len (self._openai_messages)<4:
@@ -1455,39 +1324,11 @@ class Agent:
 
     #多层级压缩流水线
     def _run_compression_pipeline(self)->None:
-        if self.use_openai:
-            self._budget_tool_results_openai()
-            self._snip_stale_results_openai()
-            self._microcompact_openai()
-        else:
-            self._budget_tool_results_anthropic()
-            self._snip_stale_results_anthropic()
-            self._microcompact_anthropic()
+        self._budget_tool_results_openai()
+        self._snip_stale_results_openai()
+        self._microcompact_openai()
 
     #第一层级压缩，预算压缩
-    def _budget_tool_results_anthropic(self)->None:
-        #计算利用率：utilization = 已用Token / 有效窗口大小。
-        utilization = self.last_input_token_count / self.effective_window if self.effective_window else 0
-        #如果利用率低于 50%，说明空间还很充裕，直接返回，不做任何处理。
-        if utilization < 0.5:
-            return
-        #动态预算（Budget）：危急状态（>70%）：如果利用率很高，允许单个工具结果保留 15,000 个字符。
-        # 警戒状态（50%-70%）：如果利用率中等，只允许保留 30000 个字符。
-        budget = 15000 if utilization > 0.7 else 30000
-
-        for msg in self._anthropic_messages:
-
-            #只处理 role 为 "user" 的消息。在工具调用流程中，工具的执行结果通常是以“用户”的身份反馈给模型的。
-
-            if msg.get("role") != "user" or not isinstance(msg.get("content"), list):
-                continue
-            for block in msg["content"]:
-                if isinstance(block, dict) and block.get("type") == "tool_result" and isinstance(block.get("content"), str) and len(block["content"]) > budget:
-                    #计算保留长度 (keep)：keep = (budget - 80) // 2 这里预留了约 80 个字符的空间给中间的提示语，剩下的长度平分给开头和结尾。
-                    keep = (budget - 80) // 2
-                    #重组新内容 = 开头部分 + 提示语 + 结尾部分
-                    block["content"] = block["content"][:keep] + f"\n\n[... budgeted: {len(block['content']) - keep * 2} chars truncated ...]\n\n" + block["content"][-keep:]
-
     def _budget_tool_results_openai(self)->None:
         #计算利用率：utilization = 已用Token / 有效窗口大小。
         utilization = self.last_input_token_count / self.effective_window if self.effective_window else 0
@@ -1505,52 +1346,6 @@ class Agent:
 
 
     #第二级策略：修剪过期的工具执行结果
-    def _snip_stale_results_anthropic(self) -> None:
-        utilization = self.last_input_token_count / self.effective_window if self.effective_window else 0
-        if utilization < SNIP_THRESHOLD:
-            return
-        results = []
-        for mindex,  msg in enumerate(self._anthropic_messages):
-            if msg.get("role") != "user" or not isinstance(msg.get("content"), list):
-                continue
-
-            for bindex, block in enumerate(msg["content"]):
-                if isinstance(block, dict) and block.get("type") == "tool_result" and isinstance(block.get("content"), str) and not is_compressed_placeholder(block["content"]):
-                    tool_use_id = block.get("tool_use_id")
-                    # 对每个 tool_result，通过 tool_use_id 反查它来自哪个工具
-                    tool_info = self._find_tool_use_by_id(tool_use_id)
-                    if tool_info and tool_info["name"] in SNIPPABLE_TOOLS:
-                        results.append({"mindex": mindex, "bindex": bindex, "name": tool_info["name"], "file_path": tool_info.get("input", {}).get("file_path")})
-
-        if len(results) <= KEEP_RECENT_RESULTS:
-            return
-
-        to_snip =  set()
-        seen_files: dict[str, list[int]] = {}
-
-        for i, r in enumerate(results):
-            if r["name"] == "read_file" and r.get("file_path"):
-                seen_files.setdefault(r["file_path"], []).append(i)
-        #如果一个文件被读取了多次，只保留最后一次读取的结果，把前面几次读取的内容全部标记为“修剪”（Snip）。
-        for indices in seen_files.values():
-            if len (indices) >1 :
-                for j in indices[:-1]:
-                    to_snip.add (j)
-
-        snip_before = len(results) - KEEP_RECENT_RESULTS
-        for i in range (snip_before):
-            to_snip.add(i)
-
-        for idx in to_snip:
-            r = results[idx]
-            block = self._anthropic_messages[r["mindex"]]["content"][r["bindex"]]
-            original = block["content"]
-            # ACE 可逆：替换前把原文无损存入 store，键用 tool_use_id。
-            key_id = block.get("tool_use_id") or f"{r['mindex']}-{r['bindex']}"
-            key = f"snip:{key_id}"
-            self._context_store.store(key, original)
-            block["content"] = snipped_placeholder(key, self._context_store.get_abstract(key))
-
     def _snip_stale_results_openai(self) -> None:
         utilization = self.last_input_token_count / self.effective_window if self.effective_window else 0
         if utilization < SNIP_THRESHOLD:
@@ -1572,31 +1367,8 @@ class Agent:
 
     #微压缩
 
-    #基于“时间”的上下文瘦身策略，
+    #基于"时间"的上下文瘦身策略，
     #如果已经很久没说话了，说明之前的工具执行结果你已经看完了，那就把它们清理掉，腾出空间
-
-    def _microcompact_anthropic(self) -> None:
-        if not self.last_api_call_time or (time.time() - self.last_api_call_time) < MICROCOMPACT_IDLE_S:
-            return
-
-        all_results = []
-        for mindex, msg in enumerate(self._anthropic_messages):
-            if msg.get("role")!="user" or not isinstance(msg.get("content"), list):
-                continue
-            for bindex, block in enumerate(msg["content"]):
-                if isinstance(block, dict) and block.get("type") == "tool_result" and isinstance(block.get("content"), str) and not is_compressed_placeholder(block["content"]):
-                    all_results.append((mindex, bindex))
-
-        clear_count = len(all_results) - KEEP_RECENT_RESULTS
-        for i in range(max(0, clear_count)):
-            mi, bi = all_results[i]
-            block = self._anthropic_messages[mi]["content"][bi]
-            original = block["content"]
-            # ACE 可逆：清理前把原文存入 store。
-            key_id = block.get("tool_use_id") or f"{mi}-{bi}"
-            key = f"clear:{key_id}"
-            self._context_store.store(key, original)
-            block["content"] = cleared_placeholder(key)
 
     def _microcompact_openai(self) -> None:
         if not self.last_api_call_time or (time.time() - self.last_api_call_time) < MICROCOMPACT_IDLE_S:
@@ -1613,15 +1385,6 @@ class Agent:
             key = f"clear:{msg.get('tool_call_id') or tool_msgs[i]}"
             self._context_store.store(key, original)
             msg["content"] = cleared_placeholder(key)
-
-    def _find_tool_use_by_id(self, tool_use_id: int) -> dict | None:
-        for msg in self._anthropic_messages:
-            if msg.get("role") != "assistant" or not isinstance(msg.get("content"), list):
-                continue
-
-            for block in msg["content"]:
-                if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id") == tool_use_id:
-                    return {"name": block["name"], "input": block.get("input", {})}
 
     #大结果持久化
     #如果工具返回的结果太大（超过 30KB），不要硬塞进上下文里，而是把它存成一个临时文件。
@@ -1786,7 +1549,7 @@ class Agent:
             self.permission_mode = "plan"
             self._plan_file_path =  self._generate_plan_file_path()
             self._system_prompt = self._base_system_prompt + self._build_plan_mode_prompt()
-            if self.use_openai and self._openai_messages:
+            if self._openai_messages:
                 self._openai_messages[0]["content"] = self._system_prompt
             print_info("Entered plan mode (read-only). Plan file: " + self._plan_file_path)
             return f"Entered plan mode. You are now in read-only mode.\n\nYour plan file: {self._plan_file_path}\nWrite your plan to this file. This is the only file you can edit.\n\nWhen your plan is complete, call exit_plan_mode."
@@ -1822,7 +1585,7 @@ class Agent:
                 saved_plan_path = self._plan_file_path
                 self._plan_file_path = None
                 self._system_prompt = self._base_system_prompt
-                if self.use_openai and self._openai_messages:
+                if self._openai_messages:
                     self._openai_messages[0]["content"] = self._system_prompt
 
                 if choice == "clear-and-execute":
@@ -1846,7 +1609,7 @@ class Agent:
             self._pre_plan_mode = None
             self._plan_file_path = None
             self._system_prompt = self._base_system_prompt
-            if self.use_openai and self._openai_messages:
+            if self._openai_messages:
                 self._openai_messages[0]["content"] = self._system_prompt
 
             print_info("Exited plan mode. Restored to " + self.permission_mode + " mode.")
@@ -1856,10 +1619,8 @@ class Agent:
 
     def _clear_history_keep_system(self) -> None:
         """清空历史信息，但是保留系统prompt."""
-        self._anthropic_messages = []
         self._openai_messages = []
-        if self.use_openai:
-            self._openai_messages.append({"role": "system", "content": self._system_prompt})
+        self._openai_messages.append({"role": "system", "content": self._system_prompt})
         self.last_input_token_count = 0
         self._fold_last_time = 0.0
         self._fold_count = 0
