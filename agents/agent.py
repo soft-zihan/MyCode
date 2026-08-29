@@ -345,6 +345,10 @@ class Agent:
         self._repeat_chain_key: str = ""
         self._repeat_chain_count: int = 0
 
+        # Skill 进化 cadence 控制（避免每轮都触发 side_query）
+        self._turns_since_last_evolution: int = 0
+        self._last_evolution_time: float = time.time()
+
         #构建系统提示词
         self._base_system_prompt = custom_system_prompt or build_system_prompt()
 
@@ -680,8 +684,14 @@ class Agent:
         self._last_assistant_text = assistant_text
         if not self.is_sub_agent and not self._aborted:
             self._schedule_background_skill_task(self._run_skill_usage_tracking(original_user_message, assistant_text))
-            if ready_skill_extraction_window:
+            
+            # Cadence 门控：避免每轮都触发进化（减少冗余 side_query 调用）
+            self._turns_since_last_evolution += 1
+            if ready_skill_extraction_window and self._should_trigger_evolution():
                 self._schedule_background_skill_task(self._run_online_skill_evolution(ready_skill_extraction_window))
+                self._turns_since_last_evolution = 0
+                self._last_evolution_time = time.time()
+            
             self._set_pending_skill_extraction_window(
                 original_user_message=original_user_message,
                 assistant_text=assistant_text,
@@ -977,6 +987,22 @@ class Agent:
         if not ref:
             return None
         return {k: v for k, v in ref.items() if k != "all_hits"}
+
+    def _should_trigger_evolution(self) -> bool:
+        """检查是否应触发 Skill 进化（cadence 门控）。
+        
+        通过环境变量配置：
+        - BEAR_SKILL_EVOLUTION_MIN_TURNS: 最少轮次间隔（默认 3）
+        - BEAR_SKILL_EVOLUTION_MIN_MINUTES: 最少时间间隔（默认 10 分钟）
+        """
+        min_turns = int(os.environ.get("BEAR_SKILL_EVOLUTION_MIN_TURNS", "3"))
+        min_minutes = int(os.environ.get("BEAR_SKILL_EVOLUTION_MIN_MINUTES", "10"))
+        
+        turns_ok = self._turns_since_last_evolution >= min_turns
+        minutes_since = (time.time() - self._last_evolution_time) / 60
+        time_ok = minutes_since >= min_minutes
+        
+        return turns_ok and time_ok
 
     async def _run_online_skill_evolution(self, window: dict[str, Any], *, interactive_confirm: bool = False) -> None:
         if not self._online_evolution_enabled() or self.permission_mode == "plan":
