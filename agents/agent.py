@@ -11,7 +11,6 @@ import uuid
 from pathlib import Path
 from typing import Callable, Awaitable, Any
 
-import anthropic
 import openai
 
 from agents.mcp_client import McpManager
@@ -27,7 +26,6 @@ from agents.model_registry import ModelEndpoint, resolve_agent_endpoint, resolve
 from agents.prompt import build_system_prompt
 from agents.session_memory import (
     FOLD_SESSION_MEMORY_SYSTEM,
-    build_anthropic_transcript,
     build_folding_user_prompt,
     build_openai_transcript,
     fallback_folded_memory,
@@ -172,7 +170,6 @@ class Agent:
                  permission_mode:str="default",
                  model:str="deepseek-chat",
                  api_base: str | None=None,
-                 anthropic_base_url: str | None=None,
                  api_key: str | None=None,
                  thinking: bool=False,
                  max_cost_usd: float | None=None,
@@ -196,7 +193,6 @@ class Agent:
                 permission_mode = options.permission_mode
                 model = options.model
                 api_base = options.api_base
-                anthropic_base_url = options.anthropic_base_url
                 api_key = options.api_key
                 thinking = options.thinking
                 max_cost_usd = options.max_cost_usd
@@ -223,7 +219,6 @@ class Agent:
         self._custom_system_prompt = custom_system_prompt
         # 保存连接信息，供模型注册表构造主端点、派生子 Agent 端点使用。
         self._api_base = api_base
-        self._anthropic_base_url = anthropic_base_url
         self._api_key = api_key
         # side query 独立端点客户端缓存：(cache_key, (client, model, use_openai))
         self._side_client_cache: tuple[tuple, tuple] | None = None
@@ -337,7 +332,6 @@ class Agent:
         self._session_memory_bytes = 0
 
         #区分message的历史消息
-        self._anthropic_messages: list[str] = []
         self._openai_messages: list[str] = []
         self._last_retrieved_skill_reference: dict[str, Any] | None = None
         self._last_retrieved_skill_hits: list[dict[str, Any]] = []
@@ -349,6 +343,8 @@ class Agent:
         self._tool_error_streak: int = 0
         self._same_tool_repeat_count: int = 0
         self._last_tool_name: str = ""
+        self._repeat_chain_key: str = ""
+        self._repeat_chain_count: int = 0
 
         #构建系统提示词
         self._base_system_prompt = custom_system_prompt or build_system_prompt()
@@ -360,18 +356,8 @@ class Agent:
             self._system_prompt = self._base_system_prompt
 
         #初始化大模型客户端
-        if self.use_openai:
-            self._openai_client = openai.AsyncOpenAI(base_url=api_base, api_key=api_key)
-            self._anthropic_client = None
-            self._openai_messages.append({"role": "system", "content": self._system_prompt})
-        else:
-            kwargs : dict[str,Any] = {}
-            if api_key:
-                kwargs["api_key"] = api_key
-            if anthropic_base_url:
-                kwargs["base_url"] = anthropic_base_url
-            self._anthropic_client = anthropic.AsyncAnthropic(**kwargs)
-            self._openai_client = None
+        self._openai_client = openai.AsyncOpenAI(base_url=api_base, api_key=api_key)
+        self._openai_messages.append({"role": "system", "content": self._system_prompt})
 
         self._refresh_runtime_system_prompt()
 
@@ -682,7 +668,7 @@ class Agent:
             user_preview=user_message[:200],
         )
         _turn_t0 = time.time()
-        coro = self._chat_openai(user_message) if self.use_openai else self._chat_anthropic(user_message)
+        coro = self._chat_openai(user_message)
         self._current_task = asyncio.create_task(coro)
         try:
             await self._current_task
@@ -828,12 +814,52 @@ class Agent:
         else:
             self._tool_error_streak += 1
 
+    @staticmethod
+    def _canonicalize_arguments(args: dict) -> str:
+        def sort_json(value):
+            if isinstance(value, dict):
+                return {k: sort_json(v) for k, v in sorted(value.items())}
+            if isinstance(value, list):
+                return [sort_json(v) for v in value]
+            return value
+        return json.dumps(sort_json(args), ensure_ascii=False, sort_keys=True)
+
+    def _check_repeat_guard(self, tool_name: str, inp: dict) -> str | None:
+        key = json.dumps([tool_name, self._canonicalize_arguments(inp)], ensure_ascii=False)
+        if key == self._repeat_chain_key:
+            self._repeat_chain_count += 1
+        else:
+            self._repeat_chain_key = key
+            self._repeat_chain_count = 1
+        if self._repeat_chain_count == 3:
+            return (
+                "You are repeating the exact same tool call with identical arguments. "
+                "Carefully analyze the previous result before calling again: if the task is "
+                "not complete, try a different approach or different arguments instead of "
+                "repeating the call."
+            )
+        if self._repeat_chain_count in (5, 8):
+            preview = self._canonicalize_arguments(inp)[:500]
+            return (
+                f"Repeated tool call detected:\n"
+                f"- tool: {tool_name}\n"
+                f"- consecutive_calls: {self._repeat_chain_count}\n"
+                f"- arguments: {preview}\n"
+                f"The repeated calls are not making progress. Do not call this tool with "
+                f"these exact arguments again. Inspect the latest result and choose a "
+                f"different action, different arguments, or finish the task if enough "
+                f"evidence has been gathered."
+            )
+        return None
+
     def _record_fold_event(self) -> None:
         self._fold_last_time = time.time()
         self._fold_count += 1
         self._tool_error_streak = 0
         self._same_tool_repeat_count = 0
         self._last_tool_name = ""
+        self._repeat_chain_key = ""
+        self._repeat_chain_count = 0
 
     def _looks_like_tool_failure(self, tool_name: str, raw: str, result: str) -> bool:
         text = f"{raw}\n{result}".lower()
@@ -1618,6 +1644,18 @@ class Agent:
         preview = "\n".join(lines[:200])
         size_kb = len(result.encode()) / 1024
 
+        # 对于 read_file，提供明确的后续读取建议
+        if tool_name == "read_file":
+            return (
+                f"[Result too large ({size_kb:.1f} KB, {len(lines)} lines). "
+                f"Full output saved to {filepath}.]\n\n"
+                f"Preview (first 200 lines):\n{preview}\n\n"
+                f"To read more, use read_file with offset parameter:\n"
+                f"  - offset=201 to read lines 201-400\n"
+                f"  - offset=401 to read lines 401-600\n"
+                f"  - Or use limit parameter to read specific ranges"
+            )
+        
         return (
             f"[Result too large ({size_kb:.1f} KB, {len(lines)} lines). "
             f"Full output saved to {filepath}. "
@@ -1865,352 +1903,14 @@ class Agent:
                 asyncio.create_task(self._stream_event_queue.put({"type": "sub_agent_end", "agent_type": agent_type, "description": description}))
             return f"Sub-agent error: {e}"
 
-#--------------Anthropic 后端---------------
-    async def  _chat_anthropic(self, user_message: str) -> None:
-        self._anthropic_messages = self._normalize_anthropic_messages(_sanitize_for_utf8(self._anthropic_messages))
-        user_message = _safe_utf8_text(user_message)
-        # 先把本轮用户输入放入 Anthropic 消息历史，后续每轮模型调用都会带上这段上下文。
-        self._anthropic_messages.append({"role": "user", "content": user_message})
-
-        # 异步内存预取：主 agent 才需要查 memory，sub agent 不额外注入记忆。
-        # 这里只启动后台任务，不阻塞当前模型调用流程。
-        memory_prefetch:MemoryPrefetch | None = None
-        if not self.is_sub_agent:
-            sq = self._build_side_query()
-            if sq:
-                memory_prefetch = start_memory_prefetch(
-                    user_message, sq,
-                    self._cooled_memory_paths(), self._session_memory_bytes,
-                )
-        while True:
-            # 外部请求中止时（含父 Agent 传播的中止），结束整个 agent loop。
-            if self._abort_requested():
-                self._aborted = True
-                break
-
-            # 每轮调用模型前尝试压缩上下文，避免消息历史过长。
-            self._run_compression_pipeline()
-
-            # 如果记忆预取任务已经完成，就把取回来的 memory 注入消息历史。
-            # Anthropic API 要求 user/assistant 严格交替，不能追加连续的 user 消息，
-            # 因此合并进最后一条 user 消息。注入只发生在每次 API 调用之前，此时最后
-            # 一条消息尚未发送，不存在"改写已发送消息"的竞态。
-            # consumed 用来保证同一批 memory 只注入一次。
-            if memory_prefetch and memory_prefetch.settled and not memory_prefetch.consumed:
-                memory_prefetch.consumed = True
-                try:
-                    memories = memory_prefetch.task.result()
-                    if memories:
-                        injection_text = format_memories_for_injection(memories)
-                        injection_text = _safe_utf8_text(injection_text)
-                        last = self._anthropic_messages[-1] if self._anthropic_messages else None
-                        if last and last.get("role") == "user":
-                            content = last.get("content", "")
-                            if isinstance(content, str):
-                                # 字符串不可变，需要重新赋值回 message。
-                                last["content"] = content + "\n\n" + injection_text
-                            elif isinstance(content, list):
-                                # list 是可变对象，append 会直接修改 last["content"] 指向的列表。
-                                content.append({"type": "text", "text": injection_text})
-                        else:
-                            # 最后一条是 assistant 消息时，追加独立 user 消息承载 memory。
-                            self._anthropic_messages.append({"role": "user", "content": injection_text})
-
-                        for m in memories:
-                            # 记录注入轮次，进入冷却期；冷却到期后允许再次召回。
-                            self._memory_surfaced_at[m.path] = self._turn_number
-                            self._session_memory_bytes += m.size
-                except:
-                    # memory 注入失败不应该中断主对话流程。
-                    pass
-
-            if not self.is_sub_agent:
-                start_spinner()
-
-
-            # 保存“提前执行”的工具任务。key 是 Anthropic 返回的 tool_use block id。
-            early_executions: dict[str, asyncio.Task] = {}
-
-
-            def _on_tool_block(block:dict):
-                # 流式响应中一旦完整收到 tool_use block，如果工具是并发安全且权限允许，
-                # 就可以提前开始执行，减少等待完整模型响应后的空档时间。
-                if block["name"] in CONCURRENCY_SAFE_TOOLS:
-                    perm = check_permission(block["name"], block["input"], self.permission_mode, self._plan_file_path)
-                    if perm["action"]=="allow":
-                        task =asyncio.create_task(self._execute_tool_call(block["name"], block["input"]))
-                        early_executions[block["id"]] = task
-
-
-            # 调用 Anthropic 流式接口；流式过程中完成 tool block 时会触发 _on_tool_block。
-            response = await self._call_anthropic_stream(on_tool_block_complete=_on_tool_block)
-            if not self.is_sub_agent:
-                stop_spinner()
-
-            # 记录本次模型调用的耗时点和 token 消耗，用于成本展示与预算控制。
-            self.last_api_call_time = time.time()
-            self.total_input_tokens += response.usage.input_tokens
-            self.total_output_tokens += response.usage.output_tokens
-            self.last_input_token_count = response.usage.input_tokens
-
-            # Anthropic 的响应内容里可能混有 text block 和 tool_use block，这里只挑出工具调用。
-            tool_uses = [b for b in response.content if b.type == "tool_use"]
-
-            # 把模型返回的所有 content block 写入消息历史，后续 tool_result 要与这些 tool_use 对应。
-            self._anthropic_messages.append({
-                "role": "assistant",
-                "content": [self._block_to_dict(b) for b in response.content],
-            })
-
-            # 没有工具调用，说明模型已经给出最终回复，本轮对话结束。
-            if not tool_uses:
-                if not self.is_sub_agent:
-                    md_track_flush()  # 流式结束：擦除原文，自动重渲染 Markdown
-                    print_cost(self.total_input_tokens, self.total_output_tokens)
-                break
-
-            # 有工具调用时，进入下一轮工具执行。这里同时检查 turn/budget 限制。
-            self.current_turns += 1
-            budget = self._check_budget()
-            if budget["exceeded"]:
-                print_info(f"Budget exceeded: {budget['reason']}")
-                self._anthropic_messages.append({
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": tu.id,
-                            "content": f"Tool execution skipped: {budget['reason']}",
-                        }
-                        for tu in tool_uses
-                    ],
-                })
-                break
-
-
-            # 收集本轮所有工具结果，之后作为 tool_result 消息回传给模型。
-            tool_results: list[dict] = []
-            context_break = False
-
-            for tu in tool_uses:
-                # context_break 表示某个工具执行期间清理了上下文，需要停止继续处理本轮剩余工具。
-                if context_break or self._abort_requested():
-                    self._aborted = True
-                    break
-
-                # 将工具入参转为普通 dict，便于权限检查、打印和实际执行。
-                inp = dict(tu.input) if hasattr(tu, "items") else tu.input
-                print_tool_call(tu.name, inp)
-                # 流式模式：推送 tool_call 事件到队列
-                if self._stream_event_queue is not None:
-                    asyncio.create_task(self._stream_event_queue.put({"type": "tool_call", "name": tu.name, "input": inp}))
-
-                # 如果这个工具已经在流式阶段提前开始执行，这里只需要等待它完成并收集结果。
-                early_task = early_executions.get(tu.id)
-                if early_task:
-                    try:
-                        raw = await early_task
-                    except Exception as e:
-                        raw = f"Error executing tool: {e}"
-                    raw = _safe_utf8_text(raw)
-                    res = self._persist_large_result(tu.name, raw)
-                    print_tool_result(tu.name, res)
-                    # 流式模式：推送 tool_result 事件到队列
-                    if self._stream_event_queue is not None:
-                        await self._stream_event_queue.put({"type": "tool_result", "name": tu.name, "result": res})
-                    self._record_tool_outcome(tu.name, not self._looks_like_tool_failure(tu.name, raw, res))
-                    tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": res})
-                    continue
-
-                # 如果不是提前执行的工具，就在真正执行前做权限检查。
-
-                perm = check_permission(tu.name, inp, self.permission_mode, self._plan_file_path)
-                if perm["action"] == "deny":
-                    # 权限拒绝时，也要返回一个 tool_result，让模型知道该工具调用失败的原因。
-                    print_info(f"Denied: {perm.get('message', '')}")
-                    self._record_tool_outcome(tu.name, False)
-                    tool_results.append({"type": "tool_result", "tool_use_id": tu.id,
-                                         "content": f"Action denied: {perm.get('message', '')}"})
-                    continue
-
-                if perm["action"] == "confirm" and perm.get("message") and perm["message"] not in self._confirmed_paths:
-                    # 高风险操作需要用户确认；同一个 message 确认过后会缓存，避免重复询问。
-                    confirmed = await self._confirm_dangerous(perm["message"])
-                    if not confirmed:
-                        self._record_tool_outcome(tu.name, False)
-                        tool_results.append(
-                            {"type": "tool_result", "tool_use_id": tu.id, "content": "User denied this action."})
-                        continue
-                    self._confirmed_paths.add(perm["message"])
-
-                # 权限通过后执行工具，并把大输出持久化为可回传的摘要或引用。
-                try:
-                    raw = await self._execute_tool_call(tu.name, inp)
-                except Exception as e:
-                    raw = f"Error executing tool: {e}"
-                raw = _safe_utf8_text(raw)
-                res = self._persist_large_result(tu.name, raw)
-                print_tool_result(tu.name, res)
-                # 流式模式：推送 tool_result 事件到队列
-                if self._stream_event_queue is not None:
-                    await self._stream_event_queue.put({"type": "tool_result", "name": tu.name, "result": res})
-                self._record_tool_outcome(tu.name, not self._looks_like_tool_failure(tu.name, raw, res))
-
-                if self._context_cleared:
-                    # 工具执行过程中如果清理了上下文，就把结果作为新的用户消息写入，
-                    # 并停止继续处理本轮剩余工具，避免旧上下文和新上下文混在一起。
-                    self._context_cleared = False
-                    self._anthropic_messages.append({"role": "user", "content": res})
-                    context_break = True
-                    break
-
-                # Anthropic 要求 tool_result 使用 tool_use_id 对应到前面的 tool_use block。
-                tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": res})
-
-            if not context_break and tool_results:
-                # Anthropic 要求 assistant/tool_use 后面紧跟一条 user/tool_result 消息，
-                # 且这条消息必须包含本轮所有 tool_use 的对应结果。
-                self._anthropic_messages.append({"role": "user", "content": tool_results})
-
-            self._context_cleared = False
-
-            # 工具结果可能很长，每轮工具执行后检查是否需要压缩上下文。
-            self._refresh_runtime_system_prompt()
-            await self._check_and_compact()
-
-    @staticmethod
-    def _block_to_dict(block) -> dict:
-        if block.type == "text":
-            return {"type": "text", "text": _safe_utf8_text(block.text)}
-        if block.type == "tool_use":
-            raw_input = dict(block.input) if hasattr(block.input, 'items') else block.input
-            return {"type": "tool_use", "id": _safe_utf8_text(block.id), "name": _safe_utf8_text(block.name), "input": _sanitize_for_utf8(raw_input)}
-        # Fallback
-        return {"type": _safe_utf8_text(block.type)}
-
-    async def _call_anthropic_stream(self, on_tool_block_complete=None):
-        from .trace import trace_event
-        _model_t0 = time.time()
-        trace_event("model.start", model=self.model, provider="anthropic")
-
-        async def _do():
-            max_output =  _get_max_output_tokens(self.model)
-
-            create_params: dict[str, Any] = {
-                "model": self.model,
-                "max_tokens": max_output if self._thinking_mode != "disabled" else 16384,
-                "system": _safe_utf8_text(self._system_prompt),
-                "tools": _sanitize_for_utf8(get_active_tool_definitions(self.tools)),
-                "messages": _sanitize_for_utf8(self._anthropic_messages),
-            }
-            #如果开启了思考模式，就给 Anthropic 请求加上 thinking 参数。
-            if self._thinking_mode  in ("adaptive", "enabled"):
-                create_params["thinking"]={"type": "enabled", "budget_tokens": max_output - 1}
-
-            first_text = True
-            first_thinking = True
-            if not self.is_sub_agent:
-                reset_thinking_window()
-                md_track_begin()
-            tool_blocks_by_index: dict[int, dict] = {}
-
-            try:
-                async with self._anthropic_client.messages.stream(**create_params)as stream:
-                    async for event in stream:
-                        if not hasattr(event, 'type'):
-                            continue
-                        # 当事件是工具调用开始：
-                        if event.type == "content_block_start":
-                            cb = getattr(event, 'content_block', None)
-                            #如果 block 类型是 tool_use，就记录这个工具调用：
-                            if cb and getattr(cb, 'type', None) == "tool_use":
-                                #因为工具参数 JSON 是流式分片返回的，所以先准备一个空字符串 input_json。
-                                tool_blocks_by_index[event.index]= {
-                                    "id": cb.id, "name": cb.name, "input_json": "",
-                                }
-                        #当事件是内容增量，分三种情况。
-                        elif event.type == "content_block_delta":
-                            delta = event.delta
-                            # 第一种，普通文本：模型输出正文时，
-                            # 调用 _emit_text()。如果是普通交互，就打印；
-                            # 如果是 run_once()，就写入 _turn_output_buffer。
-                            if hasattr(delta, "text"):
-                                if first_text:
-                                    stop_spinner()
-                                    self._emit_text("\n")
-                                    first_text = False
-                                self._emit_text(delta.text)
-                            #第二种，thinking 内容：
-                            #默认不展示（对齐 Claude Code / Codex CLI 的做法），
-                            #用 /thinking 打开后才以暗色斜体渲染；thinking 从不进入
-                            #消息历史，也不进入 _turn_output_buffer。
-                            elif hasattr(delta, 'thinking'):
-                                # 流式模式：推送 thinking 事件到队列
-                                if self._stream_event_queue is not None:
-                                    asyncio.create_task(self._stream_event_queue.put({"type": "thinking", "content": delta.thinking}))
-                                if thinking_visible():
-                                    if first_thinking:
-                                        stop_spinner()
-                                        first_thinking = False
-                                    print_thinking_text(delta.thinking)
-                            #第三种，工具参数 JSON 片段：工具调用的参数不是一次性返回，
-                            # 而是一段一段返回，所以这里不断拼接到 input_json。
-                            elif hasattr(delta, 'partial_json'):
-                                tb = tool_blocks_by_index.get(event.index)
-                                if tb:
-                                    tb["input_json"] += _safe_utf8_text(delta.partial_json)
-                        #当一个 content block 结束：
-                        #如果结束的是之前记录的工具调用，就把拼好的 JSON 解析出来：
-                        elif event.type == "content_block_stop":
-                            tb = tool_blocks_by_index.pop(event.index, None)
-                            if tb and on_tool_block_complete:
-                                import json as _json
-                                try:
-                                    parsed = _json.loads(tb["input_json"] or "{}")
-                                except Exception:
-                                    parsed = {}
-                                #然后调用回调：
-                                #这个回调的作用通常是：工具调用一完整，
-                                # 就可以提前开始执行工具，不必等整条 assistant 消息全部结束。
-                                on_tool_block_complete({
-                                    "type": "tool_use", "id": _safe_utf8_text(tb["id"]),
-                                    "name": _safe_utf8_text(tb["name"]), "input": _sanitize_for_utf8(parsed),
-                                })
-                    final_message = await stream.get_final_message()
-
-            except Exception as e:
-                raise
-
-            #过滤思考的message（因为 thinking 内容一般不应该进入历史消息，否则后续上下文会变大，也可能不符合 API 消息格式要求。）
-            final_message.content = [b for b in final_message.content if b.type != "thinking"]
-            return final_message
-#调用 _do()，如果遇到可重试错误，就由 _with_retry() 负责重试。
-        try:
-            result = await _with_retry(_do)
-            trace_event(
-                "model.end",
-                model=self.model,
-                provider="anthropic",
-                success=True,
-                duration_s=round(time.time() - _model_t0, 2),
-            )
-            return result
-        except Exception as e:
-            trace_event(
-                "model.end",
-                model=self.model,
-                provider="anthropic",
-                success=False,
-                error_message=str(e)[:300],
-                duration_s=round(time.time() - _model_t0, 2),
-            )
-            raise
-
     #openAI后端
 
     async def _chat_openai(self, user_message:str) -> None:
         user_message = _safe_utf8_text(user_message)
         self._openai_messages.append({"role": "user", "content": user_message})
+        # 用户消息重置重复调用链
+        self._repeat_chain_key = ""
+        self._repeat_chain_count = 0
 
         #预取句柄 MemoryPrefetch
         memory_prefetch: MemoryPrefetch | None = None
@@ -2348,6 +2048,10 @@ class Agent:
                                 ct_item["fn"],
                                 not self._looks_like_tool_failure(ct_item["fn"], "", res),
                             )
+                            # Repeat guard: 检测重复调用并注入提醒
+                            repeat_warning = self._check_repeat_guard(ct_item["fn"], ct_item["inp"])
+                            if repeat_warning:
+                                res = res + "\n\n" + repeat_warning
                             self._openai_messages.append(
                                 {"role": "tool", "tool_call_id": ct_item["tc"]["id"], "content": res})
                     else:
@@ -2375,6 +2079,11 @@ class Agent:
                                 self._openai_messages.append({"role": "user", "content": res})
                                 oai_context_break = True
                                 break
+
+                            # Repeat guard: 检测重复调用并注入提醒
+                            repeat_warning = self._check_repeat_guard(ct["fn"], ct["inp"])
+                            if repeat_warning:
+                                res = res + "\n\n" + repeat_warning
 
                             self._openai_messages.append(
                                 {"role": "tool", "tool_call_id": ct["tc"]["id"], "content": res})
@@ -2481,12 +2190,18 @@ class Agent:
 
         try:
             result = await _with_retry(_do)
+            # 提取 token 信息
+            usage = result.get("usage", {}) if isinstance(result, dict) else {}
+            input_tokens = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
             trace_event(
                 "model.end",
                 model=self.model,
                 provider="openai",
                 success=True,
                 duration_s=round(time.time() - _model_t0, 2),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
             )
             return result
         except Exception as e:
