@@ -605,7 +605,8 @@ class Agent:
                 print_error(f"MCP init failed: {e}")
 
         # 跨会话知识复用：注入相关历史会话记忆
-        if not self.is_sub_agent:
+        # 可通过环境变量 BEAR_DISABLE_CROSS_SESSION_MEMORY 禁用
+        if not self.is_sub_agent and not os.environ.get("BEAR_DISABLE_CROSS_SESSION_MEMORY"):
             from agents.session_memory import search_folded_memories, format_folded_memories_for_injection
             related_memories = search_folded_memories(user_message, top_k=3)
             if related_memories:
