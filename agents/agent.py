@@ -605,16 +605,15 @@ class Agent:
                 print_error(f"MCP init failed: {e}")
 
         # 跨会话知识复用：注入相关历史会话记忆
-        # TODO: 搜索算法需要改进，当前简单关键词匹配会注入不相关内容
-        # if not self.is_sub_agent:
-        #     from agents.session_memory import search_folded_memories, format_folded_memories_for_injection
-        #     related_memories = search_folded_memories(user_message, top_k=3)
-        #     if related_memories:
-        #         memory_context = format_folded_memories_for_injection(related_memories)
-        #         # 追加到系统提示
-        #         self._system_prompt += memory_context
-        #         if self._openai_messages:
-        #             self._openai_messages[0]["content"] = self._system_prompt
+        if not self.is_sub_agent:
+            from agents.session_memory import search_folded_memories, format_folded_memories_for_injection
+            related_memories = search_folded_memories(user_message, top_k=3)
+            if related_memories:
+                memory_context = format_folded_memories_for_injection(related_memories)
+                # 追加到系统提示
+                self._system_prompt += memory_context
+                if self._openai_messages:
+                    self._openai_messages[0]["content"] = self._system_prompt
 
         original_user_message = _safe_utf8_text(user_message)
         ready_skill_extraction_window: dict[str, Any] | None = None
