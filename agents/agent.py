@@ -975,12 +975,20 @@ class Agent:
     ) -> None:
         if not original_user_message.strip() or not assistant_text.strip():
             return
+        
+        # EvoSkill 启发：失败驱动进化
+        # 如果工具失败连击 >= 3，把失败信息加入 window，让 side_query 提取失败模式
+        tool_error_hint = ""
+        if self._tool_error_streak >= 3:
+            tool_error_hint = f"[Tool failure streak: {self._tool_error_streak} consecutive failures detected]"
+        
         self._pending_skill_extraction_window = {
             "messages": self._recent_dialog_messages(max_messages=8),
             "latest_user": original_user_message,
             "latest_assistant": assistant_text,
             "retrieved_reference": self._compact_retrieved_reference(retrieved_reference),
             "session_id": self.session_id,
+            "tool_error_hint": tool_error_hint,  # 失败信号
         }
 
     def _compact_retrieved_reference(self, ref: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1020,11 +1028,21 @@ class Agent:
         except Exception:
             return
 
+        # EvoSkill 启发：合并失败信号到 hint
+        hint_parts = []
+        tool_error_hint = str(window.get("tool_error_hint") or "").strip()
+        if tool_error_hint:
+            hint_parts.append(tool_error_hint)
+        user_hint = str(window.get("hint") or "").strip()
+        if user_hint:
+            hint_parts.append(user_hint)
+        combined_hint = " | ".join(hint_parts) if hint_parts else ""
+        
         result = await online_ingest(
             messages=messages,
             side_query=side_query,
             retrieved_reference=window.get("retrieved_reference") or None,
-            hint=str(window.get("hint") or ""),
+            hint=combined_hint,
             confirm_write=self._confirm_online_skill_write if interactive_confirm else self._confirm_background_online_skill_write,
             target=os.environ.get("BEAR_AUTO_SKILL_TARGET", "project"),
         )
