@@ -103,9 +103,12 @@ async def run_single_task(task_index: int = 0):
         agent_script = f'''import sys
 import asyncio
 import json
+import os
 sys.path.insert(0, '/workspace')
 
-import os
+# 禁用跨会话记忆注入（测试环境）
+os.environ["BEAR_DISABLE_CROSS_SESSION_MEMORY"] = "1"
+
 os.chdir('/testbed')
 
 from agents.agent import Agent
