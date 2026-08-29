@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""运行单个 SWE-bench 任务 - 正确的评测流程：
-1. Agent 修复代码（在 bear 环境）
-2. 应用 test_patch（添加测试用例）
-3. 用 testbed 环境跑 FAIL_TO_PASS / PASS_TO_PASS 测试
-4. 判断是否通过
+"""SWE-bench 评测脚本 - Agent 在宿主机运行，通过 Docker API 与 testbed 容器交互。
+
+架构：
+- Agent 运行在宿主机
+- 通过 Docker API 调用容器执行命令（读写文件、运行测试）
+- Trace 在宿主机生成，每次运行独立文件
+
+用法：
+    python eval/swe_bench/run_single.py <task_index>
 """
 
 import asyncio
@@ -11,19 +15,125 @@ import docker
 import json
 import sys
 import time
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from agents.trace import set_trace_enabled
+from agents.trace import set_trace_enabled, set_trace_session
+from agents.agent import Agent
+from agents.config import get_endpoint_by_model
+
+
+class DockerExecutor:
+    """通过 Docker API 执行命令的封装。"""
+    
+    def __init__(self, container):
+        self.container = container
+    
+    def exec(self, cmd: str, workdir: str = "/testbed") -> tuple[int, str]:
+        """在容器内执行命令，返回 (exit_code, output)。"""
+        result = self.container.exec_run(
+            f"bash -c 'cd {workdir} && {cmd}'",
+            demux=False,
+        )
+        return result.exit_code, result.output.decode()
+    
+    def read_file(self, path: str) -> str:
+        """读取容器内文件内容。"""
+        exit_code, output = self.exec(f"cat {path}")
+        if exit_code != 0:
+            raise FileNotFoundError(f"Cannot read {path}: {output}")
+        return output
+    
+    def write_file(self, path: str, content: str) -> None:
+        """写入内容到容器内文件。"""
+        import base64
+        content_b64 = base64.b64encode(content.encode()).decode()
+        self.exec(f"echo {content_b64} | base64 -d > {path}")
+    
+    def get_patch(self) -> str:
+        """获取 /testbed 目录的 git diff。"""
+        exit_code, output = self.exec("git diff")
+        return output if exit_code == 0 else ""
+    
+    def apply_patch(self, patch: str) -> bool:
+        """应用 patch 到 /testbed 目录。"""
+        import base64
+        patch_b64 = base64.b64encode(patch.encode()).decode()
+        self.exec(f"echo {patch_b64} | base64 -d > /tmp/patch.diff")
+        exit_code, output = self.exec("git apply /tmp/patch.diff")
+        return exit_code == 0
+    
+    def run_tests(self, tests: list[str], framework: str = "auto") -> tuple[bool, str]:
+        """运行测试，返回 (success, output)。"""
+        if framework == "auto":
+            # 检测是否是 Django 项目
+            exit_code, _ = self.exec("ls /testbed/tests/runtests.py 2>/dev/null")
+            framework = "django" if exit_code == 0 else "pytest"
+        
+        if framework == "django":
+            # Django 格式: "test_name (module.Class)" -> "module.Class.test_name"
+            def convert(t):
+                if '(' in t and ')' in t:
+                    parts = t.split(' (')
+                    method = parts[0].strip()
+                    class_path = parts[1].rstrip(')')
+                    return f"{class_path}.{method}"
+                return t
+            
+            test_args = " ".join(convert(t) for t in tests)
+            exit_code, output = self.exec(
+                f"source /opt/miniconda3/bin/activate testbed && cd /testbed/tests && python runtests.py {test_args} -v 2",
+                workdir="/"
+            )
+        else:
+            # pytest 格式
+            test_args = " ".join(f'"{t}"' for t in tests)
+            exit_code, output = self.exec(
+                f"source /opt/miniconda3/bin/activate testbed && cd /testbed && python -m pytest {test_args} -v --tb=short",
+                workdir="/"
+            )
+        
+        return exit_code == 0, output
+
+
+async def run_agent_with_docker(executor: DockerExecutor, prompt: str, model: str, container_id: str):
+    """在宿主机运行 Agent，通过 DockerRuntime 与容器交互。"""
+    endpoint = get_endpoint_by_model(model)
+    if not endpoint:
+        raise ValueError(f"Model {model} not found in config")
+    
+    # 设置 Docker 运行时
+    from agents.runtime import set_docker_runtime
+    set_docker_runtime(container_id, workdir="/testbed", conda_env="testbed")
+    
+    # 创建 Agent
+    agent = Agent(
+        model=model,
+        api_base=endpoint.base_url,
+        api_key=endpoint.api_key,
+        permission_mode="bypassPermissions",
+        is_sub_agent=True,
+    )
+    
+    await agent.run_once(prompt)
 
 
 async def run_single_task(task_index: int = 0):
-    """运行单个任务"""
+    """运行单个 SWE-bench 任务。"""
     from datasets import load_dataset
     
+    # 生成独立 session ID
+    session_id = f"swe-bench-task{task_index}-{uuid.uuid4().hex[:8]}"
+    set_trace_session(session_id)
     set_trace_enabled(True)
     
+    print(f"Trace session: {session_id}")
+    print(f"Trace file: ~/.bear-code/trace/{session_id}.jsonl")
+    print()
+    
+    # 加载任务
     print("Loading SWE-bench Lite dataset...")
     dataset = load_dataset("princeton-nlp/SWE-bench_Lite", split="test")
     
@@ -42,109 +152,36 @@ async def run_single_task(task_index: int = 0):
     print(f"任务 {task_index}: {instance_id}")
     print(f"Problem: {problem_statement[:200]}...")
     print(f"FAIL_TO_PASS: {fail_to_pass[:3]}")
-    print(f"PASS_TO_PASS: {pass_to_pass[:3]}")
     print(f"{'='*60}")
     
+    # 获取 Docker 镜像
     client = docker.from_env()
-    model = "deepseek-v4-flash"
-    
-    # 获取镜像名
     parts = instance_id.split("__")
     org, repo_and_issue = parts
     image_name = f"swebench/sweb.eval.x86_64.{org}_1776_{repo_and_issue}"
-    bear_image = image_name + "-bear"
     
-    # 检查 bear 镜像
     try:
-        client.images.get(bear_image)
-        print(f"Bear 镜像已存在: {bear_image}")
+        client.images.get(image_name)
+        print(f"镜像已存在: {image_name}")
     except docker.errors.ImageNotFound:
-        print(f"创建 Bear 镜像...")
-        container = client.containers.run(
-            image_name,
-            platform="linux/amd64",
-            detach=True,
-            tty=True,
-            command="bash",
-        )
-        try:
-            result = container.exec_run(
-                "bash -c 'source /opt/miniconda3/bin/activate && conda create -n bear python=3.11 -y -q'"
-            )
-            if result.exit_code != 0:
-                print(f"环境创建失败: {result.output.decode()[:500]}")
-                return
-            
-            result = container.exec_run(
-                "bash -c 'source /opt/miniconda3/bin/activate bear && pip install openai rich -q'"
-            )
-            if result.exit_code != 0:
-                print(f"依赖安装失败: {result.output.decode()[:500]}")
-                return
-            
-            container.commit(repository=bear_image, tag="latest")
-            print(f"Bear 镜像创建成功")
-        finally:
-            container.stop()
-            container.remove()
-    
-    # 运行 Agent
-    container = None
-    start_time = time.time()
-    
-    try:
-        project_root = Path(__file__).parent.parent.parent
-        
-        container = client.containers.run(
-            bear_image,
-            platform="linux/amd64",
-            detach=True,
-            tty=True,
-            command="bash",
-            volumes={
-                str(project_root): {'bind': '/workspace', 'mode': 'ro'},
-                str(Path.home() / '.bear-code'): {'bind': '/root/.bear-code', 'mode': 'rw'},
-            },
-        )
-        
-        # Agent 脚本 - 在 bear 环境运行
-        agent_script = f'''import sys
-import asyncio
-import json
-import os
-sys.path.insert(0, '/workspace')
-
-os.chdir('/testbed')
-
-from agents.trace import set_trace_enabled
-set_trace_enabled(True)
-
-from agents.agent import Agent
-
-async def main():
-    config_path = os.path.expanduser('~/.bear-code/config.json')
-    with open(config_path) as f:
-        config = json.load(f)
-    
-    endpoint = None
-    for ep in config.get('endpoints', {{}}).values():
-        if ep.get('model') == '{model}':
-            endpoint = ep
-            break
-    
-    if not endpoint:
-        print(f"Error: Model '{model}' not found in config")
+        print(f"镜像不存在: {image_name}")
         return
     
-    agent = Agent(
-        model='{model}',
-        api_base=endpoint['base_url'],
-        api_key=endpoint['api_key'],
-        permission_mode='bypassPermissions',
-        is_sub_agent=True,
+    # 启动容器
+    container = client.containers.run(
+        image_name,
+        platform="linux/amd64",
+        detach=True,
+        tty=True,
+        command="bash",
     )
-
-    prompt = """You are debugging a real GitHub issue. Please fix the following problem:
+    
+    executor = DockerExecutor(container)
+    model = "deepseek-v4-flash"
+    
+    try:
+        # 构建 prompt
+        prompt = f"""You are debugging a real GitHub issue. Please fix the following problem:
 
 {problem_statement}
 
@@ -154,37 +191,20 @@ IMPORTANT:
 3. Implement a fix by editing the source code
 4. Make sure your changes are minimal and focused
 5. Do NOT modify test files
-6. Do NOT run any tests or verification scripts - the evaluation system will automatically run tests to verify your fix
-7. Do NOT install any dependencies - they are already available in the test environment
+6. Do NOT run any tests - the evaluation system will automatically run tests to verify your fix
 
-Your ONLY job is to fix the source code. The testing and verification will be handled automatically."""
-
-    await agent.run_once(prompt)
-    print("Agent completed")
-
-asyncio.run(main())
-'''
+Your ONLY job is to fix the source code."""
         
-        # 写入脚本
-        import base64
-        script_b64 = base64.b64encode(agent_script.encode()).decode()
-        container.exec_run(f"bash -c 'echo {script_b64} | base64 -d > /tmp/agent_run.py'")
+        # 运行 Agent（在宿主机）
+        print("\n开始运行 Agent（宿主机）...")
+        start_time = time.time()
         
-        # 运行 Agent
-        print("\n开始运行 Agent...")
-        result = container.exec_run(
-            "bash -c 'source /opt/miniconda3/bin/activate bear && cd /testbed && python /tmp/agent_run.py'",
-            stream=False,
-        )
-        
-        output = result.output.decode()
-        print(f"\nAgent output (last 500 chars):\n{output[-500:]}")
-        
-        # 获取 Agent 的 patch
-        patch_result = container.exec_run("bash -c 'cd /testbed && git diff'")
-        agent_patch = patch_result.output.decode()
+        await run_agent_with_docker(executor, prompt, model, container.id)
         
         agent_duration = time.time() - start_time
+        
+        # 获取 Agent 的 patch
+        agent_patch = executor.get_patch()
         
         if not agent_patch.strip():
             print(f"\n❌ Agent 没有产生任何修改! Agent 耗时: {agent_duration:.1f}s")
@@ -194,66 +214,22 @@ asyncio.run(main())
         print(agent_patch[:500])
         print(f"\nAgent 耗时: {agent_duration:.1f}s")
         
-        # ─── 评测阶段：应用 test_patch 并用 testbed 环境跑测试 ───
+        # 评测阶段
         eval_start = time.time()
         print(f"\n{'='*60}")
         print("评测阶段：应用 test_patch 并运行测试...")
         print(f"{'='*60}")
         
         # 应用 test_patch
-        import base64
-        test_patch_b64 = base64.b64encode(test_patch.encode()).decode()
-        container.exec_run(f"bash -c 'echo {test_patch_b64} | base64 -d > /tmp/test_patch.diff'")
+        if not executor.apply_patch(test_patch):
+            print("❌ 应用 test_patch 失败")
+            return
+        print("应用 test_patch: 成功")
         
-        apply_result = container.exec_run(
-            "bash -c 'cd /testbed && git apply /tmp/test_patch.diff 2>&1'"
-        )
-        print(f"应用 test_patch: exit_code={apply_result.exit_code}")
-        if apply_result.exit_code != 0:
-            print(f"  错误: {apply_result.output.decode()[:500]}")
-        
-        # 用 testbed 环境跑测试
+        # 运行测试
         all_tests = fail_to_pass + pass_to_pass
-        
-        # 检测是否是 Django 项目（使用 runtests.py）
-        check_result = container.exec_run("bash -c 'ls /testbed/tests/runtests.py 2>/dev/null'")
-        is_django = check_result.exit_code == 0
-        
-        if is_django:
-            # Django 测试格式: "test_name (module.Class)" -> "module.Class.test_name"
-            def convert_django_test(test_name):
-                if '(' in test_name and ')' in test_name:
-                    parts = test_name.split(' (')
-                    method = parts[0].strip()
-                    class_path = parts[1].rstrip(')')
-                    return f"{class_path}.{method}"
-                return test_name
-            
-            converted_tests = [convert_django_test(t) for t in all_tests]
-            test_args = " ".join(converted_tests)
-            test_cmd = f"bash -c 'source /opt/miniconda3/bin/activate testbed && cd /testbed/tests && python runtests.py {test_args} -v 2 2>&1'"
-        else:
-            # pytest 格式
-            test_args = " ".join(f'"{t}"' for t in all_tests)
-            test_cmd = f'bash -c \'source /opt/miniconda3/bin/activate testbed && cd /testbed && python -m pytest {test_args} -v --tb=short 2>&1\''
-        
         print(f"\n运行测试 ({len(all_tests)} 个)...")
-        test_result = container.exec_run(test_cmd)
-        
-        test_output = test_result.output.decode()
-        test_success = test_result.exit_code == 0
-        
-        # 解析测试结果
-        if is_django:
-            # Django 格式: "Ran X tests" + "OK" or "FAILED"
-            import re
-            match = re.search(r'Ran (\d+) tests?', test_output)
-            passed = int(match.group(1)) if match else 0
-            failed = 0 if "OK" in test_output else passed - (int(re.search(r'failures=(\d+)', test_output).group(1)) if re.search(r'failures=(\d+)', test_output) else 0)
-        else:
-            # pytest 格式
-            passed = test_output.count(" PASSED")
-            failed = test_output.count(" FAILED")
+        test_success, test_output = executor.run_tests(all_tests)
         
         eval_duration = time.time() - eval_start
         total_duration = time.time() - start_time
@@ -261,16 +237,9 @@ asyncio.run(main())
         print(f"\n{'='*60}")
         if test_success:
             print(f"✅ 成功!")
-            print(f"Agent 耗时: {agent_duration:.1f}s | 评测耗时: {eval_duration:.1f}s | 总耗时: {total_duration:.1f}s")
-            print(f"测试: {passed} passed, {failed} failed")
         else:
             print(f"❌ 测试失败!")
-            print(f"Agent 耗时: {agent_duration:.1f}s | 评测耗时: {eval_duration:.1f}s | 总耗时: {total_duration:.1f}s")
-            print(f"测试: {passed} passed, {failed} failed")
-            # 打印失败的测试
-            for line in test_output.split("\n"):
-                if "FAILED" in line or "ERROR" in line:
-                    print(f"  {line.strip()}")
+        print(f"Agent 耗时: {agent_duration:.1f}s | 评测耗时: {eval_duration:.1f}s | 总耗时: {total_duration:.1f}s")
         print(f"{'='*60}")
         
         # 打印测试输出最后几行
@@ -279,17 +248,9 @@ asyncio.run(main())
         for line in test_lines[-10:]:
             print(f"  {line}")
         
-    except Exception as e:
-        duration = time.time() - start_time
-        print(f"\n❌ 异常! 耗时: {duration:.1f}s")
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
-        
     finally:
-        if container:
-            container.stop()
-            container.remove()
+        container.stop()
+        container.remove()
 
 
 if __name__ == "__main__":

@@ -108,11 +108,7 @@ def get_endpoint_by_model(model_name: str) -> ModelEndpointConfig | None:
     """根据模型名查找端点配置"""
     config = load_config()
 
-    # 先查 primary
-    if config.primary.model == model_name:
-        return config.primary
-
-    # 再查 endpoints
+    # 查 endpoints
     for endpoint in config.endpoints.values():
         if endpoint.model == model_name:
             return endpoint

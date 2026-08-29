@@ -1,7 +1,9 @@
 """轻量 trace 事件日志 — 用于监控运行状态与定位问题。
 
 设计：
-- JSONL 追加写入：~/.bear-code/trace/YYYY-MM-DD.jsonl（可用 BEAR_TRACE_DIR 覆盖目录）
+- JSONL 写入：~/.bear-code/trace/{session_id}.jsonl
+- session_id 来源：BEAR_TRACE_SESSION 环境变量 / set_trace_session() 设置
+- 如果未设置 session_id，使用日期作为文件名（向后兼容）
 - 开启方式：启动参数 --trace / 环境变量 BEAR_TRACE=1 / REPL 内 /trace on
 - 线程安全（后台 shell watcher 线程也会发事件）
 - 关闭时零开销：trace_event 立即返回，不做任何 IO
@@ -25,6 +27,7 @@ from typing import Any
 
 _LOCK = threading.Lock()
 _enabled: bool | None = None  # 懒初始化：首次使用时读环境变量
+_session_id: str | None = None  # 当前 session ID
 
 
 def trace_dir() -> Path:
@@ -34,7 +37,25 @@ def trace_dir() -> Path:
     return Path.home() / ".bear-code" / "trace"
 
 
+def set_trace_session(session_id: str) -> None:
+    """设置当前 trace 的 session ID，用于生成独立文件名。"""
+    global _session_id
+    _session_id = session_id
+    os.environ["BEAR_TRACE_SESSION"] = session_id
+
+
+def get_trace_session() -> str | None:
+    """获取当前 session ID。"""
+    global _session_id
+    if _session_id is None:
+        _session_id = os.environ.get("BEAR_TRACE_SESSION", "").strip() or None
+    return _session_id
+
+
 def trace_path() -> Path:
+    session = get_trace_session()
+    if session:
+        return trace_dir() / f"{session}.jsonl"
     return trace_dir() / f"{datetime.now():%Y-%m-%d}.jsonl"
 
 
