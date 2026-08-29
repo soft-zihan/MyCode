@@ -589,11 +589,31 @@ class Agent:
                 )
                 mcp_defs = self._mcp_manager.get_tool_definitions()
                 if mcp_defs:
+                    # 注册 MCP 工具到 Registry
+                    from agents.tool_registry import global_registry
+                    for mcp_def in mcp_defs:
+                        # 从工具名中提取 server 名（格式：mcp__server__tool）
+                        parts = mcp_def["name"].split("__")
+                        if len(parts) >= 3:
+                            server_name = parts[1]
+                            global_registry.register_mcp(mcp_def, server=server_name)
+                    # 同时更新 self.tools 以保持向后兼容
                     self.tools = self.tools + mcp_defs
             except asyncio.TimeoutError:
                 print_error("MCP init timeout (30s) - continuing without MCP tools")
             except Exception as e:
                 print_error(f"MCP init failed: {e}")
+
+        # 跨会话知识复用：注入相关历史会话记忆
+        if not self.is_sub_agent:
+            from agents.session_memory import search_folded_memories, format_folded_memories_for_injection
+            related_memories = search_folded_memories(user_message, top_k=3)
+            if related_memories:
+                memory_context = format_folded_memories_for_injection(related_memories)
+                # 追加到系统提示
+                self._system_prompt += memory_context
+                if self._openai_messages:
+                    self._openai_messages[0]["content"] = self._system_prompt
 
         original_user_message = _safe_utf8_text(user_message)
         ready_skill_extraction_window: dict[str, Any] | None = None

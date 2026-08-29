@@ -770,3 +770,73 @@ def maintenance_all_memories() -> dict[str, Any]:
     )
 
     return {"checked": len(list(d.glob("*.md"))) - 1, "actions": results}
+
+
+# ─── 记忆衰减 ─────────────────────────────────────────────────────────────────
+
+import math
+from datetime import datetime, timezone
+
+
+def compute_memory_score(entry: MemoryEntry) -> float:
+    """计算记忆的重要性分数
+    
+    综合考虑：
+    - 时间衰减（最近使用的记忆更重要）
+    - 使用频率（被召回次数多的更重要）
+    - 成功关联（与成功任务关联的更重要）
+    """
+    # 时间衰减（30 天半衰期）
+    modified = entry.meta.get("modified", "")
+    if modified:
+        try:
+            mod_time = datetime.fromisoformat(modified.replace("Z", "+00:00"))
+            days_since_modified = (datetime.now(timezone.utc) - mod_time).days
+            recency = math.exp(-days_since_modified * math.log(2) / 30)  # 30 天半衰期
+        except Exception:
+            recency = 0.5
+    else:
+        recency = 0.5
+    
+    # 使用频率（对数缩放）
+    recall_count = entry.meta.get("recall_count", 0)
+    frequency = math.log(1 + recall_count) / 10
+    
+    # 成功关联
+    success_associated = entry.meta.get("success_associated", 0)
+    success = min(1.0, success_associated / 5)
+    
+    # 综合分数
+    return 0.5 * recency + 0.3 * frequency + 0.2 * success
+
+
+def auto_prune_memories(threshold: float = 0.1, dry_run: bool = False) -> list[str]:
+    """自动清理低分数记忆
+    
+    Args:
+        threshold: 分数阈值，低于此值的记忆将被归档
+        dry_run: 如果为 True，只返回将被清理的记忆列表，不实际清理
+    
+    Returns:
+        被清理（或将被清理）的记忆文件名列表
+    """
+    entries = list_memories()
+    pruned = []
+    
+    for entry in entries:
+        score = compute_memory_score(entry)
+        if score < threshold:
+            if not dry_run:
+                # 归档而非删除（移动到 archive 子目录）
+                archive_dir = get_memory_dir() / "archive"
+                archive_dir.mkdir(exist_ok=True)
+                src = get_memory_dir() / entry.filename
+                dst = archive_dir / entry.filename
+                if src.exists():
+                    src.rename(dst)
+            pruned.append(entry.filename)
+    
+    if pruned:
+        _update_memory_index()
+    
+    return pruned

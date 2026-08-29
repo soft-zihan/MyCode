@@ -425,6 +425,39 @@ async def run_repl(agent: Agent) -> None:
                 "contextStore": session.get("contextStore"),
             })
             continue
+        if inp == "/resume" or inp.startswith("/resume "):
+            # /resume              显示最近会话列表，让用户选择恢复
+            # /resume <id>         直接恢复指定会话
+            target = inp[len("/resume"):].strip()
+            if not target:
+                sessions = list_sessions()
+                if not sessions:
+                    print_info("No saved sessions to resume.")
+                    continue
+                sessions.sort(key=lambda s: s.get("startTime", ""), reverse=True)
+                print_info("Recent sessions:")
+                for i, s in enumerate(sessions[:10]):
+                    sid = s.get("id", "N/A")[:8]
+                    title = s.get("title", "Untitled")
+                    start = s.get("startTime", "N/A")[:10]
+                    msgs = s.get("messageCount", 0)
+                    print(f"  {i+1}. {sid}... - {title} ({start}, {msgs} msgs)")
+                print_info("Usage: /resume <session_id> or /switch <session_id>")
+                continue
+            session = load_session(target)
+            if not session:
+                print_error(f"Session not found: {target}")
+                continue
+            agent.session_id = target
+            agent.restore_session({
+                "openaiMessages": session.get("openaiMessages"),
+                "foldedSessionMemories": session.get("foldedSessionMemories"),
+                "checkpointStore": session.get("checkpointStore"),
+                "turnBoundaries": session.get("turnBoundaries"),
+                "contextStore": session.get("contextStore"),
+            })
+            print_info(f"Resumed session {target}")
+            continue
         if inp == "/clear":
             agent.clear_history()
             continue
@@ -547,7 +580,30 @@ async def run_repl(agent: Agent) -> None:
                     n = max(1, int(arg))
                 print_trace_rows(recent_events(n), str(trace_path()), trace_enabled())
             continue
-        if inp == "/memory":
+        if inp == "/memory" or inp.startswith("/memory "):
+            sub = inp[len("/memory"):].strip()
+            if sub.startswith("prune"):
+                # /memory prune [--dry-run] [--threshold=0.1]
+                from agents.memory import auto_prune_memories
+                args = sub[5:].strip().split()
+                dry_run = "--dry-run" in args
+                threshold = 0.1
+                for arg in args:
+                    if arg.startswith("--threshold="):
+                        try:
+                            threshold = float(arg.split("=")[1])
+                        except ValueError:
+                            pass
+                pruned = auto_prune_memories(threshold=threshold, dry_run=dry_run)
+                if dry_run:
+                    print_info(f"Would prune {len(pruned)} memories:")
+                else:
+                    print_info(f"Pruned {len(pruned)} memories:")
+                for f in pruned[:10]:
+                    print(f"  - {f}")
+                if len(pruned) > 10:
+                    print(f"  ... and {len(pruned) - 10} more")
+                continue
             memories = list_memories()
             if not memories:
                 print_info("No memories saved yet.")
