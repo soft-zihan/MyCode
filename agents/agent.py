@@ -313,6 +313,8 @@ class Agent:
         
         # 流式事件队列（用于前端 chat_stream）
         self._stream_event_queue: asyncio.Queue | None = None
+        # 当前子智能体 ID（用于标记事件属于哪个子智能体）
+        self._current_sub_agent_id: str | None = None
 
         # 编辑前读取
         self._read_file_state: dict[str, float] ={}
@@ -769,7 +771,12 @@ class Agent:
                 md_track_feed(text)
         # 流式模式：推送文本事件到队列供前端 SSE 消费
         if self._stream_event_queue is not None:
-            asyncio.create_task(self._stream_event_queue.put({"type": "text", "content": text}))
+            event = {"type": "text", "content": text}
+            if self._current_sub_agent_id:
+                event["sub_agent_id"] = self._current_sub_agent_id
+            asyncio.create_task(self._stream_event_queue.put(event))
+            from .trace import trace_event
+            trace_event("stream.text", sub_agent_id=self._current_sub_agent_id, preview=text[:50])
 
     def _build_fold_guidance_section(self) -> str:
         if self._custom_system_prompt is not None:
@@ -1698,9 +1705,21 @@ class Agent:
         description = inp.get("description", "sub-agent task")
         prompt = inp.get("prompt", "")
         print_sub_agent_start(agent_type, description)
-        # 流式模式：推送 sub_agent_start 事件到队列
+        
+        # 生成子智能体 ID
+        import uuid
+        sub_agent_id = str(uuid.uuid4())[:8]
+        
+        # 流式模式：推送 sub_agent_start 事件到队列（必须 await 确保事件先于子 agent 事件到达）
         if self._stream_event_queue is not None:
-            asyncio.create_task(self._stream_event_queue.put({"type": "sub_agent_start", "agent_type": agent_type, "description": description}))
+            await self._stream_event_queue.put({
+                "type": "sub_agent_start", 
+                "agent_type": agent_type, 
+                "description": description,
+                "agent_id": sub_agent_id
+            })
+            from .trace import trace_event
+            trace_event("stream.sub_agent_start", agent_id=sub_agent_id, agent_type=agent_type, description=description)
 
         config = get_sub_agent_config(agent_type)
 
@@ -1710,6 +1729,12 @@ class Agent:
             model_ref=config.get("model_ref", ""),
             label=agent_type,
         )
+        
+        # 将子 agent 的事件流向父 agent 的队列
+        if self._stream_event_queue is not None:
+            sub_agent._stream_event_queue = self._stream_event_queue
+            sub_agent._current_sub_agent_id = sub_agent_id
+        
         try:
             result = await sub_agent.run_once(prompt)
             self.total_input_tokens += result["tokens"]["input"]
@@ -1717,7 +1742,14 @@ class Agent:
             print_sub_agent_end(agent_type, description)
             # 流式模式：推送 sub_agent_end 事件到队列
             if self._stream_event_queue is not None:
-                asyncio.create_task(self._stream_event_queue.put({"type": "sub_agent_end", "agent_type": agent_type, "description": description}))
+                asyncio.create_task(self._stream_event_queue.put({
+                    "type": "sub_agent_end", 
+                    "agent_type": agent_type, 
+                    "description": description,
+                    "agent_id": sub_agent_id
+                }))
+                from .trace import trace_event
+                trace_event("stream.sub_agent_end", agent_id=sub_agent_id, agent_type=agent_type, status="completed")
             if sub_agent._aborted:
                 return "(Sub-agent aborted)"
             return result["text"] or "(Sub-agent produced no output)"
@@ -1725,7 +1757,14 @@ class Agent:
             print_sub_agent_end(agent_type, description)
             # 流式模式：推送 sub_agent_end 事件到队列
             if self._stream_event_queue is not None:
-                asyncio.create_task(self._stream_event_queue.put({"type": "sub_agent_end", "agent_type": agent_type, "description": description}))
+                asyncio.create_task(self._stream_event_queue.put({
+                    "type": "sub_agent_end", 
+                    "agent_type": agent_type, 
+                    "description": description,
+                    "agent_id": sub_agent_id
+                }))
+                from .trace import trace_event
+                trace_event("stream.sub_agent_end", agent_id=sub_agent_id, agent_type=agent_type, status="error", error=str(e))
             return f"Sub-agent error: {e}"
 
     #openAI后端
@@ -1822,7 +1861,12 @@ class Agent:
                 print_tool_call(fn_name, inp)
                 # 流式模式：推送 tool_call 事件到队列
                 if self._stream_event_queue is not None:
-                    asyncio.create_task(self._stream_event_queue.put({"type": "tool_call", "name": fn_name, "input": inp}))
+                    event = {"type": "tool_call", "call_id": tc["id"], "name": fn_name, "input": inp}
+                    if self._current_sub_agent_id:
+                        event["sub_agent_id"] = self._current_sub_agent_id
+                    asyncio.create_task(self._stream_event_queue.put(event))
+                    from .trace import trace_event
+                    trace_event("stream.tool_call", call_id=tc["id"], name=fn_name, sub_agent_id=self._current_sub_agent_id)
 
                 perm = check_permission(fn_name, inp, self.permission_mode, self._plan_file_path)
 
@@ -1864,7 +1908,12 @@ class Agent:
                             print_tool_result(ct_item["fn"], res)
                             # 流式模式：推送 tool_result 事件到队列
                             if self._stream_event_queue is not None:
-                                await self._stream_event_queue.put({"type": "tool_result", "name": ct_item["fn"], "result": res})
+                                event = {"type": "tool_result", "call_id": ct_item["tc"]["id"], "name": ct_item["fn"], "result": res}
+                                if self._current_sub_agent_id:
+                                    event["sub_agent_id"] = self._current_sub_agent_id
+                                await self._stream_event_queue.put(event)
+                                from .trace import trace_event
+                                trace_event("stream.tool_result", call_id=ct_item["tc"]["id"], name=ct_item["fn"], sub_agent_id=self._current_sub_agent_id)
                             return ct_item, res
 
                         results = await asyncio.gather(*[_run_oai_safe(ct) for ct in batch["items"]])
@@ -1892,7 +1941,12 @@ class Agent:
                             print_tool_result(ct["fn"], res)
                             # 流式模式：推送 tool_result 事件到队列
                             if self._stream_event_queue is not None:
-                                await self._stream_event_queue.put({"type": "tool_result", "name": ct["fn"], "result": res})
+                                event = {"type": "tool_result", "call_id": ct["tc"]["id"], "name": ct["fn"], "result": res}
+                                if self._current_sub_agent_id:
+                                    event["sub_agent_id"] = self._current_sub_agent_id
+                                await self._stream_event_queue.put(event)
+                                from .trace import trace_event
+                                trace_event("stream.tool_result", call_id=ct["tc"]["id"], name=ct["fn"], sub_agent_id=self._current_sub_agent_id)
                             self._record_tool_outcome(
                                 ct["fn"],
                                 not self._looks_like_tool_failure(ct["fn"], raw, res),
@@ -1962,7 +2016,12 @@ class Agent:
                         self._turn_thinking_buffer.append(reasoning)
                     # 流式模式：推送 thinking 事件到队列
                     if self._stream_event_queue is not None:
-                        asyncio.create_task(self._stream_event_queue.put({"type": "thinking", "content": reasoning}))
+                        event = {"type": "thinking", "content": reasoning}
+                        if self._current_sub_agent_id:
+                            event["sub_agent_id"] = self._current_sub_agent_id
+                        asyncio.create_task(self._stream_event_queue.put(event))
+                        from .trace import trace_event
+                        trace_event("stream.thinking", sub_agent_id=self._current_sub_agent_id, preview=reasoning[:50])
                     # 终端显示仅在 thinking_visible() 时
                     if thinking_visible():
                         if first_thinking:

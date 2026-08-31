@@ -1,10 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { 
   FolderTree, ChevronRight, ChevronDown, File, Folder, X, 
   MessageSquare, Trash2, PanelRight, Send, Clock, Plus,
-  Edit3, Check, Pencil, Brain, Square, Loader2
+  Edit3, Check, Pencil, Square
 } from 'lucide-react';
 import { 
   fetchWorkspaceTree, fetchWorkspaceFile, WorkspaceNode,
@@ -12,11 +10,12 @@ import {
   fetchAgents, fetchConfig, Agent, AppConfig,
   fetchDirectories, DirectoryList,
   deleteWorkspaceFile, renameWorkspaceFile, createWorkspaceFile,
-  generateSessionName, updateSessionName, saveSessionMessages
+  generateSessionName, updateSessionName
 } from '../api/client';
 import { ReviewPanel, FileSnapshot } from '../components/ReviewPanel';
 import { DiffViewer } from '../components/DiffViewer';
 import Editor from '@monaco-editor/react';
+import { ChatView, useChatNodes } from '../components/chat/nodes';
 
 interface FileTreeNodeProps {
   node: WorkspaceNode;
@@ -614,7 +613,7 @@ function DirectoryPicker({ onSelect, onCancel }: DirectoryPickerProps) {
 
 interface SessionsPanelProps {
   onSessionSelect: (id: string) => void;
-  onNewSession: (cwd: string) => void;
+  onNewSession: (cwd?: string) => void;
   currentSessionId: string | null;
   visible?: boolean;
 }
@@ -846,196 +845,7 @@ interface ChatMessage {
   isEditing?: boolean;
 }
 
-// Parse thinking content from assistant message
-function parseThinkingContent(content: string): { thinking: string | null; mainContent: string; isThinkingComplete: boolean } {
-  if (!content || typeof content !== 'string') {
-    return { thinking: null, mainContent: content || '', isThinkingComplete: false };
-  }
-  
-  // Find ALL thinking blocks and concatenate them
-  const thinkingBlocks: string[] = [];
-  const tagRegex = /<thinking>([\s\S]*?)<\/thinking>/g;
-  let match;
-  while ((match = tagRegex.exec(content)) !== null) {
-    thinkingBlocks.push(match[1].trim());
-  }
-  
-  const isThinkingComplete = content.includes('</thinking>');
-  
-  // Check for unclosed thinking at the end
-  const lastOpenTag = content.lastIndexOf('<thinking>');
-  const lastCloseTag = content.lastIndexOf('</thinking>');
-  if (lastOpenTag > lastCloseTag) {
-    // There's an unclosed thinking block
-    thinkingBlocks.push(content.slice(lastOpenTag + 10).trim());
-  }
-  
-  const thinking = thinkingBlocks.length > 0 ? thinkingBlocks.join('\n\n') : null;
-  
-  // Remove ALL thinking blocks to get main content
-  const mainContent = content.replace(/<thinking>[\s\S]*?<\/thinking>/g, '').replace(/<thinking>[\s\S]*$/, '').trim();
-  
-  return { thinking, mainContent, isThinkingComplete };
-}
 
-// Parse content into independent sections: thinking blocks are separate, not merged
-interface ContentSection {
-  type: 'thinking' | 'text';
-  content: string;
-  isComplete: boolean;
-}
-
-function parseContentSections(content: string): ContentSection[] {
-  if (!content || typeof content !== 'string') {
-    return [{ type: 'text', content: content || '', isComplete: true }];
-  }
-  
-  const sections: ContentSection[] = [];
-  let remaining = content;
-  const isThinkingComplete = content.includes('</thinking>');
-  
-  // Split by thinking tags
-  while (remaining.length > 0) {
-    const openIdx = remaining.indexOf('<thinking>');
-    if (openIdx === -1) {
-      // Rest is normal text
-      const text = remaining.trim();
-      if (text) sections.push({ type: 'text', content: text, isComplete: true });
-      break;
-    }
-    
-    // Text before thinking block
-    const beforeText = remaining.substring(0, openIdx).trim();
-    if (beforeText) sections.push({ type: 'text', content: beforeText, isComplete: true });
-    
-    const closeIdx = remaining.indexOf('</thinking>', openIdx + 10);
-    let thinkingContent: string;
-    let thinkingComplete: boolean;
-    
-    if (closeIdx === -1) {
-      // Unclosed thinking at end
-      thinkingContent = remaining.substring(openIdx + 10).trim();
-      thinkingComplete = false;
-      sections.push({ type: 'thinking', content: thinkingContent, isComplete: false });
-      remaining = '';
-    } else {
-      thinkingContent = remaining.substring(openIdx + 10, closeIdx).trim();
-      thinkingComplete = true;
-      sections.push({ type: 'thinking', content: thinkingContent, isComplete: true });
-      remaining = remaining.substring(closeIdx + 11).trimStart();
-    }
-  }
-  
-  return sections.length > 0 ? sections : [{ type: 'text', content: '', isComplete: true }];
-}
-
-// Thinking display component - defined OUTSIDE parent to preserve state across re-renders
-function ThinkingBlock({ thinking, isStreaming, isComplete }: { thinking: string; isStreaming: boolean; isComplete: boolean }) {
-  const [isExpanded, setIsExpanded] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const prevIsStreamingRef = useRef(isStreaming);
-  
-  // Auto-expand when streaming starts, auto-collapse when streaming stops
-  useEffect(() => {
-    const wasStreaming = prevIsStreamingRef.current;
-    
-    if (isStreaming && !isComplete) {
-      // Streaming started or continuing: expand
-      setIsExpanded(true);
-    } else if (wasStreaming && !isStreaming) {
-      // Streaming just stopped: collapse
-      setIsExpanded(false);
-    }
-    
-    prevIsStreamingRef.current = isStreaming;
-  }, [isStreaming, isComplete]);
-  
-  // Auto-scroll when streaming
-  useEffect(() => {
-    if (isStreaming && !isComplete && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [thinking, isStreaming, isComplete]);
-  
-  // During streaming, show expanded with scroll
-  if (isStreaming && !isComplete) {
-    return (
-      <div className="mb-3 border border-purple-200 rounded-lg bg-purple-50/50">
-        <div className="flex items-center gap-2 px-3 py-1.5 border-b border-purple-200 bg-purple-100/50 rounded-t-lg">
-          <Brain className="w-3.5 h-3.5 text-purple-600" />
-          <span className="text-xs font-medium text-purple-700">Thinking...</span>
-          <div className="flex-1" />
-          <div className="flex gap-1">
-            <div className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-pulse" />
-            <div className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-pulse" style={{ animationDelay: '0.2s' }} />
-            <div className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-pulse" style={{ animationDelay: '0.4s' }} />
-          </div>
-        </div>
-        <div 
-          ref={scrollRef}
-          className="px-3 py-2 text-xs text-gray-600 overflow-y-auto font-mono whitespace-pre-wrap"
-          style={{ maxHeight: '150px' }}
-        >
-          {thinking}
-        </div>
-      </div>
-    );
-  }
-  
-  // Collapsed state - show as clickable button
-  return (
-    <div className="mb-3">
-      <button
-        onClick={() => setIsExpanded(!isExpanded)}
-        className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-purple-600 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg transition-colors"
-      >
-        <Brain className="w-3.5 h-3.5" />
-        <span>Thinking</span>
-        {isExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-      </button>
-      {isExpanded && (
-        <div className="mt-2 border border-purple-200 rounded-lg bg-purple-50/50">
-          <div className="px-3 py-2 text-xs text-gray-600 overflow-y-auto font-mono whitespace-pre-wrap max-h-60">
-            {thinking}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-interface ToolCollapsibleProps {
-  label: string;
-  icon: string;
-  defaultOpen?: boolean;
-  children: React.ReactNode;
-}
-
-function ToolCollapsible({ label, icon, defaultOpen = false, children }: ToolCollapsibleProps) {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
-  
-  // Auto-collapse when new content arrives (when defaultOpen changes from true to false)
-  useEffect(() => {
-    setIsOpen(defaultOpen);
-  }, [defaultOpen]);
-  
-  return (
-    <details
-      open={isOpen}
-      onToggle={(e) => setIsOpen((e.target as HTMLDetailsElement).open)}
-      className="my-1 border border-gray-200 rounded-lg bg-gray-50 overflow-hidden group/details"
-    >
-      <summary className="flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-gray-100 transition-colors select-none text-sm font-medium text-gray-700 list-none [&::-webkit-details-marker]:hidden">
-        <span className="text-xs">{icon}</span>
-        <span className="flex-1">{label}</span>
-        <ChevronDown className="w-3 h-3 text-gray-400 transition-transform group-open/details:rotate-180" />
-      </summary>
-      <div className="px-3 pb-2 border-t border-gray-200">
-        {children}
-      </div>
-    </details>
-  );
-}
 
 // Split markdown content into alternating normal/tool sections
 function simplifyToolResult(toolName: string, rawResult: string): string {
@@ -1153,130 +963,6 @@ function simplifyToolCall(toolName: string, input: Record<string, unknown>): str
   return `🔧 ${toolName}`;
 }
 
-function splitToolSections(content: string): Array<{ type: 'normal' | 'tool'; text: string; label?: string; icon?: string }> {
-  const sections: Array<{ type: 'normal' | 'tool'; text: string; label?: string; icon?: string }> = [];
-
-  // First handle :::tool-block markers (combined call+result blocks)
-  const toolBlockRegex = /(?:^|\n\n):::tool-block\n([\s\S]*?)\n:::(?:\n\n|$)/g;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = toolBlockRegex.exec(content)) !== null) {
-    const normalText = content.substring(lastIndex, match.index).trim();
-    if (normalText) {
-      sections.push({ type: 'normal', text: normalText });
-    }
-    const blockContent = match[1].trim();
-    // Extract tool name from first line (simplifyToolCall output)
-    const firstLine = blockContent.split('\n')[0] || '';
-    const toolName = firstLine.replace(/^[📄📝✏️▶📂🔍🌐⏳🔧]\s*/, '').split(' ')[0] || 'tool';
-    sections.push({ type: 'tool', text: blockContent, label: toolName, icon: '🔧' });
-    lastIndex = match.index + match[0].length;
-  }
-
-  // Then handle legacy tool blocks: starts with bold emoji marker, may include following code block
-  const toolRegex = /(?:^|\n\n)(\*\*(?:\u{1F527}|\u2705|[\u{1F916}]|\u2713|\u2139\uFE0F)[^*]*\*\*(?:\s*\n(?:```\w*\n[\s\S]*?```|[\s\S]*?))?(?=\n\n|\n*$))/gu;
-
-  while ((match = toolRegex.exec(content)) !== null) {
-    // Add normal text before this tool block
-    const normalText = content.substring(lastIndex, match.index).trim();
-    if (normalText) {
-      sections.push({ type: 'normal', text: normalText });
-    }
-
-    // Parse the tool block
-    const block = match[0].trim();
-    const toolCallMatch = block.match(/^\*\*\u{1F527}[^*]*\*[^`]*`([^`]+)`/u);
-    if (toolCallMatch) {
-      const codeBlockMatch = block.match(/```[\s\S]*?```/);
-      sections.push({ type: 'tool', text: codeBlockMatch ? codeBlockMatch[0] : '', label: `\u8C03\u7528\u5DE5\u5177: ${toolCallMatch[1]}`, icon: '\u{1F527}' });
-      lastIndex = match.index + match[0].length;
-      continue;
-    }
-
-    const toolResultMatch = block.match(/^\*\*\u2705[^*]*\*[^`]*`([^`]+)`/u);
-    if (toolResultMatch) {
-      const codeBlockMatch = block.match(/```[\s\S]*?```/);
-      const result = codeBlockMatch ? codeBlockMatch[0] : '';
-      const preview = result.length > 120 ? result.substring(0, 120) + '...' : result;
-      sections.push({ type: 'tool', text: result, label: `\u5DE5\u5177\u7ED3\u679C: ${toolResultMatch[1]} \u2014 ${preview}`, icon: '\u2705' });
-      lastIndex = match.index + match[0].length;
-      continue;
-    }
-
-    const subAgentStartMatch = block.match(/^\*\*\u{1F916}[^*]*\*[^`]*`([^`]+)`\s*-\s*(.*)/u);
-    if (subAgentStartMatch) {
-      sections.push({ type: 'tool', text: '', label: `\u542F\u52A8\u5B50Agent: ${subAgentStartMatch[1]} \u2014 ${subAgentStartMatch[2]}`, icon: '\u{1F916}' });
-      lastIndex = match.index + match[0].length;
-      continue;
-    }
-
-    const subAgentEndMatch = block.match(/^\*\*\u2713[^*]*\*[^`]*`([^`]+)`/u);
-    if (subAgentEndMatch) {
-      sections.push({ type: 'tool', text: '', label: `\u5B50Agent\u5B8C\u6210: ${subAgentEndMatch[1]}`, icon: '\u2713' });
-      lastIndex = match.index + match[0].length;
-      continue;
-    }
-
-    const infoMatch = block.match(/^\*\*\u2139\uFE0F[^*]*\*\*\s*(.*)/u);
-    if (infoMatch) {
-      sections.push({ type: 'tool', text: infoMatch[1], label: '\u4FE1\u606F', icon: '\u2139\uFE0F' });
-      lastIndex = match.index + match[0].length;
-      continue;
-    }
-
-    // Not a recognized tool block — treat as normal
-    sections.push({ type: 'normal', text: block });
-    lastIndex = match.index + match[0].length;
-  }
-
-  // Remaining normal text
-  const remaining = content.substring(lastIndex).trim();
-  if (remaining) {
-    if (sections.length > 0 && sections[sections.length - 1].type === 'normal') {
-      sections[sections.length - 1].text += '\n\n' + remaining;
-    } else {
-      sections.push({ type: 'normal', text: remaining });
-    }
-  }
-
-  return sections;
-}
-
-// Helper function to build display content from parts
-function buildDisplayContent(
-  contentParts: Array<{type: 'thinking' | 'text', content: string, complete?: boolean}>,
-  accumulatedContent: string,
-  currentThinking: string | null
-): string {
-  let result = '';
-  
-  // Add completed thinking blocks
-  for (const part of contentParts) {
-    if (part.type === 'thinking') {
-      result += `<thinking>${part.content}</thinking>\n\n`;
-    } else {
-      result += part.content;
-    }
-  }
-  
-  // Add current thinking if exists
-  if (currentThinking !== null) {
-    result += `<thinking>${currentThinking}`;
-  }
-  
-  // Add accumulated content
-  if (accumulatedContent) {
-    if (currentThinking !== null) {
-      result += `\n\n${accumulatedContent}`;
-    } else {
-      result += accumulatedContent;
-    }
-  }
-  
-  return result.trim();
-}
-
 // Main Chat Page
 
 export default function ChatPage() {
@@ -1291,25 +977,25 @@ export default function ChatPage() {
   const [selectedAgent, setSelectedAgent] = useState<string>('');
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const currentSessionIdRef = useRef<string | null>(null);
   const [currentProject, setCurrentProject] = useState<string | null>(null);
   const [currentCwd, setCurrentCwd] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
-  const isNearBottomRef = useRef(true);
-  const [showScrollBtn, setShowScrollBtn] = useState(false);
   const messagesRef = useRef<ChatMessage[]>([]);
   const [fileSnapshots, setFileSnapshots] = useState<FileSnapshot[]>([]);
-  const [pendingToolCalls, setPendingToolCalls] = useState<Map<string, string>>(new Map());
-  const pendingToolCallRef = useRef<{ name: string; input: Record<string, unknown> } | null>(null);
   const [fileTreeRefreshTrigger, setFileTreeRefreshTrigger] = useState(0);
-  const isSubAgentActiveRef = useRef(false);
-  const subAgentTypeRef = useRef('');
-  const subAgentOutputRef = useRef('');
-  const [subAgentOutputs, setSubAgentOutputs] = useState<Array<{id: string, type: string, output: string}>>([]);
+  const pendingSessionNameRef = useRef<string | null>(null);
   // Cache messages for each session so switching doesn't unload
   const sessionMessagesCache = useRef<Map<string, ChatMessage[]>>(new Map());
+  
+  // Keep ref in sync with state
+  useEffect(() => {
+    currentSessionIdRef.current = currentSessionId;
+  }, [currentSessionId]);
+  
+  // New node-based rendering
+  const { snapshot: chatSnapshot, handleSSEEvent: handleNodeEvent, addUserMessage } = useChatNodes();
 
   useEffect(() => {
     // Load agents and config
@@ -1323,26 +1009,6 @@ export default function ChatPage() {
     // Also update cache for current session
     if (currentSessionId) {
       sessionMessagesCache.current.set(currentSessionId, messages);
-    }
-  }, [messages]);
-
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    isNearBottomRef.current = true;
-    setShowScrollBtn(false);
-  };
-
-  const handleScroll = () => {
-    const el = scrollContainerRef.current;
-    if (!el) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
-    isNearBottomRef.current = atBottom;
-    setShowScrollBtn(!atBottom);
-  };
-
-  useEffect(() => {
-    if (isNearBottomRef.current) {
-      scrollToBottom();
     }
   }, [messages]);
 
@@ -1513,39 +1179,15 @@ export default function ChatPage() {
     };
     
     setMessages(prev => [...prev, userMessage]);
+    // Add user message to node system
+    addUserMessage(userMessageContent, contextFiles.length > 0 ? contextFiles : undefined, selectedAgent || undefined, selectedModel || undefined);
     setInputValue('');
-    setContextFiles([]); // Clear context after sending
-
-    // Add empty assistant message for streaming
-    // messages.length is the current length (before either setMessages takes effect)
-    // After both appends: [...existing, userMessage, assistantMessage]
-    // assistantMessage index = messages.length + 1
-    const assistantMessageIndex = messages.length + 1;
-    const assistantMessage: ChatMessage = {
-      role: 'assistant',
-      content: '',
-      timestamp: new Date().toISOString(),
-    };
-    setMessages(prev => [...prev, assistantMessage]);
+    setContextFiles([]);
 
     // Generate session name for first message in new session (non-blocking)
     if (isFirstMessage && !currentSessionId) {
-      // Don't await - let it run in background
-      generateSessionName(userMessageContent)
-        .then(name => {
-          // Update after streaming completes
-          setTimeout(async () => {
-            if (currentSessionId) {
-              try {
-                await updateSessionName(currentSessionId, name);
-                sessionStorage.removeItem('sessions');
-              } catch (err) {
-                console.error('Failed to update session name:', err);
-              }
-            }
-          }, 2000);
-        })
-        .catch(err => console.error('Failed to generate session name:', err));
+      // Store the user message for later naming
+      pendingSessionNameRef.current = userMessageContent;
     }
 
     // Set up abort controller for stop functionality
@@ -1578,11 +1220,6 @@ export default function ChatPage() {
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
-      // Build content as an array of parts for proper interleaving of thinking/text blocks
-      // Each part is either {type:'thinking', content:string, complete:bool} or {type:'text', content:string}
-      let contentParts: Array<{type: 'thinking' | 'text', content: string, complete?: boolean}> = [];
-      let currentThinking: string | null = null; // null means not in thinking mode
-      let accumulatedContent = ''; // plain text content (non-thinking)
 
       while (true) {
         const { done, value } = await reader.read();
@@ -1597,235 +1234,51 @@ export default function ChatPage() {
             try {
               const parsed = JSON.parse(data);
               
-              // Handle thinking content
-              if (parsed.thinking) {
-                if (currentThinking === null) {
-                  // Start a new thinking block
-                  currentThinking = parsed.thinking;
-                } else {
-                  // Append to current thinking block
-                  currentThinking += parsed.thinking;
+              // Process through node system (handles display)
+              handleNodeEvent(parsed);
+              
+              // Capture file snapshots for review
+              if (parsed.tool_result?.snapshot) {
+                const snap = parsed.tool_result.snapshot;
+                if (snap.old_content !== undefined && snap.new_content !== undefined) {
+                  setFileSnapshots(prev => {
+                    const filtered = prev.filter(s => s.file_path !== snap.file_path);
+                    return [...filtered, {
+                      file_path: snap.file_path,
+                      is_new: snap.is_new,
+                      old_content: snap.old_content,
+                      new_content: snap.new_content,
+                    }];
+                  });
                 }
-                
-                // Build display content from parts
-                const displayContent = buildDisplayContent(contentParts, accumulatedContent, currentThinking);
-                setMessages(prev => {
-                  const newMessages = [...prev];
-                  newMessages[assistantMessageIndex] = {
-                    ...newMessages[assistantMessageIndex],
-                    content: displayContent,
-                  };
-                  return newMessages;
-                });
               }
               
-              // Handle main content
-              if (parsed.chunk) {
-                // If we were in thinking mode, close the thinking block and save it
-                if (currentThinking !== null) {
-                  contentParts.push({type: 'thinking', content: currentThinking, complete: true});
-                  currentThinking = null;
-                }
-                
-                // Route to sub-agent output if active, otherwise main content
-                if (isSubAgentActiveRef.current) {
-                  subAgentOutputRef.current += parsed.chunk;
-                } else {
-                  accumulatedContent += parsed.chunk;
-                }
-                
-                // Build display content from parts
-                const displayContent = buildDisplayContent(contentParts, accumulatedContent, currentThinking);
-                setMessages(prev => {
-                  const newMessages = [...prev];
-                  newMessages[assistantMessageIndex] = {
-                    ...newMessages[assistantMessageIndex],
-                    content: displayContent,
-                  };
-                  return newMessages;
-                });
+              // Refresh file tree after file-modifying tools
+              if (parsed.tool_result && ['write_file', 'edit_file', 'run_shell'].includes(parsed.tool_result.name)) {
+                setFileTreeRefreshTrigger(prev => prev + 1);
               }
               
-              // Handle tool call events - 存到 ref，等 tool_result 到了一起渲染
-              if (parsed.tool_call) {
-                const toolCall = parsed.tool_call;
-                pendingToolCallRef.current = { name: toolCall.name, input: toolCall.input };
-                setPendingToolCalls(prev => new Map(prev).set(toolCall.id || toolCall.name, toolCall.name));
-                
-                // Show loading indicator in content
-                const toolCallDisplay = `\n\n⏳ ${toolCall.name}...\n`;
-                accumulatedContent += toolCallDisplay;
-                
-                const displayContent = buildDisplayContent(contentParts, accumulatedContent, currentThinking);
-                setMessages(prev => {
-                  const newMessages = [...prev];
-                  newMessages[assistantMessageIndex] = {
-                    ...newMessages[assistantMessageIndex],
-                    content: displayContent,
-                  };
-                  return newMessages;
-                });
-              }
-              
-              // Handle tool result events - 合并 tool_call + result 到一个块
-              if (parsed.tool_result) {
-                const toolResult = parsed.tool_result;
-                setPendingToolCalls(prev => {
-                  const next = new Map(prev);
-                  next.delete(toolResult.id || toolResult.name);
-                  return next;
-                });
-                
-                // Build combined tool block
-                const pending = pendingToolCallRef.current;
-                pendingToolCallRef.current = null;
-                
-                // Remove the loading indicator from accumulatedContent
-                accumulatedContent = accumulatedContent.replace(/\n\n⏳ [^\n]+\n$/, '');
-                
-                let combinedBlock: string;
-                if (pending && pending.name === toolResult.name) {
-                  // Build combined call+result block
-                  const callLine = simplifyToolCall(pending.name, pending.input);
-                  const resultText = simplifyToolResult(toolResult.name, toolResult.result);
-                  combinedBlock = `\n\n:::tool-block\n${callLine}\n\n${resultText}\n:::\n\n`;
-                } else {
-                  combinedBlock = `\n\n${simplifyToolResult(toolResult.name, toolResult.result)}\n\n`;
-                }
-                accumulatedContent += combinedBlock;
-                
-                // Capture file snapshot for review
-                if (toolResult.snapshot) {
-                  const snap = toolResult.snapshot;
-                  if (snap.old_content !== undefined && snap.new_content !== undefined) {
-                    setFileSnapshots(prev => {
-                      // Deduplicate by file_path
-                      const filtered = prev.filter(s => s.file_path !== snap.file_path);
-                      return [...filtered, {
-                        file_path: snap.file_path,
-                        is_new: snap.is_new,
-                        old_content: snap.old_content,
-                        new_content: snap.new_content,
-                      }];
-                    });
-                  }
-                }
-                
-                // Always refresh file tree after any tool that might affect files
-                if (['write_file', 'edit_file', 'run_shell'].includes(toolResult.name)) {
-                  setFileTreeRefreshTrigger(prev => prev + 1);
-                }
-                
-                const displayContent = buildDisplayContent(contentParts, accumulatedContent, currentThinking);
-                setMessages(prev => {
-                  const newMessages = [...prev];
-                  newMessages[assistantMessageIndex] = {
-                    ...newMessages[assistantMessageIndex],
-                    content: displayContent,
-                  };
-                  return newMessages;
-                });
-              }
-              
-              // Handle sub-agent start events - begin collecting output in scrollable box
-              if (parsed.sub_agent_start) {
-                const subAgent = parsed.sub_agent_start;
-                isSubAgentActiveRef.current = true;
-                subAgentTypeRef.current = subAgent.agent_type;
-                subAgentOutputRef.current = '';
-                const startMarker = `\n\n**🤖 启动子Agent:** \`${subAgent.agent_type}\` - ${subAgent.description}\n\n:::sub-agent-start\n`;
-                accumulatedContent += startMarker;
-                
-                const displayContent = buildDisplayContent(contentParts, accumulatedContent, currentThinking);
-                setMessages(prev => {
-                  const newMessages = [...prev];
-                  newMessages[assistantMessageIndex] = {
-                    ...newMessages[assistantMessageIndex],
-                    content: displayContent,
-                  };
-                  return newMessages;
-                });
-              }
-              
-              // Handle sub-agent end events - close the scrollable box
-              if (parsed.sub_agent_end) {
-                const subAgent = parsed.sub_agent_end;
-                isSubAgentActiveRef.current = false;
-                const subOutput = subAgentOutputRef.current;
-                const endMarker = `:::sub-agent-end\n**✓ 子Agent完成:** \`${subAgent.agent_type}\`\n`;
-                accumulatedContent += endMarker;
-                
-                // Store sub-agent output for rendering
-                if (subOutput) {
-                  setSubAgentOutputs(prev => [...prev, {
-                    id: `sub-${Date.now()}`,
-                    type: subAgent.agent_type,
-                    output: subOutput,
-                  }]);
-                }
-                
-                const displayContent = buildDisplayContent(contentParts, accumulatedContent, currentThinking);
-                setMessages(prev => {
-                  const newMessages = [...prev];
-                  newMessages[assistantMessageIndex] = {
-                    ...newMessages[assistantMessageIndex],
-                    content: displayContent,
-                  };
-                  return newMessages;
-                });
-              }
-              
-              // Handle info events
-              if (parsed.info) {
-                const infoDisplay = `\n\n**ℹ️ 信息:** ${parsed.info}\n\n`;
-                accumulatedContent += infoDisplay;
-                
-                const displayContent = buildDisplayContent(contentParts, accumulatedContent, currentThinking);
-                setMessages(prev => {
-                  const newMessages = [...prev];
-                  newMessages[assistantMessageIndex] = {
-                    ...newMessages[assistantMessageIndex],
-                    content: displayContent,
-                  };
-                  return newMessages;
-                });
-              }
-              
-              // Handle error events
-              if (parsed.error) {
-                const errorDisplay = `\n\n**❌ 错误:** ${parsed.error}\n\n`;
-                accumulatedContent += errorDisplay;
-                
-                setMessages(prev => {
-                  const newMessages = [...prev];
-                  newMessages[assistantMessageIndex] = {
-                    ...newMessages[assistantMessageIndex],
-                    content: accumulatedContent,
-                  };
-                  return newMessages;
-                });
-              }
-              
-              // Handle done event - save session ID and persist messages
+              // Handle done event - save session ID and generate name if needed
               if (parsed.done) {
                 const doneSessionId = parsed.session_id || currentSessionId;
                 if (doneSessionId) {
                   setCurrentSessionId(doneSessionId);
-                  // Save pure conversation only (no context/skills/MCP)
-                  const snapshot = messagesRef.current;
-                  if (snapshot.length > 0) {
-                    // Strip context files and system data - only save role + content
-                    const pureMessages = snapshot.map(msg => ({
-                      role: msg.role,
-                      content: typeof msg.content === 'string' 
-                        ? msg.content.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim()
-                        : msg.content,
-                      timestamp: msg.timestamp,
-                    }));
-                    sessionMessagesCache.current.set(doneSessionId, snapshot);
-                    saveSessionMessages(doneSessionId, pureMessages).catch(err =>
-                      console.error('Failed to save session messages:', err)
-                    );
+                  
+                  // Generate session name for first message in new session
+                  if (pendingSessionNameRef.current) {
+                    const userMessage = pendingSessionNameRef.current;
+                    pendingSessionNameRef.current = null;
+                    
+                    generateSessionName(userMessage)
+                      .then(async name => {
+                        try {
+                          await updateSessionName(doneSessionId, name);
+                          sessionStorage.removeItem('sessions');
+                        } catch (err) {
+                          console.error('Failed to update session name:', err);
+                        }
+                      })
+                      .catch(err => console.error('Failed to generate session name:', err));
                   }
                 }
               }
@@ -1835,40 +1288,9 @@ export default function ChatPage() {
           }
         }
       }
-      
-      // Stream ended - finalize
-      setPendingToolCalls(new Map()); // Clear any pending tool calls
-      
-      // Close unclosed thinking block if any
-      if (currentThinking !== null) {
-        contentParts.push({type: 'thinking', content: currentThinking, complete: true});
-        currentThinking = null;
-      }
-      const finalContent = buildDisplayContent(contentParts, accumulatedContent, null);
-      setMessages(prev => {
-        const newMessages = [...prev];
-        if (newMessages[assistantMessageIndex]) {
-          newMessages[assistantMessageIndex] = {
-            ...newMessages[assistantMessageIndex],
-            content: finalContent,
-          };
-        }
-        return newMessages;
-      });
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
-        // User stopped the stream - keep whatever content we have
         console.log('Stream aborted by user');
-      } else {
-        const errorMessage = `Error: ${error instanceof Error ? error.message : 'Failed to get response'}`;
-        setMessages(prev => {
-          const newMessages = [...prev];
-          newMessages[assistantMessageIndex] = {
-            ...newMessages[assistantMessageIndex],
-            content: errorMessage,
-          };
-          return newMessages;
-        });
       }
     } finally {
       setIsStreaming(false);
@@ -1968,205 +1390,16 @@ export default function ChatPage() {
           </button>
         </div>
 
-        {/* Messages */}
-        <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-4 py-4">
-          {messages.length === 0 ? (
-            <div className="h-full flex items-center justify-center text-gray-400">
-              <div className="text-center">
-                <MessageSquare className="w-12 h-12 mx-auto mb-4 opacity-30" />
-                <p className="text-sm">Start a conversation</p>
-                <p className="text-xs mt-1">Type a message below or use @ to reference files</p>
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-4">
-              {messages.map((msg, idx) => (
-                <div
-                  key={idx}
-                  className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} group`}
-                >
-                  <div className="max-w-2xl">
-                    {/* Show context files for user messages */}
-                    {msg.role === 'user' && msg.contextFiles && msg.contextFiles.length > 0 && (
-                      <div className="flex items-center gap-1 flex-wrap mb-1 px-2">
-                        <span className="text-xs text-gray-500">Context:</span>
-                        {msg.contextFiles.map(file => (
-                          <span
-                            key={file}
-                            className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-gray-100 border border-gray-200 rounded text-xs text-gray-600"
-                          >
-                            <File className="w-3 h-3" />
-                            {file.split('/').pop()}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                    <div
-                      className={`rounded-lg px-4 py-3 ${
-                        msg.role === 'user'
-                          ? 'bg-blue-500 text-white'
-                          : 'bg-gray-100 text-gray-900'
-                      }`}
-                    >
-                      {msg.role === 'assistant' ? (
-                        <div>
-                          {(() => {
-                            const sections = parseContentSections(msg.content);
-                            const isLastMessage = idx === messages.length - 1;
-                            
-                            // Find the last tool section for streaming expand
-                            const mainContent = sections.filter(s => s.type === 'text').map(s => s.content).join('\n\n');
-                            const toolSections = mainContent ? splitToolSections(mainContent) : [];
-                            let lastToolIdx = -1;
-                            for (let i = toolSections.length - 1; i >= 0; i--) {
-                              if (toolSections[i].type === 'tool') { lastToolIdx = i; break; }
-                            }
-                            
-                            const fileLinkRenderer = (props: React.AnchorHTMLAttributes<HTMLAnchorElement>) => {
-                              const { href, children } = props;
-                              if (href && !href.startsWith('http') && !href.startsWith('#')) {
-                                return (
-                                  <span 
-                                    className="text-blue-600 hover:text-blue-800 underline cursor-pointer font-mono text-xs"
-                                    onClick={(e) => {
-                                      e.preventDefault();
-                                      e.stopPropagation();
-                                      setSelectedFile(href);
-                                      setSidebarTab('files');
-                                    }}
-                                  >
-                                    {children}
-                                  </span>
-                                );
-                              }
-                              return <a {...props} />;
-                            };
-                            
-                            return (
-                              <>
-                                {sections.map((section, sIdx) => {
-                                  if (section.type === 'thinking') {
-                                    const isThinkingStreaming = isStreaming && isLastMessage && !section.isComplete;
-                                    return (
-                                      <ThinkingBlock 
-                                        key={`think-${sIdx}`}
-                                        thinking={section.content} 
-                                        isStreaming={isThinkingStreaming}
-                                        isComplete={section.isComplete}
-                                      />
-                                    );
-                                  }
-                                  // Text section — render with tool sections
-                                  const textSections = splitToolSections(section.content);
-                                  if (textSections.length === 0) return null;
-                                  return (
-                                    <div key={`text-${sIdx}`} className="prose prose-sm max-w-none">
-                                      {textSections.map((ts, tIdx) => {
-                                        const globalToolIdx = tIdx; // within this text section
-                                        if (ts.type === 'normal') {
-                                          return <ReactMarkdown key={tIdx} remarkPlugins={[remarkGfm]} components={{ a: fileLinkRenderer }}>{ts.text}</ReactMarkdown>;
-                                        }
-                                        const isLastTool = globalToolIdx === lastToolIdx;
-                                        const defaultOpen = isStreaming && isLastMessage && isLastTool;
-                                        return (
-                                          <ToolCollapsible key={tIdx} label={ts.label || 'Tool'} icon={ts.icon || '🔧'} defaultOpen={defaultOpen}>
-                                            {ts.text ? (
-                                              <div className="prose prose-xs max-w-none">
-                                                <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: fileLinkRenderer }}>{ts.text}</ReactMarkdown>
-                                              </div>
-                                            ) : null}
-                                          </ToolCollapsible>
-                                        );
-                                      })}
-                                    </div>
-                                  );
-                                })}
-                                {/* Sub-agent output in fixed-height scrollable boxes */}
-                                {subAgentOutputs.map((sa) => (
-                                  <div key={sa.id} className="mt-2 border border-purple-200 rounded-lg overflow-hidden bg-purple-50/30">
-                                    <div className="flex items-center gap-2 px-3 py-1.5 bg-purple-100 border-b border-purple-200 text-xs text-purple-700 font-medium">
-                                      <span>🤖</span>
-                                      <span>子Agent: {sa.type}</span>
-                                    </div>
-                                    <div className="h-64 overflow-y-auto p-3 text-xs font-mono whitespace-pre-wrap text-gray-700">
-                                      {sa.output}
-                                    </div>
-                                  </div>
-                                ))}
-                                {/* Streaming indicator */}
-                                {isStreaming && isLastMessage && !mainContent && sections.length === 0 && (
-                                  <div className="flex items-center gap-2 text-gray-400 text-sm">
-                                    <div className="flex gap-1">
-                                      <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-pulse" />
-                                      <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-pulse" style={{ animationDelay: '0.2s' }} />
-                                      <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-pulse" style={{ animationDelay: '0.4s' }} />
-                                    </div>
-                                    <span>Thinking...</span>
-                                  </div>
-                                )}
-                              </>
-                            );
-                          })()}
-                        </div>
-                      ) : (
-                        <pre className="whitespace-pre-wrap text-sm font-sans">{msg.content}</pre>
-                      )}
-                      <div className={`text-xs mt-1 flex items-center gap-2 ${msg.role === 'user' ? 'text-blue-100' : 'text-gray-400'}`}>
-                        <span>{new Date(msg.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
-                        {msg.agent && <span>• Agent: {msg.agent}</span>}
-                        {msg.model && <span>• Model: {msg.model}</span>}
-                      </div>
-                    </div>
-                    {/* Edit button for user messages */}
-                    {msg.role === 'user' && (
-                      <button
-                        onClick={() => handleEditMessage(idx)}
-                        className="opacity-0 group-hover:opacity-100 mt-1 px-2 py-1 text-xs text-blue-600 hover:bg-blue-50 rounded transition-opacity"
-                      >
-                        Edit & Resend
-                      </button>
-                    )}
-                    {/* Delete button for all messages */}
-                    <button
-                      onClick={() => {
-                        setMessages(prev => prev.filter((_, i) => i !== idx));
-                      }}
-                      className="opacity-0 group-hover:opacity-100 mt-1 px-2 py-1 text-xs text-red-500 hover:bg-red-50 rounded transition-opacity"
-                    >
-                      Delete
-                    </button>
-                  </div>
-                </div>
-              ))}
-              {/* Tool execution loading indicator */}
-              {pendingToolCalls.size > 0 && (
-                <div className="flex justify-start">
-                  <div className="max-w-2xl">
-                    <div className="rounded-xl px-4 py-2 bg-gray-100 text-gray-600 text-sm flex items-center gap-2">
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                      <span>
-                        {Array.from(pendingToolCalls.values()).join(', ')}...
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              )}
-              <div ref={messagesEndRef} />
-            </div>
-          )}
-          {/* Scroll to bottom button */}
-          {showScrollBtn && (
-            <button
-              onClick={scrollToBottom}
-              className="sticky bottom-2 float-right mr-2 px-3 py-1.5 bg-gray-800 text-white text-xs rounded-full shadow-lg hover:bg-gray-700 transition-colors z-10 flex items-center gap-1"
-            >
-              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 14l-7 7m0 0l-7-7m7 7V3" />
-              </svg>
-              Bottom
-            </button>
-          )}
-        </div>
+        {/* Messages - using new node-based rendering */}
+        <ChatView 
+          snapshot={chatSnapshot} 
+          isStreaming={isStreaming}
+          onEditMessage={handleEditMessage}
+          onFileClick={(path) => {
+            setSelectedFile(path);
+            setSidebarTab('files');
+          }}
+        />
 
         {/* Review Panel - shows changed files with accept/reject */}
         <ReviewPanel

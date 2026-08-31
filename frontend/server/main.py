@@ -77,53 +77,60 @@ class SessionNameRequest(BaseModel):
 
 @app.post("/api/sessions/generate-name")
 async def api_generate_session_name(data: SessionNameRequest) -> dict[str, str]:
-    """Generate a session name from user message using side model."""
-    import httpx
-    from agents.config import load_config
-    
-    config = load_config()
-    
-    # Get side model from routing config
-    side_model_id = config.routing.get('side')
-    if not side_model_id:
-        # Fallback: use first available endpoint
-        if config.endpoints:
-            side_model_id = next(iter(config.endpoints.keys()))
-        else:
-            return {"name": data.message[:20] + "..." if len(data.message) > 20 else data.message}
-    
-    endpoint = config.endpoints.get(side_model_id)
-    if not endpoint:
-        return {"name": data.message[:20] + "..." if len(data.message) > 20 else data.message}
-    
+    """Generate a session name from user message using title agent."""
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                f"{endpoint.base_url.rstrip('/')}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {endpoint.api_key}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": endpoint.model,
-                    "messages": [
-                        {"role": "system", "content": "Generate a concise session title (max 30 chars) from the user's message. Return only the title, no quotes or explanation."},
-                        {"role": "user", "content": data.message}
-                    ],
-                    "max_tokens": 50,
-                    "temperature": 0.3
-                }
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                name = result.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
-                if name:
-                    # Truncate if too long
-                    return {"name": name[:30] if len(name) > 30 else name}
-            
-            # Fallback
+        from agents.agent import Agent
+        from agents.agent_mode import BUILTIN_HIDDEN_AGENTS
+        
+        # Get title agent config
+        title_config = BUILTIN_HIDDEN_AGENTS.get("title")
+        if not title_config:
             return {"name": data.message[:20] + "..." if len(data.message) > 20 else data.message}
+        
+        # Load config to get API credentials
+        from agents.config import load_config
+        config = load_config()
+        
+        # Use side model for title generation, fallback to first endpoint
+        side_model_id = config.routing.get('side')
+        model_name = None
+        api_key = None
+        api_base = None
+        
+        if side_model_id:
+            endpoint = config.endpoints.get(side_model_id)
+            if endpoint:
+                model_name = endpoint.model
+                api_key = endpoint.api_key
+                api_base = endpoint.base_url
+        
+        if not api_key and config.endpoints:
+            first_endpoint = next(iter(config.endpoints.values()))
+            model_name = first_endpoint.model
+            api_key = first_endpoint.api_key
+            api_base = first_endpoint.base_url
+        
+        if not api_key:
+            return {"name": data.message[:20] + "..." if len(data.message) > 20 else data.message}
+        
+        # Create agent with title system prompt
+        agent = Agent(
+            model=model_name,
+            api_key=api_key,
+            api_base=api_base,
+            custom_system_prompt=title_config.system_prompt,
+        )
+        
+        # Run once to generate title
+        result = await agent.run_once(data.message)
+        name = result.get("text", "").strip()
+        
+        if name:
+            # Clean up and truncate
+            name = name.replace('"', '').replace("'", "").strip()
+            return {"name": name[:30] if len(name) > 30 else name}
+        
+        return {"name": data.message[:20] + "..." if len(data.message) > 20 else data.message}
     except Exception:
         return {"name": data.message[:20] + "..." if len(data.message) > 20 else data.message}
 
@@ -1082,27 +1089,66 @@ async def api_chat_stream(data: ChatMessage):
         
         async def generate():
             # 使用新的事件流机制
+            current_sub_agent_id = None
+            
             try:
                 async for event in agent.chat_stream(full_message):
                     event_type = event.get("type")
+                    # 从事件中获取 sub_agent_id（如果有的话）
+                    event_sub_agent_id = event.get("sub_agent_id")
                     
                     if event_type == "thinking":
-                        yield f"data: {json.dumps({'thinking': event.get('content', '')})}\n\n"
+                        data = {'thinking': {'content': event.get('content', '')}}
+                        sub_id = event_sub_agent_id or current_sub_agent_id
+                        if sub_id:
+                            data['thinking']['sub_agent_id'] = sub_id
+                        yield f"data: {json.dumps(data)}\n\n"
                     elif event_type == "text":
-                        yield f"data: {json.dumps({'chunk': event.get('content', '')})}\n\n"
+                        data = {'text': {'content': event.get('content', '')}}
+                        sub_id = event_sub_agent_id or current_sub_agent_id
+                        if sub_id:
+                            data['text']['sub_agent_id'] = sub_id
+                        yield f"data: {json.dumps(data)}\n\n"
                     elif event_type == "tool_call":
-                        yield f"data: {json.dumps({'tool_call': {'name': event.get('name', ''), 'input': event.get('input', {})}})}\n\n"
+                        call_id = event.get('call_id', f"call_{id(event)}")
+                        data = {'tool_call': {
+                            'call_id': call_id,
+                            'name': event.get('name', ''), 
+                            'input': event.get('input', {})
+                        }}
+                        sub_id = event_sub_agent_id or current_sub_agent_id
+                        if sub_id:
+                            data['tool_call']['sub_agent_id'] = sub_id
+                        yield f"data: {json.dumps(data)}\n\n"
                     elif event_type == "tool_result":
-                        tool_event = {'name': event.get('name', ''), 'result': event.get('result', '')}
+                        call_id = event.get('call_id', f"call_{id(event)}")
+                        data = {'tool_result': {
+                            'call_id': call_id,
+                            'name': event.get('name', ''),
+                            'result': event.get('result', ''),
+                            'status': event.get('status', 'ok'),
+                        }}
                         if event.get('snapshot'):
-                            tool_event['snapshot'] = event['snapshot']
-                        yield f"data: {json.dumps({'tool_result': tool_event})}\n\n"
+                            data['tool_result']['snapshot'] = event['snapshot']
+                        if event.get('duration_ms') is not None:
+                            data['tool_result']['duration_ms'] = event['duration_ms']
+                        sub_id = event_sub_agent_id or current_sub_agent_id
+                        if sub_id:
+                            data['tool_result']['sub_agent_id'] = sub_id
+                        yield f"data: {json.dumps(data)}\n\n"
                     elif event_type == "sub_agent_start":
-                        yield f"data: {json.dumps({'sub_agent_start': {'agent_type': event.get('agent_type', ''), 'description': event.get('description', '')}})}\n\n"
+                        # 使用事件中传来的 agent_id
+                        current_sub_agent_id = event.get('agent_id')
+                        sa_start = {'agent_type': event.get('agent_type', ''), 'description': event.get('description', ''), 'agent_id': current_sub_agent_id}
+                        yield f"data: {json.dumps({'sub_agent_start': sa_start})}\n\n"
                     elif event_type == "sub_agent_end":
-                        yield f"data: {json.dumps({'sub_agent_end': {'agent_type': event.get('agent_type', ''), 'description': event.get('description', '')}})}\n\n"
+                        sa_end = {'agent_type': event.get('agent_type', ''), 'description': event.get('description', ''), 'agent_id': current_sub_agent_id}
+                        yield f"data: {json.dumps({'sub_agent_end': sa_end})}\n\n"
+                        current_sub_agent_id = None
                     elif event_type == "info":
                         yield f"data: {json.dumps({'info': event.get('message', '')})}\n\n"
+                    elif event_type == "error":
+                        yield f"data: {json.dumps({'error': {'message': event.get('message', '')}})}\n\n"
             finally:
                 # 确保session被保存
                 agent._auto_save()
