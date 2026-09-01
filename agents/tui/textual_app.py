@@ -589,7 +589,7 @@ class BearCodeApp(App):
                 if not mode:
                     self.state.add_message("system", f"[cyan]Current permission mode: {self.agent.permission_mode}\n\nValid modes: {', '.join(valid_modes)}\n\nUsage: /permission <mode>\n\nQuick: /yolo on|off[/cyan]")
                 elif mode in valid_modes:
-                    from agents.permissions import get_permission_set_from_legacy_mode
+                    from agents.permission_set import get_permission_set_from_legacy_mode
                     self.agent.permission_mode = mode
                     self.agent._permission_set = get_permission_set_from_legacy_mode(mode)
                     self.agent._tool_executor.permission_set = self.agent._permission_set
@@ -601,13 +601,13 @@ class BearCodeApp(App):
             elif cmd_name == "yolo":
                 arg = cmd_args.strip().lower()
                 if arg == "on":
-                    from agents.permissions import get_permission_set_from_legacy_mode
+                    from agents.permission_set import get_permission_set_from_legacy_mode
                     self.agent.permission_mode = "bypassPermissions"
                     self.agent._permission_set = get_permission_set_from_legacy_mode("bypassPermissions")
                     self.agent._tool_executor.permission_set = self.agent._permission_set
                     self.state.add_message("system", "[yellow]YOLO mode: ON - all permissions bypassed[/yellow]")
                 elif arg == "off":
-                    from agents.permissions import get_permission_set_from_legacy_mode
+                    from agents.permission_set import get_permission_set_from_legacy_mode
                     self.agent.permission_mode = "default"
                     self.agent._permission_set = get_permission_set_from_legacy_mode("default")
                     self.agent._tool_executor.permission_set = self.agent._permission_set

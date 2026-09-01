@@ -202,7 +202,7 @@ def rollback_skill(
         return result
 
     # 回退到 skill_evolution history
-    from .skill_evolution import get_evolution_dir, HISTORY_DIR
+    from .skill_file_ops import get_evolution_dir, HISTORY_DIR
 
     history_path = get_evolution_dir() / HISTORY_DIR / f"{_safe_skill_slug(skill_name)}.jsonl"
     if not history_path.is_file():
@@ -391,7 +391,7 @@ def list_skill_versions(
     versions.extend(refinement_versions)
 
     # 从 skill_evolution history
-    from .skill_evolution import get_evolution_dir, HISTORY_DIR
+    from .skill_file_ops import get_evolution_dir, HISTORY_DIR
 
     history_path = get_evolution_dir() / HISTORY_DIR / f"{_safe_skill_slug(skill_name)}.jsonl"
     if history_path.is_file():

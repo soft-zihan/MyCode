@@ -1033,7 +1033,7 @@ class Agent:
             return
 
         try:
-            from .online_skill_evolution import online_ingest
+            from .skill_extractor import online_ingest
         except Exception:
             return
 
@@ -1070,7 +1070,7 @@ class Agent:
             return
         side_query = self._build_side_query(max_tokens=700)
         try:
-            from .online_skill_evolution import judge_retrieved_skill_usage
+            from .skill_extractor import judge_retrieved_skill_usage
             from .skills import record_usage_judgments
 
             judgments = await judge_retrieved_skill_usage(

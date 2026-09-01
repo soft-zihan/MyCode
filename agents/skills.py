@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .frontmatter import parse_frontmatter
-from .skill_evolution import (
+from .skill_file_ops import (
     create_skill_file,
     evolve_skill_file,
     format_skill_stats,

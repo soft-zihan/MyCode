@@ -14,7 +14,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Literal
 
-from agents.permissions import PermissionCheckResult, PermissionSet
+from agents.permission_set import PermissionCheckResult, PermissionSet
 
 
 @dataclass

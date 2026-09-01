@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from .skill_evolution import (
+from .skill_file_ops import (
     ONLINE_PROVENANCE_INDEX,
     ONLINE_PROVENANCE_LOG,
     SKILL_USAGE_STATS,
