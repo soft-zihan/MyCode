@@ -8,8 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .memory import build_memory_prompt_section
-from .skills import build_skill_descriptions
+from .memory.memory import build_memory_prompt_section
+from .skills.skills import build_skill_descriptions
 from .subagent import build_agent_descriptions
 from .tools import get_deferred_tool_names
 

@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .observability.trace import trace_event
+from agents.observability.trace import trace_event
 
 
 # ── 配置 ───────────────────────────────────────────────────────────────────────

@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .frontmatter import parse_frontmatter
+from .memory.frontmatter import parse_frontmatter
 from .tools import tool_definitions, ToolDef
 
 

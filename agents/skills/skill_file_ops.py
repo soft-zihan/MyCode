@@ -9,8 +9,8 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from .frontmatter import format_frontmatter, parse_frontmatter
-from ._utils import safe_skill_slug as _safe_skill_slug
+from agents.memory.frontmatter import format_frontmatter, parse_frontmatter
+from agents._utils import safe_skill_slug as _safe_skill_slug
 
 
 USAGE_LOG = "usage.jsonl"

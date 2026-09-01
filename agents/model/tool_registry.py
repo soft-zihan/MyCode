@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from agents.hooks import ToolCallContext, global_hooks
+from agents.core.hooks import ToolCallContext, global_hooks
 
 
 ToolDef = dict[str, Any]

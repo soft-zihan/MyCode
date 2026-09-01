@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from agents.session import atomic_write_text
+from agents.core.session import atomic_write_text
 
 
 def _checkpoint_root() -> Path:

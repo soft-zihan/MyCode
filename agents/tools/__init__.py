@@ -88,7 +88,7 @@ async def execute_tool(
     if name == "read_file":
         result = read_file(inp)
         if read_file_state is not None and not result.startswith("Error"):
-            from agents.runtime import get_runtime, DockerRuntime
+            from agents.model.runtime import get_runtime, DockerRuntime
             rt = get_runtime()
             if isinstance(rt, DockerRuntime):
                 abs_path = inp["file_path"]
@@ -104,7 +104,7 @@ async def execute_tool(
         return _truncate_result(result)
 
     if name in ("write_file", "edit_file") and read_file_state is not None:
-        from agents.runtime import get_runtime, DockerRuntime
+        from agents.model.runtime import get_runtime, DockerRuntime
         rt = get_runtime()
         if isinstance(rt, DockerRuntime):
             abs_path = inp["file_path"]
@@ -139,7 +139,7 @@ async def execute_tool(
         )
 
     if name == "memory":
-        from agents.memory import memory_tool
+        from agents.memory.memory import memory_tool
         result = memory_tool(
             action=inp.get("action", ""),
             name=inp.get("name", ""),
@@ -151,7 +151,7 @@ async def execute_tool(
         return _truncate_result(json.dumps(result, ensure_ascii=False, indent=2))
 
     if name == "skill_evolve":
-        from agents.skills import evolve_skill
+        from agents.skills.skills import evolve_skill
         result = evolve_skill(
             skill_name=inp.get("skill_name", ""),
             lesson=inp.get("lesson", ""),
@@ -161,7 +161,7 @@ async def execute_tool(
         return _truncate_result(json.dumps(result, ensure_ascii=False, indent=2))
 
     if name == "skill_create":
-        from agents.skills import create_skill
+        from agents.skills.skills import create_skill
         result = create_skill(
             name=inp.get("name", ""),
             description=inp.get("description", ""),

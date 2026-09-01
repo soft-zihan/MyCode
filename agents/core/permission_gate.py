@@ -16,7 +16,7 @@ import asyncio
 import uuid
 from typing import Any, Awaitable, Callable, Optional
 
-from .ui import print_confirmation
+from agents.ui import print_confirmation
 
 
 class PermissionGate:

@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from agents.session import (
+from agents.core.session import (
     load_session,
     save_session,
     session_dir,

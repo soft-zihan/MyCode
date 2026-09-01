@@ -124,7 +124,7 @@ def run_shell(inp: dict) -> str:
     if inp.get("background"):
         return _start_background_shell(inp["command"])
     try:
-        from agents.runtime import get_runtime
+        from agents.model.runtime import get_runtime
         rt = get_runtime()
         timeout_ms = inp.get("timeout", 30000)
         timeout_s = timeout_ms / 1000

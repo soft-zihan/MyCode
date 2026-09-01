@@ -20,9 +20,9 @@ import asyncio
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from agents.session import list_sessions, load_session, save_session, delete_session
-from agents.memory import list_memories, save_memory, delete_memory, get_memory_dir
-from agents.skills import discover_skills, get_skill_by_name, skill_stats
+from agents.core.session import list_sessions, load_session, save_session, delete_session
+from agents.memory.memory import list_memories, save_memory, delete_memory, get_memory_dir
+from agents.skills.skills import discover_skills, get_skill_by_name, skill_stats
 from agents.observability.trace import recent_events, trace_enabled, set_trace_enabled, trace_path
 from agents.config import (
     load_config, save_config, list_endpoints, get_primary_endpoint,
@@ -492,7 +492,7 @@ class MemoryUpdate(BaseModel):
 @app.put("/api/memories/{filename}")
 def api_update_memory(filename: str, data: MemoryUpdate) -> dict[str, str]:
     """Update a memory entry (rename, edit content, set hooks)."""
-    from agents.memory import get_memory_dir
+    from agents.memory.memory import get_memory_dir
     memory_dir = get_memory_dir()
     memory_path = memory_dir / filename
     
@@ -1110,7 +1110,7 @@ def api_list_mcp_servers() -> list[dict[str, Any]]:
 async def api_list_mcp_tools() -> list[dict[str, Any]]:
     """Connect to all MCP servers and return their tools."""
     import asyncio
-    from agents.mcp_client import McpManager
+    from agents.model.mcp_client import McpManager
 
     manager = McpManager()
     try:
@@ -1298,7 +1298,7 @@ async def api_chat_stream(data: ChatMessage):
         
         # Restore session if session_id is provided
         if data.session_id:
-            from agents.session import load_session
+            from agents.core.session import load_session
             from agents.service import AgentService
             session_data = load_session(data.session_id)
             if session_data:

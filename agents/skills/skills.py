@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .frontmatter import parse_frontmatter
+from agents.memory.frontmatter import parse_frontmatter
 from .skill_file_ops import (
     create_skill_file,
     evolve_skill_file,
@@ -120,7 +120,7 @@ def _load_executable_skills(skills: list[SkillDefinition]) -> None:
     from .executable_skills import load_executable_skills
     result = load_executable_skills(executable_dirs)
 
-    from .observability.trace import trace_event
+    from agents.observability.trace import trace_event
     trace_event(
         "executable_skills.loaded",
         total=result.get("total", 0),

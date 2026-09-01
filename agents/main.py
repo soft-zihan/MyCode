@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 from dotenv import find_dotenv, load_dotenv
 
 from .agent import Agent
-from .session import get_latest_session_id, load_session
+from .core.session import get_latest_session_id, load_session
 from .tools import set_background_done_callback
 from .ui import (
     print_welcome,

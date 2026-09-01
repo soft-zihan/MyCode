@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .observability.trace import trace_event
+from agents.observability.trace import trace_event
 
 
 DEFAULT_SOCKET_PATH = Path.home() / ".bear-code" / "daemon.sock"

@@ -56,7 +56,7 @@ class DefaultCompactionStrategy:
         这里只提供接口框架，实际使用时需要调用 Agent 的压缩方法。
         """
         # 提取文件操作
-        from agents.session_memory import extract_file_ops
+        from agents.core.session_memory import extract_file_ops
         read_files, modified_files = extract_file_ops(messages)
         
         # 简化：直接返回原消息

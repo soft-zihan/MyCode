@@ -33,7 +33,7 @@ from .refinement import (
     save_harness_state,
     _utc_now,
 )
-from .observability.trace import trace_event
+from agents.observability.trace import trace_event
 
 
 def _ensure_dir(path: Path) -> None:

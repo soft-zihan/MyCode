@@ -16,7 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
-from ._utils import safe_skill_slug as _safe_skill_slug
+from agents._utils import safe_skill_slug as _safe_skill_slug
 from .refinement import (
     HarnessEntry,
     HarnessScope,
@@ -29,7 +29,7 @@ from .refinement import (
     save_harness_state,
     _utc_now,
 )
-from .observability.trace import trace_event
+from agents.observability.trace import trace_event
 
 
 # ── 回滚单个 Entry ────────────────────────────────────────────────────────────
@@ -202,7 +202,7 @@ def rollback_skill(
         return result
 
     # 回退到 skill_evolution history
-    from .skill_file_ops import get_evolution_dir, HISTORY_DIR
+    from agents.skills.skill_file_ops import get_evolution_dir, HISTORY_DIR
 
     history_path = get_evolution_dir() / HISTORY_DIR / f"{_safe_skill_slug(skill_name)}.jsonl"
     if not history_path.is_file():
@@ -391,7 +391,7 @@ def list_skill_versions(
     versions.extend(refinement_versions)
 
     # 从 skill_evolution history
-    from .skill_file_ops import get_evolution_dir, HISTORY_DIR
+    from agents.skills.skill_file_ops import get_evolution_dir, HISTORY_DIR
 
     history_path = get_evolution_dir() / HISTORY_DIR / f"{_safe_skill_slug(skill_name)}.jsonl"
     if history_path.is_file():

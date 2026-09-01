@@ -1195,7 +1195,7 @@ def _activate_champion(skill_name: str, snapshot: dict[str, Any], lineage_id: st
     Returns:
         {"activated": bool, "path": str, "reason": str}
     """
-    from .observability.trace import trace_event
+    from agents.observability.trace import trace_event
 
     # 查找 active skill 路径
     active_path = _find_active_skill_path(skill_name)

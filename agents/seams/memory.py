@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from agents.session import atomic_write_json
+from agents.core.session import atomic_write_json
 
 
 # ============================================================

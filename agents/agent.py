@@ -13,18 +13,18 @@ from typing import Callable, Awaitable, Any
 
 import openai
 
-from agents.mcp_client import McpManager
-from agents.checkpoints import FileCheckpointStore, TurnBoundary
-from agents.context_store import (
+from agents.model.mcp_client import McpManager
+from agents.core.checkpoints import FileCheckpointStore, TurnBoundary
+from agents.core.context_store import (
     ContextStore,
     cleared_placeholder,
     is_compressed_placeholder,
     snipped_placeholder,
 )
-from agents.memory import MemoryPrefetch, start_memory_prefetch, format_memories_for_injection
-from agents.model_registry import ModelEndpoint, resolve_agent_endpoint, resolve_side_endpoint
+from agents.memory.memory import MemoryPrefetch, start_memory_prefetch, format_memories_for_injection
+from agents.model.model_registry import ModelEndpoint, resolve_agent_endpoint, resolve_side_endpoint
 from agents.prompt import build_system_prompt
-from agents.session_memory import (
+from agents.core.session_memory import (
     FOLD_SESSION_MEMORY_SYSTEM,
     build_folding_user_prompt,
     build_openai_transcript,
@@ -32,7 +32,7 @@ from agents.session_memory import (
     format_folded_memory,
     parse_folded_memory,
 )
-from agents.session import save_folded_session_memory, save_session
+from agents.core.session import save_folded_session_memory, save_session
 from agents.subagent import get_sub_agent_config
 from agents.tools import ToolDef, tool_definitions, execute_tool, CONCURRENCY_SAFE_TOOLS, check_permission, \
     get_active_tool_definitions
@@ -287,9 +287,9 @@ class Agent:
         self._context_store = ContextStore()
 
         # 提取的子模块
-        from .context_compressor import ContextCompressor
-        from .permission_gate import PermissionGate
-        from .session_lifecycle import SessionLifecycle
+        from .core.context_compressor import ContextCompressor
+        from .core.permission_gate import PermissionGate
+        from .core.session_lifecycle import SessionLifecycle
         self._compressor = ContextCompressor(
             self._context_store,
             auto_compact_threshold=self.auto_compact_threshold,
@@ -639,7 +639,7 @@ class Agent:
                 mcp_defs = self._mcp_manager.get_tool_definitions()
                 if mcp_defs:
                     # 注册 MCP 工具到 Registry
-                    from agents.tool_registry import global_registry
+                    from agents.model.tool_registry import global_registry
                     for mcp_def in mcp_defs:
                         # 从工具名中提取 server 名（格式：mcp__server__tool）
                         parts = mcp_def["name"].split("__")
@@ -656,7 +656,7 @@ class Agent:
         # 跨会话知识复用：注入相关历史会话记忆
         # 可通过环境变量 BEAR_DISABLE_CROSS_SESSION_MEMORY 禁用
         if not self.is_sub_agent and not os.environ.get("BEAR_DISABLE_CROSS_SESSION_MEMORY"):
-            from agents.session_memory import search_folded_memories, format_folded_memories_for_injection
+            from agents.core.session_memory import search_folded_memories, format_folded_memories_for_injection
             related_memories = search_folded_memories(user_message, top_k=3)
             if related_memories:
                 memory_context = format_folded_memories_for_injection(related_memories)
@@ -917,7 +917,7 @@ class Agent:
 
     def _augment_user_message_with_skill_context(self, user_message: str) -> tuple[str, dict[str, Any] | None]:
         try:
-            from .skills import format_retrieved_skill_context
+            from .skills.skills import format_retrieved_skill_context
 
             context, top_ref = format_retrieved_skill_context(user_message, limit=3)
         except Exception:
@@ -1075,7 +1075,7 @@ class Agent:
             return
 
         try:
-            from .skill_extractor import online_ingest
+            from .skills.skill_extractor import online_ingest
         except Exception:
             return
 
@@ -1112,8 +1112,8 @@ class Agent:
             return
         side_query = self._build_side_query(max_tokens=700)
         try:
-            from .skill_extractor import judge_retrieved_skill_usage
-            from .skills import record_usage_judgments
+            from .skills.skill_extractor import judge_retrieved_skill_usage
+            from .skills.skills import record_usage_judgments
 
             judgments = await judge_retrieved_skill_usage(
                 hits=hits,
@@ -1202,7 +1202,7 @@ class Agent:
 
     #恢复会话信息
     def restore_session(self, data:dict)->None:
-        from .session_lifecycle import SessionState
+        from .core.session_lifecycle import SessionState
         state = SessionState(
             session_id=self.session_id,
             model=self.model,
@@ -1219,7 +1219,7 @@ class Agent:
 
     #/rewind：回退对话 N 轮，同时把被修改的文件恢复到对应轮次开始时的状态。
     def rewind(self, n: int = 1) -> str:
-        from .session_lifecycle import SessionState
+        from .core.session_lifecycle import SessionState
         state = SessionState(
             session_id=self.session_id,
             model=self.model,
@@ -1235,7 +1235,7 @@ class Agent:
 
     #/fork：从当前会话创建一个完全相同的分支（新 session_id），并切换过去。
     def fork_session(self) -> str:
-        from .session_lifecycle import SessionState
+        from .core.session_lifecycle import SessionState
         state = SessionState(
             session_id=self.session_id,
             model=self.model,
@@ -1261,7 +1261,7 @@ class Agent:
 
     #/ctx del N [N2 ...]：删除指定 index 所属的消息组（保持工具配对完整）。
     def delete_context_messages(self, indexes: list[int]) -> str:
-        from .session_lifecycle import SessionState
+        from .core.session_lifecycle import SessionState
         state = SessionState(
             session_id=self.session_id,
             model=self.model,
@@ -1277,7 +1277,7 @@ class Agent:
 
     #/ctx keep N [N2 ...]：只保留指定组（+ system prompt），其余删除。
     def keep_context_messages(self, indexes: list[int]) -> str:
-        from .session_lifecycle import SessionState
+        from .core.session_lifecycle import SessionState
         state = SessionState(
             session_id=self.session_id,
             model=self.model,
@@ -1307,7 +1307,7 @@ class Agent:
 
     async def _auto_save(self) -> None:
         try:
-            from .session_lifecycle import SessionState
+            from .core.session_lifecycle import SessionState
             state = SessionState(
                 session_id=self.session_id,
                 model=self.model,
@@ -1500,7 +1500,7 @@ class Agent:
 
 
     async def _execute_skill_tool(self, inp: dict) -> str:
-        from .skills import execute_skill
+        from .skills.skills import execute_skill
         result = execute_skill(inp.get("skill_name", ""), inp.get("args", ""))
 
         if not result:

@@ -407,7 +407,7 @@ class BearCodeApp(App):
             
             # /sessions
             elif cmd_name == "sessions":
-                from agents.session import list_sessions
+                from agents.core.session import list_sessions
                 sessions = list_sessions()
                 if not sessions:
                     self.state.add_message("system", "[yellow]No saved sessions.[/yellow]")
@@ -423,7 +423,7 @@ class BearCodeApp(App):
                 if not cmd_args:
                     self.state.add_message("system", "[red]Usage: /switch <session_id>[/red]")
                 else:
-                    from agents.session import load_session
+                    from agents.core.session import load_session
                     session = load_session(cmd_args)
                     if session:
                         self.agent.restore_session({
@@ -445,7 +445,7 @@ class BearCodeApp(App):
                     self.agent.model = cmd_args.strip()
                     self.state.add_message("system", f"[green]Switched to model: {cmd_args.strip()}[/green]")
                 else:
-                    from agents.model_registry import discover_endpoints
+                    from agents.model.model_registry import discover_endpoints
                     endpoints = discover_endpoints()
                     lines = [f"[cyan]Current model: {self.agent.model}[/cyan]"]
                     if endpoints:
@@ -518,7 +518,7 @@ class BearCodeApp(App):
                 if not name:
                     self.state.add_message("system", "[red]Usage: /rename <name>[/red]")
                 else:
-                    from agents.session import save_session_meta
+                    from agents.core.session import save_session_meta
                     if save_session_meta(self.agent.session_id, {"title": name}):
                         self.state.add_message("system", f"[green]Session renamed to: {name}[/green]")
                     else:
@@ -527,7 +527,7 @@ class BearCodeApp(App):
             # /resume
             elif cmd_name == "resume":
                 if not cmd_args:
-                    from agents.session import list_sessions
+                    from agents.core.session import list_sessions
                     sessions = list_sessions()
                     if not sessions:
                         self.state.add_message("system", "[yellow]No saved sessions to resume.[/yellow]")
@@ -538,7 +538,7 @@ class BearCodeApp(App):
                         lines.append("[cyan]Usage: /resume <session_id>[/cyan]")
                         self.state.add_message("system", "\n".join(lines))
                 else:
-                    from agents.session import load_session
+                    from agents.core.session import load_session
                     session = load_session(cmd_args)
                     if session:
                         self.agent.restore_session({
@@ -589,7 +589,7 @@ class BearCodeApp(App):
                 if not mode:
                     self.state.add_message("system", f"[cyan]Current permission mode: {self.agent.permission_mode}\n\nValid modes: {', '.join(valid_modes)}\n\nUsage: /permission <mode>\n\nQuick: /yolo on|off[/cyan]")
                 elif mode in valid_modes:
-                    from agents.permission_set import get_permission_set_from_legacy_mode
+                    from agents.core.permission_set import get_permission_set_from_legacy_mode
                     self.agent.permission_mode = mode
                     self.agent._permission_set = get_permission_set_from_legacy_mode(mode)
                     self.agent._tool_executor.permission_set = self.agent._permission_set
@@ -601,13 +601,13 @@ class BearCodeApp(App):
             elif cmd_name == "yolo":
                 arg = cmd_args.strip().lower()
                 if arg == "on":
-                    from agents.permission_set import get_permission_set_from_legacy_mode
+                    from agents.core.permission_set import get_permission_set_from_legacy_mode
                     self.agent.permission_mode = "bypassPermissions"
                     self.agent._permission_set = get_permission_set_from_legacy_mode("bypassPermissions")
                     self.agent._tool_executor.permission_set = self.agent._permission_set
                     self.state.add_message("system", "[yellow]YOLO mode: ON - all permissions bypassed[/yellow]")
                 elif arg == "off":
-                    from agents.permission_set import get_permission_set_from_legacy_mode
+                    from agents.core.permission_set import get_permission_set_from_legacy_mode
                     self.agent.permission_mode = "default"
                     self.agent._permission_set = get_permission_set_from_legacy_mode("default")
                     self.agent._tool_executor.permission_set = self.agent._permission_set
@@ -655,7 +655,7 @@ class BearCodeApp(App):
             # /memory
             elif cmd_name == "memory":
                 if cmd_args.startswith("prune"):
-                    from agents.memory import auto_prune_memories
+                    from agents.memory.memory import auto_prune_memories
                     prune_args = cmd_args[5:].strip().split()
                     dry_run = "--dry-run" in prune_args
                     threshold = 0.1
@@ -672,7 +672,7 @@ class BearCodeApp(App):
             
             # /skills
             elif cmd_name == "skills":
-                from agents.skills import discover_skills
+                from agents.skills.skills import discover_skills
                 skills = discover_skills()
                 if not skills:
                     self.state.add_message("system", "[yellow]No skills found. Add skills to .bear/skills/<name>/SKILL.md[/yellow]")
@@ -815,7 +815,7 @@ class BearCodeApp(App):
         if not self.agent:
             return
         
-        from agents.session import list_sessions
+        from agents.core.session import list_sessions
         sessions = list_sessions()
         options = [
             (f"{s['id'][:8]} - {s.get('name', 'Unnamed')}", s['id'])
@@ -837,7 +837,7 @@ class BearCodeApp(App):
         if not self.agent:
             return
         
-        from agents.model_registry import discover_endpoints
+        from agents.model.model_registry import discover_endpoints
         endpoints = discover_endpoints()
         options = [(f"{eid}: {ep.model or '(default)'}", eid) for eid, ep in sorted(endpoints.items())]
         
@@ -848,7 +848,7 @@ class BearCodeApp(App):
     
     def _on_model_selected(self, endpoint_id: str | None) -> None:
         if endpoint_id and self.agent:
-            from agents.model_registry import discover_endpoints
+            from agents.model.model_registry import discover_endpoints
             endpoints = discover_endpoints()
             if endpoint_id in endpoints:
                 ep = endpoints[endpoint_id]

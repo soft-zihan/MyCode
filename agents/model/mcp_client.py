@@ -35,7 +35,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from .ui import print_error, print_info
+from agents.ui import print_error, print_info
 
 
 # ─── 单个 MCP 连接：一个 McpConnection 对应一个 MCP Server 子进程 ──────────────────

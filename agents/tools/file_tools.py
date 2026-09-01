@@ -30,7 +30,7 @@ def _resolve_tool_path(raw_path: str, *, must_exist: bool = True) -> Path:
 
 def read_file(inp: dict) -> str:
     try:
-        from agents.runtime import get_runtime, DockerRuntime
+        from agents.model.runtime import get_runtime, DockerRuntime
         rt = get_runtime()
 
         if isinstance(rt, DockerRuntime):
@@ -68,7 +68,7 @@ def read_file(inp: dict) -> str:
 
 def write_file(inp: dict) -> str:
     try:
-        from agents.runtime import get_runtime, DockerRuntime
+        from agents.model.runtime import get_runtime, DockerRuntime
         rt = get_runtime()
 
         if isinstance(rt, DockerRuntime):
@@ -89,7 +89,7 @@ def write_file(inp: dict) -> str:
 
 def _auto_update_memory_index(file_path: str) -> None:
     try:
-        from agents.memory import get_memory_dir
+        from agents.memory.memory import get_memory_dir
         mem_dir = str(get_memory_dir())
         if file_path.startswith(mem_dir) and file_path.endswith(".md") and not file_path.endswith("MEMORY.md"):
             mem_path = Path(mem_dir)
@@ -147,7 +147,7 @@ def _generate_diff(old_content: str, old_string: str, new_string: str) -> str:
 
 def edit_file(inp: dict) -> str:
     try:
-        from agents.runtime import get_runtime, DockerRuntime
+        from agents.model.runtime import get_runtime, DockerRuntime
         rt = get_runtime()
 
         if isinstance(rt, DockerRuntime):
@@ -179,7 +179,7 @@ def edit_file(inp: dict) -> str:
 
 def list_files(inp: dict) -> str:
     try:
-        from agents.runtime import get_runtime, DockerRuntime
+        from agents.model.runtime import get_runtime, DockerRuntime
         rt = get_runtime()
 
         if isinstance(rt, DockerRuntime):

@@ -362,5 +362,5 @@ async def run_memory_maintenance() -> dict[str, Any]:
 
     可在 skill evolution 后调用，让 memory 也参与进化循环。
     """
-    from .memory import maintenance_all_memories
+    from agents.memory.memory import maintenance_all_memories
     return maintenance_all_memories()
