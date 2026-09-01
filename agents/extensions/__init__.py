@@ -1,4 +1,8 @@
-"""Extension event system for MyCode.
+"""
+[EXPERIMENTAL] Extension event system for MyCode.
+
+STATUS: Designed but not integrated.
+TODO: Wire EventBus into Agent lifecycle (emit events at turn_start, tool_call, etc.)
 
 Features:
 - 20+ 生命周期事件订阅
