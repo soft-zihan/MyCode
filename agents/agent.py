@@ -228,6 +228,8 @@ class Agent:
         self.auto_compact_threshold = _resolve_auto_compact_threshold()
         self.session_id = uuid.uuid4().hex[:8]
         self.session_start_time= time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
+        from agents.observability.trace import set_trace_session
+        set_trace_session(self.session_id)
         
         # Session Storage (Capability Seam)
         # 如果未提供，则使用 LegacySessionStorage 适配器
@@ -701,7 +703,7 @@ class Agent:
             )
         if not self.is_sub_agent:
             print_divider()
-            self._auto_save()
+            await self._auto_save()
 
     async def chat_stream(self, user_message: str):
         """
@@ -1216,11 +1218,29 @@ class Agent:
         fork 后两个会话完全独立，各自的 /rewind 互不影响。
         原会话已自动保存（_auto_save），可通过 /switch 切回。
         """
-        self._auto_save()  # 确保原会话最新状态已落盘
+        save_session(self.session_id, {
+            "metadata": {
+                "id": self.session_id,
+                "model": self.model,
+                "cwd": str(Path.cwd()),
+                "startTime": self.session_start_time,
+                "messageCount": self._get_message_count(),
+            },
+            "openaiMessages": _sanitize_for_utf8(self._openai_messages),
+            "foldedSessionMemories": _sanitize_for_utf8(self._folded_session_memories),
+            "checkpointStore": self._checkpoint_store.to_dict(),
+            "turnBoundaries": [
+                {"turn": b.turn, "message_count": b.message_count, "checkpoint_count": b.checkpoint_count}
+                for b in self._turn_boundaries
+            ],
+            "contextStore": self._context_store.to_dict(),
+        })
         old_id = self.session_id
         new_id = uuid.uuid4().hex[:8]
         self.session_id = new_id
         self.session_start_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        from agents.observability.trace import set_trace_session
+        set_trace_session(new_id)
         # 深拷贝消息历史（避免两个会话共享同一 list 对象）
         self._openai_messages = json.loads(json.dumps(self._openai_messages, default=str))
         self._folded_session_memories = json.loads(json.dumps(self._folded_session_memories, default=str))
@@ -1231,7 +1251,23 @@ class Agent:
         new_store = ContextStore()
         new_store.restore_state(json.loads(json.dumps(self._context_store.to_dict(), default=str)))
         self._context_store = new_store
-        self._auto_save()  # 新分支落盘
+        save_session(self.session_id, {
+            "metadata": {
+                "id": self.session_id,
+                "model": self.model,
+                "cwd": str(Path.cwd()),
+                "startTime": self.session_start_time,
+                "messageCount": self._get_message_count(),
+            },
+            "openaiMessages": _sanitize_for_utf8(self._openai_messages),
+            "foldedSessionMemories": _sanitize_for_utf8(self._folded_session_memories),
+            "checkpointStore": self._checkpoint_store.to_dict(),
+            "turnBoundaries": [
+                {"turn": b.turn, "message_count": b.message_count, "checkpoint_count": b.checkpoint_count}
+                for b in self._turn_boundaries
+            ],
+            "contextStore": self._context_store.to_dict(),
+        })
         return f"Forked session {old_id} -> {new_id}. You are now on the new branch."
 
     #/context：返回上下文描述行（index/role/label/chars），供 REPL 渲染表格。
@@ -1310,9 +1346,9 @@ class Agent:
             if self._turn_number - turn < self.MEMORY_RECALL_COOLDOWN_TURNS
         }
 
-    def _auto_save(self) -> None:
+    async def _auto_save(self) -> None:
         try:
-            save_session(self.session_id, {
+            await asyncio.to_thread(save_session, self.session_id, {
                 "metadata": {
                     "id": self.session_id,
                     "model": self.model,
@@ -1322,13 +1358,11 @@ class Agent:
                 },
                 "openaiMessages": _sanitize_for_utf8(self._openai_messages),
                 "foldedSessionMemories": _sanitize_for_utf8(self._folded_session_memories),
-                # /rewind 支持：快照元数据 + 轮次边界随 session 落盘。
                 "checkpointStore": self._checkpoint_store.to_dict(),
                 "turnBoundaries": [
                     {"turn": b.turn, "message_count": b.message_count, "checkpoint_count": b.checkpoint_count}
                     for b in self._turn_boundaries
                 ],
-                # ACE 可逆上下文：raw+abstract 存储随 session 落盘。
                 "contextStore": self._context_store.to_dict(),
             })
         except Exception:
@@ -1361,7 +1395,7 @@ class Agent:
         if not transcript.strip():
             return False
         memory = await self._generate_folded_session_memory(transcript)
-        self._record_folded_session_memory(trigger, memory)
+        await self._record_folded_session_memory(trigger, memory)
         self._record_fold_event()
         self._openai_messages=[
             system_msg,
@@ -1381,7 +1415,7 @@ class Agent:
         except Exception:
             return fallback_folded_memory(transcript)
 
-    def _record_folded_session_memory(self, trigger: str, memory: dict[str, Any]) -> None:
+    async def _record_folded_session_memory(self, trigger: str, memory: dict[str, Any]) -> None:
         record = {
             "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "trigger": trigger,
@@ -1390,7 +1424,7 @@ class Agent:
         }
         self._folded_session_memories.append(record)
         try:
-            save_folded_session_memory(self.session_id, _sanitize_for_utf8(record))
+            await asyncio.to_thread(save_folded_session_memory, self.session_id, _sanitize_for_utf8(record))
         except Exception:
             pass
 
@@ -1873,99 +1907,121 @@ class Agent:
                 if perm["action"] == "deny":
                     print_info(f"Denied: {perm.get('message', '')}")
                     self._record_tool_outcome(fn_name, False)
+                    deny_result = f"Action denied: {perm.get('message', '')}"
                     oai_checked.append({"tc": tc, "fn": fn_name, "inp": inp, "allowed": False,
-                                        "result": f"Action denied: {perm.get('message', '')}"})
+                                        "result": deny_result})
+                    # 流式模式：推送 tool_result 事件（即使被拒绝）
+                    if self._stream_event_queue is not None:
+                        event = {"type": "tool_result", "call_id": tc["id"], "name": fn_name, "result": deny_result, "status": "denied"}
+                        if self._current_sub_agent_id:
+                            event["sub_agent_id"] = self._current_sub_agent_id
+                        asyncio.create_task(self._stream_event_queue.put(event))
+                        from .trace import trace_event
+                        trace_event("stream.tool_result", call_id=tc["id"], name=fn_name, sub_agent_id=self._current_sub_agent_id)
                     continue
                 if perm["action"] == "confirm" and perm.get("message") and perm["message"] not in self._confirmed_paths:
+                    # 设置当前工具名用于权限请求
+                    self._current_tool_name = fn_name
                     confirmed = await self._confirm_dangerous(perm["message"])
+                    self._current_tool_name = None
                     if not confirmed:
                         self._record_tool_outcome(fn_name, False)
+                        user_deny_result = "User denied this action."
                         oai_checked.append({"tc": tc, "fn": fn_name, "inp": inp, "allowed": False,
-                                            "result": "User denied this action."})
+                                            "result": user_deny_result})
+                        # 流式模式：推送 tool_result 事件（即使被拒绝）
+                        if self._stream_event_queue is not None:
+                            event = {"type": "tool_result", "call_id": tc["id"], "name": fn_name, "result": user_deny_result, "status": "denied"}
+                            if self._current_sub_agent_id:
+                                event["sub_agent_id"] = self._current_sub_agent_id
+                            asyncio.create_task(self._stream_event_queue.put(event))
+                            from .trace import trace_event
+                            trace_event("stream.tool_result", call_id=tc["id"], name=fn_name, sub_agent_id=self._current_sub_agent_id)
                         continue
                     self._confirmed_paths.add(perm["message"])
                 oai_checked.append({"tc": tc, "fn": fn_name, "inp": inp, "allowed": True})
 
-                oai_batches: list[dict] = []
-                for ct in oai_checked:
-                    safe = ct["allowed"] and ct["fn"] in CONCURRENCY_SAFE_TOOLS
-                    if safe and oai_batches and oai_batches[-1]["concurrent"]:
-                        oai_batches[-1]["items"].append(ct)
-                    else:
-                        oai_batches.append({"concurrent": safe, "items": [ct]})
-                # 并发安全工具可并行；有依赖的串行
-                oai_context_break = False
-                for batch in oai_batches:
-                    if oai_context_break or self._abort_requested():
-                        self._aborted = True
-                        break
+            # 权限预检完成，按并发安全分批执行
+            oai_batches: list[dict] = []
+            for ct in oai_checked:
+                safe = ct["allowed"] and ct["fn"] in CONCURRENCY_SAFE_TOOLS
+                if safe and oai_batches and oai_batches[-1]["concurrent"]:
+                    oai_batches[-1]["items"].append(ct)
+                else:
+                    oai_batches.append({"concurrent": safe, "items": [ct]})
+            # 并发安全工具可并行；有依赖的串行
+            oai_context_break = False
+            for batch in oai_batches:
+                if oai_context_break or self._abort_requested():
+                    self._aborted = True
+                    break
 
-                    if batch["concurrent"]:
-                        async def _run_oai_safe(ct_item: dict) -> tuple[dict, str]:
-                            raw = await self._execute_tool_call(ct_item["fn"], ct_item["inp"])
-                            raw = _safe_utf8_text(raw)
-                            res = self._persist_large_result(ct_item["fn"], raw)
-                            print_tool_result(ct_item["fn"], res)
-                            # 流式模式：推送 tool_result 事件到队列
-                            if self._stream_event_queue is not None:
-                                event = {"type": "tool_result", "call_id": ct_item["tc"]["id"], "name": ct_item["fn"], "result": res}
-                                if self._current_sub_agent_id:
-                                    event["sub_agent_id"] = self._current_sub_agent_id
-                                await self._stream_event_queue.put(event)
-                                from .trace import trace_event
-                                trace_event("stream.tool_result", call_id=ct_item["tc"]["id"], name=ct_item["fn"], sub_agent_id=self._current_sub_agent_id)
-                            return ct_item, res
+                if batch["concurrent"]:
+                    async def _run_oai_safe(ct_item: dict) -> tuple[dict, str]:
+                        raw = await self._execute_tool_call(ct_item["fn"], ct_item["inp"])
+                        raw = _safe_utf8_text(raw)
+                        res = self._persist_large_result(ct_item["fn"], raw)
+                        print_tool_result(ct_item["fn"], res)
+                        # 流式模式：推送 tool_result 事件到队列
+                        if self._stream_event_queue is not None:
+                            event = {"type": "tool_result", "call_id": ct_item["tc"]["id"], "name": ct_item["fn"], "result": res, "status": "ok"}
+                            if self._current_sub_agent_id:
+                                event["sub_agent_id"] = self._current_sub_agent_id
+                            await self._stream_event_queue.put(event)
+                            from .trace import trace_event
+                            trace_event("stream.tool_result", call_id=ct_item["tc"]["id"], name=ct_item["fn"], sub_agent_id=self._current_sub_agent_id)
+                        return ct_item, res
 
-                        results = await asyncio.gather(*[_run_oai_safe(ct) for ct in batch["items"]])
-                        for ct_item, res in results:
-                            self._record_tool_outcome(
-                                ct_item["fn"],
-                                not self._looks_like_tool_failure(ct_item["fn"], "", res),
-                            )
-                            # Repeat guard: 检测重复调用并注入提醒
-                            repeat_warning = self._check_repeat_guard(ct_item["fn"], ct_item["inp"])
-                            if repeat_warning:
-                                res = res + "\n\n" + repeat_warning
+                    results = await asyncio.gather(*[_run_oai_safe(ct) for ct in batch["items"]])
+                    for ct_item, res in results:
+                        self._record_tool_outcome(
+                            ct_item["fn"],
+                            not self._looks_like_tool_failure(ct_item["fn"], "", res),
+                        )
+                        # Repeat guard: 检测重复调用并注入提醒
+                        repeat_warning = self._check_repeat_guard(ct_item["fn"], ct_item["inp"])
+                        if repeat_warning:
+                            res = res + "\n\n" + repeat_warning
+                        self._openai_messages.append(
+                            {"role": "tool", "tool_call_id": ct_item["tc"]["id"], "content": res})
+                else:
+                    for ct in batch["items"]:
+                        if not ct["allowed"]:
                             self._openai_messages.append(
-                                {"role": "tool", "tool_call_id": ct_item["tc"]["id"], "content": res})
-                    else:
-                        for ct in batch["items"]:
-                            if not ct["allowed"]:
-                                self._openai_messages.append(
-                                    {"role": "tool", "tool_call_id": ct["tc"]["id"], "content": ct["result"]})
-                                continue
+                                {"role": "tool", "tool_call_id": ct["tc"]["id"], "content": ct["result"]})
+                            continue
 
-                            raw = await self._execute_tool_call(ct["fn"], ct["inp"])
-                            raw = _safe_utf8_text(raw)
-                            res = self._persist_large_result(ct["fn"], raw)
-                            print_tool_result(ct["fn"], res)
-                            # 流式模式：推送 tool_result 事件到队列
-                            if self._stream_event_queue is not None:
-                                event = {"type": "tool_result", "call_id": ct["tc"]["id"], "name": ct["fn"], "result": res}
-                                if self._current_sub_agent_id:
-                                    event["sub_agent_id"] = self._current_sub_agent_id
-                                await self._stream_event_queue.put(event)
-                                from .trace import trace_event
-                                trace_event("stream.tool_result", call_id=ct["tc"]["id"], name=ct["fn"], sub_agent_id=self._current_sub_agent_id)
-                            self._record_tool_outcome(
-                                ct["fn"],
-                                not self._looks_like_tool_failure(ct["fn"], raw, res),
-                            )
+                        raw = await self._execute_tool_call(ct["fn"], ct["inp"])
+                        raw = _safe_utf8_text(raw)
+                        res = self._persist_large_result(ct["fn"], raw)
+                        print_tool_result(ct["fn"], res)
+                        # 流式模式：推送 tool_result 事件到队列
+                        if self._stream_event_queue is not None:
+                            event = {"type": "tool_result", "call_id": ct["tc"]["id"], "name": ct["fn"], "result": res, "status": "ok"}
+                            if self._current_sub_agent_id:
+                                event["sub_agent_id"] = self._current_sub_agent_id
+                            await self._stream_event_queue.put(event)
+                            from .trace import trace_event
+                            trace_event("stream.tool_result", call_id=ct["tc"]["id"], name=ct["fn"], sub_agent_id=self._current_sub_agent_id)
+                        self._record_tool_outcome(
+                            ct["fn"],
+                            not self._looks_like_tool_failure(ct["fn"], raw, res),
+                        )
 
-                            if self._context_cleared:
-                            # compact 等操作清空上下文后，把结果当新 user 消息，停止本轮剩余工具
-                                self._context_cleared = False
-                                self._openai_messages.append({"role": "user", "content": res})
-                                oai_context_break = True
-                                break
+                        if self._context_cleared:
+                        # compact 等操作清空上下文后，把结果当新 user 消息，停止本轮剩余工具
+                            self._context_cleared = False
+                            self._openai_messages.append({"role": "user", "content": res})
+                            oai_context_break = True
+                            break
 
-                            # Repeat guard: 检测重复调用并注入提醒
-                            repeat_warning = self._check_repeat_guard(ct["fn"], ct["inp"])
-                            if repeat_warning:
-                                res = res + "\n\n" + repeat_warning
+                        # Repeat guard: 检测重复调用并注入提醒
+                        repeat_warning = self._check_repeat_guard(ct["fn"], ct["inp"])
+                        if repeat_warning:
+                            res = res + "\n\n" + repeat_warning
 
-                            self._openai_messages.append(
-                                {"role": "tool", "tool_call_id": ct["tc"]["id"], "content": res})
+                        self._openai_messages.append(
+                            {"role": "tool", "tool_call_id": ct["tc"]["id"], "content": res})
 
             self._context_cleared = False
             self._refresh_runtime_system_prompt()
@@ -2104,9 +2160,49 @@ class Agent:
         print_confirmation(command)
         if self.confirm_fn:
             return await self.confirm_fn(command)
+        
+        # 流式模式：发送 permission_request 事件并等待响应
+        if self._stream_event_queue is not None:
+            import uuid
+            request_id = str(uuid.uuid4())[:8]
+            
+            # 发送权限请求事件
+            event = {
+                "type": "permission_request",
+                "request_id": request_id,
+                "command": command,
+                "tool_name": getattr(self, '_current_tool_name', 'unknown'),
+            }
+            if self._current_sub_agent_id:
+                event["sub_agent_id"] = self._current_sub_agent_id
+            await self._stream_event_queue.put(event)
+            
+            # 等待用户响应
+            if not hasattr(self, '_permission_responses'):
+                self._permission_responses = {}
+            
+            # 轮询等待响应（最多等待 5 分钟）
+            for _ in range(3000):  # 3000 * 0.1s = 5 分钟
+                await asyncio.sleep(0.1)
+                if request_id in self._permission_responses:
+                    response = self._permission_responses.pop(request_id)
+                    return response.get("allowed", False)
+                # 检查是否被中止
+                if self._abort_requested():
+                    return False
+            
+            # 超时，默认拒绝
+            return False
+        
         # Fallback: blocking input
         try:
             answer = input("  Allow? (y/n): ")
             return answer.lower().startswith("y")
         except EOFError:
             return False
+    
+    def set_permission_response(self, request_id: str, allowed: bool) -> None:
+        """设置权限响应（由 API 调用）"""
+        if not hasattr(self, '_permission_responses'):
+            self._permission_responses = {}
+        self._permission_responses[request_id] = {"allowed": allowed}

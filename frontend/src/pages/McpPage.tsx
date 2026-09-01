@@ -123,6 +123,7 @@ export default function McpPage() {
             <h1 className="text-2xl font-bold text-gray-900">MCP Servers</h1>
             <p className="text-sm text-gray-500 mt-1">
               {servers.length} server{servers.length !== 1 ? 's' : ''} configured • {serverTools.reduce((sum, s) => sum + s.tool_count, 0)} tools available
+              {loadingTools && ' • Loading tools...'}
             </p>
           </div>
           <button

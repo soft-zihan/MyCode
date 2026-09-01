@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from agents.seams.memory import MemoryEntry
+from agents.session import atomic_write_json
 
 
 class DefaultMemoryStore:
@@ -44,7 +45,7 @@ class DefaultMemoryStore:
     
     def _save(self, category: str, data: dict[str, Any]) -> None:
         path = self._get_file_path(category)
-        path.write_text(json.dumps(data, indent=2, default=str))
+        atomic_write_json(path, data)
     
     def get(self, category: str, key: str) -> str | None:
         """获取 Memory 值。"""

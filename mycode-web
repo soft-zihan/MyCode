@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# mycode-gui: 启动 MyCode Web GUI
+# 用法: mycode-gui [start|stop|restart|status]
+set -euo pipefail
+
+# Resolve symlink to find real project root
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+PROJECT_ROOT="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+exec "$PROJECT_ROOT/start.sh" "${1:-start}"

@@ -2,15 +2,17 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   FolderTree, ChevronRight, ChevronDown, File, Folder, X, 
   MessageSquare, Trash2, PanelRight, Send, Clock, Plus,
-  Edit3, Check, Pencil, Square
+  Edit3, Check, Pencil, Square, Zap
 } from 'lucide-react';
-import { 
+import {
   fetchWorkspaceTree, fetchWorkspaceFile, WorkspaceNode,
   fetchSessions, deleteSession, Session,
   fetchAgents, fetchConfig, Agent, AppConfig,
   fetchDirectories, DirectoryList,
   deleteWorkspaceFile, renameWorkspaceFile, createWorkspaceFile,
-  generateSessionName, updateSessionName
+  generateSessionName, updateSessionName, saveSessionMessages,
+  compactSession, updatePermissionMode,
+  forkSession, respondToPermission, truncateSession, PermissionRequest
 } from '../api/client';
 import { ReviewPanel, FileSnapshot } from '../components/ReviewPanel';
 import { DiffViewer } from '../components/DiffViewer';
@@ -845,6 +847,55 @@ interface ChatMessage {
   isEditing?: boolean;
 }
 
+// Convert node snapshot to ChatMessage[] for saving
+function snapshotToMessages(snapshot: { order: string[]; nodes: Map<string, any> }): ChatMessage[] {
+  const messages: ChatMessage[] = [];
+  for (const key of snapshot.order) {
+    const node = snapshot.nodes.get(key);
+    if (!node) continue;
+    
+    switch (node.kind) {
+      case 'user':
+        messages.push({
+          role: 'user',
+          content: node.content,
+          timestamp: node.timestamp,
+          contextFiles: node.contextFiles,
+          agent: node.agent,
+          model: node.model,
+        });
+        break;
+      case 'assistant':
+        let content = '';
+        if (node.thinking) {
+          content += `<thinking>${node.thinking}</thinking>\n\n`;
+        }
+        content += node.content || '';
+        if (content.trim()) {
+          messages.push({
+            role: 'assistant',
+            content: content.trim(),
+            timestamp: node.timestamp,
+          });
+        }
+        break;
+      case 'tool-call':
+        // Tool calls are embedded in assistant messages or shown separately
+        // For simplicity, skip them here (they're in the node system)
+        break;
+      case 'error':
+        messages.push({
+          role: 'assistant',
+          content: `**Error:** ${node.message}`,
+          timestamp: new Date().toISOString(),
+        });
+        break;
+      // Skip thinking, sub-agent, turn-status nodes
+    }
+  }
+  return messages;
+}
+
 
 
 // Split markdown content into alternating normal/tool sections
@@ -989,13 +1040,21 @@ export default function ChatPage() {
   // Cache messages for each session so switching doesn't unload
   const sessionMessagesCache = useRef<Map<string, ChatMessage[]>>(new Map());
   
+  // Session control states
+  const [yoloMode, setYoloMode] = useState(true);  // Default to YOLO for web
+  const contextUsed = 0;  // TODO: Track from agent
+  const contextTotal = 128000;
+  
+  // Permission request state
+  const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
+  
   // Keep ref in sync with state
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
   }, [currentSessionId]);
   
   // New node-based rendering
-  const { snapshot: chatSnapshot, handleSSEEvent: handleNodeEvent, addUserMessage } = useChatNodes();
+  const { snapshot: chatSnapshot, handleSSEEvent: handleNodeEvent, addUserMessage, resetNodes, loadMessages } = useChatNodes();
 
   useEffect(() => {
     // Load agents and config
@@ -1028,12 +1087,18 @@ export default function ChatPage() {
       sessionMessagesCache.current.set(currentSessionId, messages);
     }
     
+    // Reset state for new session
+    resetNodes();
+    pendingSessionNameRef.current = null;
+    setPendingPermission(null);
+    setFileSnapshots([]);  // Clear file snapshots from previous session
     setCurrentSessionId(sessionId);
     
     // Check cache first - instant switch
     const cached = sessionMessagesCache.current.get(sessionId);
     if (cached && cached.length > 0) {
       setMessages(cached);
+      loadMessages(cached);
       return;
     }
     
@@ -1135,6 +1200,7 @@ export default function ChatPage() {
           }
           
           setMessages(loadedMessages);
+          loadMessages(loadedMessages);
         }
         
         if (data.metadata?.cwd) {
@@ -1258,11 +1324,23 @@ export default function ChatPage() {
                 setFileTreeRefreshTrigger(prev => prev + 1);
               }
               
+              // Handle permission request event
+              if (parsed.permission_request) {
+                const permReq = parsed.permission_request as PermissionRequest;
+                setPendingPermission(permReq);
+              }
+              
               // Handle done event - save session ID and generate name if needed
               if (parsed.done) {
                 const doneSessionId = parsed.session_id || currentSessionId;
                 if (doneSessionId) {
                   setCurrentSessionId(doneSessionId);
+                  
+                  // Save frontend messages for lossless restore
+                  const messagesToSave = snapshotToMessages(chatSnapshot);
+                  saveSessionMessages(doneSessionId, messagesToSave).catch(err => {
+                    console.error('Failed to save session messages:', err);
+                  });
                   
                   // Generate session name for first message in new session
                   if (pendingSessionNameRef.current) {
@@ -1291,6 +1369,22 @@ export default function ChatPage() {
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
         console.log('Stream aborted by user');
+        // Save messages even on abort to preserve progress
+        if (currentSessionId) {
+          const messagesToSave = snapshotToMessages(chatSnapshot);
+          saveSessionMessages(currentSessionId, messagesToSave).catch(err => {
+            console.error('Failed to save session messages on abort:', err);
+          });
+        }
+      } else {
+        console.error('Streaming error:', error);
+        // Save messages on error to preserve progress
+        if (currentSessionId) {
+          const messagesToSave = snapshotToMessages(chatSnapshot);
+          saveSessionMessages(currentSessionId, messagesToSave).catch(err => {
+            console.error('Failed to save session messages on error:', err);
+          });
+        }
       }
     } finally {
       setIsStreaming(false);
@@ -1305,6 +1399,100 @@ export default function ChatPage() {
       setIsStreaming(false);
     }
   }, []);
+
+  // Session control handlers
+  const handleCompactSession = useCallback(async () => {
+    if (!currentSessionId) return;
+    try {
+      await compactSession(currentSessionId);
+    } catch (err) {
+      console.error('Failed to compact session:', err);
+    }
+  }, [currentSessionId]);
+
+  const handleToggleYoloMode = useCallback(async () => {
+    if (!currentSessionId) return;
+    const newMode = !yoloMode;
+    setYoloMode(newMode);
+    try {
+      await updatePermissionMode(currentSessionId, newMode ? 'bypassPermissions' : 'default');
+    } catch (err) {
+      console.error('Failed to update permission mode:', err);
+    }
+  }, [currentSessionId, yoloMode]);
+
+  const handleForkSession = useCallback(async () => {
+    if (!currentSessionId) return;
+    try {
+      const result = await forkSession(currentSessionId);
+      if (result.new_session_id) {
+        // Clear cache for the new session to force reload from backend
+        sessionMessagesCache.current.delete(result.new_session_id);
+        // Switch to the new session using handleSessionSelect
+        await handleSessionSelect(result.new_session_id);
+        // Refresh session list
+        sessionStorage.removeItem('sessions');
+      }
+    } catch (err) {
+      console.error('Failed to fork session:', err);
+    }
+  }, [currentSessionId, handleSessionSelect]);
+
+  const handleEditMessage = useCallback(async (index: number) => {
+    const msg = messages[index];
+    if (msg.role !== 'user') return;
+    
+    // Count how many user messages to keep (up to but not including this one)
+    let keepUserMessages = 0;
+    for (let i = 0; i < index; i++) {
+      if (messages[i].role === 'user') {
+        keepUserMessages++;
+      }
+    }
+    
+    // Load message data into input fields
+    setInputValue(msg.content);
+    setContextFiles(msg.contextFiles || []);
+    setSelectedAgent(msg.agent || '');
+    setSelectedModel(msg.model || '');
+    
+    // Truncate backend session
+    if (currentSessionId) {
+      try {
+        await truncateSession(currentSessionId, keepUserMessages);
+      } catch (err) {
+        console.error('Failed to truncate session:', err);
+      }
+    }
+    
+    // Remove this message and all subsequent messages from frontend
+    const remainingMessages = messages.slice(0, index);
+    setMessages(remainingMessages);
+    
+    // Rebuild nodes from remaining messages
+    loadMessages(remainingMessages);
+  }, [messages, loadMessages, currentSessionId]);
+
+  // Permission handlers
+  const handlePermissionApprove = useCallback(async () => {
+    if (!pendingPermission || !currentSessionId) return;
+    try {
+      await respondToPermission(currentSessionId, pendingPermission.request_id, true);
+      setPendingPermission(null);
+    } catch (err) {
+      console.error('Failed to approve permission:', err);
+    }
+  }, [pendingPermission, currentSessionId]);
+
+  const handlePermissionDeny = useCallback(async () => {
+    if (!pendingPermission || !currentSessionId) return;
+    try {
+      await respondToPermission(currentSessionId, pendingPermission.request_id, false);
+      setPendingPermission(null);
+    } catch (err) {
+      console.error('Failed to deny permission:', err);
+    }
+  }, [pendingPermission, currentSessionId]);
 
   // File review handlers
   const handleAcceptFile = useCallback((filePath: string) => {
@@ -1338,20 +1526,6 @@ export default function ChatPage() {
     setSelectedFile(filePath);
   }, []);
 
-  const handleEditMessage = (index: number) => {
-    const msg = messages[index];
-    if (msg.role !== 'user') return;
-    
-    // Load message data into input fields
-    setInputValue(msg.content);
-    setContextFiles(msg.contextFiles || []);
-    setSelectedAgent(msg.agent || '');
-    setSelectedModel(msg.model || '');
-    
-    // Remove this message and all subsequent messages
-    setMessages(messages.slice(0, index));
-  };
-
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -1379,6 +1553,36 @@ export default function ChatPage() {
               </span>
             )}
           </div>
+          
+          {/* Session Controls */}
+          <div className="flex items-center gap-2 mr-2">
+            {/* Context Progress Bar */}
+            <div className="flex items-center gap-2">
+              <div className="w-32 h-2 bg-gray-200 rounded-full overflow-hidden">
+                <div 
+                  className={`h-full transition-all ${
+                    (contextUsed / contextTotal) >= 0.9 ? 'bg-red-500' :
+                    (contextUsed / contextTotal) >= 0.7 ? 'bg-yellow-500' :
+                    'bg-green-500'
+                  }`}
+                  style={{ width: `${Math.min((contextUsed / contextTotal) * 100, 100)}%` }}
+                />
+              </div>
+              <span className="text-xs text-gray-500">
+                {Math.round(contextUsed / 1000)}k / {Math.round(contextTotal / 1000)}k
+              </span>
+              {currentSessionId && !isStreaming && (
+                <button
+                  onClick={handleCompactSession}
+                  className="p-1 text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                  title="压缩上下文"
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          </div>
+          
           <button
             onClick={() => setSidebarOpen(!sidebarOpen)}
             className={`p-2 rounded hover:bg-gray-100 transition-colors flex-shrink-0 ${
@@ -1409,6 +1613,39 @@ export default function ChatPage() {
           onAcceptAll={handleAcceptAll}
           onOpenFile={handleOpenFile}
         />
+
+        {/* Permission Request Dialog */}
+        {pendingPermission && (
+          <div className="border-t border-yellow-300 bg-yellow-50 px-4 py-3">
+            <div className="flex items-start gap-3">
+              <div className="flex-1">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-sm font-medium text-yellow-800">⚠️ 需要授权</span>
+                  <span className="text-xs px-1.5 py-0.5 bg-yellow-200 text-yellow-800 rounded">
+                    {pendingPermission.tool_name}
+                  </span>
+                </div>
+                <pre className="text-xs text-gray-700 bg-white border border-yellow-200 rounded p-2 overflow-x-auto max-h-32 overflow-y-auto whitespace-pre-wrap font-mono">
+                  {pendingPermission.command}
+                </pre>
+              </div>
+              <div className="flex gap-2 flex-shrink-0">
+                <button
+                  onClick={handlePermissionDeny}
+                  className="px-3 py-1.5 text-sm font-medium text-red-700 bg-white border border-red-300 rounded hover:bg-red-50 transition-colors"
+                >
+                  拒绝
+                </button>
+                <button
+                  onClick={handlePermissionApprove}
+                  className="px-3 py-1.5 text-sm font-medium text-white bg-green-600 border border-green-700 rounded hover:bg-green-700 transition-colors"
+                >
+                  批准
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Input Area */}
         <div className="border-t border-gray-200 bg-white px-4 py-3">
@@ -1486,6 +1723,28 @@ export default function ChatPage() {
                 </option>
               ))}
             </select>
+            {/* YOLO Mode Toggle */}
+            <button
+              onClick={handleToggleYoloMode}
+              className={`px-3 py-1 text-xs font-medium rounded transition-colors ${
+                yoloMode
+                  ? 'text-green-600 bg-green-50 border border-green-200 hover:bg-green-100'
+                  : 'text-gray-600 bg-white border border-gray-200 hover:bg-gray-50'
+              }`}
+              title={yoloMode ? 'YOLO模式：自动允许所有操作' : '默认模式：需要确认'}
+            >
+              {yoloMode ? '🚀 YOLO' : '🛡️ Default'}
+            </button>
+            {/* Fork Session */}
+            {currentSessionId && (
+              <button
+                onClick={handleForkSession}
+                className="px-3 py-1 text-xs font-medium text-gray-600 bg-white border border-gray-200 rounded hover:bg-gray-50 transition-colors"
+                title="分叉会话"
+              >
+                🔀 Fork
+              </button>
+            )}
           </div>
         </div>
       </div>

@@ -534,35 +534,48 @@ def _sync_usage_into_provenance(stats: dict[str, Any]) -> None:
         _write_json(path, index)
 
 
+def _parse_usage_line(line: str) -> dict[str, Any] | None:
+    try:
+        row = json.loads(line)
+    except Exception:
+        return None
+    skill = str(row.get("skill") or "").strip()
+    if not skill:
+        return None
+    return row
+
+
+def _apply_usage_event(stats: dict[str, dict[str, Any]], skill: str, row: dict[str, Any]) -> None:
+    item = stats.setdefault(skill, {"created": 0, "invocations": 0, "feedback": 0, "evolutions": 0})
+    event = row.get("event")
+    if event == "create":
+        item["created"] = int(item.get("created", 0)) + 1
+        item["created_at"] = row.get("time")
+        item["file"] = row.get("file")
+    elif event == "invoke":
+        item["invocations"] = int(item.get("invocations", 0)) + 1
+        item["last_invoked"] = row.get("time")
+    elif event == "feedback":
+        item["feedback"] = int(item.get("feedback", 0)) + 1
+        item["last_feedback"] = row.get("time")
+    elif event == "evolve":
+        item["evolutions"] = int(item.get("evolutions", 0)) + 1
+        item["last_evolved"] = row.get("time")
+        item["version"] = row.get("version")
+        item["file"] = row.get("file")
+
+
 def load_skill_stats() -> dict[str, dict[str, Any]]:
     stats: dict[str, dict[str, Any]] = {}
     usage_path = get_evolution_dir() / USAGE_LOG
     if usage_path.is_file():
         for line in usage_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            try:
-                row = json.loads(line)
-            except Exception:
+            row = _parse_usage_line(line)
+            if row is None:
                 continue
             skill = str(row.get("skill") or "").strip()
-            if not skill:
-                continue
-            item = stats.setdefault(skill, {"created": 0, "invocations": 0, "feedback": 0, "evolutions": 0})
-            event = row.get("event")
-            if event == "create":
-                item["created"] = int(item.get("created", 0)) + 1
-                item["created_at"] = row.get("time")
-                item["file"] = row.get("file")
-            elif event == "invoke":
-                item["invocations"] = int(item.get("invocations", 0)) + 1
-                item["last_invoked"] = row.get("time")
-            elif event == "feedback":
-                item["feedback"] = int(item.get("feedback", 0)) + 1
-                item["last_feedback"] = row.get("time")
-            elif event == "evolve":
-                item["evolutions"] = int(item.get("evolutions", 0)) + 1
-                item["last_evolved"] = row.get("time")
-                item["version"] = row.get("version")
-                item["file"] = row.get("file")
+            if skill:
+                _apply_usage_event(stats, skill, row)
 
     history_root = get_evolution_dir() / HISTORY_DIR
     if history_root.is_dir():

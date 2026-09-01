@@ -259,3 +259,13 @@ project-learning/
 
 # OS files
 .DS_Store
+
+wiki/
+eval/
+experiments/
+.VSCodeCounter/
+tests/
+output/
+.ua/
+data/
+.opencode/

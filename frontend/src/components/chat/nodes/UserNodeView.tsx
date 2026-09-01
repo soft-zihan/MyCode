@@ -1,5 +1,5 @@
 import { memo } from 'react';
-import { File } from 'lucide-react';
+import { File, RotateCcw } from 'lucide-react';
 import type { UserNode } from './types';
 
 interface UserNodeViewProps {
@@ -37,9 +37,10 @@ export const UserNodeView = memo(function UserNodeView({ node, onEdit, index }: 
         {onEdit && (
           <button
             onClick={() => onEdit(index || 0)}
-            className="opacity-0 group-hover:opacity-100 mt-1 px-2 py-1 text-xs text-blue-600 hover:bg-blue-50 rounded transition-opacity"
+            className="opacity-0 group-hover:opacity-100 mt-1 p-1 text-blue-600 hover:bg-blue-50 rounded transition-opacity"
+            title="回退到此消息并重新发送"
           >
-            Edit & Resend
+            <RotateCcw className="w-3.5 h-3.5" />
           </button>
         )}
       </div>

@@ -2,12 +2,268 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from typing import Any
 import json
 import os
 import time
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(content)
+    tmp.rename(path)
+
+
+def atomic_write_json(path: Path, data: Any, indent: int = 2) -> None:
+    atomic_write_text(path, json.dumps(data, indent=indent, default=str))
+
+
+# ============================================================
+# Tree-based Session Storage
+# ============================================================
+
+
+@dataclass
+class SessionEntry:
+    """Session 条目（树形结构节点）。
+    
+    Attributes:
+        id: 条目 ID
+        parent_id: 父条目 ID
+        role: 角色 ("user" | "assistant" | "tool" | "system")
+        content: 内容
+        metadata: 元数据
+            - tool_calls: list[{call_id, name, input}]
+            - tool_results: list[{call_id, name, result, status}]
+            - injected: bool (是否为 steering/follow-up 注入)
+            - turn: int (轮次号)
+    """
+    
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    parent_id: str | None = None
+    role: str = ""
+    content: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+    
+    def to_dict(self) -> dict[str, Any]:
+        """转换为字典。"""
+        return {
+            "id": self.id,
+            "parent_id": self.parent_id,
+            "role": self.role,
+            "content": self.content,
+            "metadata": self.metadata,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SessionEntry:
+        """从字典创建。"""
+        return cls(
+            id=data.get("id", str(uuid.uuid4())[:8]),
+            parent_id=data.get("parent_id"),
+            role=data.get("role", ""),
+            content=data.get("content", ""),
+            metadata=data.get("metadata", {}),
+        )
+
+
+class Session:
+    """树形 Session 存储。
+    
+    支持：
+    - 添加条目到当前分支
+    - 从任意条目创建分支（fork）
+    - 获取当前分支的消息列表
+    - 持久化到文件
+    """
+    
+    def __init__(self, session_id: str | None = None) -> None:
+        self.id = session_id or str(uuid.uuid4())
+        self.entries: dict[str, SessionEntry] = {}
+        self.children: dict[str | None, list[str]] = {}  # parent_id -> [entry_ids]
+        self.current_branch: list[str] = []  # 当前分支的 entry_id 列表
+        self.title: str | None = None
+        self.summary: str | None = None
+    
+    def add_entry(self, entry: SessionEntry) -> str:
+        """添加 entry 到当前分支。
+        
+        Args:
+            entry: 要添加的条目
+        
+        Returns:
+            str: 条目 ID
+        """
+        entry.parent_id = self.current_branch[-1] if self.current_branch else None
+        self.entries[entry.id] = entry
+        self.children.setdefault(entry.parent_id, []).append(entry.id)
+        self.current_branch.append(entry.id)
+        return entry.id
+    
+    def fork(self, entry_id: str) -> Session:
+        """从指定 entry 创建新分支。
+        
+        Args:
+            entry_id: 分支点条目 ID
+        
+        Returns:
+            Session: 新的 Session 实例
+        """
+        new_session = Session()
+        path = self._trace_path(entry_id)
+        for eid in path:
+            entry = self.entries[eid]
+            new_entry = SessionEntry(
+                id=entry.id,
+                parent_id=entry.parent_id,
+                role=entry.role,
+                content=entry.content,
+                metadata=entry.metadata.copy(),
+            )
+            new_session.entries[new_entry.id] = new_entry
+            new_session.children.setdefault(new_entry.parent_id, []).append(new_entry.id)
+            new_session.current_branch.append(new_entry.id)
+        return new_session
+    
+    def get_messages(self) -> list[dict[str, Any]]:
+        """获取当前分支的消息列表（用于 LLM 调用）。
+        
+        Returns:
+            list[dict]: 消息列表
+        """
+        return [
+            {"role": self.entries[eid].role, "content": self.entries[eid].content}
+            for eid in self.current_branch
+            if eid in self.entries
+        ]
+    
+    def get_entries(self) -> list[SessionEntry]:
+        """获取当前分支的所有条目。
+        
+        Returns:
+            list[SessionEntry]: 条目列表
+        """
+        return [self.entries[eid] for eid in self.current_branch if eid in self.entries]
+    
+    def _trace_path(self, entry_id: str) -> list[str]:
+        """从根到 entry_id 的路径。
+        
+        Args:
+            entry_id: 目标条目 ID
+        
+        Returns:
+            list[str]: 路径上的条目 ID 列表
+        """
+        path = []
+        current = entry_id
+        while current:
+            path.append(current)
+            if current not in self.entries:
+                break
+            current = self.entries[current].parent_id
+        return list(reversed(path))
+    
+    def get_branch_point(self) -> str | None:
+        """获取当前分支的分支点（最后一个有兄弟节点的条目）。
+        
+        Returns:
+            str | None: 分支点条目 ID
+        """
+        for parent_id, child_ids in self.children.items():
+            if len(child_ids) > 1:
+                return child_ids[-2] if len(child_ids) >= 2 else None
+        return None
+    
+    def list_branches(self) -> list[list[str]]:
+        """列出所有分支。
+        
+        Returns:
+            list[list[str]]: 分支列表，每个分支是条目 ID 列表
+        """
+        branches = []
+        for parent_id, child_ids in self.children.items():
+            if len(child_ids) > 1:
+                for child_id in child_ids:
+                    branch = self._trace_path(child_id)
+                    branches.append(branch)
+        if not branches:
+            branches.append(self.current_branch.copy())
+        return branches
+    
+    def save(self) -> None:
+        """持久化到文件。"""
+        data = {
+            "id": self.id,
+            "title": self.title,
+            "summary": self.summary,
+            "entries": [e.to_dict() for e in self.entries.values()],
+            "current_branch": self.current_branch,
+            "children": {str(k): v for k, v in self.children.items()},
+        }
+        save_session(self.id, data)
+    
+    @classmethod
+    def load(cls, session_id: str) -> Session | None:
+        """从文件加载。
+        
+        Args:
+            session_id: Session ID
+        
+        Returns:
+            Session | None: Session 实例
+        """
+        data = load_session(session_id)
+        if data is None:
+            return None
+        
+        session = cls(session_id)
+        session.title = data.get("title")
+        session.summary = data.get("summary")
+        
+        for entry_data in data.get("entries", []):
+            entry = SessionEntry.from_dict(entry_data)
+            session.entries[entry.id] = entry
+        
+        session.current_branch = data.get("current_branch", [])
+        
+        children_data = data.get("children", {})
+        for parent_id, child_ids in children_data.items():
+            key = None if parent_id == "null" else parent_id
+            session.children[key] = child_ids
+        
+        return session
+    
+    def compact(self, summary: str) -> None:
+        """压缩会话，保留摘要。
+        
+        Args:
+            summary: 压缩后的摘要
+        """
+        if len(self.current_branch) <= 2:
+            return
+        
+        # 保留 system 和第一条用户消息
+        keep_entries = []
+        for eid in self.current_branch[:2]:
+            if eid in self.entries:
+                keep_entries.append(eid)
+        
+        # 添加摘要条目
+        summary_entry = SessionEntry(
+            role="user",
+            content=f"[Session compacted]\n\n{summary}",
+            metadata={"compacted": True},
+        )
+        keep_entries.append(summary_entry.id)
+        self.entries[summary_entry.id] = summary_entry
+        
+        # 更新当前分支
+        self.current_branch = keep_entries
 
 
 def session_dir() -> Path:
@@ -31,7 +287,7 @@ def get_project_session_dir() -> Path:
 
 def save_session(session_id: str, data: dict[str, Any]) -> None:
     _ensure_dir()
-    (session_dir() / f"{session_id}.json").write_text(json.dumps(data, indent=2, default=str))
+    atomic_write_json(session_dir() / f"{session_id}.json", data)
 
 
 def save_folded_session_memory(session_id: str, record: dict[str, Any]) -> None:
@@ -39,10 +295,7 @@ def save_folded_session_memory(session_id: str, record: dict[str, Any]) -> None:
     line = json.dumps(record, ensure_ascii=False, default=str)
     with (d / f"{session_id}.folded-memory.jsonl").open("a", encoding="utf-8") as f:
         f.write(line + "\n")
-    (d / f"{session_id}.folded-memory.latest.json").write_text(
-        json.dumps(record, indent=2, ensure_ascii=False, default=str),
-        encoding="utf-8",
-    )
+    atomic_write_json(d / f"{session_id}.folded-memory.latest.json", record)
 
 
 def load_session(session_id: str) -> dict[str, Any] | None:
@@ -53,6 +306,21 @@ def load_session(session_id: str) -> dict[str, Any] | None:
         return json.loads(path.read_text())
     except Exception:
         return None
+
+
+def save_session_meta(session_id: str, meta: dict[str, Any]) -> bool:
+    path = session_dir() / f"{session_id}.json"
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text())
+        if "metadata" not in data:
+            data["metadata"] = {"id": session_id}
+        data["metadata"].update(meta)
+        atomic_write_json(path, data)
+        return True
+    except Exception:
+        return False
 
 
 def list_sessions() -> list[dict[str, Any]]:

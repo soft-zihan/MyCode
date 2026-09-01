@@ -41,6 +41,11 @@ export interface ToolCallNode extends BaseNode {
   snapshot?: { file_path: string; old_content: string; new_content: string };
 }
 
+export type SubAgentEventItem =
+  | { type: 'thinking'; content: string }
+  | { type: 'text'; content: string }
+  | { type: 'tool_call'; toolCall: ToolCallNode };
+
 export interface SubAgentNode extends BaseNode {
   kind: 'sub-agent';
   agentId: string;
@@ -50,6 +55,7 @@ export interface SubAgentNode extends BaseNode {
   thinking?: string;
   text?: string;
   toolCalls: ToolCallNode[];
+  internalOrder: SubAgentEventItem[];
   tokens?: number;
   durationMs?: number;
 }

@@ -1,7 +1,6 @@
-import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom';
-import { MessageSquare, Database, Wrench, Activity, FolderTree, Server, Bot } from 'lucide-react';
+import { BrowserRouter, Link, useLocation } from 'react-router-dom';
+import { MessageSquare, Database, Wrench, Clock, Server, Bot } from 'lucide-react';
 import ChatPage from './pages/ChatPage';
-import SessionsPage from './pages/SessionsPage';
 import MemoryPage from './pages/MemoryPage';
 import SkillsPage from './pages/SkillsPage';
 import TracePage from './pages/TracePage';
@@ -17,7 +16,7 @@ function Navigation() {
     { path: '/agents', label: 'Agents', icon: Bot },
     { path: '/memory', label: 'Memory', icon: Database },
     { path: '/skills', label: 'Skills', icon: Wrench },
-    { path: '/trace', label: 'Trace', icon: Activity },
+    { path: '/trace', label: 'Trajectory', icon: Clock },
   ];
 
   return (
@@ -81,21 +80,40 @@ function Navigation() {
   );
 }
 
+function PageContainer() {
+  const location = useLocation();
+  const path = location.pathname;
+  
+  return (
+    <main className="flex-1 overflow-hidden">
+      <div className={path === '/' ? 'block h-full' : 'hidden h-full'}>
+        <ChatPage />
+      </div>
+      <div className={path === '/mcp' ? 'block h-full' : 'hidden h-full'}>
+        <McpPage />
+      </div>
+      <div className={path === '/agents' ? 'block h-full' : 'hidden h-full'}>
+        <AgentsPage />
+      </div>
+      <div className={path === '/memory' ? 'block h-full' : 'hidden h-full'}>
+        <MemoryPage />
+      </div>
+      <div className={path === '/skills' ? 'block h-full' : 'hidden h-full'}>
+        <SkillsPage />
+      </div>
+      <div className={path === '/trace' ? 'block h-full' : 'hidden h-full'}>
+        <TracePage />
+      </div>
+    </main>
+  );
+}
+
 function App() {
   return (
     <BrowserRouter>
       <div className="flex h-screen bg-gray-100">
         <Navigation />
-        <main className="flex-1 overflow-hidden">
-          <Routes>
-            <Route path="/" element={<ChatPage />} />
-            <Route path="/agents" element={<AgentsPage />} />
-            <Route path="/memory" element={<MemoryPage />} />
-            <Route path="/skills" element={<SkillsPage />} />
-            <Route path="/mcp" element={<McpPage />} />
-            <Route path="/trace" element={<TracePage />} />
-          </Routes>
-        </main>
+        <PageContainer />
       </div>
     </BrowserRouter>
   );

@@ -78,6 +78,8 @@ class SessionNameRequest(BaseModel):
 @app.post("/api/sessions/generate-name")
 async def api_generate_session_name(data: SessionNameRequest) -> dict[str, str]:
     """Generate a session name from user message using title agent."""
+    import asyncio
+    fallback_name = data.message[:20] + "..." if len(data.message) > 20 else data.message
     try:
         from agents.agent import Agent
         from agents.agent_mode import BUILTIN_HIDDEN_AGENTS
@@ -85,54 +87,53 @@ async def api_generate_session_name(data: SessionNameRequest) -> dict[str, str]:
         # Get title agent config
         title_config = BUILTIN_HIDDEN_AGENTS.get("title")
         if not title_config:
-            return {"name": data.message[:20] + "..." if len(data.message) > 20 else data.message}
+            return {"name": fallback_name}
         
         # Load config to get API credentials
         from agents.config import load_config
         config = load_config()
         
-        # Use side model for title generation, fallback to first endpoint
+        # Collect candidate endpoints: side model first, then all others
+        candidates = []
         side_model_id = config.routing.get('side')
-        model_name = None
-        api_key = None
-        api_base = None
+        if side_model_id and side_model_id in config.endpoints:
+            candidates.append(config.endpoints[side_model_id])
+        for eid, ep in config.endpoints.items():
+            if eid != side_model_id:
+                candidates.append(ep)
         
-        if side_model_id:
-            endpoint = config.endpoints.get(side_model_id)
-            if endpoint:
-                model_name = endpoint.model
-                api_key = endpoint.api_key
-                api_base = endpoint.base_url
+        if not candidates:
+            return {"name": fallback_name}
         
-        if not api_key and config.endpoints:
-            first_endpoint = next(iter(config.endpoints.values()))
-            model_name = first_endpoint.model
-            api_key = first_endpoint.api_key
-            api_base = first_endpoint.base_url
+        # Try each endpoint until one succeeds (with timeout)
+        last_error = None
+        for endpoint in candidates:
+            try:
+                agent = Agent(
+                    model=endpoint.model,
+                    api_key=endpoint.api_key,
+                    api_base=endpoint.base_url,
+                    custom_system_prompt=title_config.system_prompt,
+                )
+                # Add timeout to prevent hanging
+                result = await asyncio.wait_for(agent.run_once(data.message), timeout=10.0)
+                name = result.get("text", "").strip()
+                if name:
+                    name = name.replace('"', '').replace("'", "").strip()
+                    return {"name": name[:30] if len(name) > 30 else name}
+            except asyncio.TimeoutError:
+                last_error = Exception(f"Timeout for model {endpoint.model}")
+                continue
+            except Exception as e:
+                last_error = e
+                continue
         
-        if not api_key:
-            return {"name": data.message[:20] + "..." if len(data.message) > 20 else data.message}
-        
-        # Create agent with title system prompt
-        agent = Agent(
-            model=model_name,
-            api_key=api_key,
-            api_base=api_base,
-            custom_system_prompt=title_config.system_prompt,
-        )
-        
-        # Run once to generate title
-        result = await agent.run_once(data.message)
-        name = result.get("text", "").strip()
-        
-        if name:
-            # Clean up and truncate
-            name = name.replace('"', '').replace("'", "").strip()
-            return {"name": name[:30] if len(name) > 30 else name}
-        
-        return {"name": data.message[:20] + "..." if len(data.message) > 20 else data.message}
+        if last_error:
+            import logging
+            logging.getLogger(__name__).warning(f"All endpoints failed for title generation: {last_error}")
+        return {"name": fallback_name}
     except Exception:
-        return {"name": data.message[:20] + "..." if len(data.message) > 20 else data.message}
+        return {"name": fallback_name}
 
 
 class SessionUpdateRequest(BaseModel):
@@ -156,6 +157,254 @@ def api_update_session(session_id: str, data: SessionUpdateRequest) -> dict[str,
     
     save_session(session_id, session_data)
     return {"success": True}
+
+
+# ── Session Control Endpoints ─────────────────────────────────────────────────
+
+# In-memory store for active sessions (for abort, steer, etc.)
+_active_sessions: dict[str, dict] = {}
+
+
+class SteerRequest(BaseModel):
+    message: str
+
+
+class RewindRequest(BaseModel):
+    turns: int = 1
+
+
+class TruncateRequest(BaseModel):
+    keep_user_messages: int  # 保留前 N 条用户消息
+
+
+class PermissionModeRequest(BaseModel):
+    mode: str  # "default", "bypassPermissions", "plan"
+
+
+@app.post("/api/sessions/{session_id}/abort")
+async def api_abort_session(session_id: str) -> dict[str, Any]:
+    """Abort a running session."""
+    session_info = _active_sessions.get(session_id)
+    if session_info and session_info.get("agent"):
+        agent = session_info["agent"]
+        agent.request_abort()
+        return {"success": True, "message": "Abort requested"}
+    return {"success": False, "message": "Session not active"}
+
+
+@app.post("/api/sessions/{session_id}/compact")
+async def api_compact_session(session_id: str) -> dict[str, Any]:
+    """Compact session context."""
+    session_data = load_session(session_id)
+    if session_data is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session_info = _active_sessions.get(session_id)
+    if session_info and session_info.get("agent"):
+        agent = session_info["agent"]
+        try:
+            await agent.compact_context("Manual compaction requested")
+            return {"success": True, "message": "Context compacted"}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+    
+    return {"success": False, "message": "Session not active"}
+
+
+@app.post("/api/sessions/{session_id}/truncate")
+async def api_truncate_session(session_id: str, data: TruncateRequest) -> dict[str, Any]:
+    """Truncate session messages to keep only the first N user messages."""
+    session_data = load_session(session_id)
+    if session_data is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    # Truncate openaiMessages by counting user messages
+    openai_messages = session_data.get("openaiMessages", [])
+    user_count = 0
+    truncate_at = len(openai_messages)
+    
+    for i, msg in enumerate(openai_messages):
+        if msg.get("role") == "user":
+            if user_count >= data.keep_user_messages:
+                truncate_at = i
+                break
+            user_count += 1
+    
+    session_data["openaiMessages"] = openai_messages[:truncate_at]
+    
+    # Truncate frontendMessages if exists (by counting user messages)
+    frontend_messages = session_data.get("frontendMessages", [])
+    if frontend_messages:
+        user_count = 0
+        truncate_at = len(frontend_messages)
+        
+        for i, msg in enumerate(frontend_messages):
+            if msg.get("role") == "user":
+                if user_count >= data.keep_user_messages:
+                    truncate_at = i
+                    break
+                user_count += 1
+        
+        session_data["frontendMessages"] = frontend_messages[:truncate_at]
+    
+    # Truncate turnBoundaries
+    turn_boundaries = session_data.get("turnBoundaries", [])
+    session_data["turnBoundaries"] = [
+        b for b in turn_boundaries 
+        if b.get("message_count", 0) <= len(session_data["openaiMessages"])
+    ]
+    
+    save_session(session_id, session_data)
+    
+    # Also truncate active agent's messages if running
+    session_info = _active_sessions.get(session_id)
+    if session_info and session_info.get("agent"):
+        agent = session_info["agent"]
+        if hasattr(agent, '_openai_messages'):
+            # Count user messages in agent's current messages
+            user_count = 0
+            truncate_at = len(agent._openai_messages)
+            
+            for i, msg in enumerate(agent._openai_messages):
+                if msg.get("role") == "user":
+                    if user_count >= data.keep_user_messages:
+                        truncate_at = i
+                        break
+                    user_count += 1
+            
+            agent._openai_messages = agent._openai_messages[:truncate_at]
+    
+    return {"success": True, "message": f"Truncated to {data.keep_user_messages} user messages"}
+
+
+@app.post("/api/sessions/{session_id}/rewind")
+async def api_rewind_session(session_id: str, data: RewindRequest) -> dict[str, Any]:
+    """Rewind session by N turns."""
+    session_data = load_session(session_id)
+    if session_data is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    # Get turn boundaries
+    turn_boundaries = session_data.get("turnBoundaries", [])
+    if not turn_boundaries:
+        return {"success": False, "message": "No turn boundaries found"}
+    
+    # Find the target turn
+    current_turn = len(turn_boundaries)
+    target_turn = max(1, current_turn - data.turns)
+    
+    # Find the boundary for the target turn
+    target_boundary = None
+    for boundary in turn_boundaries:
+        if boundary.get("turn") == target_turn:
+            target_boundary = boundary
+            break
+    
+    if not target_boundary:
+        return {"success": False, "message": "Target turn not found"}
+    
+    # Truncate messages
+    message_count = target_boundary.get("message_count", 0)
+    messages = session_data.get("openaiMessages", [])
+    session_data["openaiMessages"] = messages[:message_count]
+    
+    # Restore checkpoints if available
+    checkpoint_count = target_boundary.get("checkpoint_count", 0)
+    checkpoint_store = session_data.get("checkpointStore", {})
+    snapshots = checkpoint_store.get("snapshots", [])
+    checkpoint_store["snapshots"] = snapshots[:checkpoint_count]
+    session_data["checkpointStore"] = checkpoint_store
+    
+    # Update turn boundaries
+    session_data["turnBoundaries"] = [b for b in turn_boundaries if b.get("turn") <= target_turn]
+    
+    save_session(session_id, session_data)
+    return {
+        "success": True, 
+        "message": f"Rewound to turn {target_turn}",
+        "turn": target_turn
+    }
+
+
+@app.put("/api/sessions/{session_id}/permission-mode")
+async def api_update_permission_mode(session_id: str, data: PermissionModeRequest) -> dict[str, Any]:
+    """Update permission mode for a session."""
+    session_info = _active_sessions.get(session_id)
+    if session_info and session_info.get("agent"):
+        agent = session_info["agent"]
+        agent.permission_mode = data.mode
+        return {"success": True, "permission_mode": data.mode}
+    
+    # If session not active, update stored session data
+    session_data = load_session(session_id)
+    if session_data:
+        session_data["permissionMode"] = data.mode
+        save_session(session_id, session_data)
+        return {"success": True, "permission_mode": data.mode}
+    
+    return {"success": False, "message": "Session not found"}
+
+
+@app.post("/api/sessions/{session_id}/steer")
+async def api_steer_session(session_id: str, data: SteerRequest) -> dict[str, Any]:
+    """Inject a steering message into a running session."""
+    session_info = _active_sessions.get(session_id)
+    if session_info and session_info.get("agent"):
+        agent = session_info["agent"]
+        # Add steering message to the agent's message queue
+        if hasattr(agent, '_steer_queue'):
+            agent._steer_queue.append(data.message)
+            return {"success": True, "message": "Steer message queued"}
+    
+    return {"success": False, "message": "Session not active or steer not supported"}
+
+
+@app.post("/api/sessions/{session_id}/fork")
+async def api_fork_session(session_id: str) -> dict[str, Any]:
+    """Fork a session (create a deep copy with a new ID)."""
+    session_data = load_session(session_id)
+    if session_data is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    # Generate new session ID
+    import uuid
+    new_session_id = uuid.uuid4().hex[:8]
+    
+    # Deep copy session data to avoid shared references
+    import copy
+    new_session_data = copy.deepcopy(session_data)
+    
+    # Update metadata
+    new_session_data["metadata"] = new_session_data.get("metadata", {}).copy()
+    new_session_data["metadata"]["id"] = new_session_id
+    new_session_data["metadata"]["startTime"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    new_session_data["metadata"]["name"] = ""  # Clear name for forked session
+    
+    # Save new session
+    save_session(new_session_id, new_session_data)
+    
+    return {
+        "success": True,
+        "new_session_id": new_session_id,
+        "message": f"Session forked to {new_session_id}"
+    }
+
+
+class PermissionResponseRequest(BaseModel):
+    request_id: str
+    allowed: bool
+
+
+@app.post("/api/sessions/{session_id}/permission-response")
+async def api_permission_response(session_id: str, data: PermissionResponseRequest) -> dict[str, Any]:
+    """Respond to a permission request."""
+    session_info = _active_sessions.get(session_id)
+    if session_info and session_info.get("agent"):
+        agent = session_info["agent"]
+        agent.set_permission_response(data.request_id, data.allowed)
+        return {"success": True}
+    
+    return {"success": False, "message": "Session not active"}
 
 
 class RevertRequest(BaseModel):
@@ -916,6 +1165,7 @@ class ChatMessage(BaseModel):
     context_files: list[str] | None = None
     agent: str | None = None
     model: str | None = None
+    permission_mode: str | None = None  # "default", "bypassPermissions", "plan"
 
 
 @app.post("/api/chat")
@@ -1044,6 +1294,7 @@ async def api_chat_stream(data: ChatMessage):
             model=model_name,
             api_key=api_key,
             api_base=api_base,
+            permission_mode=data.permission_mode or "bypassPermissions",  # Web 模式默认 YOLO
         )
         
         # Restore session if session_id is provided
@@ -1087,9 +1338,16 @@ async def api_chat_stream(data: ChatMessage):
         if context:
             full_message = f"{data.message}\n\nContext files:{context}"
         
+        # Initialize steer queue for steering support
+        agent._steer_queue = []
+        
         async def generate():
             # 使用新的事件流机制
             current_sub_agent_id = None
+            
+            # Register agent in active sessions for control endpoints
+            session_id = agent.session_id or data.session_id or "unknown"
+            _active_sessions[session_id] = {"agent": agent}
             
             try:
                 async for event in agent.chat_stream(full_message):
@@ -1149,9 +1407,24 @@ async def api_chat_stream(data: ChatMessage):
                         yield f"data: {json.dumps({'info': event.get('message', '')})}\n\n"
                     elif event_type == "error":
                         yield f"data: {json.dumps({'error': {'message': event.get('message', '')}})}\n\n"
+                    elif event_type == "permission_request":
+                        # 权限请求事件
+                        perm_request = {
+                            'permission_request': {
+                                'request_id': event.get('request_id', ''),
+                                'command': event.get('command', ''),
+                                'tool_name': event.get('tool_name', ''),
+                            }
+                        }
+                        sub_id = event_sub_agent_id or current_sub_agent_id
+                        if sub_id:
+                            perm_request['permission_request']['sub_agent_id'] = sub_id
+                        yield f"data: {json.dumps(perm_request)}\n\n"
             finally:
                 # 确保session被保存
                 agent._auto_save()
+                # Unregister from active sessions
+                _active_sessions.pop(session_id, None)
             
             # Send completion event
             yield f"data: {json.dumps({'done': True, 'session_id': agent.session_id})}\n\n"

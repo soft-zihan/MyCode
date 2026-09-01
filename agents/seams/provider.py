@@ -18,6 +18,35 @@ from typing import Any, AsyncIterator, Protocol
 
 
 @dataclass
+class ProviderResult:
+    """Provider 返回结果，包含统计信息。
+    
+    Attributes:
+        content: 文本内容
+        tool_calls: 工具调用列表
+        usage: Token 使用统计 {input_tokens, output_tokens, cache_hit}
+        ttft_ms: 首 Token 延迟（毫秒）
+    """
+    
+    content: str = ""
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    usage: dict[str, Any] = field(default_factory=dict)
+    ttft_ms: float = 0
+    
+    @property
+    def input_tokens(self) -> int:
+        return self.usage.get("input_tokens", 0)
+    
+    @property
+    def output_tokens(self) -> int:
+        return self.usage.get("output_tokens", 0)
+    
+    @property
+    def cache_hit(self) -> bool:
+        return self.usage.get("cache_hit", False)
+
+
+@dataclass
 class StreamEvent:
     """流式事件。"""
     

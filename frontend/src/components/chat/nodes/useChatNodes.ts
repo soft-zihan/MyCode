@@ -1,11 +1,12 @@
 import { useCallback, useRef, useState } from 'react';
-import type { ChatNode, ChatSnapshot, ToolCallNode, SubAgentNode } from './types';
+import type { ChatNode, ChatSnapshot, ToolCallNode, SubAgentNode, SubAgentEventItem } from './types';
 
 interface UseChatNodesReturn {
   snapshot: ChatSnapshot;
   handleSSEEvent: (data: Record<string, unknown>) => void;
   addUserMessage: (content: string, contextFiles?: string[], agent?: string, model?: string) => void;
   resetNodes: () => void;
+  loadMessages: (messages: Array<{role: string; content: string; timestamp?: string; contextFiles?: string[]; agent?: string; model?: string}>) => void;
 }
 
 const emptySnapshot: ChatSnapshot = { order: [], nodes: new Map() };
@@ -14,7 +15,6 @@ let nodeSeq = 0;
 const nextSeq = () => ++nodeSeq;
 const nextKey = (prefix: string) => `${prefix}_${nextSeq()}`;
 
-// Helper to create a placeholder sub-agent node
 const createSubAgentNode = (agentId: string): SubAgentNode => ({
   key: `subagent_${agentId}`,
   kind: 'sub-agent',
@@ -24,7 +24,22 @@ const createSubAgentNode = (agentId: string): SubAgentNode => ({
   description: '',
   status: 'running',
   toolCalls: [],
+  internalOrder: [],
 });
+
+const appendToInternalOrder = (
+  existing: SubAgentEventItem[],
+  newItem: SubAgentEventItem
+): SubAgentEventItem[] => {
+  if (newItem.type === 'thinking' || newItem.type === 'text') {
+    const last = existing[existing.length - 1];
+    if (last && last.type === newItem.type) {
+      const merged = { ...last, content: last.content + newItem.content };
+      return [...existing.slice(0, -1), merged];
+    }
+  }
+  return [...existing, newItem];
+};
 
 export function useChatNodes(): UseChatNodesReturn {
   const [snapshot, setSnapshot] = useState<ChatSnapshot>(emptySnapshot);
@@ -88,11 +103,19 @@ export function useChatNodes(): UseChatNodesReturn {
             newNodes.set(subAgentKey, existing);
             return { 
               order: [...prev.order, subAgentKey], 
-              nodes: newNodes.set(subAgentKey, { ...existing, thinking: content })
+              nodes: newNodes.set(subAgentKey, { 
+                ...existing, 
+                thinking: content,
+                internalOrder: appendToInternalOrder(existing.internalOrder, { type: 'thinking', content })
+              })
             };
           }
           
-          newNodes.set(subAgentKey, { ...existing, thinking: (existing.thinking || '') + content });
+          newNodes.set(subAgentKey, { 
+            ...existing, 
+            thinking: (existing.thinking || '') + content,
+            internalOrder: appendToInternalOrder(existing.internalOrder, { type: 'thinking', content })
+          });
           return { order: prev.order, nodes: newNodes };
         });
       } else {
@@ -143,11 +166,19 @@ export function useChatNodes(): UseChatNodesReturn {
             newNodes.set(subAgentKey, existing);
             return { 
               order: [...prev.order, subAgentKey], 
-              nodes: newNodes.set(subAgentKey, { ...existing, text: content })
+              nodes: newNodes.set(subAgentKey, { 
+                ...existing, 
+                text: content,
+                internalOrder: appendToInternalOrder(existing.internalOrder, { type: 'text', content })
+              })
             };
           }
           
-          newNodes.set(subAgentKey, { ...existing, text: (existing.text || '') + content });
+          newNodes.set(subAgentKey, { 
+            ...existing, 
+            text: (existing.text || '') + content,
+            internalOrder: appendToInternalOrder(existing.internalOrder, { type: 'text', content })
+          });
           return { order: prev.order, nodes: newNodes };
         });
       } else {
@@ -206,11 +237,19 @@ export function useChatNodes(): UseChatNodesReturn {
             newNodes.set(subAgentKey, existing);
             return { 
               order: [...prev.order, subAgentKey], 
-              nodes: newNodes.set(subAgentKey, { ...existing, toolCalls: [toolNode] })
+              nodes: newNodes.set(subAgentKey, { 
+                ...existing, 
+                toolCalls: [toolNode],
+                internalOrder: appendToInternalOrder(existing.internalOrder, { type: 'tool_call', toolCall: toolNode })
+              })
             };
           }
           
-          newNodes.set(subAgentKey, { ...existing, toolCalls: [...existing.toolCalls, toolNode] });
+          newNodes.set(subAgentKey, { 
+            ...existing, 
+            toolCalls: [...existing.toolCalls, toolNode],
+            internalOrder: appendToInternalOrder(existing.internalOrder, { type: 'tool_call', toolCall: toolNode })
+          });
           return { order: prev.order, nodes: newNodes };
         });
       } else {
@@ -254,7 +293,13 @@ export function useChatNodes(): UseChatNodesReturn {
           if (existing) {
             const newNodes = new Map(prev.nodes);
             const updatedToolCalls = existing.toolCalls.map(tc => tc.callId === tr.call_id ? updateTool(tc) as ToolCallNode : tc);
-            newNodes.set(subAgentKey, { ...existing, toolCalls: updatedToolCalls });
+            const updatedInternalOrder = existing.internalOrder.map(item => {
+              if (item.type === 'tool_call' && item.toolCall.callId === tr.call_id) {
+                return { type: 'tool_call' as const, toolCall: updateTool(item.toolCall) as ToolCallNode };
+              }
+              return item;
+            });
+            newNodes.set(subAgentKey, { ...existing, toolCalls: updatedToolCalls, internalOrder: updatedInternalOrder });
             return { order: prev.order, nodes: newNodes };
           }
           return prev;
@@ -306,6 +351,7 @@ export function useChatNodes(): UseChatNodesReturn {
           description: sa.description,
           status: 'running',
           toolCalls: [],
+          internalOrder: [],
         };
         const newNodes = new Map(prev.nodes);
         newNodes.set(subAgentKey, subAgentNode);
@@ -360,5 +406,53 @@ export function useChatNodes(): UseChatNodesReturn {
     subAgentInfoRef.current.clear();
   }, []);
 
-  return { snapshot, handleSSEEvent, addUserMessage, resetNodes };
+  const loadMessages = useCallback((messages: Array<{role: string; content: string; timestamp?: string; contextFiles?: string[]; agent?: string; model?: string}>) => {
+    resetNodes();
+    setSnapshot(prev => {
+      const newNodes = new Map(prev.nodes);
+      const newOrder = [...prev.order];
+      
+      for (const msg of messages) {
+        if (msg.role === 'user') {
+          const key = nextKey('user');
+          newNodes.set(key, {
+            key,
+            kind: 'user',
+            seq: nextSeq(),
+            content: msg.content,
+            contextFiles: msg.contextFiles,
+            agent: msg.agent,
+            model: msg.model,
+            timestamp: msg.timestamp || new Date().toISOString(),
+          });
+          newOrder.push(key);
+        } else if (msg.role === 'assistant') {
+          // Parse thinking and content
+          let thinking = '';
+          let content = msg.content;
+          const thinkingMatch = msg.content.match(/<thinking>([\s\S]*?)<\/thinking>/);
+          if (thinkingMatch) {
+            thinking = thinkingMatch[1].trim();
+            content = msg.content.replace(/<thinking>[\s\S]*?<\/thinking>/, '').trim();
+          }
+          
+          const key = nextKey('assistant');
+          newNodes.set(key, {
+            key,
+            kind: 'assistant',
+            seq: nextSeq(),
+            content,
+            thinking: thinking || undefined,
+            streaming: false,
+            timestamp: msg.timestamp || new Date().toISOString(),
+          });
+          newOrder.push(key);
+        }
+      }
+      
+      return { order: newOrder, nodes: newNodes };
+    });
+  }, [resetNodes]);
+
+  return { snapshot, handleSSEEvent, addUserMessage, resetNodes, loadMessages };
 }

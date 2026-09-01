@@ -3,7 +3,7 @@ import { Bot, ChevronDown, ChevronRight, Brain } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ToolRow } from '../ToolRow';
-import type { SubAgentNode, ToolCallNode } from './types';
+import type { SubAgentNode, ToolCallNode, SubAgentEventItem } from './types';
 import type { ToolCallEvent } from '../../../hooks';
 
 interface SubAgentNodeViewProps {
@@ -28,6 +28,39 @@ export const SubAgentNodeView = memo(function SubAgentNodeView({ node }: SubAgen
 
   const isRunning = node.status === 'running';
   const isError = node.status === 'error';
+
+  const renderEventItem = (item: SubAgentEventItem, idx: number) => {
+    switch (item.type) {
+      case 'thinking':
+        return (
+          <div key={`thinking-${idx}`}>
+            <button
+              onClick={(e) => { e.stopPropagation(); setShowThinking(!showThinking); }}
+              className="flex items-center gap-1.5 text-xs font-medium text-purple-600 hover:text-purple-700"
+            >
+              <Brain className="w-3 h-3" />
+              <span>Thinking</span>
+              {showThinking ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+            </button>
+            {showThinking && (
+              <pre className="mt-1 text-xs text-gray-600 bg-purple-50/50 rounded p-2 overflow-x-auto max-h-32 overflow-y-auto whitespace-pre-wrap font-mono">
+                {item.content}
+              </pre>
+            )}
+          </div>
+        );
+      case 'text':
+        return (
+          <div key={`text-${idx}`} className="prose prose-xs max-w-none">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {item.content}
+            </ReactMarkdown>
+          </div>
+        );
+      case 'tool_call':
+        return <SubAgentToolRow key={`tool-${idx}`} node={item.toolCall} />;
+    }
+  };
 
   return (
     <div className="flex justify-start">
@@ -74,44 +107,46 @@ export const SubAgentNodeView = memo(function SubAgentNodeView({ node }: SubAgen
             </div>
           </div>
 
-          {/* Expanded content */}
+          {/* Expanded content - render in order */}
           {expanded && (
             <div className="border-t border-gray-200 px-3 py-2 space-y-2">
-              {/* Thinking section */}
-              {node.thinking && (
-                <div>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); setShowThinking(!showThinking); }}
-                    className="flex items-center gap-1.5 text-xs font-medium text-purple-600 hover:text-purple-700"
-                  >
-                    <Brain className="w-3 h-3" />
-                    <span>Thinking</span>
-                    {showThinking ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-                  </button>
-                  {showThinking && (
-                    <pre className="mt-1 text-xs text-gray-600 bg-purple-50/50 rounded p-2 overflow-x-auto max-h-32 overflow-y-auto whitespace-pre-wrap font-mono">
-                      {node.thinking}
-                    </pre>
+              {node.internalOrder.length > 0 ? (
+                node.internalOrder.map((item, idx) => renderEventItem(item, idx))
+              ) : (
+                <>
+                  {/* Fallback for old data without internalOrder */}
+                  {node.thinking && (
+                    <div>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setShowThinking(!showThinking); }}
+                        className="flex items-center gap-1.5 text-xs font-medium text-purple-600 hover:text-purple-700"
+                      >
+                        <Brain className="w-3 h-3" />
+                        <span>Thinking</span>
+                        {showThinking ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                      </button>
+                      {showThinking && (
+                        <pre className="mt-1 text-xs text-gray-600 bg-purple-50/50 rounded p-2 overflow-x-auto max-h-32 overflow-y-auto whitespace-pre-wrap font-mono">
+                          {node.thinking}
+                        </pre>
+                      )}
+                    </div>
                   )}
-                </div>
-              )}
-
-              {/* Text output */}
-              {node.text && (
-                <div className="prose prose-xs max-w-none">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                    {node.text}
-                  </ReactMarkdown>
-                </div>
-              )}
-
-              {/* Tool calls */}
-              {node.toolCalls.length > 0 && (
-                <div className="space-y-1">
-                  {node.toolCalls.map(tc => (
-                    <SubAgentToolRow key={tc.callId} node={tc} />
-                  ))}
-                </div>
+                  {node.text && (
+                    <div className="prose prose-xs max-w-none">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {node.text}
+                      </ReactMarkdown>
+                    </div>
+                  )}
+                  {node.toolCalls.length > 0 && (
+                    <div className="space-y-1">
+                      {node.toolCalls.map(tc => (
+                        <SubAgentToolRow key={tc.callId} node={tc} />
+                      ))}
+                    </div>
+                  )}
+                </>
               )}
             </div>
           )}

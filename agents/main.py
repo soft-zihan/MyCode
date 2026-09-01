@@ -7,44 +7,33 @@ import asyncio
 import os
 import queue
 import re
+import select
 import signal
 import sys
+import threading
 from pathlib import Path
 from urllib.parse import urlparse
 
 from dotenv import find_dotenv, load_dotenv
 
 from .agent import Agent
-from .session import list_sessions, load_session, get_latest_session_id, delete_session, clean_sessions
+from .session import get_latest_session_id, load_session
 from .tools import set_background_done_callback
 from .ui import (
     print_welcome,
     print_user_prompt,
+    print_user_message,
+    print_input_metadata,
     print_error,
     print_info,
     print_plan_for_approval,
     print_plan_approval_options,
     print_goodbye,
     print_interrupted,
-    print_memory_entries,
-    print_skill_entries,
+    print_processing_status,
     print_warning,
-    print_context_rows,
-    print_session_rows,
-    set_thinking_visible,
-    thinking_visible,
 )
-from .memory import list_memories
-from .skills import (
-    create_skill,
-    discover_skills,
-    evolve_skill,
-    execute_skill,
-    get_skill_by_name,
-    record_feedback,
-    skill_stats,
-)
-from .online_skill_eval import format_online_skill_eval_async
+from .cli import registry as cli_registry, handle_skill_invocation
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,10 +50,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--thinking", action="store_true", help="Enable extended thinking")
     parser.add_argument("--model", "-m", default=None, help="Model to use")
     parser.add_argument("--api-base", default=None, help="OpenAI-compatible API base URL")
-    parser.add_argument("--resume", action="store_true", help="Resume last session")
+    parser.add_argument("--resume", "-c", "--continue", action="store_true", help="Resume last session (alias: -c)")
+    parser.add_argument("--session", default=None, help="Resume specific session by ID")
+    parser.add_argument("--fork", action="store_true", help="Fork session when resuming")
     parser.add_argument("--max-cost", type=float, default=None, help="Max USD spend")
     parser.add_argument("--max-turns", type=int, default=None, help="Max agentic turns")
     parser.add_argument("--trace", action="store_true", help="Enable JSONL trace logging (~/.bear-code/trace/)")
+    parser.add_argument("--tui", action="store_true", help="Use Textual TUI interface (interactive with mouse support)")
     parser.add_argument("--help", "-h", action="store_true", help="Show help")
     return parser.parse_args()
 
@@ -182,11 +174,12 @@ def _expand_at_references(text: str) -> tuple[str, list[str]]:
 # ─── Tab 补全（readline）───────────────────────────────────
 
 REPL_COMMANDS = [
-    "/clear", "/plan", "/cost", "/compact", "/cd", "/help", "/thinking",
-    "/rewind", "/goal", "/context", "/ctx", "/memory", "/skills",
+    "/new", "/clear", "/plan", "/cost", "/compact", "/cd", "/help", "/thinking",
+    "/rewind", "/undo", "/goal", "/context", "/ctx", "/memory", "/skills",
     "/skill-stats", "/skill-eval", "/extract_now", "/skill-feedback",
     "/skill-evolve", "/skill-create", "/fork", "/sessions", "/switch",
-    "/trace", "/graph",
+    "/resume", "/rename", "/export", "/trace", "/graph", "/models", "/status",
+    "/permission", "/perm", "/yolo", "/quit", "/q",
 ]
 
 
@@ -259,13 +252,61 @@ def _setup_readline() -> None:
         pass
 
 
+async def _dispatch_command(agent: Agent, inp: str) -> bool:
+    """Dispatch a slash command using the CLI registry. Returns True if handled."""
+    cmd, args = cli_registry.find(inp)
+    if cmd:
+        result = cmd.handler(agent, args)
+        if asyncio.iscoroutine(result):
+            await result
+        return True
+    if inp.startswith("/"):
+        space_idx = inp.find(" ")
+        cmd_name = inp[1:space_idx] if space_idx > 0 else inp[1:]
+        cmd_args = inp[space_idx + 1:] if space_idx > 0 else ""
+        return await handle_skill_invocation(agent, cmd_name, cmd_args)
+    return False
+
+
 async def run_repl(agent: Agent) -> None:
     """Interactive REPL loop."""
+    from .history import get_history
+    
+    # Initialize prompt history
+    history = get_history()
+    
+    # Try to use prompt_toolkit for better input
+    try:
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.history import InMemoryHistory
+        from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+        from prompt_toolkit.completion import WordCompleter
+        
+        # Build completer from commands
+        from .cli.registry import registry
+        commands = [f"/{cmd.name}" for cmd in registry.list_all()]
+        completer = WordCompleter(commands, sentence=True)
+        
+        # Create prompt session with history
+        pt_history = InMemoryHistory()
+        # Load recent history
+        for text in history.recent(100):
+            pt_history.append_string(text)
+        
+        session = PromptSession(
+            history=pt_history,
+            auto_suggest=AutoSuggestFromHistory(),
+            completer=completer,
+        )
+        use_prompt_toolkit = True
+    except ImportError:
+        use_prompt_toolkit = False
+        session = None
 
     async def confirm_fn(message: str) -> bool:
         try:
-            answer = input("  Allow? (y/n): ")
-            return answer.lower().startswith("y")
+            answer = input().strip().lower()
+            return answer in ("y", "yes", "a", "always")
         except EOFError:
             return False
 
@@ -347,9 +388,39 @@ async def run_repl(agent: Agent) -> None:
                 if "abort" not in str(e).lower():
                     print_error(str(e))
 
-        print_user_prompt(agent.status_line())
+        # Show status bar (but not ❯ if using prompt_toolkit)
+        if use_prompt_toolkit:
+            # Just show status bar without ❯
+            from pathlib import Path
+            from .tui.theme import theme
+            from .ui import console
+            
+            cwd = str(Path.cwd())
+            home = str(Path.home())
+            if cwd.startswith(home):
+                cwd = "~" + cwd[len(home):]
+            
+            term_width = console.width or 80
+            max_cwd_len = term_width // 2
+            if len(cwd) > max_cwd_len:
+                cwd = "..." + cwd[-(max_cwd_len-3):]
+            
+            status = agent.status_line()
+            right_part = status
+            padding = max(2, term_width - len(cwd) - len(right_part))
+            
+            console.print(f"[{theme.TEXT_MUTED}]{cwd}[/{theme.TEXT_MUTED}]" + 
+                          " " * padding + 
+                          f"[{theme.TEXT_MUTED}]{right_part}[/{theme.TEXT_MUTED}]")
+        else:
+            print_user_prompt(agent.status_line())
+        
+        print_input_metadata(agent.permission_mode, agent.model)
         try:
-            line = input()
+            if use_prompt_toolkit and session:
+                line = await session.prompt_async("❯ ")
+            else:
+                line = input()
         except (EOFError, KeyboardInterrupt):
             print_goodbye()
             break
@@ -359,7 +430,12 @@ async def run_repl(agent: Agent) -> None:
 
         if not inp:
             continue
-        if inp in ("exit", "quit"):
+        
+        # Add to history (only non-command inputs)
+        if not inp.startswith("/"):
+            history.add(inp)
+        
+        if inp in ("exit", "quit", ":q"):
             print_goodbye()
             break
 
@@ -377,357 +453,13 @@ async def run_repl(agent: Agent) -> None:
             continue
 
         # REPL commands
-        if inp == "/fork":
-            print_info(agent.fork_session())
-            continue
-        if inp == "/sessions" or inp.startswith("/sessions "):
-            # /sessions              表格列出所有会话（当前会话 * 高亮）
-            # /sessions rm <id>      删除指定会话
-            # /sessions clean        清理测试残留（cwd 在临时目录的会话）
-            sub = inp[len("/sessions"):].strip()
-            if sub.startswith("rm "):
-                target = sub[3:].strip()
-                if not target:
-                    print_error("Usage: /sessions rm <session_id>")
-                elif target == agent.session_id:
-                    print_error("Cannot delete the current session. /switch to another one first.")
-                elif delete_session(target):
-                    print_info(f"Deleted session {target}.")
-                else:
-                    print_error(f"Session not found: {target}")
-                continue
-            if sub == "clean":
-                deleted = clean_sessions(only_tmp=True)
-                print_info(f"Cleaned {deleted} test/temp session(s).")
-                continue
-            sessions = list_sessions()
-            if not sessions:
-                print_info("No saved sessions.")
-            else:
-                sessions.sort(key=lambda s: s.get("startTime", ""), reverse=True)
-                print_session_rows(sessions[:30], current_id=agent.session_id)
-            continue
-        if inp.startswith("/switch"):
-            target = inp[len("/switch"):].strip()
-            if not target:
-                print_error("Usage: /switch <session_id>  (see /sessions)")
-                continue
-            session = load_session(target)
-            if not session:
-                print_error(f"Session not found: {target}")
-                continue
-            agent.session_id = target
-            agent.restore_session({
-                "openaiMessages": session.get("openaiMessages"),
-                "foldedSessionMemories": session.get("foldedSessionMemories"),
-                "checkpointStore": session.get("checkpointStore"),
-                "turnBoundaries": session.get("turnBoundaries"),
-                "contextStore": session.get("contextStore"),
-            })
-            continue
-        if inp == "/resume" or inp.startswith("/resume "):
-            # /resume              显示最近会话列表，让用户选择恢复
-            # /resume <id>         直接恢复指定会话
-            target = inp[len("/resume"):].strip()
-            if not target:
-                sessions = list_sessions()
-                if not sessions:
-                    print_info("No saved sessions to resume.")
-                    continue
-                sessions.sort(key=lambda s: s.get("startTime", ""), reverse=True)
-                print_info("Recent sessions:")
-                for i, s in enumerate(sessions[:10]):
-                    sid = s.get("id", "N/A")[:8]
-                    title = s.get("title", "Untitled")
-                    start = s.get("startTime", "N/A")[:10]
-                    msgs = s.get("messageCount", 0)
-                    print(f"  {i+1}. {sid}... - {title} ({start}, {msgs} msgs)")
-                print_info("Usage: /resume <session_id> or /switch <session_id>")
-                continue
-            session = load_session(target)
-            if not session:
-                print_error(f"Session not found: {target}")
-                continue
-            agent.session_id = target
-            agent.restore_session({
-                "openaiMessages": session.get("openaiMessages"),
-                "foldedSessionMemories": session.get("foldedSessionMemories"),
-                "checkpointStore": session.get("checkpointStore"),
-                "turnBoundaries": session.get("turnBoundaries"),
-                "contextStore": session.get("contextStore"),
-            })
-            print_info(f"Resumed session {target}")
-            continue
-        if inp == "/clear":
-            agent.clear_history()
-            continue
-        if inp == "/plan":
-            agent.toggle_plan_mode()
-            continue
-        if inp == "/cost":
-            agent.show_cost()
-            continue
-        if inp == "/compact":
-            try:
-                await agent.compact()
-            except Exception as e:
-                print_error(str(e))
-            continue
-        if inp == "/rewind" or inp.startswith("/rewind "):
-            # /rewind [N]：回退最近 N 轮对话（默认 1），同时恢复被修改的文件。
-            n = 1
-            if inp.startswith("/rewind "):
-                try:
-                    n = int(inp.split(" ", 1)[1].strip())
-                except ValueError:
-                    print_error("Usage: /rewind [N]  (N = number of turns to rewind)")
-                    continue
-            print_info(agent.rewind(n))
-            continue
-        if inp == "/context":
-            # /context：可视化当前上下文（index/role/内容摘要/字符数）。
-            rows = agent.describe_context()
-            if not rows:
-                print_info("Context is empty.")
-            else:
-                print_context_rows(rows)
-            continue
-        if inp.startswith("/ctx del") or inp.startswith("/ctx keep"):
-            # /ctx del <spec>：删除指定消息组（保持工具配对完整）。
-            # /ctx keep <spec>：只保留指定消息组。
-            # spec 支持批量表达式：1,3,5~10（逗号/空格混合，~ 或 - 表示范围）。
-            from .context_edit import parse_index_spec
-
-            action = "del" if inp.startswith("/ctx del") else "keep"
-            rest = inp.split(None, 2)[2] if len(inp.split(None, 2)) > 2 else ""
-            try:
-                indexes = parse_index_spec(rest)
-            except ValueError:
-                print_error(f"Usage: /ctx {action} <index> [index2 ...]  e.g. /ctx {action} 1,3,5~10")
-                continue
-            if not indexes:
-                print_error(f"Usage: /ctx {action} <index> [index2 ...]  e.g. /ctx {action} 1,3,5~10")
-                continue
-            if action == "del":
-                print_info(agent.delete_context_messages(indexes))
-            else:
-                print_info(agent.keep_context_messages(indexes))
-            continue
-        if inp.startswith("/goal"):
-            # /goal <目标>：提炼成功标准 → 用户确认 → 自主执行+验证循环。
-            from .goal import GoalLoop, extract_goal_criteria
-
-            goal_text = inp[len("/goal"):].strip()
-            if not goal_text:
-                print_error("Usage: /goal <goal description>")
-                continue
-            side_query = agent._build_side_query(max_tokens=2400)
-            if not side_query:
-                print_error("No side-query model configured; cannot extract goal criteria.")
-                continue
-            print_info("Extracting success criteria...")
-            criteria = await extract_goal_criteria(goal_text, side_query)
-            if not criteria:
-                print_error("Could not extract verifiable success criteria. Try a more concrete goal.")
-                continue
-            print_info("Success criteria:\n" + "\n".join(f"  {i}. {c}" for i, c in enumerate(criteria, 1)))
-            try:
-                answer = input("  Start goal mode with these criteria? (y/n): ")
-            except EOFError:
-                answer = "n"
-            if not answer.lower().startswith("y"):
-                print_info("Goal mode cancelled.")
-                continue
-            loop = GoalLoop(agent, goal_text, criteria, side_query=side_query)
-            state = await loop.run()
-            print_info(
-                f"Goal mode finished: {state.status} after {state.iteration} iteration(s)."
-                + ("\nUse /rewind to undo changes if the result is not what you wanted."
-                   if state.status != "achieved" else "")
-            )
-            continue
-        if inp == "/help":
-            cmds = "\n".join(f"  {c}" for c in REPL_COMMANDS)
-            print_info(
-                "REPL commands:\n" + cmds +
-                "\n\nTips:\n"
-                "  @path            引用文件/目录，内容自动注入本轮输入\n"
-                "  Tab              补全 / 命令与 @ 路径\n"
-                "  /help            显示本帮助；完整说明见 --help"
-            )
-            continue
-        if inp == "/thinking":
-            new_state = not thinking_visible()
-            set_thinking_visible(new_state)
-            print_info(f"Thinking display: {'ON' if new_state else 'OFF'}")
-            continue
-        if inp == "/trace" or inp.startswith("/trace "):
-            # /trace          表格查看最近 20 条事件
-            # /trace on|off   开关 trace 记录
-            # /trace <n>      查看最近 n 条事件
-            from .trace import set_trace_enabled, trace_enabled, recent_events, trace_path
-            from .ui import print_trace_rows
-            arg = inp[len("/trace"):].strip()
-            if arg == "on":
-                set_trace_enabled(True)
-                print_info("Trace logging: ON")
-            elif arg == "off":
-                set_trace_enabled(False)
-                print_info("Trace logging: OFF")
-            else:
-                n = 20
-                if arg.isdigit():
-                    n = max(1, int(arg))
-                print_trace_rows(recent_events(n), str(trace_path()), trace_enabled())
-            continue
-        if inp == "/memory" or inp.startswith("/memory "):
-            sub = inp[len("/memory"):].strip()
-            if sub.startswith("prune"):
-                # /memory prune [--dry-run] [--threshold=0.1]
-                from agents.memory import auto_prune_memories
-                args = sub[5:].strip().split()
-                dry_run = "--dry-run" in args
-                threshold = 0.1
-                for arg in args:
-                    if arg.startswith("--threshold="):
-                        try:
-                            threshold = float(arg.split("=")[1])
-                        except ValueError:
-                            pass
-                pruned = auto_prune_memories(threshold=threshold, dry_run=dry_run)
-                if dry_run:
-                    print_info(f"Would prune {len(pruned)} memories:")
-                else:
-                    print_info(f"Pruned {len(pruned)} memories:")
-                for f in pruned[:10]:
-                    print(f"  - {f}")
-                if len(pruned) > 10:
-                    print(f"  ... and {len(pruned) - 10} more")
-                continue
-            memories = list_memories()
-            if not memories:
-                print_info("No memories saved yet.")
-            else:
-                print_memory_entries(memories)
-            continue
-        if inp == "/cd" or inp.startswith("/cd "):
-            # /cd <path>：切换工作目录。Memory/Skills/规则都按 cwd 隔离，
-            # 切换后刷新 system prompt 让模型看到新的工作目录与项目规则。
-            target = inp[len("/cd"):].strip() if inp.startswith("/cd ") else ""
-            if not target:
-                print_info(f"Current directory: {Path.cwd()}")
-                continue
-            new_dir = Path(os.path.expanduser(target))
-            if not new_dir.is_absolute():
-                new_dir = Path.cwd() / new_dir
-            try:
-                new_dir = new_dir.resolve()
-                if not new_dir.is_dir():
-                    print_error(f"Not a directory: {new_dir}")
-                    continue
-                os.chdir(new_dir)
-            except OSError as e:
-                print_error(f"Cannot change directory: {e}")
-                continue
-            agent._refresh_runtime_system_prompt()
-            print_info(f"Changed working directory to: {new_dir}")
-            continue
-        if inp == "/skills":
-            skills = discover_skills()
-            if not skills:
-                print_info("No skills found. Add skills to .bear/skills/<name>/SKILL.md")
-            else:
-                print_skill_entries(skills)
-            continue
-        if inp == "/skill-stats":
-            print_info(skill_stats())
-            continue
-        if inp == "/skill-eval":
-            side_query = agent._build_side_query(max_tokens=2400)
-            print_info(await format_online_skill_eval_async(side_query=side_query))
-            continue
-        if inp.startswith("/extract_now"):
-            hint = inp[len("/extract_now") :].strip()
-            result = await agent.extract_now(hint)
-            if result.get("ok"):
-                print_info("Ran online skill extraction for the current pending window.")
-            else:
-                print_error(str(result.get("error") or result))
-            continue
-        if inp.startswith("/skill-feedback "):
-            _, rest = inp.split(" ", 1)
-            parts = rest.strip().split(" ", 2)
-            if len(parts) < 2:
-                print_error("Usage: /skill-feedback <skill-name> <rating> [note]")
-                continue
-            note = parts[2] if len(parts) > 2 else ""
-            record_feedback(parts[0], parts[1], note)
-            print_info(f"Recorded feedback for skill: {parts[0]}")
-            continue
-        if inp.startswith("/skill-evolve "):
-            _, rest = inp.split(" ", 1)
-            parts = rest.strip().split(" ", 1)
-            if len(parts) < 2:
-                print_error("Usage: /skill-evolve <skill-name> <durable lesson>")
-                continue
-            result = evolve_skill(parts[0], parts[1], rationale="Manual REPL evolution", target="active")
-            if result.get("ok"):
-                print_info(f"Evolved skill {result.get('skill')} to version {result.get('version')}")
-            else:
-                print_error(str(result.get("error") or result))
-            continue
-        if inp.startswith("/skill-create "):
-            _, rest = inp.split(" ", 1)
-            parts = [part.strip() for part in rest.split("|", 3)]
-            if len(parts) < 4 or not all(parts[:4]):
-                print_error("Usage: /skill-create <name> | <description> | <when-to-use> | <instructions>")
-                continue
-            result = create_skill(
-                name=parts[0],
-                description=parts[1],
-                when_to_use=parts[2],
-                instructions=parts[3],
-                target="project",
-                context="inline",
-                user_invocable=False,
-                evidence="Manual REPL skill creation",
-            )
-            if result.get("ok"):
-                print_info(f"Created skill {result.get('skill')} at {result.get('file')}")
-            else:
-                print_error(str(result.get("error") or result))
-            continue
-        if inp == "/graph" or inp.startswith("/graph "):
-            # /graph build|update|status：管理 code-review-graph 代码图谱。
-            # 走 CRG CLI 而非 MCP 工具：MCP 调用无超时保护，构建可能挂死对话循环。
-            from .graph_cmd import run_graph_command
-            from .ui import console as _console
-            _console.print(run_graph_command(inp[len("/graph"):].strip()))
-            continue
-
-        # Skill invocation: /<skill-name> [args]
         if inp.startswith("/"):
+            handled = await _dispatch_command(agent, inp)
+            if handled:
+                continue
+            # Unknown command: error instead of sending to model
             space_idx = inp.find(" ")
             cmd_name = inp[1:space_idx] if space_idx > 0 else inp[1:]
-            cmd_args = inp[space_idx + 1:] if space_idx > 0 else ""
-            skill = get_skill_by_name(cmd_name)
-            if skill and skill.user_invocable:
-                print_info(f"Invoking skill: {skill.name}")
-                try:
-                    if skill.context == "fork":
-                        await agent.chat(f'Use the skill tool to invoke "{skill.name}" with args: {cmd_args or "(none)"}')
-                    else:
-                        result = execute_skill(skill.name, cmd_args)
-                        if not result:
-                            print_error(f"Unknown skill: {skill.name}")
-                            continue
-                        await agent.chat(result["prompt"])
-                except Exception as e:
-                    if "abort" not in str(e).lower():
-                        print_error(str(e))
-                continue
-            # 既不是内置命令也不是可调用 skill：报错而不是发给模型，
-            # 避免 /ls 这类输入被当成对话浪费 token。想问“ls 是什么”请用自然语言。
             print_error(
                 f"Unknown command: /{cmd_name}. Type /help for the command list, "
                 "or write it as a natural-language question to ask the model."
@@ -737,13 +469,68 @@ async def run_repl(agent: Agent) -> None:
         # Normal chat
         # @path 引用展开：把 @文件/@目录 的内容注入本轮输入。
         expanded, ref_notes = _expand_at_references(inp)
+        
+        # 提取 @ 引用的文件路径用于显示 badge
+        at_refs = _AT_REF_RE.findall(inp)
+        file_refs = [r for r in at_refs if (Path.cwd() / os.path.expanduser(r)).is_file()]
+        
+        # 显示文件引用 badge（用户输入已在 ❯ 行显示，无需重复显示消息）
+        if file_refs:
+            from .ui import console
+            from .tui.theme import theme
+            for f in file_refs:
+                console.print(f"[{theme.PRIMARY}]┃[/{theme.PRIMARY}] [{theme.SECONDARY}] File [/{theme.SECONDARY}] {f}")
+        
         for note in ref_notes:
             print_info(note)
+
+        # ESC 键中断监听：在 agent 处理时启动后台线程监听 ESC 键
+        esc_listener_started = False
+        esc_listener_stop = threading.Event()
+
+        def _esc_listener():
+            """后台线程：监听 ESC 键，按下时中断 agent。"""
+            try:
+                import termios
+                import tty
+                fd = sys.stdin.fileno()
+                # 检查是否是 TTY
+                if not sys.stdin.isatty():
+                    return
+                old_settings = termios.tcgetattr(fd)
+                try:
+                    tty.setcbreak(fd)
+                    while not esc_listener_stop.is_set():
+                        if select.select([sys.stdin], [], [], 0.1)[0]:
+                            ch = sys.stdin.read(1)
+                            if ch == '\x1b':  # ESC
+                                if agent.is_processing and not agent._aborted:
+                                    agent.abort()
+                                    print_interrupted()
+                                break
+                finally:
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            except (ImportError, OSError, ValueError, Exception):
+                # 非 TTY 环境或 termios 不可用，静默退出
+                pass
+
         try:
+            # 显示处理中状态
+            print_processing_status()
+            
+            # 启动 ESC 监听线程
+            esc_thread = threading.Thread(target=_esc_listener, daemon=True)
+            esc_thread.start()
+            esc_listener_started = True
+
             await agent.chat(expanded)
         except Exception as e:
             if "abort" not in str(e).lower():
                 print_error(str(e))
+        finally:
+            if esc_listener_started:
+                esc_listener_stop.set()
+                esc_thread.join(timeout=0.5)
     await agent.drain_background_skill_tasks()
 
 
@@ -758,6 +545,12 @@ def main() -> None:
     args = parse_args()
     _load_env_file()
 
+    # 如果指定了 --tui，启动 Textual 交互式界面
+    if getattr(args, 'tui', False):
+        from .tui.textual_app import run_textual_app
+        run_textual_app(args)
+        return
+
     if args.help:
         # 自定义帮助文本，展示 My Code 支持的启动参数和 REPL 内置命令。
         print("""
@@ -771,38 +564,57 @@ Options:
   --thinking          Enable extended thinking (model-dependent)
   --model, -m         Model to use (default: deepseek-chat, or MODEL env)
   --api-base URL      Override API base URL from CLI or .env
-  --resume            Resume the last session
+  --resume, -c        Resume the last session (alias: --continue)
+  --session <id>      Resume specific session by ID
+  --fork              Fork session when resuming
   --max-cost USD      Stop when estimated cost exceeds this amount
   --max-turns N       Stop after N agentic turns
   --trace             Enable JSONL trace logging (~/.bear-code/trace/)
   --help, -h          Show this help
 
 REPL commands:
-  /clear              Clear conversation history
-  /plan               Toggle plan mode (read-only <-> normal)
-  /cost               Show token usage and cost
-  /compact            Manually compact conversation
-  /cd [path]          Change working directory (no arg = show current)
-  /help               Show REPL command list
-  /thinking           Toggle thinking display (default OFF)
-  /rewind [N]         Rewind last N turns (default 1), restoring changed files
-  /goal <goal>        Autonomous goal mode with verifier loop
-  /fork               Fork current session into a new independent branch
-  /sessions           List saved sessions
-  /switch <id>        Switch to a saved session by id
-  /context            Visualize context (index/role/label/tokens)
-  /trace [on|off|n]   View recent trace events / toggle trace logging
-  /ctx del <spec>     Delete message groups, e.g. /ctx del 1,3,5~10
-  /ctx keep <spec>    Keep only the given message groups
-  /memory             List saved memories
-  /skills             List available skills
-  /skill-stats        Show skill usage and evolution stats
-  /skill-eval         Evaluate online skill evolution quality
-  /extract_now        Extract the current pending online skill window: /extract_now [hint]
-  /skill-feedback     Record feedback: /skill-feedback <skill> <rating> [note]
-  /skill-evolve       Evolve a skill: /skill-evolve <skill> <durable lesson>
-  /skill-create       Create a skill: /skill-create <name> | <description> | <when-to-use> | <instructions>
-  /<skill-name>       Invoke a skill (e.g. /commit "fix types")
+  Session:
+    /new, /clear        Start new session (clear history)
+    /sessions           List saved sessions
+    /switch <id>        Switch to a saved session by id
+    /resume [id]        Resume a session (no arg = list recent)
+    /fork               Fork current session into a new branch
+    /rename <name>      Rename current session
+    /export [file]      Export session transcript to file
+    /compact            Manually compact conversation
+    /rewind [N], /undo  Rewind last N turns (default 1), restoring files
+    /quit, /q, exit     Quit the session
+
+  Model & Status:
+    /models [name]      List available models or switch model
+    /status             Show current model, session, tokens, cost
+    /cost               Show token usage and cost
+    /context            Visualize context (index/role/label/tokens)
+    /ctx del <spec>     Delete message groups, e.g. /ctx del 1,3,5~10
+    /ctx keep <spec>    Keep only the given message groups
+
+  Mode & Config:
+    /plan               Toggle plan mode (read-only <-> normal)
+    /permission [mode]  Switch permission mode (default/acceptEdits/bypassPermissions/plan/dontAsk)
+    /yolo on|off        Quick toggle for bypass permissions mode
+    /thinking           Toggle thinking display (default OFF)
+    /cd [path]          Change working directory (no arg = show current)
+    /trace [on|off|n]   View recent trace events / toggle trace logging
+
+  Skills & Memory:
+    /memory             List saved memories
+    /skills             List available skills
+    /skill-stats        Show skill usage and evolution stats
+    /skill-eval         Evaluate online skill evolution quality
+    /extract_now        Extract the current pending window: /extract_now [hint]
+    /skill-feedback     Record feedback: /skill-feedback <skill> <rating> [note]
+    /skill-evolve       Evolve a skill: /skill-evolve <skill> <durable lesson>
+    /skill-create       Create: /skill-create <name> | <desc> | <when> | <instr>
+    /<skill-name>       Invoke a skill (e.g. /commit "fix types")
+
+  Other:
+    /goal <goal>        Autonomous goal mode with verifier loop
+    /help               Show this help message
 
 Tips:
   @path               Reference a file/dir in your prompt, e.g. "summarize @README.md"
@@ -816,10 +628,10 @@ Examples:
   mycode "fix the bug in src/app.ts"
   mycode --yolo "run all tests and fix failures"
   mycode --plan "how would you refactor this?"
+  mycode -c                           # resume last session
+  mycode --session abc123             # resume specific session
+  mycode -c --fork                    # fork from last session
   mycode --max-cost 0.50 --max-turns 20 "implement feature X"
-  MODEL=deepseek-chat APIKEY=sk-xxx API=https://api.deepseek.com/v1 mycode "hello"
-  MODEL=gpt-4o OPENAI_API_KEY=sk-xxx OPENAI_BASE_URL=https://aihubmix.com/v1 mycode "hello"
-  mycode --resume
   mycode  # starts interactive REPL
 """)
         sys.exit(0)
@@ -858,20 +670,37 @@ Examples:
     )
 
     # Resume session
-    # --resume 会加载最近一次会话，把历史消息恢复到新建的 Agent 中。
-    if args.resume:
-        session_id = get_latest_session_id()
-        if session_id:
-            session = load_session(session_id)
-            if session:
+    # --resume/-c 会加载最近一次会话，--session <id> 加载指定会话。
+    # --fork 会从恢复的会话创建一个新分支。
+    session_to_resume = None
+    if args.session:
+        session_to_resume = args.session
+    elif args.resume:
+        session_to_resume = get_latest_session_id()
+
+    if session_to_resume:
+        session = load_session(session_to_resume)
+        if session:
+            if args.fork:
                 agent.restore_session({
                     "openaiMessages": session.get("openaiMessages"),
                     "foldedSessionMemories": session.get("foldedSessionMemories"),
+                    "checkpointStore": session.get("checkpointStore"),
+                    "turnBoundaries": session.get("turnBoundaries"),
+                    "contextStore": session.get("contextStore"),
                 })
+                agent.fork_session()
             else:
-                print_info("No session found to resume.")
+                agent.session_id = session_to_resume
+                agent.restore_session({
+                    "openaiMessages": session.get("openaiMessages"),
+                    "foldedSessionMemories": session.get("foldedSessionMemories"),
+                    "checkpointStore": session.get("checkpointStore"),
+                    "turnBoundaries": session.get("turnBoundaries"),
+                    "contextStore": session.get("contextStore"),
+                })
         else:
-            print_info("No previous sessions found.")
+            print_info(f"Session not found: {session_to_resume}")
 
     # 如果命令行后面带了普通文本参数，就拼成一次性 prompt；否则进入交互式 REPL。
     prompt = " ".join(args.prompt) if args.prompt else None

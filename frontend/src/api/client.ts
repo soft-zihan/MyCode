@@ -28,8 +28,14 @@ export interface Memory {
 export interface Skill {
   name: string;
   description: string;
-  file_path: string;
+  skill_dir: string;
   model?: string;
+  source: string;
+}
+
+export interface SkillDetail extends Skill {
+  prompt_template: string;
+  raw_content: string;
   content?: string;
 }
 
@@ -196,9 +202,15 @@ export async function fetchNativeTools(): Promise<any[]> {
   return res.json();
 }
 
+export interface DirectoryItem {
+  name: string;
+  path: string;
+}
+
 export interface DirectoryList {
   current: string;
-  directories: string[];
+  parent: string | null;
+  directories: DirectoryItem[];
 }
 
 export async function fetchDirectories(path?: string): Promise<DirectoryList> {
@@ -318,6 +330,7 @@ export interface ModelEndpointConfig {
   model: string;
   base_url: string;
   api_key: string;
+  provider_name?: string;
   context_window?: number;
 }
 
@@ -343,4 +356,136 @@ export async function saveConfig(config: AppConfig): Promise<void> {
     body: JSON.stringify(config),
   });
   if (!res.ok) throw new Error('Failed to save config');
+}
+
+// ── Session Control ──────────────────────────────────────────────────────────
+
+export async function abortSession(sessionId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/abort`, { method: 'POST' });
+  if (!res.ok) throw new Error('Failed to abort session');
+}
+
+export async function compactSession(sessionId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/compact`, { method: 'POST' });
+  if (!res.ok) throw new Error('Failed to compact session');
+}
+
+export async function rewindSession(sessionId: string, turns: number): Promise<{ message: string }> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/rewind`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, turns }),
+  });
+  if (!res.ok) throw new Error('Failed to rewind session');
+  return res.json();
+}
+
+export async function togglePlanMode(sessionId: string, enabled: boolean): Promise<{ mode: string }> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan-mode`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, enabled }),
+  });
+  if (!res.ok) throw new Error('Failed to toggle plan mode');
+  return res.json();
+}
+
+export async function getSessionStatus(sessionId: string): Promise<{
+  active: boolean;
+  model?: string;
+  permission_mode?: string;
+  total_input_tokens?: number;
+  total_output_tokens?: number;
+  current_turns?: number;
+  context?: {
+    used_tokens: number;
+    total_tokens: number;
+    occupancy_percent: number;
+  };
+}> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/status`);
+  if (!res.ok) throw new Error('Failed to get session status');
+  return res.json();
+}
+
+export async function updatePermissionMode(sessionId: string, mode: string): Promise<{ success: boolean; permission_mode: string }> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/permission-mode`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode }),
+  });
+  if (!res.ok) throw new Error('Failed to update permission mode');
+  return res.json();
+}
+
+export async function activateSession(sessionId: string): Promise<{ success: boolean; session_id: string; message: string }> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/activate`, {
+    method: 'POST',
+  });
+  if (!res.ok) throw new Error('Failed to activate session');
+  return res.json();
+}
+
+export async function getSessionStats(sessionId: string): Promise<{
+  session_id: string;
+  model: string;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  current_turns: number;
+  tool_execution_stats: Record<string, { count: number; total_ms: number }>;
+}> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/stats`);
+  if (!res.ok) throw new Error('Failed to get session stats');
+  return res.json();
+}
+
+export async function steerSession(sessionId: string, message: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/steer`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, message }),
+  });
+  if (!res.ok) throw new Error('Failed to steer session');
+}
+
+export async function followUpSession(sessionId: string, message: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/follow-up`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, message }),
+  });
+  if (!res.ok) throw new Error('Failed to follow-up session');
+}
+
+export async function forkSession(sessionId: string): Promise<{ new_session_id: string; message: string }> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/fork`, {
+    method: 'POST',
+  });
+  if (!res.ok) throw new Error('Failed to fork session');
+  return res.json();
+}
+
+export interface PermissionRequest {
+  request_id: string;
+  command: string;
+  tool_name: string;
+  sub_agent_id?: string;
+}
+
+export async function respondToPermission(sessionId: string, requestId: string, allowed: boolean): Promise<void> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/permission-response`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ request_id: requestId, allowed }),
+  });
+  if (!res.ok) throw new Error('Failed to respond to permission');
+}
+
+export async function truncateSession(sessionId: string, keepUserMessages: number): Promise<void> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/truncate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ keep_user_messages: keepUserMessages }),
+  });
+  if (!res.ok) throw new Error('Failed to truncate session');
 }

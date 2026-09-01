@@ -357,6 +357,16 @@ def _paragraph_limit(text: str) -> int:
     return 0
 
 
+def _check_json_parseable(stripped: str) -> tuple[bool, dict[str, Any]]:
+    if not _RE_JSON_PREFIX.search(stripped):
+        return False, {"reason": "missing_json_prefix"}
+    try:
+        json.loads(stripped)
+        return True, {}
+    except Exception as exc:
+        return False, {"reason": "json_parse_failed", "error": str(exc)}
+
+
 def _evaluate_rule(rule: dict[str, Any], response_text: str) -> dict[str, Any]:
     params = rule.get("params") if isinstance(rule.get("params"), dict) else {}
     mode = str(params.get("mode") or "").strip()
@@ -369,14 +379,7 @@ def _evaluate_rule(rule: dict[str, Any], response_text: str) -> dict[str, Any]:
         passed = bool(stripped)
         details = {"length": len(stripped)}
     elif mode == "json_parseable":
-        if not _RE_JSON_PREFIX.search(stripped):
-            details = {"reason": "missing_json_prefix"}
-        else:
-            try:
-                json.loads(stripped)
-                passed = True
-            except Exception as exc:
-                details = {"reason": "json_parse_failed", "error": str(exc)}
+        passed, details = _check_json_parseable(stripped)
     elif mode == "mentions_sources":
         passed = bool(_RE_URL.search(text) or _RE_MARKDOWN_LINK.search(text) or _RE_SOURCE_LABEL.search(text))
         details = {"has_url": bool(_RE_URL.search(text))}
@@ -756,6 +759,36 @@ def _rule_by_id(rules: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {str(rule.get("rule_id") or ""): rule for rule in rules if str(rule.get("rule_id") or "")}
 
 
+_RULE_ADDITIONS: dict[str, str] = {
+    "must_cite_sources": "Always cite concrete sources or links for factual claims.",
+    "lead_with_conclusion": "Open with a direct conclusion or answer before elaboration.",
+    "json_parseable": "Output valid JSON only, with no markdown fences or extra commentary.",
+    "markdown_table": "Include a markdown table when presenting structured comparisons or plans.",
+    "no_unfounded_claims": "Do not invent facts; if evidence is missing, state uncertainty explicitly.",
+    "skill_instruction_alignment": "Satisfy the Skill's observable requirements before adding extra clarifications or commentary.",
+}
+
+
+def _additions_for_failure(failure: dict[str, Any], rule: dict[str, Any]) -> list[str]:
+    rid = str(failure.get("rule_id") or "").strip()
+    details = failure.get("details") if isinstance(failure.get("details"), dict) else {}
+    reason = str(details.get("reason") or details.get("error") or "").strip()
+
+    additions: list[str] = []
+    if rid in _RULE_ADDITIONS:
+        additions.append(_RULE_ADDITIONS[rid])
+    elif rid == "paragraph_limit":
+        limit = int((rule.get("params") or {}).get("max_paragraphs", 3) or 3)
+        additions.append(f"Keep the final answer within {limit} short paragraphs.")
+    else:
+        requirement = str((rule.get("params") or {}).get("requirement_text") or "").strip()
+        if requirement:
+            additions.append(f"Requirement to preserve: {requirement[:500]}")
+    if reason:
+        additions.append(f"Address prior evaluation failure: {reason[:500]}")
+    return additions
+
+
 def _build_heuristic_candidate_variants(
     *,
     lineage_id: str,
@@ -778,30 +811,7 @@ def _build_heuristic_candidate_variants(
         if not rid or rid in seen_labels:
             continue
         rule = rule_lookup.get(rid, {})
-        details = failure.get("details") if isinstance(failure.get("details"), dict) else {}
-        reason = str(details.get("reason") or details.get("error") or "").strip()
-        additions: list[str] = []
-        if rid == "must_cite_sources":
-            additions.append("Always cite concrete sources or links for factual claims.")
-        elif rid == "paragraph_limit":
-            limit = int((rule.get("params") or {}).get("max_paragraphs", 3) or 3)
-            additions.append(f"Keep the final answer within {limit} short paragraphs.")
-        elif rid == "lead_with_conclusion":
-            additions.append("Open with a direct conclusion or answer before elaboration.")
-        elif rid == "json_parseable":
-            additions.append("Output valid JSON only, with no markdown fences or extra commentary.")
-        elif rid == "markdown_table":
-            additions.append("Include a markdown table when presenting structured comparisons or plans.")
-        elif rid == "no_unfounded_claims":
-            additions.append("Do not invent facts; if evidence is missing, state uncertainty explicitly.")
-        elif rid == "skill_instruction_alignment":
-            additions.append("Satisfy the Skill's observable requirements before adding extra clarifications or commentary.")
-        else:
-            requirement = str((rule.get("params") or {}).get("requirement_text") or "").strip()
-            if requirement:
-                additions.append(f"Requirement to preserve: {requirement[:500]}")
-        if reason:
-            additions.append(f"Address prior evaluation failure: {reason[:500]}")
+        additions = _additions_for_failure(failure, rule)
         if not additions:
             continue
         label = f"heuristic:{rid}"

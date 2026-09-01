@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from agents.session import atomic_write_json
+
 
 # ============================================================
 # 数据类型
@@ -161,7 +163,7 @@ class FileMemoryStore:
     def _save(self, category: str, data: dict[str, Any]) -> None:
         import json
         path = self._get_file_path(category)
-        path.write_text(json.dumps(data, indent=2, default=str))
+        atomic_write_json(path, data)
     
     def get(self, category: str, key: str) -> str | None:
         data = self._load(category)

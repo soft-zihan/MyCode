@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from agents.session import atomic_write_json, atomic_write_text
+
 
 # ============================================================
 # 数据类型
@@ -228,7 +230,7 @@ class JsonSessionStorage:
     
     def _save(self) -> None:
         self._session_dir.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(self._data, indent=2, default=str))
+        atomic_write_json(self._path, self._data)
     
     def create_entry_id(self) -> str:
         return _create_entry_id()
@@ -339,12 +341,11 @@ class JsonlTreeSessionStorage:
             "leaf_id": self._leaf_id,
             "label": self._label,
         }
-        # 重写整个文件（metadata + entries）
         lines = [json.dumps(meta, default=str)]
         for eid in self._order:
             if eid in self._entries:
                 lines.append(json.dumps(self._entries[eid].to_dict(), default=str))
-        self._path.write_text("\n".join(lines) + "\n")
+        atomic_write_text(self._path, "\n".join(lines) + "\n")
     
     def create_entry_id(self) -> str:
         return _create_entry_id()

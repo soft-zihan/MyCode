@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from agents.session import atomic_write_text
+
 
 def _checkpoint_root() -> Path:
     """检查点根目录。默认 ~/.bear-code/checkpoints/，
@@ -76,7 +78,7 @@ class FileCheckpointStore:
                     except OSError:
                         pass
             snap_name = f"{len(self._snapshots):05d}.txt"
-            (self.dir / snap_name).write_text(content)
+            atomic_write_text(self.dir / snap_name, content)
             self._snapshots.append({"path": key, "snapshot": snap_name, "existed": True})
             self._existed_before.setdefault(key, True)
         else:
