@@ -644,7 +644,7 @@ Examples:
 
     # --trace 开启 JSONL 事件日志（也可用 BEAR_TRACE=1 或 REPL 内 /trace on）。
     if args.trace:
-        from .trace import set_trace_enabled, trace_path
+        from .observability.trace import set_trace_enabled, trace_path
         set_trace_enabled(True)
         print_info(f"Trace logging enabled: {trace_path()}")
 

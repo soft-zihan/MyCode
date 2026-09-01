@@ -11,7 +11,7 @@ import threading
 import time as _time
 from typing import Any
 
-from agents.trace import trace_event
+from agents.observability.trace import trace_event
 
 
 BACKGROUND_JOBS: dict[str, dict[str, Any]] = {}

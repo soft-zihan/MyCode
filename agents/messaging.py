@@ -17,7 +17,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .trace import trace_event
+from .observability.trace import trace_event
 
 
 DEFAULT_MESSAGE_DIR = Path.home() / ".bear-code" / "messages"

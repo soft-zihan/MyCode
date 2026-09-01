@@ -138,7 +138,7 @@ class ExtensionAPI:
 
     def log(self, message: str, level: str = "info") -> None:
         """记录扩展日志。"""
-        from .trace import trace_event
+        from .observability.trace import trace_event
         trace_event("extension.log", extension=self.extension_name, level=level, message=message)
 
     def get_config(self, key: str, default: Any = None) -> Any:

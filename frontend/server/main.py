@@ -23,7 +23,7 @@ sys.path.insert(0, str(project_root))
 from agents.session import list_sessions, load_session, save_session, delete_session
 from agents.memory import list_memories, save_memory, delete_memory, get_memory_dir
 from agents.skills import discover_skills, get_skill_by_name, skill_stats
-from agents.trace import recent_events, trace_enabled, set_trace_enabled, trace_path
+from agents.observability.trace import recent_events, trace_enabled, set_trace_enabled, trace_path
 from agents.config import (
     load_config, save_config, list_endpoints, get_primary_endpoint,
     AppConfig, ModelEndpointConfig

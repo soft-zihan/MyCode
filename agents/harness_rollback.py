@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+from ._utils import safe_skill_slug as _safe_skill_slug
 from .refinement import (
     HarnessEntry,
     HarnessScope,
@@ -28,7 +29,7 @@ from .refinement import (
     save_harness_state,
     _utc_now,
 )
-from .trace import trace_event
+from .observability.trace import trace_event
 
 
 # ── 回滚单个 Entry ────────────────────────────────────────────────────────────
@@ -258,21 +259,6 @@ def rollback_skill(
     result["to_version"] = target.get("version")
     result["restored_path"] = str(skill_path)
     return result
-
-
-def _safe_skill_slug(name: str) -> str:
-    """生成安全的文件名 slug。"""
-    import re
-    import hashlib
-    raw = str(name or "").strip()
-    slug = re.sub(r"[^A-Za-z0-9_.\-\u4e00-\u9fff]+", "-", raw)
-    slug = re.sub(r"-{2,}", "-", slug).strip("-.")
-    if slug:
-        return slug[:120].rstrip("-.") or slug[:120]
-    if raw:
-        digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
-        return f"skill-{digest}"
-    return "unknown"
 
 
 def _resolve_skill_path(skill_name: str) -> Optional[Path]:

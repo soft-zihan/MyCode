@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Awaitable
 
-from .trace import trace_event
+from .observability.trace import trace_event
 
 
 DEFAULT_SCHEDULE_FILE = Path.home() / ".bear-code" / "schedules.json"

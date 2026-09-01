@@ -652,7 +652,7 @@ class Agent:
         # 如果是流式模式，初始化事件队列
         if self._stream_event_queue is not None:
             pass  # 队列已在 chat_stream 中初始化
-        from .trace import trace_event
+        from .observability.trace import trace_event
         trace_event(
             "turn.start",
             turn=self._turn_number,
@@ -777,7 +777,7 @@ class Agent:
             if self._current_sub_agent_id:
                 event["sub_agent_id"] = self._current_sub_agent_id
             asyncio.create_task(self._stream_event_queue.put(event))
-            from .trace import trace_event
+            from .observability.trace import trace_event
             trace_event("stream.text", sub_agent_id=self._current_sub_agent_id, preview=text[:50])
 
     def _build_fold_guidance_section(self) -> str:
@@ -1377,7 +1377,7 @@ class Agent:
     async def _compact_conversation(self, *, trigger: str = "manual")->bool:
         compacted = await self._compact_openai(trigger=trigger)
         if compacted:
-            from .trace import trace_event
+            from .observability.trace import trace_event
             trace_event(
                 "compact",
                 trigger=trigger,
@@ -1534,7 +1534,7 @@ class Agent:
     #执行工具入口
 
     async def _execute_tool_call(self, name: str, inp: dict) -> str:
-        from .trace import trace_event, trace_tool_input
+        from .observability.trace import trace_event, trace_tool_input
         _tool_t0 = time.time()
         trace_event("tool.start", tool=name, input=trace_tool_input(inp))
         try:
@@ -1752,7 +1752,7 @@ class Agent:
                 "description": description,
                 "agent_id": sub_agent_id
             })
-            from .trace import trace_event
+            from .observability.trace import trace_event
             trace_event("stream.sub_agent_start", agent_id=sub_agent_id, agent_type=agent_type, description=description)
 
         config = get_sub_agent_config(agent_type)
@@ -1782,7 +1782,7 @@ class Agent:
                     "description": description,
                     "agent_id": sub_agent_id
                 }))
-                from .trace import trace_event
+                from .observability.trace import trace_event
                 trace_event("stream.sub_agent_end", agent_id=sub_agent_id, agent_type=agent_type, status="completed")
             if sub_agent._aborted:
                 return "(Sub-agent aborted)"
@@ -1797,7 +1797,7 @@ class Agent:
                     "description": description,
                     "agent_id": sub_agent_id
                 }))
-                from .trace import trace_event
+                from .observability.trace import trace_event
                 trace_event("stream.sub_agent_end", agent_id=sub_agent_id, agent_type=agent_type, status="error", error=str(e))
             return f"Sub-agent error: {e}"
 
@@ -1899,7 +1899,7 @@ class Agent:
                     if self._current_sub_agent_id:
                         event["sub_agent_id"] = self._current_sub_agent_id
                     asyncio.create_task(self._stream_event_queue.put(event))
-                    from .trace import trace_event
+                    from .observability.trace import trace_event
                     trace_event("stream.tool_call", call_id=tc["id"], name=fn_name, sub_agent_id=self._current_sub_agent_id)
 
                 perm = check_permission(fn_name, inp, self.permission_mode, self._plan_file_path)
@@ -1916,7 +1916,7 @@ class Agent:
                         if self._current_sub_agent_id:
                             event["sub_agent_id"] = self._current_sub_agent_id
                         asyncio.create_task(self._stream_event_queue.put(event))
-                        from .trace import trace_event
+                        from .observability.trace import trace_event
                         trace_event("stream.tool_result", call_id=tc["id"], name=fn_name, sub_agent_id=self._current_sub_agent_id)
                     continue
                 if perm["action"] == "confirm" and perm.get("message") and perm["message"] not in self._confirmed_paths:
@@ -1935,7 +1935,7 @@ class Agent:
                             if self._current_sub_agent_id:
                                 event["sub_agent_id"] = self._current_sub_agent_id
                             asyncio.create_task(self._stream_event_queue.put(event))
-                            from .trace import trace_event
+                            from .observability.trace import trace_event
                             trace_event("stream.tool_result", call_id=tc["id"], name=fn_name, sub_agent_id=self._current_sub_agent_id)
                         continue
                     self._confirmed_paths.add(perm["message"])
@@ -1968,7 +1968,7 @@ class Agent:
                             if self._current_sub_agent_id:
                                 event["sub_agent_id"] = self._current_sub_agent_id
                             await self._stream_event_queue.put(event)
-                            from .trace import trace_event
+                            from .observability.trace import trace_event
                             trace_event("stream.tool_result", call_id=ct_item["tc"]["id"], name=ct_item["fn"], sub_agent_id=self._current_sub_agent_id)
                         return ct_item, res
 
@@ -2001,7 +2001,7 @@ class Agent:
                             if self._current_sub_agent_id:
                                 event["sub_agent_id"] = self._current_sub_agent_id
                             await self._stream_event_queue.put(event)
-                            from .trace import trace_event
+                            from .observability.trace import trace_event
                             trace_event("stream.tool_result", call_id=ct["tc"]["id"], name=ct["fn"], sub_agent_id=self._current_sub_agent_id)
                         self._record_tool_outcome(
                             ct["fn"],
@@ -2028,7 +2028,7 @@ class Agent:
             await self._check_and_compact()
 
     async def _call_openai_stream(self) -> dict:
-        from .trace import trace_event
+        from .observability.trace import trace_event
         _model_t0 = time.time()
         trace_event("model.start", model=self.model, provider="openai")
 
@@ -2076,7 +2076,7 @@ class Agent:
                         if self._current_sub_agent_id:
                             event["sub_agent_id"] = self._current_sub_agent_id
                         asyncio.create_task(self._stream_event_queue.put(event))
-                        from .trace import trace_event
+                        from .observability.trace import trace_event
                         trace_event("stream.thinking", sub_agent_id=self._current_sub_agent_id, preview=reasoning[:50])
                     # 终端显示仅在 thinking_visible() 时
                     if thinking_visible():

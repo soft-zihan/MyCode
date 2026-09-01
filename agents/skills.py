@@ -120,7 +120,7 @@ def _load_executable_skills(skills: list[SkillDefinition]) -> None:
     from .executable_skills import load_executable_skills
     result = load_executable_skills(executable_dirs)
 
-    from .trace import trace_event
+    from .observability.trace import trace_event
     trace_event(
         "executable_skills.loaded",
         total=result.get("total", 0),

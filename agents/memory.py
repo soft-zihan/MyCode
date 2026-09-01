@@ -694,7 +694,7 @@ def maybe_promote_or_archive_memory(
             days_since = (datetime.now(timezone.utc) - last_dt).days
             if days_since > archive_days:
                 _set_memory_status(filename, "archived")
-                from .trace import trace_event
+                from .observability.trace import trace_event
                 trace_event(
                     "memory.archive",
                     filename=filename,
@@ -709,7 +709,7 @@ def maybe_promote_or_archive_memory(
         success_rate = success_associated / recall_count if recall_count > 0 else 0
         if success_rate >= promote_success_rate:
             _set_memory_priority(filename, "high")
-            from .trace import trace_event
+            from .observability.trace import trace_event
             trace_event(
                 "memory.promote",
                 filename=filename,
@@ -762,7 +762,7 @@ def maintenance_all_memories() -> dict[str, Any]:
         if result.get("action") != "none":
             results.append({"filename": f.name, **result})
 
-    from .trace import trace_event
+    from .observability.trace import trace_event
     trace_event(
         "memory.maintenance",
         total_checked=len(list(d.glob("*.md"))) - 1,
