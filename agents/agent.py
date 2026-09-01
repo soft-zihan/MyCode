@@ -594,6 +594,36 @@ class Agent:
     def get_token_usage(self) -> dict:
         return {"input":self.total_input_tokens, "output":self.total_output_tokens}
 
+    # ── 公开方法（供 AgentService / 外部调用）──
+
+    def get_messages(self) -> list[dict]:
+        return self._openai_messages
+
+    def set_messages(self, messages: list[dict]) -> None:
+        self._openai_messages = list(messages)
+
+    def truncate_messages_to(self, index: int) -> None:
+        self._openai_messages = self._openai_messages[:index]
+
+    def set_permission_mode(self, mode: str) -> None:
+        self.permission_mode = mode
+
+    def steer(self, message: str) -> None:
+        if not hasattr(self, '_steer_queue') or self._steer_queue is None:
+            self._steer_queue = []
+        self._steer_queue.append(message)
+
+    async def save(self) -> None:
+        await self._auto_save()
+
+    @property
+    def last_response(self) -> str:
+        return self._last_assistant_text
+
+    @property
+    def aborted(self) -> bool:
+        return self._aborted
+
     #主入口
 
     async def  chat(self, user_message:str)->None:

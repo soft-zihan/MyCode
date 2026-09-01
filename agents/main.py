@@ -97,7 +97,7 @@ def _should_abort_on_sigint(agent) -> bool:
     `_output_buffer is not None` —— 后者只在 run_once()（子 Agent）里被设置，
     在 REPL 顶层 chat 中恒为 None，会导致 Ctrl+C 永远无法打断。
     """
-    return not agent._aborted and agent.is_processing
+    return not agent.aborted and agent.is_processing
 
 
 def _load_env_file() -> None:
@@ -504,7 +504,7 @@ async def run_repl(agent: Agent) -> None:
                         if select.select([sys.stdin], [], [], 0.1)[0]:
                             ch = sys.stdin.read(1)
                             if ch == '\x1b':  # ESC
-                                if agent.is_processing and not agent._aborted:
+                                if agent.is_processing and not agent.aborted:
                                     agent.abort()
                                     print_interrupted()
                                 break

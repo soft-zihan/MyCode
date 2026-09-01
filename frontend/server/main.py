@@ -259,20 +259,18 @@ async def api_truncate_session(session_id: str, data: TruncateRequest) -> dict[s
     # Also truncate active agent's messages if running
     session_info = _active_sessions.get(session_id)
     if session_info and session_info.get("agent"):
-        agent = session_info["agent"]
-        if hasattr(agent, '_openai_messages'):
-            # Count user messages in agent's current messages
-            user_count = 0
-            truncate_at = len(agent._openai_messages)
-            
-            for i, msg in enumerate(agent._openai_messages):
-                if msg.get("role") == "user":
-                    if user_count >= data.keep_user_messages:
-                        truncate_at = i
-                        break
-                    user_count += 1
-            
-            agent._openai_messages = agent._openai_messages[:truncate_at]
+        from agents.service import AgentService
+        svc = AgentService(session_info["agent"])
+        messages = svc.get_messages()
+        user_count = 0
+        truncate_at = len(messages)
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "user":
+                if user_count >= data.keep_user_messages:
+                    truncate_at = i
+                    break
+                user_count += 1
+        svc.truncate_messages_to(truncate_at)
     
     return {"success": True, "message": f"Truncated to {data.keep_user_messages} user messages"}
 
@@ -331,8 +329,9 @@ async def api_update_permission_mode(session_id: str, data: PermissionModeReques
     """Update permission mode for a session."""
     session_info = _active_sessions.get(session_id)
     if session_info and session_info.get("agent"):
-        agent = session_info["agent"]
-        agent.permission_mode = data.mode
+        from agents.service import AgentService
+        svc = AgentService(session_info["agent"])
+        svc.set_permission_mode(data.mode)
         return {"success": True, "permission_mode": data.mode}
     
     # If session not active, update stored session data
@@ -350,11 +349,10 @@ async def api_steer_session(session_id: str, data: SteerRequest) -> dict[str, An
     """Inject a steering message into a running session."""
     session_info = _active_sessions.get(session_id)
     if session_info and session_info.get("agent"):
-        agent = session_info["agent"]
-        # Add steering message to the agent's message queue
-        if hasattr(agent, '_steer_queue'):
-            agent._steer_queue.append(data.message)
-            return {"success": True, "message": "Steer message queued"}
+        from agents.service import AgentService
+        svc = AgentService(session_info["agent"])
+        svc.steer(data.message)
+        return {"success": True, "message": "Steer message queued"}
     
     return {"success": False, "message": "Session not active or steer not supported"}
 
@@ -1242,8 +1240,9 @@ async def api_chat(data: ChatMessage) -> dict[str, Any]:
         # Process the message
         await agent.chat(full_message)
         
-        # Get the response from agent's internal buffer
-        response = getattr(agent, '_last_assistant_text', '') or ''
+        # Get the response
+        from agents.service import AgentService
+        response = AgentService(agent).last_response or ''
         
         return {
             "response": response,
@@ -1300,10 +1299,11 @@ async def api_chat_stream(data: ChatMessage):
         # Restore session if session_id is provided
         if data.session_id:
             from agents.session import load_session
+            from agents.service import AgentService
             session_data = load_session(data.session_id)
             if session_data:
-                agent._openai_messages = session_data.get('openaiMessages', [])
-                agent._anthropic_messages = session_data.get('anthropicMessages', [])
+                svc = AgentService(agent)
+                svc.restore(session_data)
                 agent.session_id = data.session_id
         
         # Build context from files and directories
@@ -1337,9 +1337,6 @@ async def api_chat_stream(data: ChatMessage):
         full_message = data.message
         if context:
             full_message = f"{data.message}\n\nContext files:{context}"
-        
-        # Initialize steer queue for steering support
-        agent._steer_queue = []
         
         async def generate():
             # 使用新的事件流机制
@@ -1422,7 +1419,8 @@ async def api_chat_stream(data: ChatMessage):
                         yield f"data: {json.dumps(perm_request)}\n\n"
             finally:
                 # 确保session被保存
-                agent._auto_save()
+                from agents.service import AgentService
+                await AgentService(agent).save()
                 # Unregister from active sessions
                 _active_sessions.pop(session_id, None)
             
