@@ -286,6 +286,17 @@ class Agent:
         # ACE 可逆上下文：snip/clear 前原文无损存入，可用 context_restore 取回。
         self._context_store = ContextStore()
 
+        # 提取的子模块
+        from .context_compressor import ContextCompressor
+        from .permission_gate import PermissionGate
+        from .session_lifecycle import SessionLifecycle
+        self._compressor = ContextCompressor(
+            self._context_store,
+            auto_compact_threshold=self.auto_compact_threshold,
+            effective_window=self.effective_window,
+        )
+        self._permission_gate = PermissionGate()
+        self._session_lifecycle = SessionLifecycle(self._checkpoint_store, self._context_store)
 
         self._aborted = False
         # 共享中止事件：父 Agent 触发 abort 时置位，子 Agent 在循环检查点读取，
@@ -641,11 +652,11 @@ class Agent:
         self._turn_number += 1
         # /rewind 支持：在用户消息追加【之前】记录轮次边界，
         # 这样边界 message_count 指向上一轮完整结束的位置（tool_use/tool_result 配对完整）。
-        self._turn_boundaries.append(TurnBoundary(
+        self._session_lifecycle.record_boundary(
             turn=self._turn_number,
             message_count=self._get_message_count(),
             checkpoint_count=self._checkpoint_store.checkpoint_count,
-        ))
+        )
         self._turn_output_buffer = []
         self._turn_thinking_buffer = []
         self._turn_event_buffer = []
@@ -857,8 +868,9 @@ class Agent:
         return None
 
     def _record_fold_event(self) -> None:
-        self._fold_last_time = time.time()
-        self._fold_count += 1
+        self._compressor._record_fold_event()
+        self._fold_last_time = self._compressor._fold_last_time
+        self._fold_count = self._compressor._fold_count
         self._tool_error_streak = 0
         self._same_tool_repeat_count = 0
         self._last_tool_name = ""
@@ -1160,177 +1172,94 @@ class Agent:
 
     #恢复会话信息
     def restore_session(self, data:dict)->None:
-        if data.get("openaiMessages"):
-            self._openai_messages = _sanitize_for_utf8(data["openaiMessages"])
-        if isinstance(data.get("foldedSessionMemories"), list):
-            self._folded_session_memories = _sanitize_for_utf8(data["foldedSessionMemories"])
-        # 恢复 checkpoint 元数据（快照文件仍在磁盘上）。
-        if isinstance(data.get("checkpointStore"), dict):
-            self._checkpoint_store.restore_state(data["checkpointStore"])
-        if isinstance(data.get("turnBoundaries"), list):
-            self._turn_boundaries = [
-                TurnBoundary(**b) for b in data["turnBoundaries"]
-                if isinstance(b, dict) and {"turn", "message_count", "checkpoint_count"} <= set(b)
-            ]
-        # ACE 可逆上下文存储恢复。
-        if isinstance(data.get("contextStore"), dict):
-            self._context_store.restore_state(data["contextStore"])
+        from .session_lifecycle import SessionState
+        state = SessionState(
+            session_id=self.session_id,
+            model=self.model,
+            messages=self._openai_messages,
+            folded_memories=self._folded_session_memories,
+            turn_boundaries=self._session_lifecycle.turn_boundaries,
+            checkpoint_store=self._checkpoint_store,
+            context_store=self._context_store,
+        )
+        self._session_lifecycle.restore(state, data)
+        self._openai_messages = state.messages
+        self._folded_session_memories = state.folded_memories
         print_info(f"Session restored ({self._get_message_count()} messages).")
 
     #/rewind：回退对话 N 轮，同时把被修改的文件恢复到对应轮次开始时的状态。
     def rewind(self, n: int = 1) -> str:
-        if not self._turn_boundaries:
-            return "Nothing to rewind (no completed turns yet)."
-        n = max(1, n)
-        idx = len(self._turn_boundaries) - n
-        if idx < 0:
-            return f"Cannot rewind {n} turns; only {len(self._turn_boundaries)} turns recorded."
-
-        boundary = self._turn_boundaries[idx]
-
-        # 1. 截断消息历史到边界记录的消息数（边界在用户消息追加前记录，配对完整）。
-        self._openai_messages = self._openai_messages[:boundary.message_count]
-
-        # 2. 回滚边界之后被修改/新建的文件。
-        file_results = self._checkpoint_store.restore_after(boundary.checkpoint_count)
-
-        # 3. 清理 read_file_state，避免对已恢复文件报"外部修改"。
-        for path_key in file_results:
-            self._read_file_state.pop(path_key, None)
-
-        # 4. 丢弃边界之后的轮次边界记录。
-        self._turn_boundaries = self._turn_boundaries[:idx]
-
-        restored = sum(1 for v in file_results.values() if v == "restored")
-        deleted = sum(1 for v in file_results.values() if v == "deleted")
-        parts = [f"Rewound {n} turn(s). Messages now: {self._get_message_count()}."]
-        if restored:
-            parts.append(f"Restored {restored} file(s).")
-        if deleted:
-            parts.append(f"Deleted {deleted} newly-created file(s).")
-        return " ".join(parts)
+        from .session_lifecycle import SessionState
+        state = SessionState(
+            session_id=self.session_id,
+            model=self.model,
+            messages=self._openai_messages,
+            folded_memories=self._folded_session_memories,
+            turn_boundaries=self._session_lifecycle.turn_boundaries,
+            checkpoint_store=self._checkpoint_store,
+            context_store=self._context_store,
+        )
+        result = self._session_lifecycle.rewind(state, self._read_file_state, n)
+        self._openai_messages = state.messages
+        return result
 
     #/fork：从当前会话创建一个完全相同的分支（新 session_id），并切换过去。
     def fork_session(self) -> str:
-        """深拷贝当前会话状态到新 session，形成独立分支。
-
-        复制内容：消息历史、折叠记忆、文件快照、轮次边界、ACE 存储。
-        fork 后两个会话完全独立，各自的 /rewind 互不影响。
-        原会话已自动保存（_auto_save），可通过 /switch 切回。
-        """
-        save_session(self.session_id, {
-            "metadata": {
-                "id": self.session_id,
-                "model": self.model,
-                "cwd": str(Path.cwd()),
-                "startTime": self.session_start_time,
-                "messageCount": self._get_message_count(),
-            },
-            "openaiMessages": _sanitize_for_utf8(self._openai_messages),
-            "foldedSessionMemories": _sanitize_for_utf8(self._folded_session_memories),
-            "checkpointStore": self._checkpoint_store.to_dict(),
-            "turnBoundaries": [
-                {"turn": b.turn, "message_count": b.message_count, "checkpoint_count": b.checkpoint_count}
-                for b in self._turn_boundaries
-            ],
-            "contextStore": self._context_store.to_dict(),
-        })
-        old_id = self.session_id
-        new_id = uuid.uuid4().hex[:8]
-        self.session_id = new_id
-        self.session_start_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        from agents.observability.trace import set_trace_session
-        set_trace_session(new_id)
-        # 深拷贝消息历史（避免两个会话共享同一 list 对象）
-        self._openai_messages = json.loads(json.dumps(self._openai_messages, default=str))
-        self._folded_session_memories = json.loads(json.dumps(self._folded_session_memories, default=str))
-        self._turn_boundaries = [TurnBoundary(b.turn, b.message_count, b.checkpoint_count) for b in self._turn_boundaries]
-        # fork 文件快照存储（复制快照文件 + 元数据）
-        self._checkpoint_store = self._checkpoint_store.fork(new_id)
-        # fork ACE 存储
-        new_store = ContextStore()
-        new_store.restore_state(json.loads(json.dumps(self._context_store.to_dict(), default=str)))
-        self._context_store = new_store
-        save_session(self.session_id, {
-            "metadata": {
-                "id": self.session_id,
-                "model": self.model,
-                "cwd": str(Path.cwd()),
-                "startTime": self.session_start_time,
-                "messageCount": self._get_message_count(),
-            },
-            "openaiMessages": _sanitize_for_utf8(self._openai_messages),
-            "foldedSessionMemories": _sanitize_for_utf8(self._folded_session_memories),
-            "checkpointStore": self._checkpoint_store.to_dict(),
-            "turnBoundaries": [
-                {"turn": b.turn, "message_count": b.message_count, "checkpoint_count": b.checkpoint_count}
-                for b in self._turn_boundaries
-            ],
-            "contextStore": self._context_store.to_dict(),
-        })
-        return f"Forked session {old_id} -> {new_id}. You are now on the new branch."
+        from .session_lifecycle import SessionState
+        state = SessionState(
+            session_id=self.session_id,
+            model=self.model,
+            messages=self._openai_messages,
+            folded_memories=self._folded_session_memories,
+            turn_boundaries=self._session_lifecycle.turn_boundaries,
+            checkpoint_store=self._checkpoint_store,
+            context_store=self._context_store,
+            start_time=self.session_start_time,
+        )
+        result = self._session_lifecycle.fork(state)
+        self.session_id = state.session_id
+        self.session_start_time = state.start_time
+        self._openai_messages = state.messages
+        self._folded_session_memories = state.folded_memories
+        self._checkpoint_store = self._session_lifecycle.checkpoint_store
+        self._context_store = self._session_lifecycle.context_store
+        return result
 
     #/context：返回上下文描述行（index/role/label/chars），供 REPL 渲染表格。
     def describe_context(self) -> list[dict]:
-        from .context_edit import describe_messages
-
-        return describe_messages(self._openai_messages, True)
+        return self._session_lifecycle.describe(self._openai_messages)
 
     #/ctx del N [N2 ...]：删除指定 index 所属的消息组（保持工具配对完整）。
     def delete_context_messages(self, indexes: list[int]) -> str:
-        from .context_edit import delete_message_group
-
-        messages = self._openai_messages
-        # ACE：删除前记录被引用的 restore key，删除后不再被引用的才持久 drop。
-        referenced_before = self._referenced_store_keys(messages)
-        total_deleted = 0
-        for idx in sorted(set(indexes)):
-            messages, deleted = delete_message_group(messages, idx, True)
-            total_deleted += deleted
-        self._openai_messages = messages
-        self._drop_orphaned_store_entries(referenced_before, messages)
-        return f"Deleted {total_deleted} message(s). Context now: {self._get_message_count()} messages."
-
-    @staticmethod
-    def _referenced_store_keys(messages: list[dict]) -> set[str]:
-        """收集消息中占位符携带的 restore key。"""
-        import re as _re
-
-        referenced: set[str] = set()
-        for msg in messages:
-            content = msg.get("content")
-            texts: list[str] = []
-            if isinstance(content, str):
-                texts.append(content)
-            elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and isinstance(block.get("content"), str):
-                        texts.append(block["content"])
-            for text in texts:
-                referenced.update(_re.findall(r"key '([^']+)'", text))
-        return referenced
-
-    def _drop_orphaned_store_entries(self, referenced_before: set[str], kept_messages: list[dict]) -> None:
-        """持久 drop：只 drop 删除前被引用、删除后不再被引用的条目。
-
-        未被任何消息引用的条目（如 /compact 后原文消息已折叠）保持可恢复，
-        避免误伤。
-        """
-        referenced_after = self._referenced_store_keys(kept_messages)
-        for key in referenced_before - referenced_after:
-            self._context_store.mark_dropped(key)
+        from .session_lifecycle import SessionState
+        state = SessionState(
+            session_id=self.session_id,
+            model=self.model,
+            messages=self._openai_messages,
+            folded_memories=self._folded_session_memories,
+            turn_boundaries=self._session_lifecycle.turn_boundaries,
+            checkpoint_store=self._checkpoint_store,
+            context_store=self._context_store,
+        )
+        result = self._session_lifecycle.delete_messages(state, indexes)
+        self._openai_messages = state.messages
+        return result
 
     #/ctx keep N [N2 ...]：只保留指定组（+ system prompt），其余删除。
     def keep_context_messages(self, indexes: list[int]) -> str:
-        from .context_edit import keep_only_groups
-
-        messages = self._openai_messages
-        referenced_before = self._referenced_store_keys(messages)
-        kept, deleted = keep_only_groups(messages, indexes, True)
-        self._openai_messages = kept
-        # ACE：不再被引用的 store 条目持久 drop。
-        self._drop_orphaned_store_entries(referenced_before, kept)
-        return f"Kept {len(kept)} message(s), removed {deleted}. Context now: {self._get_message_count()} messages."
+        from .session_lifecycle import SessionState
+        state = SessionState(
+            session_id=self.session_id,
+            model=self.model,
+            messages=self._openai_messages,
+            folded_memories=self._folded_session_memories,
+            turn_boundaries=self._session_lifecycle.turn_boundaries,
+            checkpoint_store=self._checkpoint_store,
+            context_store=self._context_store,
+        )
+        result = self._session_lifecycle.keep_messages(state, indexes)
+        self._openai_messages = state.messages
+        return result
 
     def _get_message_count(self) -> int:
         return len(self._openai_messages)
@@ -1348,34 +1277,43 @@ class Agent:
 
     async def _auto_save(self) -> None:
         try:
-            await asyncio.to_thread(save_session, self.session_id, {
-                "metadata": {
-                    "id": self.session_id,
-                    "model": self.model,
-                    "cwd": str(Path.cwd()),
-                    "startTime": self.session_start_time,
-                    "messageCount": self._get_message_count(),
-                },
-                "openaiMessages": _sanitize_for_utf8(self._openai_messages),
-                "foldedSessionMemories": _sanitize_for_utf8(self._folded_session_memories),
-                "checkpointStore": self._checkpoint_store.to_dict(),
-                "turnBoundaries": [
-                    {"turn": b.turn, "message_count": b.message_count, "checkpoint_count": b.checkpoint_count}
-                    for b in self._turn_boundaries
-                ],
-                "contextStore": self._context_store.to_dict(),
-            })
+            from .session_lifecycle import SessionState
+            state = SessionState(
+                session_id=self.session_id,
+                model=self.model,
+                messages=self._openai_messages,
+                folded_memories=self._folded_session_memories,
+                turn_boundaries=self._session_lifecycle.turn_boundaries,
+                checkpoint_store=self._checkpoint_store,
+                context_store=self._context_store,
+                start_time=self.session_start_time,
+            )
+            await asyncio.to_thread(self._session_lifecycle._save_state, state)
         except Exception:
             pass
 
     #自动压缩
     async def _check_and_compact(self)->None:
-        if self.last_input_token_count > self.effective_window * self.auto_compact_threshold:
-            print_info("Context window filling up, compacting conversation...")
-            await self._compact_conversation(trigger="auto")
+        await self._compressor.check_and_compact(
+            self._openai_messages,
+            self.last_input_token_count,
+            self._build_side_query(max_tokens=6000),
+            self.session_id,
+            self._folded_session_memories,
+            self._refresh_runtime_system_prompt,
+            self._get_message_count,
+        )
 
     async def _compact_conversation(self, *, trigger: str = "manual")->bool:
-        compacted = await self._compact_openai(trigger=trigger)
+        compacted = await self._compressor.compact(
+            self._openai_messages,
+            trigger,
+            self._build_side_query(max_tokens=6000),
+            self.session_id,
+            self._folded_session_memories,
+            self._refresh_runtime_system_prompt,
+            self._get_message_count,
+        )
         if compacted:
             from .observability.trace import trace_event
             trace_event(
@@ -1385,112 +1323,34 @@ class Agent:
                 ctx_tokens=self.last_input_token_count,
             )
             print_info("Conversation compacted.")
+            self.last_input_token_count = 0
         return compacted
 
     async def _compact_openai(self, *, trigger: str)->bool:
-        if len (self._openai_messages)<4:
-            return False
-        system_msg = self._openai_messages[0]
-        transcript = build_openai_transcript(_sanitize_for_utf8(self._openai_messages))
-        if not transcript.strip():
-            return False
-        memory = await self._generate_folded_session_memory(transcript)
-        await self._record_folded_session_memory(trigger, memory)
-        self._record_fold_event()
-        self._openai_messages=[
-            system_msg,
-            {"role": "user", "content": format_folded_memory(memory)},
-        ]
-        self.last_input_token_count=0
-        self._refresh_runtime_system_prompt()
-        return True
+        return await self._compact_conversation(trigger=trigger)
 
     async def _generate_folded_session_memory(self, transcript: str) -> dict[str, Any]:
         side_query = self._build_side_query(max_tokens=6000)
-        if side_query is None:
-            return fallback_folded_memory(transcript)
-        try:
-            raw = await side_query(FOLD_SESSION_MEMORY_SYSTEM, build_folding_user_prompt(transcript))
-            return parse_folded_memory(raw)
-        except Exception:
-            return fallback_folded_memory(transcript)
+        return await self._compressor._generate_folded_memory(transcript, side_query)
 
     async def _record_folded_session_memory(self, trigger: str, memory: dict[str, Any]) -> None:
-        record = {
-            "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "trigger": trigger,
-            "session_id": self.session_id,
-            **memory,
-        }
-        self._folded_session_memories.append(record)
-        try:
-            await asyncio.to_thread(save_folded_session_memory, self.session_id, _sanitize_for_utf8(record))
-        except Exception:
-            pass
+        await self._compressor._record_folded_memory(trigger, memory, self.session_id, self._folded_session_memories)
 
     #多层级压缩流水线
     def _run_compression_pipeline(self)->None:
-        self._budget_tool_results_openai()
-        self._snip_stale_results_openai()
-        self._microcompact_openai()
+        self._compressor.run_pipeline(self._openai_messages, self.last_input_token_count, self.last_api_call_time)
 
     #第一层级压缩，预算压缩
     def _budget_tool_results_openai(self)->None:
-        #计算利用率：utilization = 已用Token / 有效窗口大小。
-        utilization = self.last_input_token_count / self.effective_window if self.effective_window else 0
-        #如果利用率低于 50%，说明空间还很充裕，直接返回，不做任何处理。
-        if utilization < 0.5:
-            return
-        #动态预算（Budget）：危急状态（>70%）：如果利用率很高，允许单个工具结果保留 15,000 个字符。
-        # 警戒状态（50%-70%）：如果利用率中等，只允许保留 30000 个字符。
-        budget = 15000 if utilization > 0.7 else 30000
-
-        for msg in self._openai_messages:
-            if msg.get("role") == "tool" and isinstance(msg.get("content"), str) and len(msg["content"]) > budget:
-                keep = (budget - 80) // 2
-                msg["content"] = msg["content"][:keep] + f"\n\n[... budgeted: {len(msg['content']) - keep * 2} chars truncated ...]\n\n" + msg["content"][-keep:]
-
+        self._compressor._budget(self._openai_messages, self.last_input_token_count)
 
     #第二级策略：修剪过期的工具执行结果
     def _snip_stale_results_openai(self) -> None:
-        utilization = self.last_input_token_count / self.effective_window if self.effective_window else 0
-        if utilization < SNIP_THRESHOLD:
-            return
-        tool_msgs = []
-        for i, msg in enumerate(self._openai_messages):
-            if msg.get("role") == "tool" and isinstance(msg.get("content"), str) and not is_compressed_placeholder(msg["content"]):
-                tool_msgs.append(i)
-        if len(tool_msgs) <= KEEP_RECENT_RESULTS:
-            return
-        snip_count = len(tool_msgs) - KEEP_RECENT_RESULTS
-        for i in range(snip_count):
-            msg = self._openai_messages[tool_msgs[i]]
-            original = msg["content"]
-            # ACE 可逆：替换前把原文无损存入 store，键用 tool_call_id。
-            key = f"snip:{msg.get('tool_call_id') or tool_msgs[i]}"
-            self._context_store.store(key, original)
-            msg["content"] = snipped_placeholder(key, self._context_store.get_abstract(key))
+        self._compressor._snip(self._openai_messages, self.last_input_token_count)
 
     #微压缩
-
-    #基于"时间"的上下文瘦身策略，
-    #如果已经很久没说话了，说明之前的工具执行结果你已经看完了，那就把它们清理掉，腾出空间
-
     def _microcompact_openai(self) -> None:
-        if not self.last_api_call_time or (time.time() - self.last_api_call_time) < MICROCOMPACT_IDLE_S:
-            return
-        tool_msgs = []
-        for i, msg in enumerate(self._openai_messages):
-            if msg.get("role") == "tool" and isinstance(msg.get("content"), str) and not is_compressed_placeholder(msg["content"]):
-                tool_msgs.append(i)
-        clear_count = len(tool_msgs) - KEEP_RECENT_RESULTS
-        for i in range(max(0, clear_count)):
-            msg = self._openai_messages[tool_msgs[i]]
-            original = msg["content"]
-            # ACE 可逆：清理前把原文存入 store。
-            key = f"clear:{msg.get('tool_call_id') or tool_msgs[i]}"
-            self._context_store.store(key, original)
-            msg["content"] = cleared_placeholder(key)
+        self._compressor._microcompact(self._openai_messages, self.last_api_call_time)
 
     #大结果持久化
     #如果工具返回的结果太大（超过 30KB），不要硬塞进上下文里，而是把它存成一个临时文件。
@@ -2156,53 +2016,12 @@ class Agent:
             raise
 
     async def _confirm_dangerous(self, command: str) -> bool:
-        # 危险命令确认：优先用注入的 confirm_fn，否则阻塞 input
-        print_confirmation(command)
-        if self.confirm_fn:
-            return await self.confirm_fn(command)
-        
-        # 流式模式：发送 permission_request 事件并等待响应
-        if self._stream_event_queue is not None:
-            import uuid
-            request_id = str(uuid.uuid4())[:8]
-            
-            # 发送权限请求事件
-            event = {
-                "type": "permission_request",
-                "request_id": request_id,
-                "command": command,
-                "tool_name": getattr(self, '_current_tool_name', 'unknown'),
-            }
-            if self._current_sub_agent_id:
-                event["sub_agent_id"] = self._current_sub_agent_id
-            await self._stream_event_queue.put(event)
-            
-            # 等待用户响应
-            if not hasattr(self, '_permission_responses'):
-                self._permission_responses = {}
-            
-            # 轮询等待响应（最多等待 5 分钟）
-            for _ in range(3000):  # 3000 * 0.1s = 5 分钟
-                await asyncio.sleep(0.1)
-                if request_id in self._permission_responses:
-                    response = self._permission_responses.pop(request_id)
-                    return response.get("allowed", False)
-                # 检查是否被中止
-                if self._abort_requested():
-                    return False
-            
-            # 超时，默认拒绝
-            return False
-        
-        # Fallback: blocking input
-        try:
-            answer = input("  Allow? (y/n): ")
-            return answer.lower().startswith("y")
-        except EOFError:
-            return False
+        self._permission_gate.set_stream_event_queue(self._stream_event_queue) if self._stream_event_queue else None
+        self._permission_gate.set_confirm_fn(self.confirm_fn) if self.confirm_fn else None
+        self._permission_gate.set_sub_agent_id(self._current_sub_agent_id)
+        self._permission_gate.set_abort_fn(self._abort_requested)
+        self._permission_gate.set_current_tool_name(getattr(self, '_current_tool_name', 'unknown'))
+        return await self._permission_gate.confirm(command)
     
     def set_permission_response(self, request_id: str, allowed: bool) -> None:
-        """设置权限响应（由 API 调用）"""
-        if not hasattr(self, '_permission_responses'):
-            self._permission_responses = {}
-        self._permission_responses[request_id] = {"allowed": allowed}
+        self._permission_gate.set_response(request_id, allowed)
