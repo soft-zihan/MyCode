@@ -28,7 +28,7 @@ from agents.config import (
     load_config, save_config, list_endpoints, get_primary_endpoint,
     AppConfig, ModelEndpointConfig
 )
-from agents.subagent import get_sub_agent_config, _discover_custom_agents
+from agents.core.subagent import get_sub_agent_config, _discover_custom_agents
 
 app = FastAPI(title="MyCode API", version="1.0.0")
 
@@ -82,7 +82,7 @@ async def api_generate_session_name(data: SessionNameRequest) -> dict[str, str]:
     fallback_name = data.message[:20] + "..." if len(data.message) > 20 else data.message
     try:
         from agents.agent import Agent
-        from agents.agent_mode import BUILTIN_HIDDEN_AGENTS
+        from agents.core.agent_mode import BUILTIN_HIDDEN_AGENTS
         
         # Get title agent config
         title_config = BUILTIN_HIDDEN_AGENTS.get("title")
@@ -647,7 +647,7 @@ def api_delete_skill(skill_name: str) -> dict[str, Any]:
 @app.get("/api/agents")
 def api_list_agents() -> list[dict[str, Any]]:
     """List all agents (built-in + custom) with their model configuration."""
-    from agents.subagent import get_available_agent_types, _discover_custom_agents, get_agent_model_ref_env
+    from agents.core.subagent import get_available_agent_types, _discover_custom_agents, get_agent_model_ref_env
     
     agents = []
     custom_agents = _discover_custom_agents()
@@ -678,7 +678,7 @@ def api_list_agents() -> list[dict[str, Any]]:
 @app.get("/api/agents/{agent_name}")
 def api_get_agent(agent_name: str) -> dict[str, Any]:
     """Get detailed agent configuration."""
-    from agents.subagent import get_sub_agent_config, _discover_custom_agents
+    from agents.core.subagent import get_sub_agent_config, _discover_custom_agents
     
     custom_agents = _discover_custom_agents()
     is_custom = agent_name in custom_agents

@@ -23,7 +23,7 @@ from agents.core.context_store import (
 )
 from agents.memory.memory import MemoryPrefetch, start_memory_prefetch, format_memories_for_injection
 from agents.model.model_registry import ModelEndpoint, resolve_agent_endpoint, resolve_side_endpoint
-from agents.prompt import build_system_prompt
+from agents.core.prompt import build_system_prompt
 from agents.core.session_memory import (
     FOLD_SESSION_MEMORY_SYSTEM,
     build_folding_user_prompt,
@@ -33,7 +33,7 @@ from agents.core.session_memory import (
     parse_folded_memory,
 )
 from agents.core.session import save_folded_session_memory, save_session
-from agents.subagent import get_sub_agent_config
+from agents.core.subagent import get_sub_agent_config
 from agents.tools import ToolDef, tool_definitions, execute_tool, CONCURRENCY_SAFE_TOOLS, check_permission, \
     get_active_tool_definitions
 from agents.ui import print_info, print_divider, print_assistant_text, print_sub_agent_start, print_sub_agent_end, \
@@ -188,7 +188,7 @@ class Agent:
                  skill_store: Any | None=None,):
         # 如果提供了 options，则从中提取参数
         if options is not None:
-            from agents.options import AgentOptions
+            from agents.core.options import AgentOptions
             if isinstance(options, AgentOptions):
                 permission_mode = options.permission_mode
                 model = options.model

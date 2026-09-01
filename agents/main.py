@@ -270,7 +270,7 @@ async def _dispatch_command(agent: Agent, inp: str) -> bool:
 
 async def run_repl(agent: Agent) -> None:
     """Interactive REPL loop."""
-    from .history import get_history
+    from .cli.history import get_history
     
     # Initialize prompt history
     history = get_history()

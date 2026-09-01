@@ -7,8 +7,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .memory.frontmatter import parse_frontmatter
-from .tools import tool_definitions, ToolDef
+from agents.memory.frontmatter import parse_frontmatter
+from agents.tools import tool_definitions, ToolDef
 
 
 def get_agent_model_ref_env(agent_type: str) -> str:
