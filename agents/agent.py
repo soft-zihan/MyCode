@@ -290,6 +290,7 @@ class Agent:
         from .core.context_compressor import ContextCompressor
         from .core.permission_gate import PermissionGate
         from .core.session_lifecycle import SessionLifecycle
+        from .skills.skill_orchestrator import SkillOrchestrator
         self._compressor = ContextCompressor(
             self._context_store,
             auto_compact_threshold=self.auto_compact_threshold,
@@ -297,6 +298,12 @@ class Agent:
         )
         self._permission_gate = PermissionGate()
         self._session_lifecycle = SessionLifecycle(self._checkpoint_store, self._context_store)
+        self._skill_orchestrator = SkillOrchestrator(
+            side_query_fn=self._build_side_query,
+            permission_mode=self.permission_mode,
+            session_id=self.session_id,
+            refresh_system_prompt=self._refresh_runtime_system_prompt,
+        )
 
         self._aborted = False
         # 共享中止事件：父 Agent 触发 abort 时置位，子 Agent 在循环检查点读取，
@@ -347,10 +354,6 @@ class Agent:
 
         #区分message的历史消息
         self._openai_messages: list[str] = []
-        self._last_retrieved_skill_reference: dict[str, Any] | None = None
-        self._last_retrieved_skill_hits: list[dict[str, Any]] = []
-        self._pending_skill_extraction_window: dict[str, Any] | None = None
-        self._background_skill_tasks: set[asyncio.Task] = set()
         self._folded_session_memories: list[dict[str, Any]] = []
         self._fold_last_time: float = 0.0
         self._fold_count: int = 0
@@ -359,10 +362,6 @@ class Agent:
         self._last_tool_name: str = ""
         self._repeat_chain_key: str = ""
         self._repeat_chain_count: int = 0
-
-        # Skill 进化 cadence 控制（避免每轮都触发 side_query）
-        self._turns_since_last_evolution: int = 0
-        self._last_evolution_time: float = time.time()
 
         #构建系统提示词
         self._base_system_prompt = custom_system_prompt or build_system_prompt()
@@ -667,13 +666,13 @@ class Agent:
 
         original_user_message = _safe_utf8_text(user_message)
         ready_skill_extraction_window: dict[str, Any] | None = None
-        self._last_retrieved_skill_reference = None
-        self._last_retrieved_skill_hits = []
+        self._skill_orchestrator.last_retrieved_skill_reference = None
         if not self.is_sub_agent:
-            ready_skill_extraction_window = self._pop_pending_skill_extraction_window(original_user_message)
-            user_message, self._last_retrieved_skill_reference = self._augment_user_message_with_skill_context(
-                original_user_message
+            ready_skill_extraction_window = self._skill_orchestrator.pop_pending_extraction_window(
+                original_user_message, self._tool_error_streak
             )
+            user_message, ref = self._skill_orchestrator.augment_message(original_user_message)
+            self._skill_orchestrator.last_retrieved_skill_reference = ref
 
         self._aborted = False
         # 新一轮对话开始时清除中止信号，避免上一轮的中止状态影响本轮。
@@ -728,19 +727,26 @@ class Agent:
         # /goal 模式的 verifier 需要最近一轮的助手报告作为证据。
         self._last_assistant_text = assistant_text
         if not self.is_sub_agent and not self._aborted:
-            self._schedule_background_skill_task(self._run_skill_usage_tracking(original_user_message, assistant_text))
+            self._skill_orchestrator.schedule_background_task(
+                self._skill_orchestrator.run_skill_usage_tracking(original_user_message, assistant_text),
+                plan_mode=(self.permission_mode == "plan"),
+            )
             
             # Cadence 门控：避免每轮都触发进化（减少冗余 side_query 调用）
-            self._turns_since_last_evolution += 1
-            if ready_skill_extraction_window and self._should_trigger_evolution():
-                self._schedule_background_skill_task(self._run_online_skill_evolution(ready_skill_extraction_window))
-                self._turns_since_last_evolution = 0
-                self._last_evolution_time = time.time()
+            self._skill_orchestrator.turns_since_last_evolution += 1
+            if ready_skill_extraction_window and self._skill_orchestrator.should_trigger_evolution():
+                self._skill_orchestrator.schedule_background_task(
+                    self._skill_orchestrator.run_online_skill_evolution(ready_skill_extraction_window),
+                    plan_mode=(self.permission_mode == "plan"),
+                )
+                self._skill_orchestrator.record_evolution_event()
             
-            self._set_pending_skill_extraction_window(
+            self._skill_orchestrator.set_pending_extraction_window(
+                messages=self._skill_orchestrator.get_recent_dialog_messages(self._openai_messages, max_messages=8),
                 original_user_message=original_user_message,
                 assistant_text=assistant_text,
-                retrieved_reference=self._last_retrieved_skill_reference,
+                retrieved_reference=self._skill_orchestrator.last_retrieved_skill_reference,
+                tool_error_streak=self._tool_error_streak,
             )
         if not self.is_sub_agent:
             print_divider()
@@ -915,234 +921,10 @@ class Agent:
             return True
         return False
 
-    def _augment_user_message_with_skill_context(self, user_message: str) -> tuple[str, dict[str, Any] | None]:
-        try:
-            from .skills.skills import format_retrieved_skill_context
-
-            context, top_ref = format_retrieved_skill_context(user_message, limit=3)
-        except Exception:
-            return user_message, None
-        if top_ref and isinstance(top_ref.get("all_hits"), list):
-            self._last_retrieved_skill_hits = list(top_ref.get("all_hits") or [])
-        if not context.strip():
-            return user_message, top_ref
-        return f"{user_message}\n\n{context}", top_ref
-
-    def _strip_runtime_injections(self, text: str) -> str:
-        return re.sub(r"\n*<retrieved_skills>.*?</retrieved_skills>\s*", "", str(text or ""), flags=re.DOTALL).strip()
-
-    def _message_text(self, msg: dict[str, Any]) -> str:
-        content = msg.get("content")
-        if isinstance(content, str):
-            return self._strip_runtime_injections(content)
-        if isinstance(content, list):
-            parts: list[str] = []
-            for block in content:
-                if isinstance(block, dict):
-                    if block.get("type") == "text":
-                        parts.append(str(block.get("text") or ""))
-                    elif "content" in block and block.get("type") not in {"tool_result", "tool_use"}:
-                        parts.append(str(block.get("content") or ""))
-            return self._strip_runtime_injections("\n".join(parts))
-        return ""
-
-    def _recent_dialog_messages(self, *, max_messages: int = 8) -> list[dict[str, str]]:
-        raw_messages = self._openai_messages
-        out: list[dict[str, str]] = []
-        for msg in raw_messages:
-            if not isinstance(msg, dict):
-                continue
-            role = str(msg.get("role") or "").strip().lower()
-            if role not in {"user", "assistant"}:
-                continue
-            text = self._message_text(msg)
-            if text:
-                out.append({"role": role, "content": text})
-        return out[-max(2, int(max_messages)) :]
-
-    async def _confirm_online_skill_write(self, summary: str) -> bool:
-        if self.permission_mode in {"bypassPermissions", "acceptEdits"}:
-            return True
-        if self.permission_mode in {"plan", "dontAsk"}:
-            return False
-        if self.confirm_fn is None:
-            return False
-        print_confirmation(summary)
-        try:
-            return bool(await self.confirm_fn(summary))
-        except Exception:
-            return False
-
-    async def _confirm_background_online_skill_write(self, summary: str) -> bool:
-        return self.permission_mode in {"bypassPermissions", "acceptEdits"}
-
-    def _online_evolution_enabled(self) -> bool:
-        raw = os.environ.get("BEAR_AUTO_SKILL_EVOLUTION", "1").strip().lower()
-        return raw not in {"0", "false", "no", "off"}
-
-    def _schedule_background_skill_task(self, coro) -> None:
-        if self.permission_mode == "plan":
-            try:
-                coro.close()
-            except Exception:
-                pass
-            return
-        task = asyncio.create_task(coro)
-        self._background_skill_tasks.add(task)
-
-        def _done(done_task: asyncio.Task) -> None:
-            self._background_skill_tasks.discard(done_task)
-            try:
-                done_task.result()
-            except Exception:
-                pass
-
-        task.add_done_callback(_done)
-
-    async def drain_background_skill_tasks(self) -> None:
-        tasks = [task for task in self._background_skill_tasks if not task.done()]
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    def _pop_pending_skill_extraction_window(self, next_user_feedback: str) -> dict[str, Any] | None:
-        pending = self._pending_skill_extraction_window
-        self._pending_skill_extraction_window = None
-        if not pending:
-            return None
-        messages = list(pending.get("messages") or [])
-        feedback = _safe_utf8_text(next_user_feedback).strip()
-        if feedback:
-            messages.append({"role": "user", "content": feedback})
-        pending["messages"] = messages[-10:]
-        pending["next_user_feedback"] = feedback
-        return pending
-
-    def _set_pending_skill_extraction_window(
-        self,
-        *,
-        original_user_message: str,
-        assistant_text: str,
-        retrieved_reference: dict[str, Any] | None,
-    ) -> None:
-        if not original_user_message.strip() or not assistant_text.strip():
-            return
-        
-        # EvoSkill 启发：失败驱动进化
-        # 如果工具失败连击 >= 3，把失败信息加入 window，让 side_query 提取失败模式
-        tool_error_hint = ""
-        if self._tool_error_streak >= 3:
-            tool_error_hint = f"[Tool failure streak: {self._tool_error_streak} consecutive failures detected]"
-        
-        self._pending_skill_extraction_window = {
-            "messages": self._recent_dialog_messages(max_messages=8),
-            "latest_user": original_user_message,
-            "latest_assistant": assistant_text,
-            "retrieved_reference": self._compact_retrieved_reference(retrieved_reference),
-            "session_id": self.session_id,
-            "tool_error_hint": tool_error_hint,  # 失败信号
-        }
-
-    def _compact_retrieved_reference(self, ref: dict[str, Any] | None) -> dict[str, Any] | None:
-        if not ref:
-            return None
-        return {k: v for k, v in ref.items() if k != "all_hits"}
-
-    def _should_trigger_evolution(self) -> bool:
-        """检查是否应触发 Skill 进化（cadence 门控）。
-        
-        通过环境变量配置：
-        - BEAR_SKILL_EVOLUTION_MIN_TURNS: 最少轮次间隔（默认 3）
-        - BEAR_SKILL_EVOLUTION_MIN_MINUTES: 最少时间间隔（默认 10 分钟）
-        """
-        min_turns = int(os.environ.get("BEAR_SKILL_EVOLUTION_MIN_TURNS", "3"))
-        min_minutes = int(os.environ.get("BEAR_SKILL_EVOLUTION_MIN_MINUTES", "10"))
-        
-        turns_ok = self._turns_since_last_evolution >= min_turns
-        minutes_since = (time.time() - self._last_evolution_time) / 60
-        time_ok = minutes_since >= min_minutes
-        
-        return turns_ok and time_ok
-
-    async def _run_online_skill_evolution(self, window: dict[str, Any], *, interactive_confirm: bool = False) -> None:
-        if not self._online_evolution_enabled() or self.permission_mode == "plan":
-            return
-        messages = list(window.get("messages") or [])
-        if not messages:
-            return
-
-        side_query = self._build_side_query(max_tokens=2200)
-        if side_query is None:
-            return
-
-        try:
-            from .skills.skill_extractor import online_ingest
-        except Exception:
-            return
-
-        # EvoSkill 启发：合并失败信号到 hint
-        hint_parts = []
-        tool_error_hint = str(window.get("tool_error_hint") or "").strip()
-        if tool_error_hint:
-            hint_parts.append(tool_error_hint)
-        user_hint = str(window.get("hint") or "").strip()
-        if user_hint:
-            hint_parts.append(user_hint)
-        combined_hint = " | ".join(hint_parts) if hint_parts else ""
-        
-        result = await online_ingest(
-            messages=messages,
-            side_query=side_query,
-            retrieved_reference=window.get("retrieved_reference") or None,
-            hint=combined_hint,
-            confirm_write=self._confirm_online_skill_write if interactive_confirm else self._confirm_background_online_skill_write,
-            target=os.environ.get("BEAR_AUTO_SKILL_TARGET", "project"),
-        )
-        if result.get("ok"):
-            if result.get("action") in {"add", "merge"}:
-                self._refresh_runtime_system_prompt()
-                print_info(f"Online skill {result.get('action')}: {result.get('skill')}")
-        elif result.get("action") not in {"add_denied", "merge_denied"}:
-            print_error(f"Online skill evolution failed: {result.get('error') or result}")
-
-    async def _run_skill_usage_tracking(self, original_user_message: str, assistant_text: str) -> None:
-        if not self._online_evolution_enabled() or self.permission_mode == "plan":
-            return
-        hits = list(self._last_retrieved_skill_hits or [])
-        if not hits or not assistant_text.strip():
-            return
-        side_query = self._build_side_query(max_tokens=700)
-        try:
-            from .skills.skill_extractor import judge_retrieved_skill_usage
-            from .skills.skills import record_usage_judgments
-
-            judgments = await judge_retrieved_skill_usage(
-                hits=hits,
-                user_message=original_user_message,
-                assistant_text=assistant_text,
-                side_query=side_query,
-            )
-            result = record_usage_judgments(judgments)
-            if result.get("pruned"):
-                self._refresh_runtime_system_prompt()
-        except Exception:
-            return
-
-    async def extract_now(self, hint: str = "") -> dict[str, Any]:
-        pending = self._pending_skill_extraction_window
-        if not pending:
-            return {"ok": False, "error": "no pending online skill extraction window"}
-        window = dict(pending)
-        window["hint"] = hint
-        await self._run_online_skill_evolution(window, interactive_confirm=True)
-        self._pending_skill_extraction_window = None
-        return {"ok": True}
-
 
     def clear_history(self)->None:
         self._openai_messages = []
-        self._pending_skill_extraction_window = None
-        self._last_retrieved_skill_reference = None
-        self._last_retrieved_skill_hits = []
+        self._skill_orchestrator.reset()
         self._fold_last_time = 0.0
         self._fold_count = 0
         self._tool_error_streak = 0
@@ -1153,6 +935,14 @@ class Agent:
         self.total_output_tokens = 0
         self.last_input_token_count = 0
         print_info("Conversation cleared.")
+
+    async def drain_background_skill_tasks(self) -> None:
+        """等待所有后台 Skill 任务完成。"""
+        await self._skill_orchestrator.drain_background_tasks()
+
+    async def extract_now(self, hint: str = "") -> dict[str, Any]:
+        """立即执行 Skill 提取（交互式）。"""
+        return await self._skill_orchestrator.extract_now(hint, confirm_fn=self.confirm_fn)
 
     def show_cost(self):
         total = self._get_current_cost_usd()
