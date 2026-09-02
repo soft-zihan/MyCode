@@ -1,16 +1,18 @@
 import { memo, useRef, useEffect, useState } from 'react';
-import { ChevronDown } from 'lucide-react';
+import { ChevronDown, Loader2, GitBranch } from 'lucide-react';
 import type { ChatSnapshot } from './types';
 import { ChatNodeSeat } from './ChatNodeSeat';
 
 interface ChatViewProps {
   snapshot: ChatSnapshot;
   isStreaming: boolean;
+  isWaitingResponse?: boolean;
   onEditMessage?: (index: number) => void;
   onFileClick?: (path: string) => void;
+  onFork?: (beforeIndex: number) => void;
 }
 
-export const ChatView = memo(function ChatView({ snapshot, isStreaming, onEditMessage, onFileClick }: ChatViewProps) {
+export const ChatView = memo(function ChatView({ snapshot, isStreaming, isWaitingResponse, onEditMessage, onFileClick, onFork }: ChatViewProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
@@ -34,7 +36,7 @@ export const ChatView = memo(function ChatView({ snapshot, isStreaming, onEditMe
     if (isNearBottomRef.current) {
       scrollToBottom();
     }
-  }, [snapshot.order.length]);
+  }, [snapshot.order.length, isWaitingResponse]);
 
   const { order, nodes } = snapshot;
 
@@ -58,16 +60,41 @@ export const ChatView = memo(function ChatView({ snapshot, isStreaming, onEditMe
         {order.map((key, idx) => {
           const node = nodes.get(key);
           if (!node) return null;
+          
+          // Add fork button before each user message (except the first one)
+          const showForkButton = node.kind === 'user' && idx > 0 && !isStreaming;
+          
           return (
-            <ChatNodeSeat
-              key={key}
-              node={node}
-              index={idx}
-              onEditMessage={onEditMessage}
-              onFileClick={onFileClick}
-            />
+            <div key={key}>
+              {showForkButton && (
+                <div className="flex items-center gap-2 py-2 my-2 group/fork">
+                  <div className="flex-1 h-px bg-gray-200"></div>
+                  <button
+                    onClick={() => onFork?.(idx)}
+                    className="flex items-center gap-1 px-2 py-1 text-xs text-gray-400 hover:text-green-600 hover:bg-green-50 rounded transition-colors opacity-0 group-hover/fork:opacity-100"
+                    title="Fork from this point"
+                  >
+                    <GitBranch className="w-3 h-3" />
+                    Fork here
+                  </button>
+                  <div className="flex-1 h-px bg-gray-200"></div>
+                </div>
+              )}
+              <ChatNodeSeat
+                node={node}
+                index={idx}
+                onEditMessage={onEditMessage}
+                onFileClick={onFileClick}
+              />
+            </div>
           );
         })}
+        {isWaitingResponse && (
+          <div className="flex items-center gap-2 px-3 py-2 text-gray-400">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            <span className="text-sm">Thinking...</span>
+          </div>
+        )}
         <div ref={messagesEndRef} />
       </div>
 

@@ -18,6 +18,8 @@ BACKGROUND_JOBS: dict[str, dict[str, Any]] = {}
 _BG_LOCK = threading.Lock()
 _BG_COUNTER = 0
 _on_background_done: Any = None
+MAX_BACKGROUND_JOBS = 100
+BACKGROUND_JOB_TTL_SECONDS = 3600
 
 
 def set_background_done_callback(fn: Any) -> None:
@@ -50,7 +52,9 @@ def _watch_background(job_id: str) -> None:
     job["output"] = output
     job["exit_code"] = exit_code
     job["done"] = True
+    job["status"] = "completed" if exit_code == 0 else "failed"
     job["end_time"] = _time.time()
+    job["finished_at"] = _time.time()
     trace_event(
         "bg.done",
         job_id=job_id,
@@ -98,9 +102,28 @@ def _start_background_shell(command: str) -> str:
     )
 
 
+def _cleanup_background_jobs() -> None:
+    now = _time.time()
+    expired = [
+        jid for jid, job in BACKGROUND_JOBS.items()
+        if job.get("done")
+        and now - job.get("finished_at", job.get("end_time", 0)) > BACKGROUND_JOB_TTL_SECONDS
+    ]
+    for jid in expired:
+        del BACKGROUND_JOBS[jid]
+    if len(BACKGROUND_JOBS) > MAX_BACKGROUND_JOBS:
+        completed = sorted(
+            [(jid, job) for jid, job in BACKGROUND_JOBS.items() if job.get("done")],
+            key=lambda x: x[1].get("finished_at", x[1].get("end_time", 0)),
+        )
+        for jid, _ in completed[:len(BACKGROUND_JOBS) - MAX_BACKGROUND_JOBS]:
+            del BACKGROUND_JOBS[jid]
+
+
 def shell_status(inp: dict) -> str:
     job_id = str(inp.get("job_id") or "").strip()
     with _BG_LOCK:
+        _cleanup_background_jobs()
         if job_id:
             job = BACKGROUND_JOBS.get(job_id)
             if not job:
@@ -124,7 +147,7 @@ def run_shell(inp: dict) -> str:
     if inp.get("background"):
         return _start_background_shell(inp["command"])
     try:
-        from agents.model.runtime import get_runtime
+        from agents.tools.runtime import get_runtime
         rt = get_runtime()
         timeout_ms = inp.get("timeout", 30000)
         timeout_s = timeout_ms / 1000

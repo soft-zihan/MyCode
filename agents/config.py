@@ -9,7 +9,7 @@ import json
 import os
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 def config_path() -> Path:
@@ -24,6 +24,7 @@ class ModelEndpointConfig:
     base_url: str
     api_key: str
     context_window: int = 128000
+    auto_compact_threshold: float = 0.70
     provider_name: str = ""  # User-friendly name for the provider
 
     def to_dict(self) -> dict[str, Any]:
@@ -36,6 +37,7 @@ class ModelEndpointConfig:
             base_url=data.get("base_url", ""),
             api_key=data.get("api_key", ""),
             context_window=data.get("context_window", 128000),
+            auto_compact_threshold=data.get("auto_compact_threshold", 0.70),
             provider_name=data.get("provider_name", ""),
         )
 
@@ -45,11 +47,13 @@ class AppConfig:
     """应用配置"""
     endpoints: dict[str, ModelEndpointConfig]
     routing: dict[str, str]
+    cross_session_memory: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "endpoints": {k: v.to_dict() for k, v in self.endpoints.items()},
             "routing": self.routing,
+            "cross_session_memory": self.cross_session_memory,
         }
 
     @classmethod
@@ -65,6 +69,7 @@ class AppConfig:
         return cls(
             endpoints=endpoints,
             routing=routing_data,
+            cross_session_memory=data.get("cross_session_memory", True),
         )
 
 
@@ -104,7 +109,7 @@ def get_agent_model_ref(agent_type: str) -> str:
     return config.routing.get(agent_type, "")
 
 
-def get_endpoint_by_model(model_name: str) -> ModelEndpointConfig | None:
+def get_endpoint_by_model(model_name: str) -> Optional[ModelEndpointConfig]:
     """根据模型名查找端点配置"""
     config = load_config()
 
@@ -121,17 +126,6 @@ def list_endpoints() -> list[dict[str, Any]]:
     config = load_config()
     result = []
 
-    # Primary endpoint
-    if config.primary.model:
-        result.append({
-            "id": "primary",
-            "model": config.primary.model,
-            "base_url": config.primary.base_url,
-            "has_api_key": bool(config.primary.api_key),
-            "protocol": "openai",  # 默认 OpenAI 协议
-        })
-
-    # Named endpoints
     for endpoint_id, endpoint in config.endpoints.items():
         result.append({
             "id": endpoint_id,
@@ -147,8 +141,21 @@ def list_endpoints() -> list[dict[str, Any]]:
 def get_primary_endpoint() -> dict[str, Any]:
     """获取主端点配置"""
     config = load_config()
-    return {
-        "model": config.primary.model,
-        "base_url": config.primary.base_url,
-        "has_api_key": bool(config.primary.api_key),
-    }
+    primary_id = config.routing.get("primary", "")
+    if primary_id and primary_id in config.endpoints:
+        endpoint = config.endpoints[primary_id]
+        return {
+            "model": endpoint.model,
+            "base_url": endpoint.base_url,
+            "has_api_key": bool(endpoint.api_key),
+        }
+    # Fallback: return first endpoint
+    if config.endpoints:
+        first_id = next(iter(config.endpoints))
+        endpoint = config.endpoints[first_id]
+        return {
+            "model": endpoint.model,
+            "base_url": endpoint.base_url,
+            "has_api_key": bool(endpoint.api_key),
+        }
+    return {"model": "", "base_url": "", "has_api_key": False}

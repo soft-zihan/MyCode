@@ -21,71 +21,19 @@ def get_agent_model_ref_env(agent_type: str) -> str:
 
 # ─── Read-only tools (for explore and plan agents) ──────────
 
-# explore / plan 子代理只能拿到这几个只读工具，避免它们修改项目文件或系统状态。
+# explore 子代理只能拿到这几个只读工具，避免它们修改项目文件或系统状态。
 READ_ONLY_TOOLS = {"read_file", "list_files", "grep_search"}
 
-# explore 子代理的系统提示词：定位为“代码库搜索专家”，强调只读、快速搜索和清晰汇报。
-EXPLORE_PROMPT = """You are a file search specialist for Mini Claude Code. You excel at thoroughly navigating and exploring codebases.
+# ─── Prompt loading from files ──────────────────────────────
 
-=== CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS ===
-This is a READ-ONLY exploration task. You are STRICTLY PROHIBITED from:
-- Creating new files (no write_file, touch, or file creation of any kind)
-- Modifying existing files (no edit_file operations)
-- Deleting files (no rm or deletion)
-- Running ANY commands that change system state
+_PROMPTS_DIR = Path(__file__).parent.parent / "prompts" / "subagent"
 
-Your role is EXCLUSIVELY to search and analyze existing code.
-
-Your strengths:
-- Rapidly finding files using glob patterns
-- Searching code and text with powerful regex patterns
-- Reading and analyzing file contents
-
-Guidelines:
-- Use list_files for broad file pattern matching
-- Use grep_search for searching file contents with regex
-- Use read_file when you know the specific file path you need to read
-- Adapt your search approach based on the thoroughness level specified by the caller
-
-NOTE: You are meant to be a fast agent that returns output as quickly as possible. In order to achieve this you must:
-- Make efficient use of the tools that you have at your disposal: be smart about how you search for files and implementations
-- Wherever possible you should try to spawn multiple parallel tool calls for grepping and reading files
-
-Complete the user's search request efficiently and report your findings clearly."""
-
-# plan 子代理的系统提示词：只读分析当前代码结构，并输出结构化的实现计划。
-PLAN_PROMPT = """You are a Plan agent — a READ-ONLY sub-agent specialized for designing implementation plans.
-
-IMPORTANT CONSTRAINTS:
-- You are READ-ONLY. You only have access to read_file, list_files, and grep_search.
-- Do NOT attempt to modify any files.
-
-Your job:
-- Analyze the codebase to understand the current architecture
-- Design a step-by-step implementation plan
-- Identify critical files that need modification
-- Consider architectural trade-offs
-
-Return a structured plan with:
-1. Summary of current state
-2. Step-by-step implementation steps
-3. Critical files for implementation
-4. Potential risks or considerations"""
-
-# general 子代理的系统提示词：允许使用除 agent 外的完整工具集，适合独立完成更复杂任务。
-GENERAL_PROMPT = """You are an agent for Mini Claude Code. Given the user's message, you should use the tools available to complete the task. Complete the task fully—don't gold-plate, but don't leave it half-done. When you complete the task, respond with a concise report covering what was done and any key findings — the caller will relay this to the user, so it only needs the essentials.
-
-Your strengths:
-- Searching for code, configurations, and patterns across large codebases
-- Analyzing multiple files to understand system architecture
-- Investigating complex questions that require exploring many files
-- Performing multi-step research tasks
-
-Guidelines:
-- For file searches: search broadly when you don't know where something lives. Use read_file when you know the specific file path.
-- For analysis: Start broad and narrow down. Use multiple search strategies if the first doesn't yield results.
-- Be thorough: Check multiple locations, consider different naming conventions, look for related files.
-- NEVER create files unless they're absolutely necessary for achieving your goal. ALWAYS prefer editing an existing file to creating a new one."""
+def _load_subagent_prompt(name: str) -> str:
+    """Load subagent prompt from file."""
+    prompt_path = _PROMPTS_DIR / f"{name}.txt"
+    if prompt_path.exists():
+        return prompt_path.read_text(encoding="utf-8")
+    return ""
 
 # ─── Custom agent discovery ─────────────────────────────────
 
@@ -143,33 +91,35 @@ def _load_agents_from_dir(directory: Path, agents: dict[str, dict]) -> None:
 def get_sub_agent_config(agent_type: str) -> dict:
     """根据代理类型生成 Agent 运行时需要的 system_prompt、tools 和 model_ref 配置。
 
-    model_ref 是“端点 ID 或裸模型名”的引用，真正解析成完整端点在
+    model_ref 是"端点 ID 或裸模型名"的引用，真正解析成完整端点在
     agent.py 里通过 model_registry 完成。优先级：
       1. 自定义代理 frontmatter 中的 model: 字段
       2. 环境变量 BEAR_MODEL_<TYPE>
       3. 空串（继承父 Agent 端点）
     """
+    # 子智能体不应具备的工具：
+    # - agent: 避免递归创建子代理导致控制流复杂化
+    # - tool_search: 子智能体没有 MCP 工具，不应搜索 deferred tools
+    _sub_agent_excluded = {"agent", "tool_search"}
+
     custom = _discover_custom_agents().get(agent_type)
     if custom:
         if custom["allowed_tools"]:
             # 自定义代理显式声明工具白名单时，只授予白名单中的工具。
             tools = [t for t in tool_definitions if t["name"] in custom["allowed_tools"]]
         else:
-            # 不允许子代理再调用 agent 工具，避免递归创建子代理导致控制流复杂化。
-            tools = [t for t in tool_definitions if t["name"] != "agent"]
+            tools = [t for t in tool_definitions if t["name"] not in _sub_agent_excluded]
         model_ref = custom.get("model") or get_agent_model_ref_env(agent_type)
         return {"system_prompt": custom["system_prompt"], "tools": tools, "model_ref": model_ref}
 
-    # 内置 explore / plan 使用相同的只读工具集合。
-    read_only = [t for t in tool_definitions if t["name"] in READ_ONLY_TOOLS]
+    # 内置子智能体从文件加载提示词
     model_ref = get_agent_model_ref_env(agent_type)
 
     if agent_type == "explore":
-        return {"system_prompt": EXPLORE_PROMPT, "tools": read_only, "model_ref": model_ref}
-    elif agent_type == "plan":
-        return {"system_prompt": PLAN_PROMPT, "tools": read_only, "model_ref": model_ref}
+        read_only = [t for t in tool_definitions if t["name"] in READ_ONLY_TOOLS]
+        return {"system_prompt": _load_subagent_prompt("explore"), "tools": read_only, "model_ref": model_ref}
     else:  # general
-        return {"system_prompt": GENERAL_PROMPT, "tools": [t for t in tool_definitions if t["name"] != "agent"], "model_ref": model_ref}
+        return {"system_prompt": _load_subagent_prompt("general"), "tools": [t for t in tool_definitions if t["name"] not in _sub_agent_excluded], "model_ref": model_ref}
 
 
 # ─── 可用的agent类型(for system prompt) ──────────────
@@ -179,7 +129,6 @@ def get_available_agent_types() -> list[dict[str, str]]:
     """返回系统提示词中可展示的全部代理类型说明，包括内置代理和自定义代理。"""
     types = [
         {"name": "explore", "description": "Fast, read-only codebase search and exploration"},
-        {"name": "plan", "description": "Read-only analysis with structured implementation plans"},
         {"name": "general", "description": "Full tools for independent tasks"},
     ]
     for name, defn in _discover_custom_agents().items():

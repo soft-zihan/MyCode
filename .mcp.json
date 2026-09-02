@@ -15,6 +15,17 @@
         "--tools",
         "build_or_update_graph_tool,query_graph_tool,semantic_search_nodes_tool,get_impact_radius_tool,detect_changes_tool,list_graph_stats_tool,get_minimal_context_tool"
       ]
+    },
+    "paper-rag": {
+      "command": "/Users/han/Documents/projects/paper-rag-mcp/venv/bin/python",
+      "args": ["-m", "paper_rag_mcp.server"],
+      "env": {
+        "PAPER_DIR": ".bear/paper-rag/papers",
+        "INDEX_DIR": ".bear/paper-rag/index",
+        "RERANKER_METHOD": "cross-encoder",
+        "CROSS_ENCODER_DEVICE": "mps",
+        "EMBEDDING_MODEL": "st-/Users/han/Documents/projects/Learn-LLM-and-Agent/BearCode/.bear/mcp-servers/paper-qa/models/qwen3-academic"
+      }
     }
   }
 }

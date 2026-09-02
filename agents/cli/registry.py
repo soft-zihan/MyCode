@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Optional, Union
 
-CommandHandler = Callable[..., Awaitable[None] | None]
+CommandHandler = Callable[..., Optional[Awaitable[None]]]
 
 
 @dataclass

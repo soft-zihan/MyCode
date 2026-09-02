@@ -228,7 +228,7 @@ def build_skill_descriptions() -> str:
     lines.append("To invoke a skill programmatically, use the `skill` tool with the skill name and optional arguments.")
     lines.append("")
     lines.append("# Skill Evolution")
-    lines.append("Bear Code has an online skill evolution loop after each assistant response. Do not create or evolve skills during normal task execution unless the user explicitly asks for manual skill maintenance.")
+    lines.append("MyCode has an online skill evolution loop after each assistant response. Do not create or evolve skills during normal task execution unless the user explicitly asks for manual skill maintenance.")
     lines.append("If manual maintenance is explicitly requested, call `skill_evolve` only for durable reusable feedback on an existing skill, and call `skill_create` only when no suitable existing skill exists.")
     lines.append("Never create or evolve skills from one-off task content, private secrets, temporary project facts, or assistant-only guesses.")
     return "\n".join(lines)

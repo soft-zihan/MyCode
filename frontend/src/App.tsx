@@ -25,7 +25,7 @@ function Navigation() {
       <nav className="hidden md:flex w-64 bg-gray-900 text-white flex-col">
         <div className="p-6 border-b border-gray-700">
           <h1 className="text-2xl font-bold">MyCode</h1>
-          <p className="text-sm text-gray-400 mt-1">Visual Interface</p>
+          <p className="text-sm text-gray-400 mt-1">代码智能体实验平台</p>
         </div>
         <div className="flex-1 py-4">
           {navItems.map(item => {
@@ -48,8 +48,8 @@ function Navigation() {
           })}
         </div>
         <div className="p-4 border-t border-gray-700 text-xs text-gray-500">
-          <div>Backend: localhost:8000</div>
-          <div>Frontend: localhost:5173</div>
+          <div>后端：localhost:5555</div>
+          <div>前端：localhost:8090</div>
         </div>
       </nav>
 

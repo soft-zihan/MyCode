@@ -103,7 +103,7 @@ async def cmd_graph(agent: "Agent", args: str) -> None:
     category="config",
 )
 async def cmd_models(agent: "Agent", args: str) -> None:
-    from ...model_registry import discover_endpoints
+    from ...core.model_registry import discover_endpoints
     target = args.strip()
     if target:
         agent.model = target

@@ -51,9 +51,6 @@ class AgentOptions:
     # Checkpoint 存储
     checkpoint_store: Any | None = None
     
-    # Session 存储（Capability Seam）
-    session_storage: Any | None = None
-    
     # 其他选项
     extra: dict[str, Any] = field(default_factory=dict)
     
@@ -74,7 +71,6 @@ class AgentOptions:
             "is_sub_agent": self.is_sub_agent,
             "parent_abort_event": self.parent_abort_event,
             "checkpoint_store": self.checkpoint_store,
-            "session_storage": self.session_storage,
             "extra": self.extra,
         }
     

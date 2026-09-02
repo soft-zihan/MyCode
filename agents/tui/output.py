@@ -47,7 +47,7 @@ LOGO = r"""
 
 
 def print_welcome() -> None:
-    title = Text("BearCode", style=f"bold {theme.PRIMARY}")
+    title = Text("MyCode", style=f"bold {theme.PRIMARY}")
     subtitle = Text("Evolvable Coding Agent", style=f"italic {theme.TEXT_MUTED}")
 
     commands = Table.grid(padding=(0, 1))

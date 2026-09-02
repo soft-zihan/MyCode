@@ -13,21 +13,21 @@ class AuditLogger:
     def log_permission_decision(self, tool: str, decision: str, risk_level: str = "low", reason: str = ""):
         with otel_audit(decision, tool, risk_level) as span:
             if span:
-                span.set_attribute("bearcode.audit.reason", reason)
+                span.set_attribute("MyCode.audit.reason", reason)
 
     def log_dangerous_operation(self, tool: str, input_summary: str, risk_level: str):
         with otel_span(f"audit.dangerous.{tool}", {
-            "bearcode.audit.risk_level": risk_level,
-            "bearcode.audit.requires_approval": risk_level in ("high", "critical"),
+            "MyCode.audit.risk_level": risk_level,
+            "MyCode.audit.requires_approval": risk_level in ("high", "critical"),
             "tool.input_summary": input_summary[:500],
         }) as span:
             pass
 
     def log_file_modification(self, file_path: str, operation: str, diff_summary: str = ""):
         with otel_span(f"audit.file.{operation}", {
-            "bearcode.audit.file_path": file_path,
-            "bearcode.audit.operation": operation,
-            "bearcode.audit.diff_summary": diff_summary[:1000],
+            "MyCode.audit.file_path": file_path,
+            "MyCode.audit.operation": operation,
+            "MyCode.audit.diff_summary": diff_summary[:1000],
         }) as span:
             pass
 

@@ -1,6 +1,6 @@
 """/graph 命令 —— code-review-graph 代码图谱管理。
 
-BearCode 通过 MCP（见 `.mcp.json`）接入外部 code-review-graph（CRG），
+MyCode 通过 MCP（见 `.mcp.json`）接入外部 code-review-graph（CRG），
 让模型获得符号搜索 / 调用关系 / 影响面分析能力。本模块提供 `/graph`
 REPL 命令，用 CRG 的 CLI 显式触发图谱构建 / 增量更新 / 状态查看。
 

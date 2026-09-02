@@ -1,4 +1,4 @@
-"""Textual TUI for BearCode - 全面对接后端。
+"""Textual TUI for MyCode - 全面对接后端。
 
 架构对齐 opencode：
 - 组件化（Messages, Input, Dialogs）
@@ -295,8 +295,8 @@ class InputContainer(Container):
 # Main App - 主应用
 # ============================================================
 
-class BearCodeApp(App):
-    """BearCode TUI - 全面对接后端。"""
+class MyCodeApp(App):
+    """MyCode TUI - 全面对接后端。"""
     
     CSS = """
     Screen {
@@ -354,7 +354,7 @@ class BearCodeApp(App):
     
     async def on_mount(self) -> None:
         # Welcome message
-        self.state.add_message("system", "Welcome to BearCode!")
+        self.state.add_message("system", "Welcome to MyCode!")
         
         if self.agent:
             status = self.agent.status_line()
@@ -423,16 +423,10 @@ class BearCodeApp(App):
                 if not cmd_args:
                     self.state.add_message("system", "[red]Usage: /switch <session_id>[/red]")
                 else:
-                    from agents.core.session import load_session
+                    from agents.core.session import load_session, session_to_restore_dict
                     session = load_session(cmd_args)
                     if session:
-                        self.agent.restore_session({
-                            "openaiMessages": session.get("openaiMessages"),
-                            "foldedSessionMemories": session.get("foldedSessionMemories"),
-                            "checkpointStore": session.get("checkpointStore"),
-                            "turnBoundaries": session.get("turnBoundaries"),
-                            "contextStore": session.get("contextStore"),
-                        })
+                        self.agent.restore_session(session_to_restore_dict(session))
                         self.agent.session_id = cmd_args
                         self.state.current_session_id = cmd_args
                         self.state.add_message("system", f"[green]Switched to session {cmd_args[:8]}...[/green]")
@@ -445,7 +439,7 @@ class BearCodeApp(App):
                     self.agent.model = cmd_args.strip()
                     self.state.add_message("system", f"[green]Switched to model: {cmd_args.strip()}[/green]")
                 else:
-                    from agents.model.model_registry import discover_endpoints
+                    from agents.core.model_registry import discover_endpoints
                     endpoints = discover_endpoints()
                     lines = [f"[cyan]Current model: {self.agent.model}[/cyan]"]
                     if endpoints:
@@ -538,16 +532,10 @@ class BearCodeApp(App):
                         lines.append("[cyan]Usage: /resume <session_id>[/cyan]")
                         self.state.add_message("system", "\n".join(lines))
                 else:
-                    from agents.core.session import load_session
+                    from agents.core.session import load_session, session_to_restore_dict
                     session = load_session(cmd_args)
                     if session:
-                        self.agent.restore_session({
-                            "openaiMessages": session.get("openaiMessages"),
-                            "foldedSessionMemories": session.get("foldedSessionMemories"),
-                            "checkpointStore": session.get("checkpointStore"),
-                            "turnBoundaries": session.get("turnBoundaries"),
-                            "contextStore": session.get("contextStore"),
-                        })
+                        self.agent.restore_session(session_to_restore_dict(session))
                         self.agent.session_id = cmd_args
                         self.state.current_session_id = cmd_args
                         self.state.add_message("system", f"[green]Resumed session {cmd_args[:8]}...[/green]")
@@ -837,7 +825,7 @@ class BearCodeApp(App):
         if not self.agent:
             return
         
-        from agents.model.model_registry import discover_endpoints
+        from agents.core.model_registry import discover_endpoints
         endpoints = discover_endpoints()
         options = [(f"{eid}: {ep.model or '(default)'}", eid) for eid, ep in sorted(endpoints.items())]
         
@@ -848,7 +836,7 @@ class BearCodeApp(App):
     
     def _on_model_selected(self, endpoint_id: str | None) -> None:
         if endpoint_id and self.agent:
-            from agents.model.model_registry import discover_endpoints
+            from agents.core.model_registry import discover_endpoints
             endpoints = discover_endpoints()
             if endpoint_id in endpoints:
                 ep = endpoints[endpoint_id]
@@ -865,8 +853,8 @@ class BearCodeApp(App):
 # ============================================================
 
 def run_app() -> None:
-    """Run the BearCode TUI application."""
-    app = BearCodeApp()
+    """Run the MyCode TUI application."""
+    app = MyCodeApp()
     app.run()
 
 
@@ -907,24 +895,14 @@ def run_textual_app(args) -> None:
     if session_to_resume:
         session = load_session(session_to_resume)
         if session:
+            from agents.core.session import session_to_restore_dict
+            restore_data = session_to_restore_dict(session)
             if args.fork:
-                agent.restore_session({
-                    "openaiMessages": session.get("openaiMessages"),
-                    "foldedSessionMemories": session.get("foldedSessionMemories"),
-                    "checkpointStore": session.get("checkpointStore"),
-                    "turnBoundaries": session.get("turnBoundaries"),
-                    "contextStore": session.get("contextStore"),
-                })
+                agent.restore_session(restore_data)
                 agent.fork_session()
             else:
                 agent.session_id = session_to_resume
-                agent.restore_session({
-                    "openaiMessages": session.get("openaiMessages"),
-                    "foldedSessionMemories": session.get("foldedSessionMemories"),
-                    "checkpointStore": session.get("checkpointStore"),
-                    "turnBoundaries": session.get("turnBoundaries"),
-                    "contextStore": session.get("contextStore"),
-                })
+                agent.restore_session(restore_data)
     
-    app = BearCodeApp(agent=agent)
+    app = MyCodeApp(agent=agent)
     app.run()

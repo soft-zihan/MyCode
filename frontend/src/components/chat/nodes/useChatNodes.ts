@@ -7,6 +7,8 @@ interface UseChatNodesReturn {
   addUserMessage: (content: string, contextFiles?: string[], agent?: string, model?: string) => void;
   resetNodes: () => void;
   loadMessages: (messages: Array<{role: string; content: string; timestamp?: string; contextFiles?: string[]; agent?: string; model?: string}>) => void;
+  loadOpenAIMessages: (messages: Array<Record<string, unknown>>, traceEvents?: Array<Record<string, unknown>>) => void;
+  loadTraceEvents: (events: Array<Record<string, unknown>>) => void;
 }
 
 const emptySnapshot: ChatSnapshot = { order: [], nodes: new Map() };
@@ -208,6 +210,12 @@ export function useChatNodes(): UseChatNodesReturn {
     // Tool call event - creates a new node (breaks assistant chain)
     if (data.tool_call) {
       const tc = data.tool_call as { call_id: string; name: string; input: Record<string, unknown>; sub_agent_id?: string };
+
+      // Skip tool-call node for 'agent' tool - sub_agent_start will create a sub-agent node
+      if (tc.name === 'agent') {
+        return;
+      }
+
       const subAgentId = tc.sub_agent_id;
 
       if (subAgentId) {
@@ -274,6 +282,11 @@ export function useChatNodes(): UseChatNodesReturn {
     // Tool result event
     if (data.tool_result) {
       const tr = data.tool_result as { call_id: string; name: string; result: string; status: string; duration_ms?: number; snapshot?: { file_path: string; old_content: string; new_content: string }; sub_agent_id?: string };
+
+      // Skip tool-result for 'agent' tool - sub_agent_end handles the completion
+      if (tr.name === 'agent') {
+        return;
+      }
 
       const updateTool = (node: ChatNode): ChatNode => {
         if (node.kind !== 'tool-call') return node;
@@ -401,7 +414,7 @@ export function useChatNodes(): UseChatNodesReturn {
   }, [addNode, updateNode]);
 
   const resetNodes = useCallback(() => {
-    setSnapshot(emptySnapshot);
+    setSnapshot({ order: [], nodes: new Map() });
     currentAssistantKeyRef.current = null;
     subAgentInfoRef.current.clear();
   }, []);
@@ -436,17 +449,82 @@ export function useChatNodes(): UseChatNodesReturn {
             content = msg.content.replace(/<thinking>[\s\S]*?<\/thinking>/, '').trim();
           }
           
-          const key = nextKey('assistant');
-          newNodes.set(key, {
-            key,
-            kind: 'assistant',
-            seq: nextSeq(),
-            content,
-            thinking: thinking || undefined,
-            streaming: false,
-            timestamp: msg.timestamp || new Date().toISOString(),
-          });
-          newOrder.push(key);
+          // Parse :::tool-block markers into tool-call nodes
+          const toolBlockRegex = /:::tool-block\n([\s\S]*?)\n:::/g;
+          let lastIndex = 0;
+          let match;
+          let hasToolBlocks = false;
+          
+          while ((match = toolBlockRegex.exec(content)) !== null) {
+            hasToolBlocks = true;
+            // Add text before tool block as assistant node
+            const textBefore = content.slice(lastIndex, match.index).trim();
+            if (textBefore) {
+              const key = nextKey('assistant');
+              newNodes.set(key, {
+                key,
+                kind: 'assistant',
+                seq: nextSeq(),
+                content: textBefore,
+                thinking: thinking || undefined,
+                streaming: false,
+                timestamp: msg.timestamp || new Date().toISOString(),
+              });
+              newOrder.push(key);
+              thinking = ''; // Only attach thinking to first node
+            }
+            
+            // Parse tool block content
+            const blockContent = match[1];
+            const lines = blockContent.split('\n\n');
+            const callLine = lines[0] || '';
+            const resultContent = lines.slice(1).join('\n\n');
+            
+            // Extract tool name from call line
+            let toolName = 'unknown';
+            const nameMatch = callLine.match(/(?:Read|Write|Edit|Search|List|▶️)\s+\[?([^\]\)]+)/);
+            if (nameMatch) {
+              toolName = nameMatch[1];
+            } else if (callLine.includes('▶️')) {
+              toolName = 'run_shell';
+            } else if (callLine.includes('🔍')) {
+              toolName = 'grep_search';
+            } else if (callLine.includes('📂')) {
+              toolName = 'list_files';
+            }
+            
+            // Create tool-call node
+            const toolKey = nextKey('tool');
+            newNodes.set(toolKey, {
+              key: toolKey,
+              kind: 'tool-call',
+              seq: nextSeq(),
+              callId: `restored_${toolKey}`,
+              name: toolName,
+              input: {},
+              status: 'success',
+              result: resultContent,
+            });
+            newOrder.push(toolKey);
+            
+            lastIndex = match.index + match[0].length;
+          }
+          
+          // Add remaining text after last tool block
+          const textAfter = content.slice(lastIndex).trim();
+          if (textAfter || !hasToolBlocks) {
+            const key = nextKey('assistant');
+            newNodes.set(key, {
+              key,
+              kind: 'assistant',
+              seq: nextSeq(),
+              content: textAfter || content,
+              thinking: thinking || undefined,
+              streaming: false,
+              timestamp: msg.timestamp || new Date().toISOString(),
+            });
+            newOrder.push(key);
+          }
         }
       }
       
@@ -454,5 +532,238 @@ export function useChatNodes(): UseChatNodesReturn {
     });
   }, [resetNodes]);
 
-  return { snapshot, handleSSEEvent, addUserMessage, resetNodes, loadMessages };
+  // 将 openaiMessages 转换为 SSE 事件序列，复用 handleSSEEvent 逻辑
+  const loadOpenAIMessages = useCallback((messages: Array<Record<string, unknown>>, traceEvents?: Array<Record<string, unknown>>) => {
+    resetNodes();
+    
+    // 从 trace 建立 agent tool_call_id → sub_agent_id 映射
+    const agentCallToSubAgent = new Map<string, string>();
+    if (traceEvents) {
+      let pendingAgentCallId: string | null = null;
+      for (const ev of traceEvents) {
+        const kind = ev.kind as string;
+        if (kind === 'stream.tool_call' && ev.name === 'agent') {
+          pendingAgentCallId = ev.call_id as string;
+        } else if (kind === 'stream.sub_agent_start' && pendingAgentCallId) {
+          agentCallToSubAgent.set(pendingAgentCallId, ev.agent_id as string);
+          pendingAgentCallId = null;
+        }
+      }
+    }
+    
+    // 收集所有 agent 工具调用的 call_id
+    const agentToolCallIds = new Set<string>();
+    for (const msg of messages) {
+      if (msg.role === 'assistant' && Array.isArray(msg.tool_calls)) {
+        for (const tc of msg.tool_calls as any[]) {
+          const fn = tc.function || {};
+          if (fn.name === 'agent') {
+            agentToolCallIds.add(tc.id);
+          }
+        }
+      }
+    }
+    
+    for (const msg of messages) {
+      const role = msg.role as string;
+      
+      if (role === 'system') {
+        continue;
+      }
+      
+      if (role === 'user') {
+        const content = typeof msg.content === 'string' 
+          ? msg.content 
+          : Array.isArray(msg.content)
+            ? msg.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n')
+            : '';
+        
+        const filteredContent = content.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
+        
+        if (filteredContent) {
+          addUserMessage(filteredContent);
+        }
+      }
+      
+      if (role === 'assistant') {
+        const thinking = typeof msg.thinking === 'string' ? msg.thinking : '';
+        
+        let textContent = '';
+        if (typeof msg.content === 'string') {
+          textContent = msg.content;
+        } else if (Array.isArray(msg.content)) {
+          textContent = msg.content
+            .filter((b: any) => b.type === 'text')
+            .map((b: any) => b.text)
+            .join('\n');
+        }
+        
+        if (thinking) {
+          handleSSEEvent({ thinking: { content: thinking } });
+        }
+        
+        if (textContent.trim()) {
+          handleSSEEvent({ text: { content: textContent } });
+        }
+        
+        if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+          for (const tc of msg.tool_calls) {
+            const fn = (tc as any).function || {};
+            const callId = (tc as any).id || `tc_${Date.now()}_${Math.random()}`;
+            let input: Record<string, unknown> = {};
+            try {
+              input = typeof fn.arguments === 'string' ? JSON.parse(fn.arguments) : {};
+            } catch {}
+            
+            if (fn.name === 'agent') {
+              // agent 工具调用：立即创建子智能体节点占位
+              const subAgentId = agentCallToSubAgent.get(callId);
+              if (subAgentId) {
+                handleSSEEvent({
+                  sub_agent_start: {
+                    agent_type: 'agent',
+                    description: (input.description as string) || (input.prompt as string)?.slice(0, 50) || '',
+                    agent_id: subAgentId,
+                  },
+                });
+              }
+            } else {
+              handleSSEEvent({
+                tool_call: {
+                  call_id: callId,
+                  name: fn.name || 'unknown',
+                  input,
+                },
+              });
+            }
+          }
+        }
+      }
+      
+      if (role === 'tool') {
+        const toolCallId = msg.tool_call_id as string;
+        if (agentToolCallIds.has(toolCallId)) {
+          continue;
+        }
+        
+        const result = typeof msg.content === 'string' ? msg.content : '';
+        handleSSEEvent({
+          tool_result: {
+            call_id: toolCallId,
+            name: (msg.name as string) || 'unknown',
+            result,
+            status: 'ok',
+          },
+        });
+      }
+    }
+    
+    handleSSEEvent({ done: true });
+  }, [resetNodes, addUserMessage, handleSSEEvent]);
+
+  // Load trace events and reconstruct sub-agent information
+  const loadTraceEvents = useCallback((events: Array<Record<string, unknown>>) => {
+    for (const event of events) {
+      const kind = event.kind as string;
+      
+      // Sub-agent start
+      if (kind === 'stream.sub_agent_start') {
+        const agentId = event.agent_id as string;
+        const agentType = event.agent_type as string;
+        const description = event.description as string;
+        subAgentInfoRef.current.set(agentId, { agentType, description });
+        
+        // Create sub-agent node
+        handleSSEEvent({
+          sub_agent_start: {
+            agent_type: agentType,
+            description: description,
+            agent_id: agentId,
+          },
+        });
+      }
+      
+      // Sub-agent tool call
+      if (kind === 'tool_call.start') {
+        const subAgentId = event.sub_agent_id as string;
+        const tool = event.tool as string;
+        const callId = event.call_id as string || `tc_${Date.now()}_${Math.random()}`;
+        
+        if (subAgentId) {
+          handleSSEEvent({
+            tool_call: {
+              call_id: callId,
+              name: tool,
+              input: {},
+              sub_agent_id: subAgentId,
+            },
+          });
+        }
+      }
+      
+      // Sub-agent tool result
+      if (kind === 'tool_call.end') {
+        const subAgentId = event.sub_agent_id as string;
+        const tool = event.tool as string;
+        const callId = event.call_id as string || `tc_${Date.now()}_${Math.random()}`;
+        const success = event.success as boolean;
+        
+        if (subAgentId) {
+          handleSSEEvent({
+            tool_result: {
+              call_id: callId,
+              name: tool,
+              result: '',
+              status: success ? 'ok' : 'error',
+              sub_agent_id: subAgentId,
+            },
+          });
+        }
+      }
+      
+      // Sub-agent end
+      if (kind === 'stream.sub_agent_end') {
+        const agentId = event.agent_id as string;
+        const status = event.status as string;
+        if (agentId) {
+          handleSSEEvent({
+            sub_agent_end: {
+              agent_type: '',
+              agent_id: agentId,
+              status: status,
+            },
+          });
+        }
+      }
+      
+      // Sub-agent turn end - extract content
+      if (kind === 'turn.end') {
+        const subAgentId = event.sub_agent_id as string;
+        const assistantPreview = event.assistant_preview as string;
+        const thinkingPreview = event.thinking_preview as string;
+        
+        if (subAgentId && assistantPreview) {
+          // Send text event to update sub-agent node content
+          handleSSEEvent({
+            text: {
+              content: assistantPreview,
+              sub_agent_id: subAgentId,
+            },
+          });
+          
+          // Send thinking event if available
+          if (thinkingPreview) {
+            handleSSEEvent({
+              thinking: {
+                content: thinkingPreview,
+                sub_agent_id: subAgentId,
+              },
+            });
+          }
+        }
+      }
+    }
+  }, [handleSSEEvent]);
+
+  return { snapshot, handleSSEEvent, addUserMessage, resetNodes, loadMessages, loadOpenAIMessages, loadTraceEvents };
 }

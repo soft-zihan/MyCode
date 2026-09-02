@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 def grep_search(inp: dict) -> str:
-    from agents.model.runtime import get_runtime, DockerRuntime
+    from agents.tools.runtime import get_runtime, DockerRuntime
     rt = get_runtime()
     pattern = inp["pattern"]
 

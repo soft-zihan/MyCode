@@ -76,7 +76,7 @@ class DemoApp(App):
         
         # Welcome message
         log.write(Panel(
-            "[bold]BearCode Textual TUI Demo[/bold]\n\n"
+            "[bold]MyCode Textual TUI Demo[/bold]\n\n"
             "Features:\n"
             "1. Clickable thinking blocks (click to expand/collapse)\n"
             "2. Tool call display with icons\n"

@@ -1,7 +1,7 @@
 import { memo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Brain, ChevronDown, ChevronRight } from 'lucide-react';
+import { Brain, ChevronDown, ChevronRight, Copy, Check } from 'lucide-react';
 import type { AssistantNode } from './types';
 
 interface AssistantNodeViewProps {
@@ -30,8 +30,17 @@ const fileLinkRenderer = (onFileClick?: (path: string) => void) => (props: React
 
 export const AssistantNodeView = memo(function AssistantNodeView({ node, onFileClick }: AssistantNodeViewProps) {
   const [showThinking, setShowThinking] = useState(false);
+  const [copied, setCopied] = useState(false);
   
   if (!node.content && !node.thinking && !node.streaming) return null;
+
+  const handleCopy = async () => {
+    if (node.content) {
+      await navigator.clipboard.writeText(node.content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
 
   return (
     <div className="flex justify-start">
@@ -80,8 +89,27 @@ export const AssistantNodeView = memo(function AssistantNodeView({ node, onFileC
             </div>
           )}
           
-          <div className="text-xs mt-1 flex items-center gap-2 text-gray-400">
+          <div className="text-xs mt-1 flex items-center justify-between text-gray-400">
             <span>{new Date(node.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
+            {node.content && !node.streaming && (
+              <button
+                onClick={handleCopy}
+                className="flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-gray-200 hover:text-gray-600 transition-colors"
+                title="Copy message"
+              >
+                {copied ? (
+                  <>
+                    <Check className="w-3 h-3" />
+                    <span>Copied</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3 h-3" />
+                    <span>Copy</span>
+                  </>
+                )}
+              </button>
+            )}
           </div>
         </div>
       </div>

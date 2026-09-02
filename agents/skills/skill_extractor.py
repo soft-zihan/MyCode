@@ -86,7 +86,7 @@ async def extract_online_skill_candidate(
     hint: str = "",
 ) -> OnlineSkillCandidate | None:
     system = (
-        "You are Bear Code's online Skill Extractor.\n"
+        "You are MyCode's online Skill Extractor.\n"
         "Extract at most ONE reusable skill candidate from a live conversation window.\n"
         "Output ONLY strict JSON: {\"skills\": []} or {\"skills\": [{...}]}.\n\n"
         "Candidate fields: name, description, when_to_use, instructions, evidence, tags.\n\n"
@@ -149,7 +149,7 @@ async def maintain_online_skill_candidate(
     top_reference_name = str((retrieved_reference or {}).get("name") or "").strip()
 
     system = (
-        "You are Bear Code's online Skill Set Manager.\n"
+        "You are MyCode's online Skill Set Manager.\n"
         "Decide whether a candidate should add a new skill, merge into an existing skill, or be discarded.\n"
         "Output ONLY strict JSON.\n\n"
         "Schema:\n"

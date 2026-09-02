@@ -1,12 +1,12 @@
-# Bear Agent
+# MyCode
 
-Bear Agent 是一个基于 Python 实现的 **自进化 Harness Agent**。它不是简单的命令行聊天工具，而是一个可运行、可阅读、可扩展的本地 Coding Agent Runtime：统一编排大模型推理、工具调用、文件编辑、Shell 执行、权限控制、长期记忆、Skills、自进化、MCP 外部工具、子 Agent 和会话恢复。
+MyCode 是一个基于 Python 实现的 **自进化 Coding Agent**。它不是简单的命令行聊天工具，而是一个可运行、可阅读、可扩展的本地 Coding Agent Runtime：统一编排大模型推理、工具调用、文件编辑、Shell 执行、权限控制、长期记忆、Skills、自进化、MCP 外部工具、子 Agent 和会话恢复。
 
-项目重点是 **Harness**：模型只负责推理和提出工具调用意图，真正的环境操作由 Bear Code Runtime 统一做权限判断、工具执行、结果回写、上下文压缩和经验沉淀。它适合学习 Claude Code 类工具的底层机制，也适合作为个人 Coding Agent、项目分析助手或领域 Agent 的二次开发基础。
+项目重点是 **Agent Runtime**：模型只负责推理和提出工具调用意图，真正的环境操作由 MyCode Runtime 统一做权限判断、工具执行、结果回写、上下文压缩和经验沉淀。它适合学习 Claude Code 类工具的底层机制，也适合作为个人 Coding Agent、项目分析助手或领域 Agent 的二次开发基础。
 
 ## 核心亮点
 
-- **自进化 Harness Agent**：从用户反馈中自动抽取可复用规则，新增或合并到 `SKILL.md`，让 Agent 能随着使用持续沉淀能力。
+- **自进化 Coding Agent**：从用户反馈中自动抽取可复用规则，新增或合并到 `SKILL.md`，让 Agent 能随着使用持续沉淀能力。
 - **完整 Agent Loop**：模型请求、tool call 解析、权限检查、工具执行、tool result 回写、继续推理、会话保存形成闭环。
 - **OpenAI / Anthropic 双协议**：支持 OpenAI-compatible 和 Anthropic-compatible 接口，便于接入不同模型服务或代理网关。
 - **多模型注册表**：注册任意多个 URL/Key 相互独立的模型端点，主 Agent、子 Agent、side query 按**模型名**路由到对应端点。
@@ -19,16 +19,10 @@ Bear Agent 是一个基于 Python 实现的 **自进化 Harness Agent**。它不
 - **MCP 外部工具扩展**：自研 stdio JSON-RPC MCP Client，把外部 MCP Server 工具包装为 `mcp__server__tool`。
 - **子 Agent**：支持 `explore`、`plan`、`general` 以及自定义子 Agent，用隔离上下文完成探索、规划或局部任务。
 - **会话恢复和上下文压缩**：自动保存 session，支持 `--resume`、`/compact`，并对大工具结果做截断或持久化。
-- **可插拔后端架构（Capability Seam）**：借鉴 Pi 的 Capability Seam 模式，5 个核心功能模块抽象为可替换接口，支持多种后端实现：
-  - **Session Seam**：会话存储抽象（JSON/JSONL/内存）
-  - **Compaction Seam**：压缩策略抽象（四级可逆/单级/自定义）
-  - **Provider Seam**：LLM Provider 抽象（OpenAI/Anthropic/自定义）
-  - **Memory Seam**：Memory 存储抽象（文件/SQLite）
-  - **Skill Seam**：Skill 存储抽象（文件型）
 
 ## 评估框架（v2.1 计划中）
 
-BearCode 计划集成 5 个开源 benchmark 建立完整的评估体系：
+MyCode 计划集成 5 个开源 benchmark 建立完整的评估体系：
 
 | Benchmark | 任务数 | 评估维度 |
 |-----------|--------|---------|
@@ -44,7 +38,7 @@ BearCode 计划集成 5 个开源 benchmark 建立完整的评估体系：
 
 ## 项目架构
 
-![Bear Agent 总体架构](wiki/assets/architecture/01-overall-architecture.svg)
+![MyCode 总体架构](wiki/assets/architecture/01-overall-architecture.svg)
 
 核心运行链路：
 
@@ -67,34 +61,70 @@ BearCode 计划集成 5 个开源 benchmark 建立完整的评估体系：
 ```text
 BearAgent/
 ├── agents/
+│   ├── agent.py                   # Agent 协调器（~1400行）
+│   ├── agent_loop.py              # 推理循环（模型调用、工具调度、流式输出）
+│   ├── service.py                 # AgentService 门面
 │   ├── main.py                    # CLI 入口、REPL、参数解析
-│   ├── agent.py                   # Agent Runtime、模型调用、工具调度、上下文压缩
-│   ├── options.py                 # AgentOptions 配置数据类
-│   ├── seams/                     # Capability Seam 接口定义（v0.2 新增）
-│   │   ├── session.py             # Session Seam 接口 + 实现
-│   │   ├── compaction.py          # Compaction Seam 接口 + 实现
-│   │   ├── provider.py            # Provider Seam 接口 + 实现
-│   │   ├── memory.py              # Memory Seam 接口 + 实现
-│   │   └── skill.py               # Skill Seam 接口 + 实现
-│   ├── tools.py                   # 内置工具和权限系统
-│   ├── prompt.py                  # System prompt 动态构建
-│   ├── skills.py                  # Skills 加载、检索、执行、创建和演化封装
-│   ├── online_skill_evolution.py  # 在线 Skill 抽取和 add/merge/discard 决策
-│   ├── skill_evolution.py         # Skill 落盘、版本快照、审计统计
-│   ├── memory.py                  # 长期记忆系统（含 memory 工具 add/replace/remove）
-│   ├── mcp_client.py              # MCP stdio JSON-RPC 客户端
-│   ├── subagent.py                # 子 Agent 配置
-│   ├── session.py                 # 会话保存与恢复
-│   ├── model_registry.py          # 多模型端点注册表，按模型名路由
-│   ├── checkpoints.py             # 文件写前快照与轮次边界（/rewind）
-│   ├── goal.py                    # /goal 自主目标循环（标准提炼+verifier）
-│   ├── context_edit.py            # 上下文描述与按工具配对组的局部删除
-│   ├── context_store.py           # ACE 式可逆上下文存储（raw+abstract）
-│   ├── session_memory.py          # 会话记忆折叠 schema 与解析
-│   ├── online_skill_eval.py       # 在线 Skills 评测（replay/规则/LLM judge）
-│   ├── frontmatter.py             # frontmatter 解析器
-│   └── ui.py                      # 终端 UI 输出
-├── tests/                         # pytest 测试（307 例，离线可跑）
+│   ├── config.py                  # JSON 配置管理
+│   ├── goal.py                    # /goal 自主目标循环
+│   ├── graph_cmd.py               # /graph 命令
+│   ├── ui.py                      # TUI 输出 shim
+│   ├── _utils.py                  # 共享工具函数
+│   │
+│   ├── core/                      # Agent 核心基础设施
+│   │   ├── context_compressor.py  # 上下文压缩（预算/裁剪/微压缩/折叠）
+│   │   ├── context_store.py       # ACE 式可逆上下文存储
+│   │   ├── context_edit.py        # 上下文描述与局部删除
+│   │   ├── permission_gate.py     # 运行时权限交互
+│   │   ├── permission_set.py      # Agent 级权限集
+│   │   ├── session_lifecycle.py   # Session 持久化/Rewind/Fork
+│   │   ├── session.py             # Session 数据模型
+│   │   ├── session_memory.py      # 会话记忆折叠
+│   │   ├── checkpoints.py         # 文件写前快照（/rewind）
+│   │   ├── model_registry.py      # 多模型端点注册，按模型名路由
+│   │   ├── subagent.py            # 子 Agent 配置与生成
+│   │   ├── steer_queue.py         # steer/follow_up 队列
+│   │   ├── hooks.py               # 工具调用钩子
+│   │   ├── stats_collector.py     # 运行时统计
+│   │   ├── options.py             # AgentOptions 配置数据类
+│   │   ├── prompt.py              # System prompt 动态构建
+│   │   └── agent_mode.py          # Agent 模式定义
+│   │
+│   ├── tools/                     # 工具系统
+│   │   ├── __init__.py            # 工具分发
+│   │   ├── registry.py            # 静态工具定义 + 执行模式
+│   │   ├── mcp_registry.py        # MCP 工具动态注册
+│   │   ├── executor.py            # 工具执行辅助函数
+│   │   ├── mcp.py                 # MCP stdio JSON-RPC 客户端
+│   │   ├── runtime.py             # 运行时抽象（Local/Docker）
+│   │   ├── file_tools.py          # 文件读写编辑
+│   │   ├── shell_tools.py         # Shell 命令执行
+│   │   ├── search_tools.py        # 代码搜索
+│   │   └── permissions.py         # 工具级权限
+│   │
+│   ├── skills/                    # Skill 系统
+│   │   ├── skills.py              # Skill 加载、检索、执行
+│   │   ├── skill_file_ops.py      # Skill 文件操作、版本快照
+│   │   ├── skill_extractor.py     # 从对话提取候选 Skill
+│   │   ├── skill_evaluator.py     # 评估变体质量
+│   │   ├── skill_orchestrator.py  # Skill/Memory 编排
+│   │   └── executable_skills.py   # Python 可执行 Skill
+│   │
+│   ├── memory/                    # 记忆系统
+│   │   ├── memory.py              # 长期记忆（含 memory 工具）
+│   │   └── frontmatter.py         # YAML frontmatter 解析
+│   │
+│   ├── evolution/                 # 自进化系统
+│   │   ├── refinement.py          # 精炼数据结构
+│   │   ├── evolution.py           # 应用精炼提案
+│   │   └── rollback.py            # 回滚精炼
+│   │
+│   ├── daemon/                    # 后台运行
+│   ├── cli/                       # CLI 命令
+│   ├── tui/                       # 终端 UI
+│   └── observability/             # 可观测性（trace、cost、audit）
+│
+├── tests/                         # pytest 测试
 ├── .bear/
 │   ├── skills/                    # 项目级 Skills
 │   └── skill-evolution/           # Skills 自进化审计产物
@@ -180,9 +210,6 @@ BEAR_MODEL_GENERAL=deepseek-v4-pro
 # side query 路由（记忆召回/会话折叠/skill 进化等轻量调用）
 BEAR_SIDE_MODEL=deepseek-v4-pro
 
-# 上下文窗口与自动压缩（可选）
-BEAR_CONTEXT_WINDOW=200000        # 覆盖模型上下文窗口（token）
-BEAR_AUTO_COMPACT_THRESHOLD=0.9   # 上下文达到该比例时自动压缩（默认 0.7）
 ```
 
 自定义子 Agent 也可以在 `.bear/agents/<name>.md` frontmatter 里写 `model: <模型名>` 自行配置，无需环境变量。
@@ -227,7 +254,7 @@ python3 -m agents.main --resume
 
 ## 如何让项目自动沉淀并进化 Skills
 
-Bear Code 的核心特色是 **自进化 Skills**。它可以从用户明确反馈中抽取未来可复用的规则，并自动新增或合并到项目级或用户级 `SKILL.md`。
+MyCode 的核心特色是 **自进化 Skills**。它可以从用户明确反馈中抽取未来可复用的规则，并自动新增或合并到项目级或用户级 `SKILL.md`。
 
 ### 1. 开启自动自进化
 
@@ -316,9 +343,10 @@ python3 -m agents.main --yolo
 
 ```text
 agents/agent.py
-agents/online_skill_evolution.py
-agents/skills.py
-agents/skill_evolution.py
+agents/skills/skill_extractor.py
+agents/skills/skills.py
+agents/skills/skill_file_ops.py
+agents/evolution/evolution.py
 ```
 
 审计产物：
@@ -452,7 +480,7 @@ Skill 和 Memory 的区别：
 
 ## MCP 支持
 
-Bear Code 支持 MCP 外部工具扩展。MCP Server 可以通过 stdio JSON-RPC 暴露工具，Bear Code 会将其包装为 Agent 可调用工具。
+MyCode 支持 MCP 外部工具扩展。MCP Server 可以通过 stdio JSON-RPC 暴露工具，MyCode 会将其包装为 Agent 可调用工具。
 
 配置来源：
 
@@ -497,7 +525,7 @@ docker run --rm -it \
   --env-file .env \
   -v "$PWD:/workspace" \
   -v bear-code-sessions:/root/.bear-code \
-  -v bear-code-memory:/root/.BearCode \
+  -v bear-code-memory:/root/.MyCode \
   bear-code
 ```
 
@@ -510,7 +538,7 @@ docker run --rm -it \
   -e BEAR_AUTO_SKILL_TARGET=project \
   -v "$PWD:/workspace" \
   -v bear-code-sessions:/root/.bear-code \
-  -v bear-code-memory:/root/.BearCode \
+  -v bear-code-memory:/root/.MyCode \
   bear-code --accept-edits
 ```
 
@@ -522,7 +550,7 @@ docker run --rm -it \
 | 项目级 Skills     | `.bear/skills/<skill_name>/SKILL.md`           |
 | 用户级 Skills     | `~/.bear/skills/<skill_name>/SKILL.md`         |
 | Skills 自进化审计 | `.bear/skill-evolution/`                       |
-| 长期记忆          | `~/.BearCode/projects/<project_hash>/memory/`  |
+| 长期记忆          | `~/.MyCode/projects/<project_hash>/memory/`  |
 | 会话历史          | `~/.bear-code/sessions/`                       |
 | 大工具结果        | `~/.bear-code/tool-results/`                   |
 | Plan Mode 计划    | `~/.bear/plans/`                               |
@@ -540,7 +568,7 @@ docker run --rm -it \
 | [核心源码阅读指南](wiki/核心源码阅读指南.md)            | 按源码顺序学习 Agent Loop、工具、Skills、Memory、MCP 和自进化 |
 | [技术亮点](wiki/技术亮点.md)                            | 技术亮点和核心代码讲解                                        |
 | [Skills 自进化逻辑](wiki/Skills自进化逻辑与实现思路.md) | 自进化设计和实现取舍                                          |
-| [简历包装](wiki/简历包装.md)                            | 简历 bullet、面试表达和项目包装                               |
+| [简历包装](wiki/MyCode/简历项目描述与面试准备.md)       | 简历 bullet、面试表达和项目包装                               |
 | [升级文档](wiki/升级文档.md)                            | 2026-08 升级 Step 0–9 的全部改动与实现原理                   |
 
 ## 测试
@@ -552,7 +580,7 @@ pip install -r requirements-dev.txt
 
 ## 适合如何使用
 
-Bear Code 适合：
+MyCode 适合：
 
 - 学习 Claude Code 类工具的 Agent Loop 和工具调用机制。
 - 学习如何做本地文件编辑型 Agent 的权限控制。
@@ -560,4 +588,4 @@ Bear Code 适合：
 - 扩展成个人 Coding Agent。
 - 扩展成带长期记忆和可复用经验沉淀的领域 Agent。
 
-如果只看一个核心点：Bear Code 是一个会把稳定用户反馈沉淀成 Skills 的 **自进化 Harness Agent**。
+如果只看一个核心点：MyCode 是一个会把稳定用户反馈沉淀成 Skills 的 **自进化 Coding Agent**。

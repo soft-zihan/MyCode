@@ -13,7 +13,9 @@ from typing import Callable, Awaitable, Any
 
 import openai
 
-from agents.model.mcp_client import McpManager
+from agents.tools.mcp import McpManager
+from agents.agent_loop import AgentLoop
+from agents.tools.executor import persist_large_result, detect_failure
 from agents.core.checkpoints import FileCheckpointStore, TurnBoundary
 from agents.core.context_store import (
     ContextStore,
@@ -22,7 +24,7 @@ from agents.core.context_store import (
     snipped_placeholder,
 )
 from agents.memory.memory import MemoryPrefetch, start_memory_prefetch, format_memories_for_injection
-from agents.model.model_registry import ModelEndpoint, resolve_agent_endpoint, resolve_side_endpoint
+from agents.core.model_registry import ModelEndpoint, resolve_agent_endpoint, resolve_side_endpoint
 from agents.core.prompt import build_system_prompt
 from agents.core.session_memory import (
     FOLD_SESSION_MEMORY_SYSTEM,
@@ -75,10 +77,18 @@ def _sanitize_for_utf8(value: Any) -> Any:
 
 
 async def _with_retry(fn, max_retries: int = 3):
+    from agents.core.circuit_breaker import llm_circuit_breaker
+
+    if not llm_circuit_breaker.can_execute():
+        raise RuntimeError("LLM API circuit breaker is open, retry later")
+
     for attempt in range(max_retries + 1):
         try:
-            return await fn()
+            result = await fn()
+            llm_circuit_breaker.record_success()
+            return result
         except Exception as error:
+            llm_circuit_breaker.record_failure()
             if attempt >= max_retries or not _is_retryable(error):
                 raise
             delay = min(1000 * (2 ** attempt), 30000) / 1000 + (hash(str(time.time())) % 1000) / 1000
@@ -87,50 +97,9 @@ async def _with_retry(fn, max_retries: int = 3):
             print_retry(attempt + 1, max_retries, reason)
             await asyncio.sleep(delay)
 
-MODEL_CONTEXT = {
-    "claude-opus-4-6": 200000,
-    "claude-sonnet-4-6": 200000,
-    "claude-sonnet-4-20250514": 200000,
-    "claude-haiku-4-5-20251001": 200000,
-    "claude-opus-4-20250514": 200000,
-    "gpt-4o": 128000,
-    "gpt-4o-mini": 128000,
-    "deepseek-chat":200000
-}
-
-def _get_context_windows(model:str)->int:
-    return MODEL_CONTEXT.get(model, 200000)
-
-
-def _resolve_context_window(model: str) -> int:
-    """上下文窗口：优先 BEAR_CONTEXT_WINDOW 环境变量，其次内置表，最后默认 200000。"""
-    raw = os.environ.get("BEAR_CONTEXT_WINDOW", "").strip()
-    if raw:
-        try:
-            v = int(raw)
-            if v > 0:
-                return v
-        except ValueError:
-            pass
-    return _get_context_windows(model)
-
-
-def _resolve_auto_compact_threshold() -> float:
-    """自动压缩阈值：优先 BEAR_AUTO_COMPACT_THRESHOLD（0~1），默认 AUTO_COMPACT_THRESHOLD。"""
-    raw = os.environ.get("BEAR_AUTO_COMPACT_THRESHOLD", "").strip()
-    if raw:
-        try:
-            v = float(raw)
-            if 0 < v <= 1:
-                return v
-        except ValueError:
-            pass
-    return AUTO_COMPACT_THRESHOLD
-
 
 #多层级压缩常数
 SNIP_THRESHOLD = 0.60
-AUTO_COMPACT_THRESHOLD = 0.70
 SNIP_PLACEHOLDER = "[Content snipped - re-read if needed]"
 SNIPPABLE_TOOLS = {"read_file", "grep_search", "list_files", "run_shell"}
 MICROCOMPACT_IDLE_S = 5 * 60  # 5 minutes
@@ -179,13 +148,8 @@ class Agent:
                  custom_tools: list[ToolDef] | None=None,
                  is_sub_agent: bool=False,
                  parent_abort_event: asyncio.Event | None=None,
-                 checkpoint_store: FileCheckpointStore | None=None,
-                 session_storage: Any | None=None,
-                 options: Any | None=None,
-                 compaction_strategy: Any | None=None,
-                 provider: Any | None=None,
-                 memory_store: Any | None=None,
-                 skill_store: Any | None=None,):
+                  checkpoint_store: FileCheckpointStore | None=None,
+                  options: Any | None=None,):
         # 如果提供了 options，则从中提取参数
         if options is not None:
             from agents.core.options import AgentOptions
@@ -203,9 +167,6 @@ class Agent:
                 is_sub_agent = options.is_sub_agent
                 parent_abort_event = options.parent_abort_event
                 checkpoint_store = options.checkpoint_store
-                session_storage = options.session_storage
-                # 从 extra 中提取 compaction_strategy
-                compaction_strategy = options.extra.get("compaction_strategy", compaction_strategy)
         
         self.permission_mode = permission_mode
         self.thinking = thinking
@@ -223,54 +184,18 @@ class Agent:
         self._side_client_cache: tuple[tuple, tuple] | None = None
         # 上下文窗口统一用 token 计数。context_window 是模型完整窗口（默认 200k），
         # effective_window 预留输出余量后用于压缩阈值计算。
-        self.context_window = _resolve_context_window(model)
+        from agents.config import get_endpoint_by_model
+        _ep = get_endpoint_by_model(model)
+        self.context_window = _ep.context_window if _ep else 200000
         self.effective_window = self.context_window - 20000
-        self.auto_compact_threshold = _resolve_auto_compact_threshold()
+        self.auto_compact_threshold = _ep.auto_compact_threshold if _ep else 0.70
         self.session_id = uuid.uuid4().hex[:8]
         self.session_start_time= time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
-        from agents.observability.trace import set_trace_session
-        set_trace_session(self.session_id)
+        # 只有主智能体设置 trace session，子智能体继承父智能体的 trace 文件
+        if not is_sub_agent:
+            from agents.observability.trace import set_trace_session
+            set_trace_session(self.session_id)
         
-        # Session Storage (Capability Seam)
-        # 如果未提供，则使用 LegacySessionStorage 适配器
-        if session_storage is not None:
-            self._session_storage = session_storage
-        else:
-            from agents.seams.session_adapter import LegacySessionStorage
-            self._session_storage = LegacySessionStorage(self.session_id)
-        
-        # Compaction Strategy (Capability Seam)
-        # 如果未提供，则使用默认压缩策略
-        if compaction_strategy is not None:
-            self._compaction_strategy = compaction_strategy
-        else:
-            from agents.seams.compaction_default import DefaultCompactionStrategy
-            self._compaction_strategy = DefaultCompactionStrategy(self)
-        
-        # Provider (Capability Seam)
-        # 如果未提供，则使用默认 Provider
-        if provider is not None:
-            self._provider = provider
-        else:
-            from agents.seams.provider_default import DefaultProvider
-            self._provider = DefaultProvider(self)
-        
-        # Memory Store (Capability Seam)
-        # 如果未提供，则使用默认 Memory Store
-        if memory_store is not None:
-            self._memory_store = memory_store
-        else:
-            from agents.seams.memory_default import DefaultMemoryStore
-            self._memory_store = DefaultMemoryStore()
-        
-        # Skill Store (Capability Seam)
-        # 如果未提供，则使用默认 Skill Store
-        if skill_store is not None:
-            self._skill_store = skill_store
-        else:
-            from agents.seams.skill_default import DefaultSkillStore
-            self._skill_store = DefaultSkillStore()
-
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.last_input_token_count = 0
@@ -377,26 +302,7 @@ class Agent:
         self._openai_messages.append({"role": "system", "content": self._system_prompt})
 
         self._refresh_runtime_system_prompt()
-
-    def get_session_storage(self) -> Any:
-        """获取会话存储后端。"""
-        return self._session_storage
-    
-    def get_compaction_strategy(self) -> Any:
-        """获取压缩策略。"""
-        return self._compaction_strategy
-    
-    def get_provider(self) -> Any:
-        """获取 LLM Provider。"""
-        return self._provider
-    
-    def get_memory_store(self) -> Any:
-        """获取 Memory Store。"""
-        return self._memory_store
-    
-    def get_skill_store(self) -> Any:
-        """获取 Skill Store。"""
-        return self._skill_store
+        self._loop = AgentLoop(self)
 
     #判断返回模型的思考模式
     def _resolve_thinking_mode(self) -> str:
@@ -405,7 +311,7 @@ class Agent:
         if not self._model_supports_thinking():
             return "disabled"
 
-        if self._mode_supports_adaptive_thinking(self.model):
+        if self._model_supports_adaptive_thinking():
             return "adaptive"
         return "enabled"
 
@@ -638,7 +544,7 @@ class Agent:
                 mcp_defs = self._mcp_manager.get_tool_definitions()
                 if mcp_defs:
                     # 注册 MCP 工具到 Registry
-                    from agents.model.tool_registry import global_registry
+                    from agents.tools.mcp_registry import global_registry
                     for mcp_def in mcp_defs:
                         # 从工具名中提取 server 名（格式：mcp__server__tool）
                         parts = mcp_def["name"].split("__")
@@ -648,13 +554,18 @@ class Agent:
                     # 同时更新 self.tools 以保持向后兼容
                     self.tools = self.tools + mcp_defs
             except asyncio.TimeoutError:
+                from .observability.trace import trace_error
+                trace_error("timeout", "MCP init timeout (30s)", operation="mcp_init")
                 print_error("MCP init timeout (30s) - continuing without MCP tools")
             except Exception as e:
+                from .observability.trace import trace_error
+                trace_error(type(e).__name__, str(e), operation="mcp_init")
                 print_error(f"MCP init failed: {e}")
 
         # 跨会话知识复用：注入相关历史会话记忆
-        # 可通过环境变量 BEAR_DISABLE_CROSS_SESSION_MEMORY 禁用
-        if not self.is_sub_agent and not os.environ.get("BEAR_DISABLE_CROSS_SESSION_MEMORY"):
+        from agents.config import load_config
+        _app_cfg = load_config()
+        if not self.is_sub_agent and _app_cfg.cross_session_memory:
             from agents.core.session_memory import search_folded_memories, format_folded_memories_for_injection
             related_memories = search_folded_memories(user_message, top_k=3)
             if related_memories:
@@ -693,13 +604,15 @@ class Agent:
         if self._stream_event_queue is not None:
             pass  # 队列已在 chat_stream 中初始化
         from .observability.trace import trace_event
-        trace_event(
-            "turn.start",
-            turn=self._turn_number,
-            session=self.session_id,
-            sub_agent=self.is_sub_agent,
-            user_preview=user_message[:200],
-        )
+        # 子智能体不写 session 字段，因为 trace 文件已经是主智能体的 session_id
+        trace_kwargs: dict[str, Any] = {
+            "turn": self._turn_number,
+            "sub_agent": self.is_sub_agent,
+            "user_preview": user_message[:200],
+        }
+        if not self.is_sub_agent:
+            trace_kwargs["session"] = self.session_id
+        trace_event("turn.start", **trace_kwargs)
         _turn_t0 = time.time()
         coro = self._chat_openai(user_message)
         self._current_task = asyncio.create_task(coro)
@@ -707,22 +620,46 @@ class Agent:
             await self._current_task
         except asyncio.CancelledError:
             self._aborted = True
-
+            from .observability.trace import trace_error
+            trace_error("cancelled", "Turn cancelled", operation="chat")
+            # 取消时也必须发送 done 事件，否则前端流永远不会结束
+            if self._stream_event_queue is not None and not self.is_sub_agent:
+                await self._stream_event_queue.put({"type": "done"})
+            raise
+        except Exception as e:
+            from .observability.trace import trace_error, trace_event
+            trace_error(type(e).__name__, str(e), operation="chat")
+            print_error(f"[ERROR] {type(e).__name__}: {e}")
+            trace_event(
+                "turn.end",
+                turn=self._turn_number,
+                aborted=True,
+                error=type(e).__name__,
+                duration_s=round(time.time() - _turn_t0, 2),
+            )
+            # 异常时也必须发送 done 事件
+            if self._stream_event_queue is not None and not self.is_sub_agent:
+                await self._stream_event_queue.put({"type": "done"})
+            return
         finally:
             self._current_task = None
         assistant_text = "".join(self._turn_output_buffer or []).strip()
+        thinking_text = "".join(self._turn_thinking_buffer or []).strip()
         self._turn_output_buffer = None
         self._turn_thinking_buffer = None
         self._turn_event_buffer = None
-        # 流式模式下，发送完成事件
-        if self._stream_event_queue is not None:
+        # 流式模式下，发送完成事件（只有主智能体发送，子智能体不发送，否则会提前结束主智能体的流）
+        if self._stream_event_queue is not None and not self.is_sub_agent:
             await self._stream_event_queue.put({"type": "done"})
+        # Aggregated trace event for the turn (includes thinking and text content)
         trace_event(
             "turn.end",
             turn=self._turn_number,
             aborted=self._aborted,
             duration_s=round(time.time() - _turn_t0, 2),
-            assistant_preview=assistant_text[:200],
+            assistant_preview=assistant_text[:500],
+            thinking_preview=thinking_text[:500] if thinking_text else None,
+            sub_agent_id=self._current_sub_agent_id,
         )
         # /goal 模式的 verifier 需要最近一轮的助手报告作为证据。
         self._last_assistant_text = assistant_text
@@ -749,7 +686,10 @@ class Agent:
                 tool_error_streak=self._tool_error_streak,
             )
         if not self.is_sub_agent:
-            print_divider()
+            try:
+                print_divider()
+            except Exception:
+                pass  # Ignore console errors in server environment
             await self._auto_save()
 
     async def chat_stream(self, user_message: str):
@@ -770,9 +710,7 @@ class Agent:
                     "type": "error",
                     "message": str(e)
                 })
-            finally:
-                # 确保发送完成事件
-                await self._stream_event_queue.put({"type": "done"})
+            # done 事件由 chat() 方法发送，这里不再重复发送
         
         # 创建后台任务
         task = asyncio.create_task(_run_chat())
@@ -824,8 +762,8 @@ class Agent:
             if self._current_sub_agent_id:
                 event["sub_agent_id"] = self._current_sub_agent_id
             asyncio.create_task(self._stream_event_queue.put(event))
-            from .observability.trace import trace_event
-            trace_event("stream.text", sub_agent_id=self._current_sub_agent_id, preview=text[:50])
+            # Removed per-chunk trace_event to reduce trace noise
+            # Text content is aggregated in turn.end via _turn_output_buffer
 
     def _build_fold_guidance_section(self) -> str:
         if self._custom_system_prompt is not None:
@@ -914,12 +852,7 @@ class Agent:
         self._repeat_chain_count = 0
 
     def _looks_like_tool_failure(self, tool_name: str, raw: str, result: str) -> bool:
-        text = f"{raw}\n{result}".lower()
-        if any(marker in text for marker in ("error", "denied", "timed out", "timeout")):
-            return True
-        if tool_name == "compact_context" and "no context compaction" in text:
-            return True
-        return False
+        return detect_failure(tool_name, raw, result)
 
 
     def clear_history(self)->None:
@@ -935,6 +868,186 @@ class Agent:
         self.total_output_tokens = 0
         self.last_input_token_count = 0
         print_info("Conversation cleared.")
+
+    # ── AgentLoop 公开接口 ─────────────────────────────────────────────────────
+
+    @property
+    def messages(self) -> list[dict]:
+        return self._openai_messages
+
+    @property
+    def openai_client(self):
+        return self._openai_client
+
+    @property
+    def stream_event_queue(self) -> asyncio.Queue | None:
+        return self._stream_event_queue
+
+    @property
+    def current_sub_agent_id(self) -> str | None:
+        return self._current_sub_agent_id
+
+    @property
+    def plan_file_path(self) -> str | None:
+        return self._plan_file_path
+
+    @property
+    def confirmed_paths(self) -> set[str]:
+        return self._confirmed_paths
+
+    @property
+    def context_cleared(self) -> bool:
+        return self._context_cleared
+
+    @property
+    def memory_prefetch(self):
+        return getattr(self, '_memory_prefetch', None)
+
+    def abort_requested(self) -> bool:
+        return self._abort_requested()
+
+    def mark_aborted(self) -> None:
+        self._aborted = True
+
+    def append_message(self, message: dict) -> None:
+        self._openai_messages.append(message)
+
+    def append_user_message(self, content: str) -> None:
+        self._openai_messages.append({"role": "user", "content": content})
+
+    def append_tool_message(self, tool_call_id: str, content: str) -> None:
+        self._openai_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": content})
+
+    def reset_repeat_chain(self) -> None:
+        self._repeat_chain_key = ""
+        self._repeat_chain_count = 0
+
+    def build_side_query(self):
+        return self._build_side_query()
+
+    def start_memory_prefetch(self, user_message: str, side_query) -> None:
+        from agents.memory.memory import start_memory_prefetch
+        self._memory_prefetch = start_memory_prefetch(
+            user_message, side_query,
+            self._cooled_memory_paths(), self._session_memory_bytes,
+        )
+
+    def record_memory_surface(self, path: str, content_bytes: int) -> None:
+        self._memory_surfaced_at[path] = self._turn_number
+        self._session_memory_bytes += content_bytes
+
+    def add_input_tokens(self, count: int) -> None:
+        self.total_input_tokens += count
+
+    def add_output_tokens(self, count: int) -> None:
+        self.total_output_tokens += count
+
+    def set_last_input_tokens(self, count: int) -> None:
+        self.last_input_token_count = count
+
+    def increment_turns(self) -> None:
+        self.current_turns += 1
+
+    def check_budget(self) -> dict:
+        return self._check_budget()
+
+    def publish_stream_event(self, event: dict) -> None:
+        if self._stream_event_queue is not None:
+            asyncio.create_task(self._stream_event_queue.put(event))
+
+    def publish_tool_call_event(self, call_id: str, name: str, inp: dict) -> None:
+        from agents.observability.trace import trace_event
+        if self._stream_event_queue is not None:
+            event = {"type": "tool_call", "call_id": call_id, "name": name, "input": inp}
+            if self._current_sub_agent_id:
+                event["sub_agent_id"] = self._current_sub_agent_id
+            self.publish_stream_event(event)
+            trace_event("stream.tool_call", call_id=call_id, name=name, sub_agent_id=self._current_sub_agent_id)
+
+    def publish_tool_result_event(self, call_id: str, name: str, result: str, status: str) -> None:
+        from agents.observability.trace import trace_event
+        if self._stream_event_queue is not None:
+            event = {"type": "tool_result", "call_id": call_id, "name": name, "result": result, "status": status}
+            if self._current_sub_agent_id:
+                event["sub_agent_id"] = self._current_sub_agent_id
+            self.publish_stream_event(event)
+            trace_event("stream.tool_result", call_id=call_id, name=name, sub_agent_id=self._current_sub_agent_id)
+
+    def record_tool_outcome(self, tool_name: str, success: bool) -> None:
+        self._record_tool_outcome(tool_name, success)
+
+    def set_current_tool_name(self, name: str | None) -> None:
+        self._current_tool_name = name
+
+    def add_confirmed_path(self, path: str) -> None:
+        self._confirmed_paths.add(path)
+
+    def execute_tool_call(self, name: str, inp: dict):
+        return self._execute_tool_call(name, inp)
+
+    def persist_large_result(self, tool_name: str, result: str) -> str:
+        return self._persist_large_result(tool_name, result)
+
+    def looks_like_tool_failure(self, tool_name: str, raw: str, result: str) -> bool:
+        return self._looks_like_tool_failure(tool_name, raw, result)
+
+    def check_repeat_guard(self, tool_name: str, inp: dict) -> str | None:
+        return self._check_repeat_guard(tool_name, inp)
+
+    def clear_context_flag(self) -> None:
+        self._context_cleared = False
+
+    def refresh_runtime_system_prompt(self) -> None:
+        self._refresh_runtime_system_prompt()
+
+    def run_compression_pipeline(self) -> None:
+        self._run_compression_pipeline()
+
+    def check_and_compact(self):
+        return self._check_and_compact()
+
+    def emit_text(self, text: str) -> None:
+        self._emit_text(text)
+
+    def append_thinking_text(self, text: str) -> None:
+        if self._turn_thinking_buffer is not None:
+            self._turn_thinking_buffer.append(text)
+
+    def get_thinking_content(self) -> str | None:
+        return "".join(self._turn_thinking_buffer or []).strip() if self._turn_thinking_buffer else None
+
+    async def confirm_dangerous(self, message: str) -> bool:
+        return await self._confirm_dangerous(message)
+
+    # ── 公开方法（供 AgentService / 外部调用）──
+
+    def get_messages(self) -> list[dict]:
+        return self._openai_messages
+
+    def set_messages(self, messages: list[dict]) -> None:
+        self._openai_messages = list(messages)
+
+    def truncate_messages_to(self, index: int) -> None:
+        self._openai_messages = self._openai_messages[:index]
+
+    def set_permission_mode(self, mode: str) -> None:
+        self.permission_mode = mode
+
+    def steer(self, message: str) -> None:
+        if not hasattr(self, '_steer_queue') or self._steer_queue is None:
+            self._steer_queue = []
+        self._steer_queue.append(message)
+
+    async def save(self) -> None:
+        await self._auto_save()
+
+    @property
+    def last_response(self) -> str:
+        return self._last_assistant_text
+
+    @property
+    def aborted(self) -> bool:
+        return self._aborted
 
     async def drain_background_skill_tasks(self) -> None:
         """等待所有后台 Skill 任务完成。"""
@@ -1177,64 +1290,43 @@ class Agent:
     # 然后在对话里只留一个‘文件路径’和‘内容预览’。如果模型后面还需要看完整内容，它可以再次调用工具去读取这个文件
 
     def _persist_large_result(self, tool_name: str, result: str) -> str:
-        THRESHOLD = 30 * 1024  # 30 KB
-        #转换成字节
-        if (len (result.encode())) <= THRESHOLD:
-            return result
-
-        d = Path.home() / ".bear-code" / "tool-results"
-        d.mkdir(parents=True, exist_ok=True)
-        filename = f"{int(time.time() * 1000)}-{tool_name}.txt"
-        filepath = d / filename
-        filepath.write_text(result, encoding="utf-8")
-
-        lines = result.split("\n")
-        preview = "\n".join(lines[:200])
-        size_kb = len(result.encode()) / 1024
-
-        # 对于 read_file，提供明确的后续读取建议
-        if tool_name == "read_file":
-            return (
-                f"[Result too large ({size_kb:.1f} KB, {len(lines)} lines). "
-                f"Full output saved to {filepath}.]\n\n"
-                f"Preview (first 200 lines):\n{preview}\n\n"
-                f"To read more, use read_file with offset parameter:\n"
-                f"  - offset=201 to read lines 201-400\n"
-                f"  - offset=401 to read lines 401-600\n"
-                f"  - Or use limit parameter to read specific ranges"
-            )
-        
-        return (
-            f"[Result too large ({size_kb:.1f} KB, {len(lines)} lines). "
-            f"Full output saved to {filepath}. "
-            f"You can use read_file to see the full result.]\n\n"
-            f"Preview (first 200 lines):\n{preview}"
-        )
+        return persist_large_result(tool_name, result)
 
     #执行工具入口
 
+    @staticmethod
+    def _tool_timeout(name: str) -> int:
+        if name == "run_shell":
+            return 300
+        if name in ("agent", "skill"):
+            return 300
+        if name in ("read_file", "grep_search", "list_files"):
+            return 30
+        return 60
+
     async def _execute_tool_call(self, name: str, inp: dict) -> str:
-        from .observability.trace import trace_event, trace_tool_input
+        from .observability.trace import trace_span
         _tool_t0 = time.time()
-        trace_event("tool.start", tool=name, input=trace_tool_input(inp))
-        try:
-            result = await self._execute_tool_call_inner(name, inp)
-            trace_event(
-                "tool.end",
-                tool=name,
-                success=True,
-                duration_s=round(time.time() - _tool_t0, 2),
-                result_preview=str(result)[:300],
-            )
-        except Exception as e:
-            trace_event(
-                "tool.end",
-                tool=name,
-                success=False,
-                error_message=str(e)[:300],
-                duration_s=round(time.time() - _tool_t0, 2),
-            )
-            raise
+        trace_attrs = {"tool": name}
+        if self._current_sub_agent_id:
+            trace_attrs["sub_agent_id"] = self._current_sub_agent_id
+        timeout = self._tool_timeout(name)
+        with trace_span("tool_call", **trace_attrs) as span:
+            try:
+                result = await asyncio.wait_for(
+                    self._execute_tool_call_inner(name, inp),
+                    timeout=timeout,
+                )
+                span.set_attribute("success", True)
+                span.set_attribute("duration_s", round(time.time() - _tool_t0, 2))
+            except asyncio.TimeoutError:
+                span.record_error(TimeoutError(f"Tool '{name}' timed out after {timeout}s"))
+                print_error(f"[ERROR] Tool '{name}' timed out after {timeout}s")
+                return f"Error: tool '{name}' timed out after {timeout}s"
+            except Exception as e:
+                span.record_error(e)
+                print_error(f"[ERROR] Tool '{name}' failed: {type(e).__name__}: {e}")
+                raise
         return result
 
     async def _execute_tool_call_inner(self, name: str, inp: dict) -> str:
@@ -1365,8 +1457,7 @@ class Agent:
                 else:  # manual-execute
                     target_mode = self._pre_plan_mode or "default"
 
-                #离开计划模式
-                self._pre_plan_mode = target_mode
+                self.permission_mode = target_mode
                 self._pre_plan_mode = None
                 saved_plan_path = self._plan_file_path
                 self._plan_file_path = None
@@ -1454,14 +1545,14 @@ class Agent:
             self.total_input_tokens += result["tokens"]["input"]
             self.total_output_tokens += result["tokens"]["output"]
             print_sub_agent_end(agent_type, description)
-            # 流式模式：推送 sub_agent_end 事件到队列
+            # 流式模式：推送 sub_agent_end 事件到队列（await 确保事件顺序）
             if self._stream_event_queue is not None:
-                asyncio.create_task(self._stream_event_queue.put({
+                await self._stream_event_queue.put({
                     "type": "sub_agent_end", 
                     "agent_type": agent_type, 
                     "description": description,
                     "agent_id": sub_agent_id
-                }))
+                })
                 from .observability.trace import trace_event
                 trace_event("stream.sub_agent_end", agent_id=sub_agent_id, agent_type=agent_type, status="completed")
             if sub_agent._aborted:
@@ -1469,371 +1560,25 @@ class Agent:
             return result["text"] or "(Sub-agent produced no output)"
         except Exception as e:
             print_sub_agent_end(agent_type, description)
-            # 流式模式：推送 sub_agent_end 事件到队列
+            # 流式模式：推送 sub_agent_end 事件到队列（await 确保事件顺序）
             if self._stream_event_queue is not None:
-                asyncio.create_task(self._stream_event_queue.put({
+                await self._stream_event_queue.put({
                     "type": "sub_agent_end", 
                     "agent_type": agent_type, 
                     "description": description,
                     "agent_id": sub_agent_id
-                }))
+                })
                 from .observability.trace import trace_event
                 trace_event("stream.sub_agent_end", agent_id=sub_agent_id, agent_type=agent_type, status="error", error=str(e))
             return f"Sub-agent error: {e}"
 
     #openAI后端
 
-    async def _chat_openai(self, user_message:str) -> None:
-        user_message = _safe_utf8_text(user_message)
-        self._openai_messages.append({"role": "user", "content": user_message})
-        # 用户消息重置重复调用链
-        self._repeat_chain_key = ""
-        self._repeat_chain_count = 0
-
-        #预取句柄 MemoryPrefetch
-        memory_prefetch: MemoryPrefetch | None = None
-        if not self.is_sub_agent:
-            sq = self._build_side_query()
-            if sq:
-                memory_prefetch = start_memory_prefetch(
-                    user_message, sq,
-                    self._cooled_memory_paths(), self._session_memory_bytes,
-                )
-
-        while True:
-            if self._abort_requested():
-                self._aborted = True
-                break
-
-            self._run_compression_pipeline()
-            # memory 预取完成后注入。OpenAI API 允许连续 user 消息，因此追加
-            # 独立用户消息而非改写已发送消息，避免注入竞态。
-            if memory_prefetch and memory_prefetch.settled and not memory_prefetch.consumed:
-                memory_prefetch.consumed = True
-                try:
-                    memories = memory_prefetch.task.result()
-                    if memories:
-                        injection_text = format_memories_for_injection(memories)
-                        injection_text = _safe_utf8_text(injection_text)
-                        self._openai_messages.append({"role": "user", "content": injection_text})
-
-                        for m in memories:
-                            self._memory_surfaced_at[m.path] = self._turn_number
-                            self._session_memory_bytes += len(m.content.encode())
-                except Exception:
-                    pass
-
-            if not self.is_sub_agent:
-                start_spinner()
-
-            response = await self._call_openai_stream()
-
-            if not self.is_sub_agent:
-                stop_spinner()
-
-            self.last_api_call_time = time.time()
-
-            if response.get("usage"):
-                self.total_input_tokens += response["usage"]["prompt_tokens"]
-                self.total_output_tokens += response["usage"]["completion_tokens"]
-                self.last_input_token_count = response["usage"]["prompt_tokens"]
-
-            choice = response.get("choices", [{}])[0] if response.get("choices") else {}
-            message = choice.get("message", {})
-
-            self._openai_messages.append(message)
-
-            tool_calls = message.get("tool_calls")
-
-            if not tool_calls:
-                if not self.is_sub_agent:
-                    md_track_flush()  # 流式结束：擦除原文，自动重渲染 Markdown
-                    print_cost(self.total_input_tokens, self.total_output_tokens)
-                break
-
-            self.current_turns += 1
-            budget = self._check_budget()
-            if budget["exceeded"]:
-                print_info(f"Budget exceeded: {budget['reason']}")
-                break
-            # 权限预检 → 按并发安全分批执行
-            oai_checked: list[dict] = []
-            for tc in tool_calls:
-                if self._abort_requested():
-                    self._aborted = True
-                    break
-
-                if tc.get("type") != "function":
-                    continue
-
-                fn_name = tc["function"]["name"]
-                try:
-                    inp = json.loads(tc["function"]["arguments"])
-                except Exception:
-                    inp = {}
-
-                print_tool_call(fn_name, inp)
-                # 流式模式：推送 tool_call 事件到队列
-                if self._stream_event_queue is not None:
-                    event = {"type": "tool_call", "call_id": tc["id"], "name": fn_name, "input": inp}
-                    if self._current_sub_agent_id:
-                        event["sub_agent_id"] = self._current_sub_agent_id
-                    asyncio.create_task(self._stream_event_queue.put(event))
-                    from .observability.trace import trace_event
-                    trace_event("stream.tool_call", call_id=tc["id"], name=fn_name, sub_agent_id=self._current_sub_agent_id)
-
-                perm = check_permission(fn_name, inp, self.permission_mode, self._plan_file_path)
-
-                if perm["action"] == "deny":
-                    print_info(f"Denied: {perm.get('message', '')}")
-                    self._record_tool_outcome(fn_name, False)
-                    deny_result = f"Action denied: {perm.get('message', '')}"
-                    oai_checked.append({"tc": tc, "fn": fn_name, "inp": inp, "allowed": False,
-                                        "result": deny_result})
-                    # 流式模式：推送 tool_result 事件（即使被拒绝）
-                    if self._stream_event_queue is not None:
-                        event = {"type": "tool_result", "call_id": tc["id"], "name": fn_name, "result": deny_result, "status": "denied"}
-                        if self._current_sub_agent_id:
-                            event["sub_agent_id"] = self._current_sub_agent_id
-                        asyncio.create_task(self._stream_event_queue.put(event))
-                        from .observability.trace import trace_event
-                        trace_event("stream.tool_result", call_id=tc["id"], name=fn_name, sub_agent_id=self._current_sub_agent_id)
-                    continue
-                if perm["action"] == "confirm" and perm.get("message") and perm["message"] not in self._confirmed_paths:
-                    # 设置当前工具名用于权限请求
-                    self._current_tool_name = fn_name
-                    confirmed = await self._confirm_dangerous(perm["message"])
-                    self._current_tool_name = None
-                    if not confirmed:
-                        self._record_tool_outcome(fn_name, False)
-                        user_deny_result = "User denied this action."
-                        oai_checked.append({"tc": tc, "fn": fn_name, "inp": inp, "allowed": False,
-                                            "result": user_deny_result})
-                        # 流式模式：推送 tool_result 事件（即使被拒绝）
-                        if self._stream_event_queue is not None:
-                            event = {"type": "tool_result", "call_id": tc["id"], "name": fn_name, "result": user_deny_result, "status": "denied"}
-                            if self._current_sub_agent_id:
-                                event["sub_agent_id"] = self._current_sub_agent_id
-                            asyncio.create_task(self._stream_event_queue.put(event))
-                            from .observability.trace import trace_event
-                            trace_event("stream.tool_result", call_id=tc["id"], name=fn_name, sub_agent_id=self._current_sub_agent_id)
-                        continue
-                    self._confirmed_paths.add(perm["message"])
-                oai_checked.append({"tc": tc, "fn": fn_name, "inp": inp, "allowed": True})
-
-            # 权限预检完成，按并发安全分批执行
-            oai_batches: list[dict] = []
-            for ct in oai_checked:
-                safe = ct["allowed"] and ct["fn"] in CONCURRENCY_SAFE_TOOLS
-                if safe and oai_batches and oai_batches[-1]["concurrent"]:
-                    oai_batches[-1]["items"].append(ct)
-                else:
-                    oai_batches.append({"concurrent": safe, "items": [ct]})
-            # 并发安全工具可并行；有依赖的串行
-            oai_context_break = False
-            for batch in oai_batches:
-                if oai_context_break or self._abort_requested():
-                    self._aborted = True
-                    break
-
-                if batch["concurrent"]:
-                    async def _run_oai_safe(ct_item: dict) -> tuple[dict, str]:
-                        raw = await self._execute_tool_call(ct_item["fn"], ct_item["inp"])
-                        raw = _safe_utf8_text(raw)
-                        res = self._persist_large_result(ct_item["fn"], raw)
-                        print_tool_result(ct_item["fn"], res)
-                        # 流式模式：推送 tool_result 事件到队列
-                        if self._stream_event_queue is not None:
-                            event = {"type": "tool_result", "call_id": ct_item["tc"]["id"], "name": ct_item["fn"], "result": res, "status": "ok"}
-                            if self._current_sub_agent_id:
-                                event["sub_agent_id"] = self._current_sub_agent_id
-                            await self._stream_event_queue.put(event)
-                            from .observability.trace import trace_event
-                            trace_event("stream.tool_result", call_id=ct_item["tc"]["id"], name=ct_item["fn"], sub_agent_id=self._current_sub_agent_id)
-                        return ct_item, res
-
-                    results = await asyncio.gather(*[_run_oai_safe(ct) for ct in batch["items"]])
-                    for ct_item, res in results:
-                        self._record_tool_outcome(
-                            ct_item["fn"],
-                            not self._looks_like_tool_failure(ct_item["fn"], "", res),
-                        )
-                        # Repeat guard: 检测重复调用并注入提醒
-                        repeat_warning = self._check_repeat_guard(ct_item["fn"], ct_item["inp"])
-                        if repeat_warning:
-                            res = res + "\n\n" + repeat_warning
-                        self._openai_messages.append(
-                            {"role": "tool", "tool_call_id": ct_item["tc"]["id"], "content": res})
-                else:
-                    for ct in batch["items"]:
-                        if not ct["allowed"]:
-                            self._openai_messages.append(
-                                {"role": "tool", "tool_call_id": ct["tc"]["id"], "content": ct["result"]})
-                            continue
-
-                        raw = await self._execute_tool_call(ct["fn"], ct["inp"])
-                        raw = _safe_utf8_text(raw)
-                        res = self._persist_large_result(ct["fn"], raw)
-                        print_tool_result(ct["fn"], res)
-                        # 流式模式：推送 tool_result 事件到队列
-                        if self._stream_event_queue is not None:
-                            event = {"type": "tool_result", "call_id": ct["tc"]["id"], "name": ct["fn"], "result": res, "status": "ok"}
-                            if self._current_sub_agent_id:
-                                event["sub_agent_id"] = self._current_sub_agent_id
-                            await self._stream_event_queue.put(event)
-                            from .observability.trace import trace_event
-                            trace_event("stream.tool_result", call_id=ct["tc"]["id"], name=ct["fn"], sub_agent_id=self._current_sub_agent_id)
-                        self._record_tool_outcome(
-                            ct["fn"],
-                            not self._looks_like_tool_failure(ct["fn"], raw, res),
-                        )
-
-                        if self._context_cleared:
-                        # compact 等操作清空上下文后，把结果当新 user 消息，停止本轮剩余工具
-                            self._context_cleared = False
-                            self._openai_messages.append({"role": "user", "content": res})
-                            oai_context_break = True
-                            break
-
-                        # Repeat guard: 检测重复调用并注入提醒
-                        repeat_warning = self._check_repeat_guard(ct["fn"], ct["inp"])
-                        if repeat_warning:
-                            res = res + "\n\n" + repeat_warning
-
-                        self._openai_messages.append(
-                            {"role": "tool", "tool_call_id": ct["tc"]["id"], "content": res})
-
-            self._context_cleared = False
-            self._refresh_runtime_system_prompt()
-            await self._check_and_compact()
+    async def _chat_openai(self, user_message: str) -> None:
+        await self._loop.run(user_message)
 
     async def _call_openai_stream(self) -> dict:
-        from .observability.trace import trace_event
-        _model_t0 = time.time()
-        trace_event("model.start", model=self.model, provider="openai")
-
-        # 流式拼 content + tool_calls，最后组装成类似非流式响应的结构
-        async def _do():
-            stream = await self._openai_client.chat.completions.create(
-                model=self.model,
-                tools=_sanitize_for_utf8(_to_openai_tools(get_active_tool_definitions(self.tools))),
-                messages=_sanitize_for_utf8(self._openai_messages),
-                stream=True,
-                stream_options={"include_usage": True},
-            )
-
-            content = ""
-            first_text = True
-            first_thinking = True
-            if not self.is_sub_agent:
-                reset_thinking_window()
-                md_track_begin()
-            tool_calls: dict[int, dict] = {}
-            finish_reason = ""
-            usage = None
-
-            async for chunk in stream:
-                if chunk.usage:
-                    usage = {
-                        "prompt_tokens": chunk.usage.prompt_tokens,
-                        "completion_tokens": chunk.usage.completion_tokens,
-                    }
-
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta
-
-                # OpenAI-compatible 模型的思考内容（DeepSeek 等用 reasoning_content 字段）。
-                # 始终收集到 thinking buffer 用于 SSE 传输
-                reasoning = getattr(delta, "reasoning_content", None)
-                if reasoning:
-                    # 始终写入 thinking buffer（用于 SSE 传输到前端）
-                    if self._turn_thinking_buffer is not None:
-                        self._turn_thinking_buffer.append(reasoning)
-                    # 流式模式：推送 thinking 事件到队列
-                    if self._stream_event_queue is not None:
-                        event = {"type": "thinking", "content": reasoning}
-                        if self._current_sub_agent_id:
-                            event["sub_agent_id"] = self._current_sub_agent_id
-                        asyncio.create_task(self._stream_event_queue.put(event))
-                        from .observability.trace import trace_event
-                        trace_event("stream.thinking", sub_agent_id=self._current_sub_agent_id, preview=reasoning[:50])
-                    # 终端显示仅在 thinking_visible() 时
-                    if thinking_visible():
-                        if first_thinking:
-                            stop_spinner()
-                            first_thinking = False
-                        print_thinking_text(reasoning)
-
-                if delta and delta.content:
-                    if first_text:
-                        stop_spinner()
-                        self._emit_text("\n")
-                        first_text = False
-                    self._emit_text(delta.content)
-                    content += _safe_utf8_text(delta.content)
-
-                if delta and delta.tool_calls:
-                    for tc in delta.tool_calls:
-                        existing = tool_calls.get(tc.index)
-                        if existing:
-                            if tc.function and tc.function.arguments:
-                                existing["arguments"] += _safe_utf8_text(tc.function.arguments)
-                        else:
-                            tool_calls[tc.index] = {
-                                "id": _safe_utf8_text(tc.id or ""),
-                                "name": _safe_utf8_text((tc.function.name if tc.function else "") or ""),
-                                "arguments": _safe_utf8_text((tc.function.arguments if tc.function else "") or ""),
-                            }
-
-                if chunk.choices[0].finish_reason:
-                    finish_reason = chunk.choices[0].finish_reason
-
-            assembled = None
-            if tool_calls:
-                assembled = [
-                    {"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": tc["arguments"]}}
-                    for _, tc in sorted(tool_calls.items())
-                ]
-
-            return {
-                "choices": [{
-                    "message": {
-                        "role": "assistant",
-                        "content": content or None,
-                        "tool_calls": assembled,
-                    },
-                    "finish_reason": finish_reason or "stop",
-                }],
-                "usage": usage or {"prompt_tokens": 0, "completion_tokens": 0},
-            }
-
-        try:
-            result = await _with_retry(_do)
-            # 提取 token 信息
-            usage = result.get("usage", {}) if isinstance(result, dict) else {}
-            input_tokens = usage.get("prompt_tokens", 0)
-            output_tokens = usage.get("completion_tokens", 0)
-            trace_event(
-                "model.end",
-                model=self.model,
-                provider="openai",
-                success=True,
-                duration_s=round(time.time() - _model_t0, 2),
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-            )
-            return result
-        except Exception as e:
-            trace_event(
-                "model.end",
-                model=self.model,
-                provider="openai",
-                success=False,
-                error_message=str(e)[:300],
-                duration_s=round(time.time() - _model_t0, 2),
-            )
-            raise
+        return await self._loop.call_model_stream()
 
     async def _confirm_dangerous(self, command: str) -> bool:
         self._permission_gate.set_stream_event_queue(self._stream_event_queue) if self._stream_event_queue else None

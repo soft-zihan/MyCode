@@ -104,6 +104,9 @@ const getToolSummary = (name: string, input: Record<string, unknown>): string =>
   if (name === 'list_files') {
     return (input.path as string) || '';
   }
+  if (name === 'agent') {
+    return (input.description as string) || (input.type as string) || '';
+  }
   const str = JSON.stringify(input);
   return str.length > 80 ? str.slice(0, 80) + '...' : str;
 };

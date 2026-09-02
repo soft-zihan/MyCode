@@ -120,15 +120,6 @@ export async function updateSessionName(id: string, name: string): Promise<void>
   if (!res.ok) throw new Error('Failed to update session name');
 }
 
-export async function saveSessionMessages(id: string, messages: any[]): Promise<void> {
-  const res = await fetch(`${API_BASE}/sessions/${id}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ frontendMessages: messages })
-  });
-  if (!res.ok) throw new Error('Failed to save session messages');
-}
-
 export async function fetchMemories(): Promise<Memory[]> {
   const res = await fetch(`${API_BASE}/memories`);
   if (!res.ok) throw new Error('Failed to fetch memories');
@@ -219,9 +210,26 @@ export async function fetchDirectories(path?: string): Promise<DirectoryList> {
   if (!res.ok) throw new Error('Failed to fetch directories');
   return res.json();
 }
-export async function fetchTraceEvents(n: number = 50): Promise<{ enabled: boolean; path: string; events: TraceEvent[] }> {
-  const res = await fetch(`${API_BASE}/trace?n=${n}`);
+export async function fetchTraceEvents(n: number = 50, session?: string): Promise<{ enabled: boolean; path: string; session?: string; events: TraceEvent[] }> {
+  const params = new URLSearchParams({ n: String(n) });
+  if (session) params.set('session', session);
+  const res = await fetch(`${API_BASE}/trace?${params}`);
   if (!res.ok) throw new Error('Failed to fetch trace events');
+  return res.json();
+}
+
+export interface TraceFile {
+  filename: string;
+  session_id: string;
+  created_at: string | null;
+  size: number;
+  line_count: number;
+  modified: number;
+}
+
+export async function fetchTraceFiles(): Promise<{ files: TraceFile[] }> {
+  const res = await fetch(`${API_BASE}/trace/files`);
+  if (!res.ok) throw new Error('Failed to fetch trace files');
   return res.json();
 }
 
@@ -358,6 +366,42 @@ export async function saveConfig(config: AppConfig): Promise<void> {
   if (!res.ok) throw new Error('Failed to save config');
 }
 
+// ── Prompt APIs ─────────────────────────────────────────────────────────────
+
+export interface PromptInfo {
+  id: string;
+  name: string;
+  description: string;
+  path: string;
+}
+
+export interface PromptContent {
+  id: string;
+  content: string;
+  path: string;
+}
+
+export async function fetchPrompts(): Promise<PromptInfo[]> {
+  const res = await fetch(`${API_BASE}/prompts`);
+  if (!res.ok) throw new Error('Failed to fetch prompts');
+  return res.json();
+}
+
+export async function fetchPrompt(promptId: string): Promise<PromptContent> {
+  const res = await fetch(`${API_BASE}/prompts/${promptId}`);
+  if (!res.ok) throw new Error('Failed to fetch prompt');
+  return res.json();
+}
+
+export async function savePrompt(promptId: string, content: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/prompts/${promptId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  });
+  if (!res.ok) throw new Error('Failed to save prompt');
+}
+
 // ── Session Control ──────────────────────────────────────────────────────────
 
 export async function abortSession(sessionId: string): Promise<void> {
@@ -377,6 +421,20 @@ export async function rewindSession(sessionId: string, turns: number): Promise<{
     body: JSON.stringify({ session_id: sessionId, turns }),
   });
   if (!res.ok) throw new Error('Failed to rewind session');
+  return res.json();
+}
+
+export interface SessionStats {
+  input_tokens: number;
+  output_tokens: number;
+  context_window: number;
+  effective_window: number;
+  last_input_token_count: number;
+}
+
+export async function fetchSessionStats(sessionId: string): Promise<SessionStats> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/stats`);
+  if (!res.ok) throw new Error('Failed to fetch session stats');
   return res.json();
 }
 

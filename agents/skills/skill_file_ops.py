@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from agents.memory.frontmatter import format_frontmatter, parse_frontmatter
-from agents._utils import safe_skill_slug as _safe_skill_slug
+from agents._utils import safe_skill_slug as _safe_skill_slug, utc_now as _utc_now, read_json as _read_json, write_json as _write_json
 
 
 USAGE_LOG = "usage.jsonl"
@@ -24,10 +24,6 @@ def get_evolution_dir() -> Path:
     return Path.cwd() / ".bear" / "skill-evolution"
 
 
-def _utc_now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
 def _today() -> str:
     return time.strftime("%Y-%m-%d", time.gmtime())
 
@@ -36,20 +32,6 @@ def _append_jsonl(path: Path, row: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-
-
-def _read_json(path: Path, default: Any) -> Any:
-    if not path.is_file():
-        return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return default
-
-
-def _write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def _preview(value: object, limit: int = 500) -> str:

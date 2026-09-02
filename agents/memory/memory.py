@@ -36,14 +36,15 @@ MAX_INDEX_BYTES = 25000     # MEMORY.md 注入 system prompt 前最多保留的�
 class MemoryEntry:
     """完整 memory 条目，用于 /memory 列表和 CRUD 操作。"""
 
-    __slots__ = ("name", "description", "type", "filename", "content")
+    __slots__ = ("name", "description", "type", "filename", "content", "meta")
 
-    def __init__(self, name: str, description: str, type: str, filename: str, content: str):
+    def __init__(self, name: str, description: str, type: str, filename: str, content: str, meta: dict | None = None):
         self.name = name
         self.description = description
         self.type = type
         self.filename = filename
         self.content = content
+        self.meta = meta or {}
 
 
 
@@ -55,7 +56,7 @@ def _project_hash() -> str:
 
 def get_memory_dir() -> Path:
     """返回当前项目的 memory 目录，不存在时自动创建。"""
-    d = Path.home() / ".BearCode" / "projects" / _project_hash() / "memory"
+    d = Path.home() / ".MyCode" / "projects" / _project_hash() / "memory"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -103,6 +104,7 @@ def list_memories() -> list[MemoryEntry]:
                 type=t,
                 filename=f.name,
                 content=result.body,
+                meta=meta,
             ))
         except Exception:
             pass
@@ -694,7 +696,7 @@ def maybe_promote_or_archive_memory(
             days_since = (datetime.now(timezone.utc) - last_dt).days
             if days_since > archive_days:
                 _set_memory_status(filename, "archived")
-                from .observability.trace import trace_event
+                from agents.observability.trace import trace_event
                 trace_event(
                     "memory.archive",
                     filename=filename,
@@ -709,7 +711,7 @@ def maybe_promote_or_archive_memory(
         success_rate = success_associated / recall_count if recall_count > 0 else 0
         if success_rate >= promote_success_rate:
             _set_memory_priority(filename, "high")
-            from .observability.trace import trace_event
+            from agents.observability.trace import trace_event
             trace_event(
                 "memory.promote",
                 filename=filename,
@@ -762,7 +764,7 @@ def maintenance_all_memories() -> dict[str, Any]:
         if result.get("action") != "none":
             results.append({"filename": f.name, **result})
 
-    from .observability.trace import trace_event
+    from agents.observability.trace import trace_event
     trace_event(
         "memory.maintenance",
         total_checked=len(list(d.glob("*.md"))) - 1,

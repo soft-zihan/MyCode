@@ -22,19 +22,19 @@ def init_cost_metrics() -> None:
     except ImportError:
         return
 
-    _meter = metrics.get_meter("bearcode.cost")
+    _meter = metrics.get_meter("MyCode.cost")
     _token_counter = _meter.create_counter(
-        "bearcode.tokens.total",
+        "MyCode.tokens.total",
         description="Total token usage",
         unit="tokens",
     )
     _cache_hit_counter = _meter.create_counter(
-        "bearcode.tokens.cached",
+        "MyCode.tokens.cached",
         description="Cached token count",
         unit="tokens",
     )
     _compression_ratio_histogram = _meter.create_histogram(
-        "bearcode.context.compression_ratio",
+        "MyCode.context.compression_ratio",
         description="Context compression retention ratio",
         unit="ratio",
     )

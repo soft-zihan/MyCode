@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..registry import command
-from ...session import list_sessions, load_session, delete_session, clean_sessions
+from ...core.session import list_sessions, load_session, delete_session, clean_sessions
 from ...ui import print_info, print_error, print_session_rows
 
 if TYPE_CHECKING:
@@ -98,14 +98,9 @@ async def cmd_sessions(agent: "Agent", args: str) -> None:
                 return
             session = load_session(session_id)
             if session:
+                from agents.core.session import session_to_restore_dict
                 agent.session_id = session_id
-                agent.restore_session({
-                    "openaiMessages": session.get("openaiMessages"),
-                    "foldedSessionMemories": session.get("foldedSessionMemories"),
-                    "checkpointStore": session.get("checkpointStore"),
-                    "turnBoundaries": session.get("turnBoundaries"),
-                    "contextStore": session.get("contextStore"),
-                })
+                agent.restore_session(session_to_restore_dict(session))
                 print_info(f"Switched to session {session_id[:8]}...")
         
         def on_delete(session_id: str):
@@ -169,14 +164,9 @@ async def cmd_switch(agent: "Agent", args: str) -> None:
     if not session:
         print_error(f"Session not found: {target}")
         return
+    from agents.core.session import session_to_restore_dict
     agent.session_id = target
-    agent.restore_session({
-        "openaiMessages": session.get("openaiMessages"),
-        "foldedSessionMemories": session.get("foldedSessionMemories"),
-        "checkpointStore": session.get("checkpointStore"),
-        "turnBoundaries": session.get("turnBoundaries"),
-        "contextStore": session.get("contextStore"),
-    })
+    agent.restore_session(session_to_restore_dict(session))
 
 
 @command(
@@ -206,14 +196,9 @@ async def cmd_resume(agent: "Agent", args: str) -> None:
     if not session:
         print_error(f"Session not found: {target}")
         return
+    from agents.core.session import session_to_restore_dict
     agent.session_id = target
-    agent.restore_session({
-        "openaiMessages": session.get("openaiMessages"),
-        "foldedSessionMemories": session.get("foldedSessionMemories"),
-        "checkpointStore": session.get("checkpointStore"),
-        "turnBoundaries": session.get("turnBoundaries"),
-        "contextStore": session.get("contextStore"),
-    })
+    agent.restore_session(session_to_restore_dict(session))
     print_info(f"Resumed session {target}")
 
 
@@ -310,7 +295,7 @@ async def cmd_rename(agent: "Agent", args: str) -> None:
     if not name:
         print_error("Usage: /rename <name>")
         return
-    from ...session import save_session_meta
+    from ...core.session import save_session_meta
     if save_session_meta(agent.session_id, {"title": name}):
         print_info(f"Session renamed to: {name}")
     else:

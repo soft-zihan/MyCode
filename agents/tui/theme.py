@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 class Theme:
-    """OpenCode-aligned color theme for BearCode TUI."""
+    """OpenCode-aligned color theme for MyCode TUI."""
 
     PRIMARY = "#fab283"
     SECONDARY = "#5c9cf5"

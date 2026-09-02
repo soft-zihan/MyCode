@@ -85,10 +85,12 @@ async def execute_tool(
     checkpoint_store: Any | None = None,
 ) -> str:
     """执行工具调用。"""
+    import asyncio
+
     if name == "read_file":
         result = read_file(inp)
         if read_file_state is not None and not result.startswith("Error"):
-            from agents.model.runtime import get_runtime, DockerRuntime
+            from agents.tools.runtime import get_runtime, DockerRuntime
             rt = get_runtime()
             if isinstance(rt, DockerRuntime):
                 abs_path = inp["file_path"]
@@ -104,7 +106,7 @@ async def execute_tool(
         return _truncate_result(result)
 
     if name in ("write_file", "edit_file") and read_file_state is not None:
-        from agents.model.runtime import get_runtime, DockerRuntime
+        from agents.tools.runtime import get_runtime, DockerRuntime
         rt = get_runtime()
         if isinstance(rt, DockerRuntime):
             abs_path = inp["file_path"]
@@ -195,7 +197,9 @@ async def execute_tool(
         except Exception:
             pass
 
-    result = _truncate_result(handler(inp))
+    # Run blocking handlers in thread pool to avoid blocking event loop
+    result = await asyncio.to_thread(handler, inp)
+    result = _truncate_result(result)
 
     if name in ("write_file", "edit_file") and read_file_state is not None and not result.startswith("Error"):
         abs_path = str(_resolve_tool_path(inp["file_path"], must_exist=False).resolve())

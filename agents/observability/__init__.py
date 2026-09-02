@@ -1,4 +1,4 @@
-"""BearCode 可观测性模块
+"""MyCode 可观测性模块
 
 子模块：
 - trace: JSONL 兜底日志（零依赖）

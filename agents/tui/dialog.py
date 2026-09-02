@@ -117,7 +117,7 @@ class SelectDialog(Generic[T]):
             )
         ]
     
-    def _get_display_options(self) -> list[tuple[str, bool, bool]]:
+    def _get_display_options(self) -> list[tuple[DialogOption, bool, bool]]:
         """Get options with formatting: (text, is_selected, is_current)."""
         filtered = self.filtered_options
         result = []

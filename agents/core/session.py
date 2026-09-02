@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 from __future__ import annotations
 
@@ -21,6 +20,17 @@ def atomic_write_text(path: Path, content: str) -> None:
 
 def atomic_write_json(path: Path, data: Any, indent: int = 2) -> None:
     atomic_write_text(path, json.dumps(data, indent=indent, default=str))
+
+
+def session_to_restore_dict(session: dict) -> dict:
+    """Extract the 5 keys needed to restore a session into a standardized dict."""
+    return {
+        "openaiMessages": session.get("openaiMessages"),
+        "foldedSessionMemories": session.get("foldedSessionMemories"),
+        "checkpointStore": session.get("checkpointStore"),
+        "turnBoundaries": session.get("turnBoundaries"),
+        "contextStore": session.get("contextStore"),
+    }
 
 
 # ============================================================

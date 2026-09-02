@@ -6,7 +6,7 @@ PIDFILE_BACKEND="$PROJECT_ROOT/.backend.pid"
 PIDFILE_FRONTEND="$PROJECT_ROOT/.frontend.pid"
 
 BACKEND_PORT=5555
-FRONTEND_PORT=8080
+FRONTEND_PORT=8090
 
 log()  { echo "[$(date '+%H:%M:%S')] $*"; }
 err()  { echo "[$(date '+%H:%M:%S')] ❌ $*" >&2; }
@@ -48,7 +48,7 @@ stop_frontend() {
 start_backend() {
     log "启动后端 (FastAPI @ port $BACKEND_PORT) ..."
     cd "$PROJECT_ROOT"
-    source .venv-1/bin/activate
+    source .venv/bin/activate
     nohup python frontend/server/main.py > "$PROJECT_ROOT/.backend.log" 2>&1 &
     echo $! > "$PIDFILE_BACKEND"
     log "后端已启动 (pid=$!, log=.backend.log)"

@@ -545,6 +545,10 @@ def main() -> None:
     args = parse_args()
     _load_env_file()
 
+    # 初始化可观测性系统（OTel + Phoenix）
+    from .observability import init_tracing
+    init_tracing()
+
     # 如果指定了 --tui，启动 Textual 交互式界面
     if getattr(args, 'tui', False):
         from .tui.textual_app import run_textual_app
@@ -620,8 +624,6 @@ Tips:
   @path               Reference a file/dir in your prompt, e.g. "summarize @README.md"
   !command            Run a shell command directly in the REPL, e.g. !ls -la
   Tab                 Autocomplete / commands and @ paths
-  BEAR_CONTEXT_WINDOW=N            Override the model context window (tokens)
-  BEAR_AUTO_COMPACT_THRESHOLD=0.9  Auto-compact when context reaches this fraction
   BEAR_MD_RENDER=0                 Disable auto Markdown re-render after streaming
 
 Examples:
@@ -681,24 +683,14 @@ Examples:
     if session_to_resume:
         session = load_session(session_to_resume)
         if session:
+            from agents.core.session import session_to_restore_dict
+            restore_data = session_to_restore_dict(session)
             if args.fork:
-                agent.restore_session({
-                    "openaiMessages": session.get("openaiMessages"),
-                    "foldedSessionMemories": session.get("foldedSessionMemories"),
-                    "checkpointStore": session.get("checkpointStore"),
-                    "turnBoundaries": session.get("turnBoundaries"),
-                    "contextStore": session.get("contextStore"),
-                })
+                agent.restore_session(restore_data)
                 agent.fork_session()
             else:
                 agent.session_id = session_to_resume
-                agent.restore_session({
-                    "openaiMessages": session.get("openaiMessages"),
-                    "foldedSessionMemories": session.get("foldedSessionMemories"),
-                    "checkpointStore": session.get("checkpointStore"),
-                    "turnBoundaries": session.get("turnBoundaries"),
-                    "contextStore": session.get("contextStore"),
-                })
+                agent.restore_session(restore_data)
         else:
             print_info(f"Session not found: {session_to_resume}")
 
