@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ..registry import command
-from ...ui import print_info, print_error
+from ...logging import print_info, print_error
 
 if TYPE_CHECKING:
     from ...agent import Agent

@@ -119,11 +119,11 @@ def _write_champion_skill_file(path: Path, snapshot: dict[str, Any]) -> None:
 def _auto_activate_enabled() -> bool:
     """检查是否启用 champion 自动激活。
 
-    环境变量 BEAR_SKILL_AUTO_ACTIVATE=1 启用。
+    环境变量 MYCODE_SKILL_AUTO_ACTIVATE=1 启用。
     默认关闭（观察模式），需显式开启。
     """
     import os
-    return os.environ.get("BEAR_SKILL_AUTO_ACTIVATE", "").strip() in ("1", "true", "yes")
+    return os.environ.get("MYCODE_SKILL_AUTO_ACTIVATE", "").strip() in ("1", "true", "yes")
 
 
 def _activate_champion(skill_name: str, snapshot: dict[str, Any], lineage_id: str) -> dict[str, Any]:
@@ -167,11 +167,11 @@ def _activate_champion(skill_name: str, snapshot: dict[str, Any], lineage_id: st
 
 def _find_active_skill_path(skill_name: str) -> Path | None:
     """查找 active skill 文件路径。"""
-    project_path = Path.cwd() / ".bear" / "skills" / skill_name / "SKILL.md"
+    project_path = Path.cwd() / ".mycode" / "skills" / skill_name / "SKILL.md"
     if project_path.is_file():
         return project_path
 
-    user_path = Path.home() / ".bear" / "skills" / skill_name / "SKILL.md"
+    user_path = Path.home() / ".mycode" / "skills" / skill_name / "SKILL.md"
     if user_path.is_file():
         return user_path
 

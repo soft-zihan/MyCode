@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..registry import command
-from ...ui import print_info, print_error, set_thinking_visible, thinking_visible
+from ...logging import print_info, print_error
 
 if TYPE_CHECKING:
     from ..agent import Agent
@@ -44,9 +44,7 @@ async def cmd_cd(agent: "Agent", args: str) -> None:
     category="config",
 )
 async def cmd_thinking(agent: "Agent", args: str) -> None:
-    new_state = not thinking_visible()
-    set_thinking_visible(new_state)
-    print_info(f"Thinking display: {'ON' if new_state else 'OFF'}")
+    print_info("Thinking display is managed by the frontend UI.")
 
 
 @command(
@@ -92,8 +90,7 @@ async def cmd_help(agent: "Agent", args: str) -> None:
 )
 async def cmd_graph(agent: "Agent", args: str) -> None:
     from ..graph_cmd import run_graph_command
-    from ..ui import console
-    console.print(run_graph_command(args.strip()))
+    print(run_graph_command(args.strip()))
 
 
 @command(
@@ -112,7 +109,7 @@ async def cmd_models(agent: "Agent", args: str) -> None:
     
     endpoints = discover_endpoints()
     if not endpoints:
-        print_info(f"Current model: {agent.model}\n\nNo additional endpoints configured.\nSet BEAR_ENDPOINT_<ID>_BASE_URL/API_KEY/MODEL to add more.")
+        print_info(f"Current model: {agent.model}\n\nNo additional endpoints configured.\nSet MYCODE_ENDPOINT_<ID>_BASE_URL/API_KEY/MODEL to add more.")
         return
     
     # Try interactive model selection
@@ -165,19 +162,12 @@ async def cmd_models(agent: "Agent", args: str) -> None:
                 print_info(f"Switched to model: {selected}")
     
     except ImportError:
-        # Fallback to table display
-        from ...ui import console
-        from rich.table import Table
-        from rich import box
-        table = Table(box=box.SIMPLE, padding=(0, 2))
-        table.add_column("Endpoint", style="cyan")
-        table.add_column("Model", style="white")
-        table.add_column("Base URL", style="dim")
+        # Fallback to simple list
+        print_info(f"Current model: {agent.model}\n")
+        print_info("Available endpoints:")
         for eid, ep in sorted(endpoints.items()):
-            table.add_row(eid, ep.model or "-", ep.base_url or "-")
-        console.print(f"\n[bold]Current model:[/bold] {agent.model}\n")
-        console.print(table)
-        console.print("\n[dim]Usage: /models <model_name> to switch[/dim]")
+            print_info(f"  {eid}: {ep.model or '-'} ({ep.base_url or '-'})")
+        print_info("\nUsage: /models <model_name> to switch")
 
 
 @command(
@@ -186,23 +176,16 @@ async def cmd_models(agent: "Agent", args: str) -> None:
     category="config",
 )
 async def cmd_status(agent: "Agent", args: str) -> None:
-    from ...ui import console
-    from rich.table import Table
-    from rich import box
-    table = Table(box=box.SIMPLE, padding=(0, 2))
-    table.add_column("Field", style="cyan")
-    table.add_column("Value", style="white")
     cost = agent._get_current_cost_usd()
     budget = f" / ${agent.max_cost_usd}" if agent.max_cost_usd else ""
     turns = f" / {agent.max_turns}" if agent.max_turns else ""
-    table.add_row("Model", agent.model)
-    table.add_row("Session", agent.session_id)
-    table.add_row("Tokens (in/out)", f"{agent.total_input_tokens} / {agent.total_output_tokens}")
-    table.add_row("Cost", f"${cost:.4f}{budget}")
-    table.add_row("Turns", f"{agent.current_turns}{turns}")
-    table.add_row("Permission", agent.permission_mode)
-    table.add_row("Working Dir", str(Path.cwd()))
-    console.print(table)
+    print_info(f"Model: {agent.model}")
+    print_info(f"Session: {agent.session_id}")
+    print_info(f"Tokens (in/out): {agent.total_input_tokens} / {agent.total_output_tokens}")
+    print_info(f"Cost: ${cost:.4f}{budget}")
+    print_info(f"Turns: {agent.current_turns}{turns}")
+    print_info(f"Permission: {agent.permission_mode}")
+    print_info(f"Working Dir: {Path.cwd()}")
 
 
 @command(
@@ -213,7 +196,6 @@ async def cmd_status(agent: "Agent", args: str) -> None:
     category="config",
 )
 async def cmd_permission(agent: "Agent", args: str) -> None:
-    from ...ui import print_info, print_error
     from ...permissions import get_permission_set_from_legacy_mode
 
     mode = args.strip().lower()
@@ -240,7 +222,6 @@ async def cmd_permission(agent: "Agent", args: str) -> None:
     category="config",
 )
 async def cmd_yolo(agent: "Agent", args: str) -> None:
-    from ...ui import print_info, print_error
     from ...permissions import get_permission_set_from_legacy_mode
 
     arg = args.strip().lower()

@@ -77,6 +77,13 @@ export interface Endpoint {
   protocol: 'openai' | 'anthropic';
 }
 
+export interface Project {
+  cwd: string;
+  name?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface PrimaryEndpoint {
   model: string;
   base_url: string;
@@ -86,18 +93,43 @@ export interface PrimaryEndpoint {
 export async function fetchSessions(): Promise<Session[]> {
   const res = await fetch(`${API_BASE}/sessions`);
   if (!res.ok) throw new Error('Failed to fetch sessions');
-  return res.json();
+  const data = await res.json();
+  console.log('[API] fetchSessions:', data.length, 'sessions');
+  return data;
 }
 
 export async function fetchSession(id: string): Promise<SessionDetail> {
+  console.log('[API] fetchSession:', id);
   const res = await fetch(`${API_BASE}/sessions/${id}`);
   if (!res.ok) throw new Error('Failed to fetch session');
   return res.json();
 }
 
 export async function deleteSession(id: string): Promise<void> {
+  console.log('[API] deleteSession:', id);
   const res = await fetch(`${API_BASE}/sessions/${id}`, { method: 'DELETE' });
   if (!res.ok) throw new Error('Failed to delete session');
+}
+
+export async function fetchProjects(): Promise<Project[]> {
+  const res = await fetch(`${API_BASE}/projects`);
+  if (!res.ok) throw new Error('Failed to fetch projects');
+  return res.json();
+}
+
+export async function registerProject(cwd: string, name?: string): Promise<Project> {
+  const res = await fetch(`${API_BASE}/projects`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cwd, name })
+  });
+  if (!res.ok) throw new Error('Failed to register project');
+  return res.json();
+}
+
+export async function deleteProject(cwd: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(cwd)}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error('Failed to delete project');
 }
 
 export async function generateSessionName(message: string): Promise<string> {
@@ -112,12 +144,14 @@ export async function generateSessionName(message: string): Promise<string> {
 }
 
 export async function updateSessionName(id: string, name: string): Promise<void> {
+  console.log('[API] updateSessionName:', { id, name });
   const res = await fetch(`${API_BASE}/sessions/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name })
   });
   if (!res.ok) throw new Error('Failed to update session name');
+  console.log('[API] updateSessionName done');
 }
 
 export async function fetchMemories(): Promise<Memory[]> {
@@ -287,6 +321,19 @@ export async function renameWorkspaceFile(oldPath: string, newName: string, cwd?
   return res.json();
 }
 
+export async function moveWorkspaceFile(sourcePath: string, targetPath: string, cwd?: string): Promise<{ success: boolean; source: string; target: string }> {
+  const res = await fetch(`${API_BASE}/workspace/move`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source_path: sourcePath, target_path: targetPath, cwd }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Move failed' }));
+    throw new Error(err.detail || 'Move failed');
+  }
+  return res.json();
+}
+
 export async function fetchWorkspaceFile(path: string): Promise<{ path: string; content: string; size: number }> {
   const res = await fetch(`${API_BASE}/workspace/file?path=${encodeURIComponent(path)}`);
   if (!res.ok) throw new Error('Failed to fetch file');
@@ -415,13 +462,16 @@ export async function compactSession(sessionId: string): Promise<void> {
 }
 
 export async function rewindSession(sessionId: string, turns: number): Promise<{ message: string }> {
+  console.log('[API] rewindSession:', { sessionId, turns });
   const res = await fetch(`${API_BASE}/sessions/${sessionId}/rewind`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ session_id: sessionId, turns }),
   });
   if (!res.ok) throw new Error('Failed to rewind session');
-  return res.json();
+  const data = await res.json();
+  console.log('[API] rewindSession result:', data);
+  return data;
 }
 
 export interface SessionStats {
@@ -515,35 +565,47 @@ export async function followUpSession(sessionId: string, message: string): Promi
   if (!res.ok) throw new Error('Failed to follow-up session');
 }
 
-export async function forkSession(sessionId: string): Promise<{ new_session_id: string; message: string }> {
+export async function forkSession(
+  sessionId: string, 
+  options?: { at_seq?: number; keep_user_messages?: number }
+): Promise<{ new_session_id: string; fork_name: string; message: string }> {
+  console.log('[API] forkSession:', sessionId, options);
   const res = await fetch(`${API_BASE}/sessions/${sessionId}/fork`, {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(options || {}),
   });
   if (!res.ok) throw new Error('Failed to fork session');
-  return res.json();
+  const data = await res.json();
+  console.log('[API] forkSession result:', data);
+  return data;
 }
 
 export interface PermissionRequest {
+  rpc_id: string;
   request_id: string;
   command: string;
   tool_name: string;
+  message?: string;
   sub_agent_id?: string;
 }
 
 export async function respondToPermission(sessionId: string, requestId: string, allowed: boolean): Promise<void> {
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/permission-response`, {
+  const res = await fetch(`${API_BASE}/events/respond`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ request_id: requestId, allowed }),
+    body: JSON.stringify({ rpc_id: requestId, allowed, session_id: sessionId }),
   });
   if (!res.ok) throw new Error('Failed to respond to permission');
 }
 
 export async function truncateSession(sessionId: string, keepUserMessages: number): Promise<void> {
+  console.log('[API] truncateSession:', { sessionId, keepUserMessages });
   const res = await fetch(`${API_BASE}/sessions/${sessionId}/truncate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ keep_user_messages: keepUserMessages }),
   });
   if (!res.ok) throw new Error('Failed to truncate session');
+  console.log('[API] truncateSession done');
 }

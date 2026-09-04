@@ -4,7 +4,7 @@
 - prompt: 补充性提示词片段（行为策略、风格约束）
 - memory: 持久化事实与偏好（项目级记忆条目）
 - skill: 可复用任务方法（SKILL.md）
-- subagent: 子 Agent 配置（.bear/agents/*.md）
+- subagent: 子 Agent 配置（.mycode/agents/*.md）
 
 设计参考：Prime Agent / HCL (arXiv:2605.09998) 的 guarded harness evolution。
 """
@@ -234,7 +234,7 @@ class HarnessState:
 
 def get_harness_state_dir() -> Path:
     """获取 harness state 存储目录。"""
-    return Path.cwd() / ".bear" / "harness-state"
+    return Path.cwd() / ".mycode" / "harness-state"
 
 
 def get_harness_state_path() -> Path:
@@ -288,14 +288,14 @@ def resolve_component_path(kind: RefinementKind, name: str) -> Path:
     """根据组件类型和名称解析文件路径。"""
     cwd = Path.cwd()
     if kind == RefinementKind.PROMPT:
-        return cwd / ".bear" / "prompts" / f"{name}.md"
+        return cwd / ".mycode" / "prompts" / f"{name}.md"
     elif kind == RefinementKind.MEMORY:
         # Memory 路径需要项目 hash，这里简化处理
-        return cwd / ".bear" / "memories" / f"{name}.md"
+        return cwd / ".mycode" / "memories" / f"{name}.md"
     elif kind == RefinementKind.SKILL:
-        return cwd / ".bear" / "skills" / name / "SKILL.md"
+        return cwd / ".mycode" / "skills" / name / "SKILL.md"
     elif kind == RefinementKind.SUBAGENT:
-        return cwd / ".bear" / "agents" / f"{name}.md"
+        return cwd / ".mycode" / "agents" / f"{name}.md"
     else:
         raise ValueError(f"Unknown kind: {kind}")
 
@@ -304,16 +304,16 @@ def list_component_files(kind: RefinementKind) -> list[Path]:
     """列出某类型组件的所有文件。"""
     cwd = Path.cwd()
     if kind == RefinementKind.PROMPT:
-        base = cwd / ".bear" / "prompts"
+        base = cwd / ".mycode" / "prompts"
         return list(base.glob("*.md")) if base.is_dir() else []
     elif kind == RefinementKind.MEMORY:
-        base = cwd / ".bear" / "memories"
+        base = cwd / ".mycode" / "memories"
         return list(base.glob("*.md")) if base.is_dir() else []
     elif kind == RefinementKind.SKILL:
-        base = cwd / ".bear" / "skills"
+        base = cwd / ".mycode" / "skills"
         return [p / "SKILL.md" for p in base.iterdir() if p.is_dir()] if base.is_dir() else []
     elif kind == RefinementKind.SUBAGENT:
-        base = cwd / ".bear" / "agents"
+        base = cwd / ".mycode" / "agents"
         return list(base.glob("*.md")) if base.is_dir() else []
     else:
         return []

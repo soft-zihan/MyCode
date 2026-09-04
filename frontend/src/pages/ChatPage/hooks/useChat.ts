@@ -1,16 +1,19 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   fetchConfig, AppConfig,
-  generateSessionName, updateSessionName,
+  updateSessionName,
   compactSession, updatePermissionMode,
-  forkSession, respondToPermission, truncateSession, rewindSession, PermissionRequest
+  forkSession, respondToPermission, truncateSession
 } from '../../../api/client';
-import { FileSnapshot } from '../../../components/ReviewPanel';
 import { useChatNodes } from '../../../components/chat/nodes';
-import { ChatMessage } from '../types';
+import type { UserNode } from '../../../components/chat/nodes/types';
+import { sessionStore, wsManager, eventRouter, useSessionStore } from '../../../store';
+import type { PermissionRequest, FileSnapshot } from '../../../store/SessionStore';
+import { logger } from '../../../utils/logger';
+
+const EMPTY_FILE_SNAPSHOTS: FileSnapshot[] = [];
 
 export function useChat() {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [contextFiles, setContextFiles] = useState<string[]>([]);
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -20,38 +23,223 @@ export function useChat() {
   const currentSessionIdRef = useRef<string | null>(null);
   const [currentProject, setCurrentProject] = useState<string | null>(null);
   const [currentCwd, setCurrentCwd] = useState<string | null>(null);
-  const [isStreaming, setIsStreaming] = useState(false);
   const [isWaitingResponse, setIsWaitingResponse] = useState(false);
-  const abortControllerRef = useRef<AbortController | null>(null);
-  const messagesRef = useRef<ChatMessage[]>([]);
-  const [fileSnapshots, setFileSnapshots] = useState<FileSnapshot[]>([]);
   const [fileTreeRefreshTrigger, setFileTreeRefreshTrigger] = useState(0);
   const pendingSessionNameRef = useRef<string | null>(null);
   
   const [yoloMode, setYoloMode] = useState(true);
-  const [contextUsed, setContextUsed] = useState(0);
   const [contextTotal, setContextTotal] = useState(128000);
   
-  const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
   const [sessionRefreshTrigger, setSessionRefreshTrigger] = useState(0);
-  const [pendingSteerMessage, setPendingSteerMessage] = useState<{content: string, contextFiles: string[], model?: string} | null>(null);
+  const [pendingSteerMessages, setPendingSteerMessages] = useState<Array<{content: string, contextFiles: string[], model?: string}>>([]);
   const autoSendRef = useRef(false);
   
-  // Goal mode state
-  const [goalState, setGoalState] = useState<{
-    active: boolean;
-    goal: string;
-    criteria: string[];
-    iteration: number;
-    maxIterations: number;
-    status: 'idle' | 'running' | 'achieved' | 'budget_exhausted' | 'aborted';
-  } | null>(null);
+  const sessionId = currentSessionId ?? sessionStore.getCurrentId();
+  const isStreaming = useSessionStore(() => sessionStore.get(sessionId ?? '')?.projections?.running ?? false);
+  const pendingPermission = useSessionStore(() => sessionId ? sessionStore.getPendingPermission(sessionId) : undefined);
+  const goalState = useSessionStore(() => sessionId ? sessionStore.getGoalState(sessionId) : undefined);
+  const fileSnapshots = useSessionStore(() => sessionId ? sessionStore.getFileSnapshots(sessionId) : EMPTY_FILE_SNAPSHOTS);
+  const contextUsed = useSessionStore(() => sessionId ? sessionStore.getContextUsed(sessionId) : 0);
   
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
   }, [currentSessionId]);
   
-  const { snapshot: chatSnapshot, handleSSEEvent: handleNodeEvent, addUserMessage, resetNodes, loadMessages, loadOpenAIMessages, loadTraceEvents } = useChatNodes();
+  const { snapshot: chatSnapshot, handleSSEEvent: handleNodeEvent, addUserMessage, resetNodes, loadSessionEvents, prependSessionEvents } = useChatNodes();
+  
+  // 从 chatSnapshot 派生 user 节点列表
+  const userNodes = useMemo(() => {
+    const nodes: UserNode[] = [];
+    for (const key of chatSnapshot.order) {
+      const node = chatSnapshot.nodes.get(key);
+      if (node && node.kind === 'user') {
+        nodes.push(node as UserNode);
+      }
+    }
+    return nodes;
+  }, [chatSnapshot]);
+
+  // Initialize WebSocket connection and event router
+  useEffect(() => {
+    wsManager.connect();
+    eventRouter.start();
+    
+    const isWaitingResponseRef = { current: isWaitingResponse };
+    isWaitingResponseRef.current = isWaitingResponse;
+    
+    // Subscribe to WebSocket events
+    const unsubscribe = eventRouter.subscribe((event) => {
+      const eventType = event.type;
+      const eventSessionId = event.session_id;
+      
+      // Only process events for current session
+      // Allow session/created events to set the current session
+      if (eventType === 'session/created') {
+        const newSessionId = event.session_id;
+        logger.info('[WS] session/created:', newSessionId);
+        if (newSessionId) {
+          wsManager.subscribeSession(newSessionId);
+          sessionStore.migrateNodes('__pending__', newSessionId);
+          sessionStore.setCurrentId(newSessionId);
+          currentSessionIdRef.current = newSessionId;
+          setCurrentSessionId(newSessionId);
+          setSessionRefreshTrigger(prev => prev + 1);
+        }
+        return;
+      }
+      
+      if (eventType === 'session/title') {
+        const titleSessionId = event.session_id;
+        const title = event.title;
+        if (titleSessionId && title) {
+          sessionStore.updateProjections(titleSessionId, { title });
+          updateSessionName(titleSessionId, title).catch(err => {
+            console.error('Failed to update session name:', err);
+          });
+          setSessionRefreshTrigger(prev => prev + 1);
+        }
+        return;
+      }
+      
+      if (!eventSessionId) return;
+      
+      logger.debug('[EVENT] Processing event:', eventType, eventSessionId);
+      
+      const isCurrentSession = eventSessionId === currentSessionIdRef.current;
+      
+      // 如果是子智能体事件，关联到主 session
+      const subAgentId = event.sub_agent_id as string | undefined;
+      const targetSessionId = (subAgentId && currentSessionIdRef.current) 
+        ? currentSessionIdRef.current 
+        : eventSessionId;
+      
+      if (isCurrentSession && isWaitingResponseRef.current && ['text', 'thinking', 'tool_call'].includes(eventType)) {
+        setIsWaitingResponse(false);
+      }
+      
+      if (eventType === 'stats') {
+        sessionStore.setContextStats(targetSessionId, event.last_input_token_count || 0, event.context_window || 128000);
+      }
+      
+      if (eventType === 'context/compacted') {
+        // 更新 token 计数
+        if (event.last_input_token_count !== undefined) {
+          sessionStore.setContextStats(targetSessionId, event.last_input_token_count, event.context_window || 128000);
+        }
+        // 显示压缩提示
+        handleNodeEvent(targetSessionId, {
+          type: 'system',
+          message: event.message || '上下文已压缩',
+        });
+      }
+      
+      handleNodeEvent(targetSessionId, event);
+      
+      if (eventType === 'tool_result' && event.snapshot) {
+        const snap = event.snapshot;
+        if (snap.old_content !== undefined && snap.new_content !== undefined) {
+          sessionStore.addFileSnapshot(eventSessionId, {
+            file_path: snap.file_path,
+            is_new: snap.is_new,
+            old_content: snap.old_content,
+            new_content: snap.new_content,
+          });
+        }
+      }
+      
+      if (eventType === 'tool_result' && ['write_file', 'edit_file', 'run_shell'].includes(event.name)) {
+        setFileTreeRefreshTrigger(prev => prev + 1);
+      }
+      
+      if (eventType === 'permission/request') {
+        const permReq: PermissionRequest = {
+          rpc_id: event.rpc_id,
+          request_id: event.request_id || event.rpc_id,
+          command: event.command,
+          tool_name: event.tool_name,
+          message: event.message || '',
+          sub_agent_id: event.sub_agent_id,
+        };
+        sessionStore.setPendingPermission(eventSessionId, permReq);
+      }
+      
+      if (eventType === 'goal/criteria') {
+        sessionStore.setGoalState(eventSessionId, {
+          active: false,
+          goal: event.goal as string,
+          criteria: event.criteria as string[],
+          iteration: 0,
+          maxIterations: 10,
+          status: 'idle',
+        });
+      }
+      
+      if (eventType === 'goal/start') {
+        sessionStore.setGoalState(eventSessionId, {
+          active: true,
+          goal: event.goal as string,
+          criteria: event.criteria as string[],
+          iteration: 0,
+          maxIterations: 10,
+          status: 'running',
+        });
+      }
+      
+      if (eventType === 'goal/progress') {
+        const current = sessionStore.getGoalState(eventSessionId);
+        if (current) {
+          sessionStore.setGoalState(eventSessionId, {
+            ...current,
+            iteration: event.iteration,
+            status: event.status || 'running',
+          });
+        }
+      }
+      
+      if (eventType === 'goal/complete') {
+        const current = sessionStore.getGoalState(eventSessionId);
+        if (current) {
+          sessionStore.setGoalState(eventSessionId, {
+            ...current,
+            status: event.status,
+          });
+        }
+      }
+      
+      if (eventType === 'turn/start') {
+        sessionStore.updateProjections(eventSessionId, { running: true });
+      }
+      
+      if (eventType === 'turn/end') {
+        const doneSessionId = eventSessionId;
+        const turnName = event.name as string | undefined;
+        logger.info('[WS] turn/end:', { sessionId: doneSessionId, subAgentId: event.sub_agent_id, name: turnName });
+        sessionStore.updateProjections(doneSessionId, {
+          running: false,
+          updatedAt: Date.now(),
+        });
+        if (turnName) {
+          sessionStore.updateProjections(doneSessionId, { title: turnName });
+          updateSessionName(doneSessionId, turnName).catch(err => {
+            console.error('Failed to update session name:', err);
+          });
+        }
+        if (isCurrentSession) {
+          currentSessionIdRef.current = doneSessionId;
+          setCurrentSessionId(doneSessionId);
+          setSessionRefreshTrigger(prev => prev + 1);
+          setIsWaitingResponse(false);
+        }
+      }
+    });
+    
+    return () => {
+      unsubscribe();
+      // Don't disconnect WebSocketManager on cleanup - it's a global singleton
+      // React.StrictMode will cause this effect to run twice, and disconnecting
+      // would reset the connecting flag, causing duplicate connections
+    };
+  }, [handleNodeEvent]);
 
   useEffect(() => {
     fetchConfig().then(cfg => {
@@ -69,6 +257,13 @@ export function useChat() {
       setCurrentCwd(lastCwd);
       setCurrentProject(lastCwd.split('/').pop() || lastCwd);
     }
+    
+    // 恢复上次的 session
+    const lastSessionId = localStorage.getItem('lastSessionId');
+    if (lastSessionId) {
+      logger.info('[INIT] restoring session:', lastSessionId);
+      handleSessionSelect(lastSessionId);
+    }
   }, []);
 
   useEffect(() => {
@@ -79,10 +274,6 @@ export function useChat() {
       }
     }
   }, [config, selectedModel]);
-
-  useEffect(() => {
-    messagesRef.current = messages;
-  }, [messages]);
 
   const handleAddToChat = (path: string) => {
     if (!contextFiles.includes(path)) {
@@ -95,103 +286,136 @@ export function useChat() {
   };
 
   const handleSessionSelect = async (sessionId: string) => {
-    resetNodes();
-    pendingSessionNameRef.current = null;
-    setPendingPermission(null);
-    setFileSnapshots([]);
+    logger.info('[SESSION] handleSessionSelect:', sessionId);
+    
+    // 保存当前 session 到 localStorage
+    localStorage.setItem('lastSessionId', sessionId);
+    
+    // Switch session in store
+    sessionStore.select(sessionId);
+    
+    // Update ref immediately
+    currentSessionIdRef.current = sessionId;
     setCurrentSessionId(sessionId);
     
+    // Reset UI state
+    resetNodes(sessionId);
+    pendingSessionNameRef.current = null;
+    
+    // Load session data with lazy loading
     try {
-      // Fetch session data and trace events in parallel
-      const [sessionResponse, traceResponse] = await Promise.all([
-        fetch(`/api/sessions/${sessionId}`),
-        fetch(`/api/trace/${sessionId}`),
-      ]);
+      // Load session metadata
+      const sessionResponse = await fetch(`/api/sessions/${sessionId}`);
       
       if (sessionResponse.ok) {
         const data = await sessionResponse.json();
-        const rawMessages = data.openaiMessages || data.messages || [];
+        const metadata = data.metadata || {};
         
-        const loadedMessages: ChatMessage[] = [];
-        for (const msg of rawMessages) {
-          if (msg.role === 'user') {
-            const content = typeof msg.content === 'string' 
-              ? msg.content 
-              : Array.isArray(msg.content)
-                ? msg.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('\n')
-                : '';
-            const filteredContent = content.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim();
-            if (filteredContent) {
-              loadedMessages.push({
-                role: 'user',
-                content: filteredContent,
-                timestamp: new Date().toISOString(),
-              });
-            }
-          } else if (msg.role === 'assistant') {
-            let content = '';
-            if (typeof msg.content === 'string' && msg.content) {
-              content = msg.content;
-            }
-            if (msg.thinking) {
-              content = `<thinking>${msg.thinking}</thinking>\n\n${content}`;
-            }
-            if (content.trim()) {
-              loadedMessages.push({
-                role: 'assistant',
-                content: content.trim(),
-                timestamp: new Date().toISOString(),
-              });
-            }
-          }
+        // Update projections
+        sessionStore.updateProjections(sessionId, {
+          title: metadata.name,
+          cwd: metadata.cwd,
+          updatedAt: Date.now(),
+        });
+        
+        if (metadata.cwd) {
+          setCurrentProject(metadata.cwd.split('/').pop() || metadata.cwd);
+          setCurrentCwd(metadata.cwd);
+          localStorage.setItem('lastCwd', metadata.cwd);
         }
-        setMessages(loadedMessages);
+      }
+      
+      // Load recent events with pagination
+      const eventsResponse = await fetch(`/api/sessions/${sessionId}/events?limit=50`);
+      
+      if (eventsResponse.ok) {
+        const { events, has_more, base_seq, total_count } = await eventsResponse.json();
+        logger.info('[SESSION] loaded:', {
+          id: sessionId,
+          eventCount: events.length,
+          totalCount: total_count,
+          hasMore: has_more,
+          baseSeq: base_seq,
+        });
         
-        // Get trace events first for sub-agent mapping
-        let traceEvents: Array<Record<string, unknown>> | undefined;
-        if (traceResponse.ok) {
-          const traceData = await traceResponse.json();
-          if (traceData.events && traceData.events.length > 0) {
-            traceEvents = traceData.events;
-          }
-        }
+        // Update pagination state
+        const lastSeq = events.length > 0 ? Math.max(...events.map((e: any) => e.seq ?? 0)) : -1;
+        sessionStore.setPagination(sessionId, has_more, base_seq, lastSeq);
         
-        // Load messages with trace context for proper sub-agent ordering
-        loadOpenAIMessages(rawMessages, traceEvents);
-        
-        // Load trace events to reconstruct sub-agent content
-        if (traceEvents) {
-          loadTraceEvents(traceEvents);
-        }
-        
-        if (data.metadata?.cwd) {
-          setCurrentProject(data.metadata.cwd.split('/').pop() || data.metadata.cwd);
-          setCurrentCwd(data.metadata.cwd);
-          localStorage.setItem('lastCwd', data.metadata.cwd);
-        }
+        // Load events into nodes
+        loadSessionEvents(sessionId, events);
       }
     } catch (err) {
       console.error('Failed to load session:', err);
     }
   };
 
+  const handleLoadMoreEvents = async () => {
+    const sessionId = currentSessionIdRef.current;
+    if (!sessionId) return false;
+    
+    const state = sessionStore.get(sessionId);
+    if (!state || !state.hasMore) return false;
+    
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}/events?before=${state.baseSeq}&limit=50`);
+      
+      if (!response.ok) {
+        console.error(`[SESSION] loadMore failed: ${response.status}`);
+        return false;
+      }
+      
+      const { events, has_more, base_seq } = await response.json();
+      
+      if (events && events.length > 0) {
+        logger.info('[SESSION] loaded more events:', { count: events.length, hasMore: has_more });
+        
+        // Prepend events to existing snapshot
+        prependSessionEvents(sessionId, events);
+        
+        // Update pagination state
+        sessionStore.setPagination(sessionId, has_more, base_seq, state.lastSeq);
+        return true;
+      }
+      
+      return false;
+    } catch (err) {
+      console.error('[SESSION] loadMore error:', err);
+      return false;
+    }
+  };
+
   const handleNewSession = (cwd?: string) => {
+    logger.info('[SESSION] handleNewSession, cwd:', cwd);
     const projectCwd = cwd || currentCwd || localStorage.getItem('lastCwd') || '';
     if (!projectCwd) {
       alert('Please select a project first');
       return;
     }
-    setCurrentSessionId(null);
-    setMessages([]);
+    
+    // 清除 lastSessionId，表示新建 session
+    localStorage.removeItem('lastSessionId');
+    
+    // Reset streaming state
+    setIsWaitingResponse(false);
+    
+    // Create new session in store (sets currentSessionId to '__pending__')
+    sessionStore.create();
+    
+    // Get the pending session ID from store
+    const pendingId = sessionStore.getCurrentId();
+    
+    // Update ref and state to match store
+    currentSessionIdRef.current = pendingId;
+    setCurrentSessionId(pendingId);
+    
+    // Reset UI state
     setInputValue('');
     setContextFiles([]);
     setCurrentProject(projectCwd.split('/').pop() || projectCwd);
     setCurrentCwd(projectCwd);
     localStorage.setItem('lastCwd', projectCwd);
-    setPendingPermission(null);
-    setFileSnapshots([]);
     pendingSessionNameRef.current = null;
-    resetNodes();
   };
 
   const handleSendMessage = async () => {
@@ -201,31 +425,33 @@ export function useChat() {
       return;
     }
     
-    // If currently streaming, queue as steer message
+    // Auto-create pending session if needed
+    if (!currentSessionIdRef.current) {
+      sessionStore.create();
+      const pendingId = sessionStore.getCurrentId();
+      currentSessionIdRef.current = pendingId;
+      setCurrentSessionId(pendingId);
+    }
+    
     if (isStreaming) {
-      setPendingSteerMessage({
+      logger.info('[MSG] queued as steer:', inputValue.trim().slice(0, 30));
+      setPendingSteerMessages(prev => [...prev, {
         content: inputValue.trim(),
         contextFiles: [...contextFiles],
         model: selectedModel || undefined,
-      });
+      }]);
       setInputValue('');
       setContextFiles([]);
       return;
     }
     
-    const isFirstMessage = messages.length === 0;
+    const isFirstMessage = userNodes.length === 0;
     const userMessageContent = inputValue.trim();
+    logger.info('[MSG] send:', { content: userMessageContent.slice(0, 30), isFirstMessage, sessionId: currentSessionIdRef.current });
     
-    const userMessage: ChatMessage = {
-      role: 'user',
-      content: userMessageContent,
-      timestamp: new Date().toISOString(),
-      contextFiles: [...contextFiles],
-      model: selectedModel || undefined,
-    };
-    
-    setMessages(prev => [...prev, userMessage]);
-    addUserMessage(userMessageContent, contextFiles.length > 0 ? contextFiles : undefined, undefined, selectedModel || undefined);
+    // For new sessions, use a pending session ID until the real one is created
+    const nodeSessionId = currentSessionIdRef.current || '__pending__';
+    addUserMessage(nodeSessionId, userMessageContent, contextFiles.length > 0 ? contextFiles : undefined, undefined, selectedModel || undefined);
     setInputValue('');
     setContextFiles([]);
 
@@ -233,9 +459,7 @@ export function useChat() {
       pendingSessionNameRef.current = userMessageContent;
     }
 
-    const abortController = new AbortController();
-    abortControllerRef.current = abortController;
-    setIsStreaming(true);
+    sessionStore.updateProjections(nodeSessionId, { running: true });
     setIsWaitingResponse(true);
 
     try {
@@ -243,178 +467,65 @@ export function useChat() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: userMessage.content,
-          session_id: currentSessionId,
-          context_files: userMessage.contextFiles,
+          message: userMessageContent,
+          session_id: currentSessionIdRef.current === '__pending__' ? null : currentSessionIdRef.current,
+          context_files: contextFiles.length > 0 ? contextFiles : undefined,
           agent: selectedAgent,
-          model: userMessage.model,
+          model: selectedModel || undefined,
           permission_mode: yoloMode ? 'bypassPermissions' : 'default',
           cwd: currentCwd!,
         }),
-        signal: abortController.signal,
       });
 
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
 
-      if (!response.body) {
-        throw new Error('No response body');
+      const result = await response.json();
+      
+      // If new session, update session_id
+      if (result.session_id && (!currentSessionIdRef.current || currentSessionIdRef.current === '__pending__')) {
+        sessionStore.setCurrentId(result.session_id);
+        currentSessionIdRef.current = result.session_id;
+        setCurrentSessionId(result.session_id);
       }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n');
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6);
-            try {
-              const parsed = JSON.parse(data);
-
-              if (isWaitingResponse && (parsed.text || parsed.thinking || parsed.tool_call)) {
-                setIsWaitingResponse(false);
-              }
-
-              if (parsed.stats) {
-                setContextUsed(parsed.stats.last_input_token_count || 0);
-                setContextTotal(parsed.stats.context_window || 128000);
-              }
-
-              handleNodeEvent(parsed);
-              
-              if (parsed.tool_result?.snapshot) {
-                const snap = parsed.tool_result.snapshot;
-                if (snap.old_content !== undefined && snap.new_content !== undefined) {
-                  setFileSnapshots(prev => {
-                    const filtered = prev.filter(s => s.file_path !== snap.file_path);
-                    return [...filtered, {
-                      file_path: snap.file_path,
-                      is_new: snap.is_new,
-                      old_content: snap.old_content,
-                      new_content: snap.new_content,
-                    }];
-                  });
-                }
-              }
-              
-              if (parsed.tool_result && ['write_file', 'edit_file', 'run_shell'].includes(parsed.tool_result.name)) {
-                setFileTreeRefreshTrigger(prev => prev + 1);
-              }
-              
-              if (parsed.permission_request) {
-                const permReq = parsed.permission_request as PermissionRequest;
-                setPendingPermission(permReq);
-              }
-              
-              // Goal mode events
-              if (parsed.goal_criteria) {
-                // Show criteria for confirmation
-                const { goal, criteria } = parsed.goal_criteria;
-                setGoalState({
-                  active: false, // Not started yet, waiting for confirmation
-                  goal,
-                  criteria,
-                  iteration: 0,
-                  maxIterations: 10,
-                  status: 'idle',
-                });
-              }
-              
-              if (parsed.goal_start) {
-                const { goal, criteria } = parsed.goal_start;
-                setGoalState({
-                  active: true,
-                  goal,
-                  criteria,
-                  iteration: 0,
-                  maxIterations: 10,
-                  status: 'running',
-                });
-              }
-              
-              if (parsed.goal_progress) {
-                setGoalState(prev => prev ? {
-                  ...prev,
-                  iteration: parsed.goal_progress.iteration,
-                  status: parsed.goal_progress.status || 'running',
-                } : null);
-              }
-              
-              if (parsed.goal_complete) {
-                setGoalState(prev => prev ? {
-                  ...prev,
-                  status: parsed.goal_complete.status,
-                } : null);
-              }
-              
-              if (parsed.done) {
-                const doneSessionId = parsed.session_id || currentSessionId;
-                if (doneSessionId) {
-                  setCurrentSessionId(doneSessionId);
-                  sessionStorage.removeItem('sessions');
-                  setSessionRefreshTrigger(prev => prev + 1);
-                  
-                  if (pendingSessionNameRef.current) {
-                    const userMessage = pendingSessionNameRef.current;
-                    pendingSessionNameRef.current = null;
-                    
-                    generateSessionName(userMessage)
-                      .then(async name => {
-                        try {
-                          await updateSessionName(doneSessionId, name);
-                          sessionStorage.removeItem('sessions');
-                          setSessionRefreshTrigger(prev => prev + 1);
-                        } catch (err) {
-                          console.error('Failed to update session name:', err);
-                        }
-                      })
-                      .catch(err => console.error('Failed to generate session name:', err));
-                  }
-                }
-              }
-            } catch {
-              // Ignore parse errors
-            }
-          }
-        }
-      }
+      
+      // 总是触发侧边栏刷新，确保 session 立刻出现
+      setSessionRefreshTrigger(prev => prev + 1);
+      
     } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') {
-        console.log('Stream aborted by user');
-      } else {
-        console.error('Streaming error:', error);
-      }
-    } finally {
-      setIsStreaming(false);
+      console.error('Send message error:', error);
+      sessionStore.updateProjections(nodeSessionId, { running: false });
       setIsWaitingResponse(false);
-      abortControllerRef.current = null;
     }
   };
 
   const handleStopStreaming = useCallback(async () => {
-    // Send abort to backend but don't abort the fetch - wait for "done" event
-    if (currentSessionId) {
+    logger.info('[ABORT] handleStopStreaming called, currentSessionId:', currentSessionId, 'currentSessionIdRef:', currentSessionIdRef.current);
+    const sessionId = currentSessionId || currentSessionIdRef.current;
+    if (sessionId) {
       try {
-        await fetch(`/api/sessions/${currentSessionId}/abort`, { method: 'POST' });
+        logger.info('[ABORT] sending abort via WebSocket:', sessionId);
+        wsManager.send({ type: 'abort', session_id: sessionId });
+        logger.info('[ABORT] abort sent');
       } catch (err) {
         console.error('Failed to abort session:', err);
       }
+    } else {
+      logger.info('[ABORT] no session to abort');
     }
-    // Don't set isStreaming to false here - wait for "done" event from backend
+    
+    if (sessionId) {
+      sessionStore.updateProjections(sessionId, { running: false });
+    }
+    setIsWaitingResponse(false);
   }, [currentSessionId]);
 
-  // Send pending steer message after streaming ends
+  // Send pending steer messages after streaming ends (one by one)
   useEffect(() => {
-    if (!isStreaming && pendingSteerMessage) {
-      const steerMsg = pendingSteerMessage;
-      setPendingSteerMessage(null);
+    if (!isStreaming && pendingSteerMessages.length > 0) {
+      const [steerMsg, ...rest] = pendingSteerMessages;
+      setPendingSteerMessages(rest);
       
       // Set input value and context files
       setInputValue(steerMsg.content);
@@ -426,7 +537,7 @@ export function useChat() {
       // Mark for auto-send after state updates
       autoSendRef.current = true;
     }
-  }, [isStreaming, pendingSteerMessage]);
+  }, [isStreaming, pendingSteerMessages]);
   
   // Check for auto-send when input value changes
   useEffect(() => {
@@ -439,14 +550,21 @@ export function useChat() {
     }
   }, [inputValue, isStreaming]);
 
+  const [isCompacting, setIsCompacting] = useState(false);
+  
   const handleCompactSession = useCallback(async () => {
-    if (!currentSessionId) return;
+    if (!currentSessionId || isCompacting) return;
     try {
+      setIsCompacting(true);
       await compactSession(currentSessionId);
+      alert('上下文压缩成功');
     } catch (err) {
       console.error('Failed to compact session:', err);
+      alert('上下文压缩失败');
+    } finally {
+      setIsCompacting(false);
     }
-  }, [currentSessionId]);
+  }, [currentSessionId, isCompacting]);
 
   const handleToggleYoloMode = useCallback(async () => {
     const newMode = !yoloMode;
@@ -475,19 +593,22 @@ export function useChat() {
     }
   }, [currentSessionId, handleSessionSelect]);
 
-  const handleForkAtPoint = useCallback(async (nodeIndex: number) => {
+  const handleForkAtPoint = useCallback(async (userMessageIndex: number) => {
     if (!currentSessionId) return;
     try {
-      let userMessageCount = 0;
-      for (let i = 0; i < nodeIndex; i++) {
-        if (messages[i]?.role === 'user') {
-          userMessageCount++;
-        }
-      }
+      logger.info('[FORK] userMessageIndex:', userMessageIndex);
+      logger.info('[FORK] userNodes:', userNodes.map((n, i) => ({ index: i, key: n.key, content: n.content.slice(0, 30) })));
       
-      const result = await forkSession(currentSessionId);
+      // userMessageIndex is the index of the user message before the click point
+      // fork keeps messages before this index (not including this message)
+      const keep_user_messages = userMessageIndex;
+      logger.info('[FORK] keep_user_messages:', keep_user_messages);
+      
+      // Use atomic fork API (fork + truncate in one step)
+      const result = await forkSession(currentSessionId, { keep_user_messages });
+      logger.info('[FORK] forkSession result:', result);
+      
       if (result.new_session_id) {
-        await truncateSession(result.new_session_id, userMessageCount);
         sessionStorage.removeItem('sessions');
         setSessionRefreshTrigger(prev => prev + 1);
         await handleSessionSelect(result.new_session_id);
@@ -495,60 +616,43 @@ export function useChat() {
     } catch (err) {
       console.error('Failed to fork at point:', err);
     }
-  }, [currentSessionId, messages, handleSessionSelect]);
+  }, [currentSessionId, userNodes, handleSessionSelect]);
 
-  const handleEditMessage = useCallback(async (index: number) => {
-    const msg = messages[index];
-    if (msg.role !== 'user') return;
+  const handleEditMessage = useCallback(async (node: UserNode, restoreFiles: boolean) => {
+    logger.info('[EDIT] node:', { key: node.key, content: node.content.slice(0, 30) });
+    logger.info('[EDIT] userNodes:', userNodes.map((n, i) => ({ index: i, key: n.key, content: n.content.slice(0, 30) })));
     
-    // Count user messages before this one to determine how many turns to rewind
-    let userMessagesBefore = 0;
-    for (let i = 0; i < index; i++) {
-      if (messages[i].role === 'user') {
-        userMessagesBefore++;
-      }
-    }
+    setInputValue(node.content);
+    setContextFiles(node.contextFiles || []);
+    setSelectedModel(node.model || '');
     
-    setInputValue(msg.content);
-    setContextFiles(msg.contextFiles || []);
-    setSelectedModel(msg.model || '');
+    const nodeIndex = userNodes.findIndex(n => n.key === node.key);
+    logger.info('[EDIT] nodeIndex:', nodeIndex);
     
     if (currentSessionId) {
       try {
-        // Calculate turns to rewind: current turns - target turns
-        // Each user message represents one turn
-        const currentTurns = messages.filter(m => m.role === 'user').length;
-        const targetTurns = userMessagesBefore;
-        const turnsToRewind = currentTurns - targetTurns;
+        // Always use truncate, keeping messages before nodeIndex
+        logger.info('[EDIT] truncate to:', nodeIndex, 'restoreFiles:', restoreFiles);
+        await truncateSession(currentSessionId, nodeIndex);
         
-        if (turnsToRewind > 0) {
-          // Use rewind to restore file snapshots
-          await rewindSession(currentSessionId, turnsToRewind);
-        } else {
-          // Fallback to truncate if no turns to rewind
-          await truncateSession(currentSessionId, userMessagesBefore);
+        // If file restore is needed, call rewind (but this may not be accurate)
+        if (restoreFiles) {
+          logger.info('[EDIT] restoreFiles requested, but using truncate only');
         }
+        
+        // Reload session after truncate to rebuild all nodes
+        await handleSessionSelect(currentSessionId);
       } catch (err) {
-        console.error('Failed to rewind session:', err);
-        // Fallback to truncate on error
-        try {
-          await truncateSession(currentSessionId, userMessagesBefore);
-        } catch (e) {
-          console.error('Failed to truncate session:', e);
-        }
+        console.error('Failed to edit session:', err);
       }
     }
-    
-    const remainingMessages = messages.slice(0, index);
-    setMessages(remainingMessages);
-    loadMessages(remainingMessages);
-  }, [messages, loadMessages, currentSessionId]);
+  }, [userNodes, currentSessionId, handleSessionSelect]);
 
   const handlePermissionApprove = useCallback(async () => {
     if (!pendingPermission || !currentSessionId) return;
     try {
       await respondToPermission(currentSessionId, pendingPermission.request_id, true);
-      setPendingPermission(null);
+      sessionStore.setPendingPermission(currentSessionId, undefined);
     } catch (err) {
       console.error('Failed to approve permission:', err);
     }
@@ -558,17 +662,20 @@ export function useChat() {
     if (!pendingPermission || !currentSessionId) return;
     try {
       await respondToPermission(currentSessionId, pendingPermission.request_id, false);
-      setPendingPermission(null);
+      sessionStore.setPendingPermission(currentSessionId, undefined);
     } catch (err) {
       console.error('Failed to deny permission:', err);
     }
   }, [pendingPermission, currentSessionId]);
 
   const handleAcceptFile = useCallback((filePath: string) => {
-    setFileSnapshots(prev => prev.filter(s => s.file_path !== filePath));
-  }, []);
+    if (!currentSessionId) return;
+    const snaps = sessionStore.getFileSnapshots(currentSessionId).filter(s => s.file_path !== filePath);
+    sessionStore.setFileSnapshots(currentSessionId, snaps);
+  }, [currentSessionId]);
 
   const handleRejectFile = useCallback(async (filePath: string) => {
+    if (!currentSessionId) return;
     const snap = fileSnapshots.find(s => s.file_path === filePath);
     if (!snap) return;
     try {
@@ -578,17 +685,19 @@ export function useChat() {
         body: JSON.stringify({ file_path: filePath, old_content: snap.old_content }),
       });
       if (res.ok) {
-        setFileSnapshots(prev => prev.filter(s => s.file_path !== filePath));
+        const snaps = sessionStore.getFileSnapshots(currentSessionId).filter(s => s.file_path !== filePath);
+        sessionStore.setFileSnapshots(currentSessionId, snaps);
         setFileTreeRefreshTrigger(prev => prev + 1);
       }
     } catch (err) {
       console.error('Failed to revert file:', err);
     }
-  }, [fileSnapshots]);
+  }, [fileSnapshots, currentSessionId]);
 
   const handleAcceptAll = useCallback(() => {
-    setFileSnapshots([]);
-  }, []);
+    if (!currentSessionId) return;
+    sessionStore.setFileSnapshots(currentSessionId, []);
+  }, [currentSessionId]);
 
   const handleConfirmGoal = useCallback(async () => {
     if (!currentSessionId) return;
@@ -601,12 +710,12 @@ export function useChat() {
   }, [currentSessionId]);
 
   const handleCancelGoal = useCallback(() => {
-    setGoalState(null);
-  }, []);
+    if (!currentSessionId) return;
+    sessionStore.setGoalState(currentSessionId, undefined);
+  }, [currentSessionId]);
 
   return {
     // State
-    messages,
     inputValue,
     setInputValue,
     contextFiles,
@@ -620,6 +729,7 @@ export function useChat() {
     currentCwd,
     isStreaming,
     isWaitingResponse,
+    isCompacting,
     fileSnapshots,
     fileTreeRefreshTrigger,
     yoloMode,
@@ -628,8 +738,8 @@ export function useChat() {
     pendingPermission,
     sessionRefreshTrigger,
     chatSnapshot,
-    pendingSteerMessage,
-    setPendingSteerMessage,
+    pendingSteerMessages,
+    setPendingSteerMessages,
     goalState,
     
     // Handlers
@@ -652,5 +762,6 @@ export function useChat() {
     handleNodeEvent,
     handleConfirmGoal,
     handleCancelGoal,
+    handleLoadMoreEvents,
   };
 }

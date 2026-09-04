@@ -15,7 +15,7 @@ import re
 import time
 from typing import Any, Awaitable, Callable
 
-from agents.ui import print_confirmation, print_error, print_info
+from agents.logging import print_confirmation, print_error, print_info
 
 
 # 类型别名
@@ -162,7 +162,7 @@ class SkillOrchestrator:
         return self._permission_mode in {"bypassPermissions", "acceptEdits"}
 
     def _online_evolution_enabled(self) -> bool:
-        raw = os.environ.get("BEAR_AUTO_SKILL_EVOLUTION", "1").strip().lower()
+        raw = os.environ.get("MYCODE_AUTO_SKILL_EVOLUTION", "1").strip().lower()
         return raw not in {"0", "false", "no", "off"}
 
     # ── 后台任务 ──
@@ -245,8 +245,8 @@ class SkillOrchestrator:
 
     def should_trigger_evolution(self) -> bool:
         """检查是否应触发 Skill 进化（cadence 门控）。"""
-        min_turns = int(os.environ.get("BEAR_SKILL_EVOLUTION_MIN_TURNS", "3"))
-        min_minutes = int(os.environ.get("BEAR_SKILL_EVOLUTION_MIN_MINUTES", "10"))
+        min_turns = int(os.environ.get("MYCODE_SKILL_EVOLUTION_MIN_TURNS", "3"))
+        min_minutes = int(os.environ.get("MYCODE_SKILL_EVOLUTION_MIN_MINUTES", "10"))
 
         turns_ok = self._turns_since_last_evolution >= min_turns
         minutes_since = (time.time() - self._last_evolution_time) / 60
@@ -301,7 +301,7 @@ class SkillOrchestrator:
             retrieved_reference=window.get("retrieved_reference") or None,
             hint=combined_hint,
             confirm_write=self._confirm_online_skill_write if interactive_confirm else self._confirm_background_online_skill_write,
-            target=os.environ.get("BEAR_AUTO_SKILL_TARGET", "project"),
+            target=os.environ.get("MYCODE_AUTO_SKILL_TARGET", "project"),
         )
         if result.get("ok"):
             if result.get("action") in {"add", "merge"}:

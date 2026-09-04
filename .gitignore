@@ -199,7 +199,7 @@ cython_debug/
 .task_outputs/
 .tasks/
 .teams/
-.bear/skill-evolution/
+.mycode/skill-evolution/
 
 # Ruff stuff:
 .ruff_cache/
@@ -234,7 +234,7 @@ frontend/build/
 frontend/.env*.local
 
 # Config files with secrets
-.bear-code/
+.my-code/
 config.json
 *.key
 *.pem
@@ -246,7 +246,8 @@ analysis_progress.md
 paper/
 .playwright-mcp/
 .idea/
-.bear/
+.mycode/
+.mycode/
 
 # Project learning (cloned repos for reference)
 project-learning/
@@ -270,3 +271,4 @@ output/
 data/
 .opencode/
 projects/
+.bear/

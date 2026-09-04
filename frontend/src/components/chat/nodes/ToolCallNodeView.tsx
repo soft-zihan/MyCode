@@ -24,7 +24,7 @@ export const ToolCallNodeView = memo(function ToolCallNodeView({ node }: ToolCal
 
   return (
     <div className="flex justify-start">
-      <div className="max-w-2xl w-full">
+      <div className="w-full">
         <ToolRow call={toolCall} />
       </div>
     </div>

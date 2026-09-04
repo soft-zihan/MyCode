@@ -20,11 +20,11 @@
       "command": "/Users/han/Documents/projects/paper-rag-mcp/venv/bin/python",
       "args": ["-m", "paper_rag_mcp.server"],
       "env": {
-        "PAPER_DIR": ".bear/paper-rag/papers",
-        "INDEX_DIR": ".bear/paper-rag/index",
+        "PAPER_DIR": ".mycode/paper-rag/papers",
+        "INDEX_DIR": ".mycode/paper-rag/index",
         "RERANKER_METHOD": "cross-encoder",
         "CROSS_ENCODER_DEVICE": "mps",
-        "EMBEDDING_MODEL": "st-/Users/han/Documents/projects/Learn-LLM-and-Agent/BearCode/.bear/mcp-servers/paper-qa/models/qwen3-academic"
+        "EMBEDDING_MODEL": "st-/Users/han/Documents/projects/Learn-LLM-and-Agent/mycodeCode/.mycode/mcp-servers/paper-qa/models/qwen3-academic"
       }
     }
   }

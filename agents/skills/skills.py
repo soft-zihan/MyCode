@@ -90,14 +90,14 @@ def discover_skills() -> list[SkillDefinition]:
         return _cached_skills
 
     skills: dict[str,SkillDefinition] = {}
-    # 用户级 skills 优先级最高：~/.bear/skills/<name>/SKILL.md
-    user_dir = Path.home() / ".bear" / "skills"
+    # 用户级 skills 优先级最高：~/.mycode/skills/<name>/SKILL.md
+    user_dir = Path.home() / ".mycode" / "skills"
     _load_skills_from_dir(user_dir, "user", skills)
     # 用户级 skills（agents 目录）：~/.agents/skills/<name>/SKILL.md
     agents_dir = Path.home() / ".agents" / "skills"
     _load_skills_from_dir(agents_dir, "user", skills, overwrite=False)
-    # 项目级 skills 优先级较低：<cwd>/.bear/skills/<name>/SKILL.md
-    project_dir = Path.cwd() / ".bear" / "skills"
+    # 项目级 skills 优先级较低：<cwd>/.mycode/skills/<name>/SKILL.md
+    project_dir = Path.cwd() / ".mycode" / "skills"
     _load_skills_from_dir(project_dir, "project", skills, overwrite=False)
 
     _cached_skills = list(skills.values())
@@ -129,7 +129,7 @@ def _load_executable_skills(skills: list[SkillDefinition]) -> None:
     )
 
 def _load_skills_from_dir( base_dir: Path, source: str, skills:dict[str, SkillDefinition], overwrite: bool = True) -> None:
-    # 只加载目录形式的 skill，不加载 .bear/skills/foo.md 这种单文件形式。
+    # 只加载目录形式的 skill，不加载 .mycode/skills/foo.md 这种单文件形式。
     if not base_dir.is_dir():
         return
     for entry in base_dir.iterdir():

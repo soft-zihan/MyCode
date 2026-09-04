@@ -28,7 +28,7 @@ from .session_memory import (
     FOLD_SESSION_MEMORY_SYSTEM,
 )
 from .session import save_session, save_folded_session_memory
-from agents.ui import print_info
+from agents.logging import print_info
 
 SNIP_THRESHOLD = 0.60
 MICROCOMPACT_IDLE_S = 5 * 60

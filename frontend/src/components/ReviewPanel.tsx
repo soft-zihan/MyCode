@@ -4,7 +4,7 @@ import { DiffViewer } from './DiffViewer';
 export interface FileSnapshot {
   file_path: string;
   is_new: boolean;
-  old_content: string;
+  old_content?: string;
   new_content: string;
 }
 

@@ -29,15 +29,15 @@ class CustomAgentCreate(BaseModel):
     name: str
     description: str
     system_prompt: str
-    allowed_tools: list[str] | None = None
-    model: str | None = None
+    allowed_tools: Optional[list[str]] = None
+    model: Optional[str] = None
 
 
 class CustomAgentUpdate(BaseModel):
-    description: str | None = None
-    system_prompt: str | None = None
-    allowed_tools: list[str] | None = None
-    model: str | None = None
+    description: Optional[str] = None
+    system_prompt: Optional[str] = None
+    allowed_tools: Optional[list[str]] = None
+    model: Optional[str] = None
 
 
 @router.get("/api/tools")
@@ -119,7 +119,7 @@ def api_update_agent_prompt(agent_name: str, data: PromptUpdate) -> dict[str, An
     if agent_name in custom_agents:
         import frontmatter
         
-        for base_dir in [Path.home() / ".bear" / "agents", Path.cwd() / ".bear" / "agents"]:
+        for base_dir in [Path.home() / ".mycode" / "agents", Path.cwd() / ".mycode" / "agents"]:
             agent_file = base_dir / f"{agent_name}.md"
             if agent_file.exists():
                 try:
@@ -158,7 +158,7 @@ def api_create_custom_agent(data: CustomAgentCreate) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=f"Agent '{data.name}' already exists.")
     
     # Create agent file in user's home directory
-    agents_dir = Path.home() / ".bear" / "agents"
+    agents_dir = Path.home() / ".mycode" / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
     agent_file = agents_dir / f"{data.name}.md"
     
@@ -193,7 +193,7 @@ def api_update_custom_agent(agent_name: str, data: CustomAgentUpdate) -> dict[st
     
     # Find the agent file
     agent_file = None
-    for base_dir in [Path.home() / ".bear" / "agents", Path.cwd() / ".bear" / "agents"]:
+    for base_dir in [Path.home() / ".mycode" / "agents", Path.cwd() / ".mycode" / "agents"]:
         path = base_dir / f"{agent_name}.md"
         if path.exists():
             agent_file = path
@@ -234,7 +234,7 @@ def api_delete_custom_agent(agent_name: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"Custom agent '{agent_name}' not found.")
     
     # Find and delete the agent file
-    for base_dir in [Path.home() / ".bear" / "agents", Path.cwd() / ".bear" / "agents"]:
+    for base_dir in [Path.home() / ".mycode" / "agents", Path.cwd() / ".mycode" / "agents"]:
         agent_file = base_dir / f"{agent_name}.md"
         if agent_file.exists():
             try:

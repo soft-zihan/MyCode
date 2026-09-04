@@ -23,6 +23,12 @@ class RenameRequest(BaseModel):
     cwd: Optional[str] = None
 
 
+class MoveRequest(BaseModel):
+    source_path: str
+    target_path: str
+    cwd: Optional[str] = None
+
+
 @router.get("/api/directories")
 def api_list_directories(path: Optional[str] = None) -> dict[str, Any]:
     if path:
@@ -166,6 +172,32 @@ def api_workspace_rename(data: RenameRequest) -> dict[str, Any]:
         return {"success": True, "old_path": data.old_path, "new_path": str(new_path.relative_to(workspace_path))}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to rename: {str(e)}")
+
+
+@router.post("/api/workspace/move")
+def api_workspace_move(data: MoveRequest) -> dict[str, Any]:
+    workspace_path = Path(data.cwd) if data.cwd else Path.cwd()
+    source = workspace_path / data.source_path
+    target = workspace_path / data.target_path
+
+    if not source.exists():
+        raise HTTPException(status_code=404, detail="Source not found")
+
+    try:
+        source.resolve().relative_to(workspace_path.resolve())
+        target.resolve().relative_to(workspace_path.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    if target.exists():
+        raise HTTPException(status_code=400, detail="Target already exists")
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source.rename(target)
+        return {"success": True, "source": data.source_path, "target": data.target_path}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to move: {str(e)}")
 
 
 @router.get("/api/workspace/file")

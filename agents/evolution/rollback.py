@@ -257,12 +257,12 @@ def _resolve_skill_path(skill_name: str) -> Optional[Path]:
     cwd = Path.cwd()
 
     # 项目级 skill
-    project_path = cwd / ".bear" / "skills" / skill_name / "SKILL.md"
+    project_path = cwd / ".mycode" / "skills" / skill_name / "SKILL.md"
     if project_path.is_file():
         return project_path
 
     # 用户级 skill
-    user_path = Path.home() / ".bear" / "skills" / skill_name / "SKILL.md"
+    user_path = Path.home() / ".mycode" / "skills" / skill_name / "SKILL.md"
     if user_path.is_file():
         return user_path
 

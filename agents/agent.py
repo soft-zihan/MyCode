@@ -16,7 +16,6 @@ import openai
 from agents.tools.mcp import McpManager
 from agents.agent_loop import AgentLoop
 from agents.tools.executor import persist_large_result, detect_failure
-from agents.core.checkpoints import FileCheckpointStore, TurnBoundary
 from agents.core.context_store import (
     ContextStore,
     cleared_placeholder,
@@ -34,14 +33,12 @@ from agents.core.session_memory import (
     format_folded_memory,
     parse_folded_memory,
 )
-from agents.core.session import save_folded_session_memory, save_session
+from agents.core.session import save_folded_session_memory, save_session, Session
 from agents.core.subagent import get_sub_agent_config
 from agents.tools import ToolDef, tool_definitions, execute_tool, CONCURRENCY_SAFE_TOOLS, check_permission, \
     get_active_tool_definitions
-from agents.ui import print_info, print_divider, print_assistant_text, print_sub_agent_start, print_sub_agent_end, \
-    start_spinner, stop_spinner, print_cost, print_tool_call, print_tool_result, print_confirmation, print_retry, \
-    print_error, print_thinking_text, thinking_visible, md_track_begin, md_track_feed, md_track_flush, \
-    reset_thinking_window
+from agents.logging import print_info, print_divider, print_assistant_text, print_sub_agent_start, print_sub_agent_end, \
+    print_error, print_retry
 
 
 # 指数退避重试
@@ -148,8 +145,8 @@ class Agent:
                  custom_tools: list[ToolDef] | None=None,
                  is_sub_agent: bool=False,
                  parent_abort_event: asyncio.Event | None=None,
-                  checkpoint_store: FileCheckpointStore | None=None,
-                  options: Any | None=None,):
+                   session_id: str | None=None,
+                   options: Any | None=None,):
         # 如果提供了 options，则从中提取参数
         if options is not None:
             from agents.core.options import AgentOptions
@@ -166,7 +163,7 @@ class Agent:
                 custom_tools = options.custom_tools
                 is_sub_agent = options.is_sub_agent
                 parent_abort_event = options.parent_abort_event
-                checkpoint_store = options.checkpoint_store
+                session_id = getattr(options, 'session_id', None)
         
         self.permission_mode = permission_mode
         self.thinking = thinking
@@ -189,12 +186,20 @@ class Agent:
         self.context_window = _ep.context_window if _ep else 200000
         self.effective_window = self.context_window - 20000
         self.auto_compact_threshold = _ep.auto_compact_threshold if _ep else 0.70
-        self.session_id = uuid.uuid4().hex[:8]
+        self.session_id = session_id or uuid.uuid4().hex[:8]
         self.session_start_time= time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
-        # 只有主智能体设置 trace session，子智能体继承父智能体的 trace 文件
+        
+        self.session = Session(self.session_id, origin="sub_agent" if is_sub_agent else None)
+        self._current_turn: int = 0
+        self._current_step: int = 0
+        self._permission_waiters: dict[str, asyncio.Future] = {}
+        
         if not is_sub_agent:
-            from agents.observability.trace import set_trace_session
+            from agents.observability.trace import set_trace_session, get_trace_session
+            old_session = get_trace_session()
             set_trace_session(self.session_id)
+            import logging
+            logging.getLogger(__name__).info(f"[DEBUG] Agent.__init__ set trace session: {self.session_id} (was: {old_session})")
         
         self.total_input_tokens = 0
         self.total_output_tokens = 0
@@ -202,10 +207,6 @@ class Agent:
         self.current_turns = 0
         self.last_api_call_time = 0
 
-        # /rewind 支持：文件快照存储 + 轮次边界记录。
-        # 子 Agent 与父共享同一个 store，这样子 Agent 改的文件也能被回退。
-        self._checkpoint_store = checkpoint_store or FileCheckpointStore(self.session_id)
-        self._turn_boundaries: list[TurnBoundary] = []
         # /goal 模式：最近一轮助手回复文本，供 verifier 作为证据。
         self._last_assistant_text = ""
         # ACE 可逆上下文：snip/clear 前原文无损存入，可用 context_restore 取回。
@@ -222,7 +223,7 @@ class Agent:
             effective_window=self.effective_window,
         )
         self._permission_gate = PermissionGate()
-        self._session_lifecycle = SessionLifecycle(self._checkpoint_store, self._context_store)
+        self._session_lifecycle = SessionLifecycle(self._context_store)
         self._skill_orchestrator = SkillOrchestrator(
             side_query_fn=self._build_side_query,
             permission_mode=self.permission_mode,
@@ -253,12 +254,9 @@ class Agent:
         #子agent的输出缓存
         self._output_buffer: list[str] | None=None
         self._turn_output_buffer: list[str] | None = None
-        self._turn_thinking_buffer: list[str] | None = None  # 收集 thinking 内容用于 SSE 传输
-        self._turn_event_buffer: list[dict] | None = None  # 收集工具调用等事件用于 SSE 传输
+        self._turn_thinking_buffer: list[str] | None = None
+        self._turn_event_buffer: list[dict] | None = None
         
-        # 流式事件队列（用于前端 chat_stream）
-        self._stream_event_queue: asyncio.Queue | None = None
-        # 当前子智能体 ID（用于标记事件属于哪个子智能体）
         self._current_sub_agent_id: str | None = None
 
         # 编辑前读取
@@ -277,8 +275,7 @@ class Agent:
         #当前会话占用的字节数
         self._session_memory_bytes = 0
 
-        #区分message的历史消息
-        self._openai_messages: list[str] = []
+        #区分message的历史消息（现在从事件日志派生）
         self._folded_session_memories: list[dict[str, Any]] = []
         self._fold_last_time: float = 0.0
         self._fold_count: int = 0
@@ -299,8 +296,7 @@ class Agent:
 
         #初始化大模型客户端
         self._openai_client = openai.AsyncOpenAI(base_url=api_base, api_key=api_key)
-        self._openai_messages.append({"role": "system", "content": self._system_prompt})
-
+        
         self._refresh_runtime_system_prompt()
         self._loop = AgentLoop(self)
 
@@ -328,7 +324,7 @@ class Agent:
 
     #生成一个用于保存 AI 计划（Plan）的 Markdown 文件的绝对路径。
     def _generate_plan_file_path(self) -> str:
-        d = Path.home() / ".bear" / "plans"
+        d = Path.home() / ".mycode" / "plans"
         d.mkdir(parents=True, exist_ok=True)
         return str(d / f"plan-{self.session_id}.md")
 
@@ -360,7 +356,7 @@ class Agent:
 
     #大模型调用的工厂方法,构建一个用于记忆召回（memory recall）的 sideQuery 可调用对象。
     def _get_side_client(self):
-        """解析 side query 专用端点（BEAR_SIDE_MODEL），返回 (client, model, use_openai)。
+        """解析 side query 专用端点（MYCODE_SIDE_MODEL），返回 (client, model, use_openai)。
 
         未配置或解析结果与主端点完全一致时返回 None，表示复用主客户端。
         独立端点的客户端按 (model, base_url, protocol) 缓存，避免重复创建。
@@ -451,7 +447,6 @@ class Agent:
             is_sub_agent=True,
             permission_mode="plan" if self.permission_mode == "plan" else "bypassPermissions",
             parent_abort_event=self._abort_event,
-            checkpoint_store=self._checkpoint_store,
         )
 
     def set_confirm_fn(self, fn:Callable[[str], Awaitable[bool]]) -> None:
@@ -484,8 +479,7 @@ class Agent:
             self._pre_plan_mode = None
             self._plan_file_path = None
             self._system_prompt = self._base_system_prompt
-            if self._openai_messages:
-                self._openai_messages[0]["content"] =self._system_prompt
+            self.session.system_prompt = self._system_prompt
             print_info(f"Exited plan mode -> {self.permission_mode} mode")
             return self.permission_mode
         else:
@@ -493,6 +487,7 @@ class Agent:
             self.permission_mode = "plan"
             self._plan_file_path = self._generate_plan_file_path()
             self._system_prompt = self._base_system_prompt + self._build_plan_mode_prompt()
+            self.session.system_prompt = self._system_prompt
             print_info(f"Entered plan mode. Plan file: {self._plan_file_path}")
             return "plan"
 
@@ -502,13 +497,22 @@ class Agent:
     # ── 公开方法（供 AgentService / 外部调用）──
 
     def get_messages(self) -> list[dict]:
-        return self._openai_messages
-
-    def set_messages(self, messages: list[dict]) -> None:
-        self._openai_messages = list(messages)
+        """获取 LLM 消息历史（从事件日志派生）。"""
+        return self.session.get_messages_for_llm()
 
     def truncate_messages_to(self, index: int) -> None:
-        self._openai_messages = self._openai_messages[:index]
+        """截断事件日志到指定索引。"""
+        messages = self.session.get_messages_for_llm()
+        if index >= len(messages):
+            return
+        # 找到对应的事件序号并截断
+        msg_count = 0
+        for i, event in enumerate(self.session._log):
+            if event["type"] in ("user_message", "assistant_message", "tool_result_msg"):
+                if msg_count >= index:
+                    self.session._log = self.session._log[:i]
+                    return
+                msg_count += 1
 
     def set_permission_mode(self, mode: str) -> None:
         self.permission_mode = mode
@@ -532,8 +536,10 @@ class Agent:
     #主入口
 
     async def  chat(self, user_message:str)->None:
+        print(f"[DEBUG] agent.chat: STARTED - self.session_id = {self.session_id}, is_sub_agent = {self.is_sub_agent}")
         #懒加载MCP服务在第一次chat的时候
         if not self._mcp_initialized and not self.is_sub_agent:
+            print(f"[DEBUG] agent.chat: initializing MCP")
             self._mcp_initialized = True
             try:
                 # 使用 asyncio.wait_for 添加总超时，避免 MCP 初始化卡住整个聊天
@@ -561,8 +567,10 @@ class Agent:
                 from .observability.trace import trace_error
                 trace_error(type(e).__name__, str(e), operation="mcp_init")
                 print_error(f"MCP init failed: {e}")
+            print(f"[DEBUG] agent.chat: MCP init done")
 
         # 跨会话知识复用：注入相关历史会话记忆
+        print(f"[DEBUG] agent.chat: before cross_session_memory")
         from agents.config import load_config
         _app_cfg = load_config()
         if not self.is_sub_agent and _app_cfg.cross_session_memory:
@@ -572,8 +580,7 @@ class Agent:
                 memory_context = format_folded_memories_for_injection(related_memories)
                 # 追加到系统提示
                 self._system_prompt += memory_context
-                if self._openai_messages:
-                    self._openai_messages[0]["content"] = self._system_prompt
+                self.session.system_prompt = self._system_prompt
 
         original_user_message = _safe_utf8_text(user_message)
         ready_skill_extraction_window: dict[str, Any] | None = None
@@ -590,21 +597,18 @@ class Agent:
         self._abort_event.clear()
         # 轮次计数递增，用于记忆召回冷却衰减。
         self._turn_number += 1
-        # /rewind 支持：在用户消息追加【之前】记录轮次边界，
-        # 这样边界 message_count 指向上一轮完整结束的位置（tool_use/tool_result 配对完整）。
-        self._session_lifecycle.record_boundary(
-            turn=self._turn_number,
-            message_count=self._get_message_count(),
-            checkpoint_count=self._checkpoint_store.checkpoint_count,
-        )
         self._turn_output_buffer = []
         self._turn_thinking_buffer = []
         self._turn_event_buffer = []
-        # 如果是流式模式，初始化事件队列
-        if self._stream_event_queue is not None:
-            pass  # 队列已在 chat_stream 中初始化
+        
+        self._current_turn += 1
+        print(f"[DEBUG] agent.chat: before turn/start - self.session_id = {self.session_id}, self.session.id = {self.session.id}, is_sub_agent = {self.is_sub_agent}")
+        if not self.is_sub_agent:
+            print(f"[DEBUG] agent.chat: BEFORE turn/start - self.session_id = {self.session_id}, self.session.id = {self.session.id}, id(self.session) = {id(self.session)}")
+        self.session.append("turn/start", {"turn": self._current_turn})
+        # user_message 由 agent_loop._prepare_turn() 写入，这里不重复写入
+        
         from .observability.trace import trace_event
-        # 子智能体不写 session 字段，因为 trace 文件已经是主智能体的 session_id
         trace_kwargs: dict[str, Any] = {
             "turn": self._turn_number,
             "sub_agent": self.is_sub_agent,
@@ -622,9 +626,7 @@ class Agent:
             self._aborted = True
             from .observability.trace import trace_error
             trace_error("cancelled", "Turn cancelled", operation="chat")
-            # 取消时也必须发送 done 事件，否则前端流永远不会结束
-            if self._stream_event_queue is not None and not self.is_sub_agent:
-                await self._stream_event_queue.put({"type": "done"})
+            self.session.append("turn/end", {"turn": self._current_turn, "reason": "aborted", "sub_agent_id": self._current_sub_agent_id})
             raise
         except Exception as e:
             from .observability.trace import trace_error, trace_event
@@ -637,9 +639,7 @@ class Agent:
                 error=type(e).__name__,
                 duration_s=round(time.time() - _turn_t0, 2),
             )
-            # 异常时也必须发送 done 事件
-            if self._stream_event_queue is not None and not self.is_sub_agent:
-                await self._stream_event_queue.put({"type": "done"})
+            self.session.append("turn/end", {"turn": self._current_turn, "reason": "error", "error": str(e), "sub_agent_id": self._current_sub_agent_id})
             return
         finally:
             self._current_task = None
@@ -648,9 +648,8 @@ class Agent:
         self._turn_output_buffer = None
         self._turn_thinking_buffer = None
         self._turn_event_buffer = None
-        # 流式模式下，发送完成事件（只有主智能体发送，子智能体不发送，否则会提前结束主智能体的流）
-        if self._stream_event_queue is not None and not self.is_sub_agent:
-            await self._stream_event_queue.put({"type": "done"})
+        
+        self.session.append("turn/end", {"turn": self._current_turn, "reason": "completed", "sub_agent_id": self._current_sub_agent_id})
         # Aggregated trace event for the turn (includes thinking and text content)
         trace_event(
             "turn.end",
@@ -679,7 +678,7 @@ class Agent:
                 self._skill_orchestrator.record_evolution_event()
             
             self._skill_orchestrator.set_pending_extraction_window(
-                messages=self._skill_orchestrator.get_recent_dialog_messages(self._openai_messages, max_messages=8),
+                messages=self._skill_orchestrator.get_recent_dialog_messages(self.session.get_messages_for_llm(), max_messages=8),
                 original_user_message=original_user_message,
                 assistant_text=assistant_text,
                 retrieved_reference=self._skill_orchestrator.last_retrieved_skill_reference,
@@ -692,43 +691,7 @@ class Agent:
                 pass  # Ignore console errors in server environment
             await self._auto_save()
 
-    async def chat_stream(self, user_message: str):
-        """
-        流式聊天接口，用于前端 SSE 传输。
-        返回一个异步生成器，yield 出事件字典供前端处理。
-        """
-        # 初始化事件队列
-        self._stream_event_queue = asyncio.Queue()
-        
-        # 启动后台任务执行 chat
-        async def _run_chat():
-            try:
-                await self.chat(user_message)
-            except Exception as e:
-                # 发送错误事件
-                await self._stream_event_queue.put({
-                    "type": "error",
-                    "message": str(e)
-                })
-            # done 事件由 chat() 方法发送，这里不再重复发送
-        
-        # 创建后台任务
-        task = asyncio.create_task(_run_chat())
-        
-        # 从队列中读取事件并 yield
-        while True:
-            event = await self._stream_event_queue.get()
-            yield event
-            if event.get("type") == "done":
-                break
-        
-        # 等待任务完成
-        await task
-        # 清理队列
-        self._stream_event_queue = None
-
-   #执行一次对话，收集本轮模型输出文本，并返回本轮消耗的 token 数
-    async def run_once(self, prompt:str)->None:
+    async def run_once(self, prompt: str) -> dict:
         self._output_buffer = []
         prev_in = self.total_input_tokens
         prev_out = self.total_output_tokens
@@ -737,15 +700,15 @@ class Agent:
         self._output_buffer = None
         return {
             "text": text,
-            "tokens":{
-                "input":self.total_input_tokens-prev_in,
-                "output":self.total_output_tokens-prev_out
+            "tokens": {
+                "input": self.total_input_tokens - prev_in,
+                "output": self.total_output_tokens - prev_out
             },
         }
 
     #输出工具：统一处理模型输出文本。根据当前是否处于“收集输出”的模式
     # 决定是把文本存进缓冲区，还是直接打印到终端。
-    def _emit_text(self, text:str)->None:
+    def _emit_text(self, text: str) -> None:
         text = _safe_utf8_text(text)
         if self._turn_output_buffer is not None:
             self._turn_output_buffer.append(text)
@@ -753,17 +716,12 @@ class Agent:
             self._output_buffer.append(text)
         else:
             print_assistant_text(text)
-            # 主 Agent 的正文同步喂入 Markdown 自动渲染跟踪（流式结束后重渲染）。
-            if not self.is_sub_agent:
-                md_track_feed(text)
-        # 流式模式：推送文本事件到队列供前端 SSE 消费
-        if self._stream_event_queue is not None:
-            event = {"type": "text", "content": text}
-            if self._current_sub_agent_id:
-                event["sub_agent_id"] = self._current_sub_agent_id
-            asyncio.create_task(self._stream_event_queue.put(event))
-            # Removed per-chunk trace_event to reduce trace noise
-            # Text content is aggregated in turn.end via _turn_output_buffer
+        
+        # 流式事件只发送 SSE，不持久化到事件日志
+        event_data = {"content": text, "turn": self._current_turn, "step": self._current_step}
+        if self._current_sub_agent_id:
+            event_data["sub_agent_id"] = self._current_sub_agent_id
+        self.session.append("text", event_data)
 
     def _build_fold_guidance_section(self) -> str:
         if self._custom_system_prompt is not None:
@@ -789,8 +747,7 @@ class Agent:
         else:
             self._system_prompt = self._base_system_prompt
         self._system_prompt += self._build_fold_guidance_section()
-        if self._openai_messages:
-            self._openai_messages[0]["content"] = self._system_prompt
+        self.session.system_prompt = self._system_prompt
 
     def _record_tool_outcome(self, tool_name: str, success: bool) -> None:
         if tool_name == self._last_tool_name:
@@ -856,14 +813,14 @@ class Agent:
 
 
     def clear_history(self)->None:
-        self._openai_messages = []
+        self.session._log.clear()
+        self.session.system_prompt = self._system_prompt
         self._skill_orchestrator.reset()
         self._fold_last_time = 0.0
         self._fold_count = 0
         self._tool_error_streak = 0
         self._same_tool_repeat_count = 0
         self._last_tool_name = ""
-        self._openai_messages.append({"role": "system", "content":self._system_prompt})
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.last_input_token_count = 0
@@ -873,7 +830,8 @@ class Agent:
 
     @property
     def messages(self) -> list[dict]:
-        return self._openai_messages
+        """获取 LLM 消息历史（从事件日志派生）。"""
+        return self.session.get_messages_for_llm()
 
     @property
     def openai_client(self):
@@ -881,8 +839,8 @@ class Agent:
 
     @property
     def stream_event_queue(self) -> asyncio.Queue | None:
-        return self._stream_event_queue
-
+        return None
+    
     @property
     def current_sub_agent_id(self) -> str | None:
         return self._current_sub_agent_id
@@ -909,14 +867,13 @@ class Agent:
     def mark_aborted(self) -> None:
         self._aborted = True
 
-    def append_message(self, message: dict) -> None:
-        self._openai_messages.append(message)
-
     def append_user_message(self, content: str) -> None:
-        self._openai_messages.append({"role": "user", "content": content})
+        """追加用户消息到事件日志。"""
+        self.session.append("user_message", {"content": content})
 
     def append_tool_message(self, tool_call_id: str, content: str) -> None:
-        self._openai_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": content})
+        """追加工具结果消息到事件日志。"""
+        self.session.append("tool_result_msg", {"call_id": tool_call_id, "content": content})
 
     def reset_repeat_chain(self) -> None:
         self._repeat_chain_key = ""
@@ -952,26 +909,29 @@ class Agent:
         return self._check_budget()
 
     def publish_stream_event(self, event: dict) -> None:
-        if self._stream_event_queue is not None:
-            asyncio.create_task(self._stream_event_queue.put(event))
+        event_type = event.pop("type", "info")
+        self.session.append(event_type, event)
 
     def publish_tool_call_event(self, call_id: str, name: str, inp: dict) -> None:
         from agents.observability.trace import trace_event
-        if self._stream_event_queue is not None:
-            event = {"type": "tool_call", "call_id": call_id, "name": name, "input": inp}
-            if self._current_sub_agent_id:
-                event["sub_agent_id"] = self._current_sub_agent_id
-            self.publish_stream_event(event)
-            trace_event("stream.tool_call", call_id=call_id, name=name, sub_agent_id=self._current_sub_agent_id)
+        # 流式事件只发送 SSE，不持久化到事件日志
+        event_data = {"call_id": call_id, "name": name, "input": inp, "turn": self._current_turn, "step": self._current_step}
+        if self._current_sub_agent_id:
+            event_data["sub_agent_id"] = self._current_sub_agent_id
+        self.session.append("tool_call", event_data)
+        trace_event("stream.tool_call", call_id=call_id, name=name, sub_agent_id=self._current_sub_agent_id)
 
     def publish_tool_result_event(self, call_id: str, name: str, result: str, status: str) -> None:
         from agents.observability.trace import trace_event
-        if self._stream_event_queue is not None:
-            event = {"type": "tool_result", "call_id": call_id, "name": name, "result": result, "status": status}
-            if self._current_sub_agent_id:
-                event["sub_agent_id"] = self._current_sub_agent_id
-            self.publish_stream_event(event)
-            trace_event("stream.tool_result", call_id=call_id, name=name, sub_agent_id=self._current_sub_agent_id)
+        # 流式事件只发送 SSE，不持久化到事件日志
+        event_data = {"call_id": call_id, "name": name, "result": result, "status": status, "turn": self._current_turn, "step": self._current_step}
+        if self._current_sub_agent_id:
+            event_data["sub_agent_id"] = self._current_sub_agent_id
+        self.session.append("tool_result", event_data)
+        
+        # tool_result_msg 是聚合事件，需要持久化（但这里不写入，由 agent_loop 调用 append_tool_message 写入）
+        
+        trace_event("stream.tool_result", call_id=call_id, name=name, sub_agent_id=self._current_sub_agent_id)
 
     def record_tool_outcome(self, tool_name: str, success: bool) -> None:
         self._record_tool_outcome(tool_name, success)
@@ -1018,36 +978,6 @@ class Agent:
 
     async def confirm_dangerous(self, message: str) -> bool:
         return await self._confirm_dangerous(message)
-
-    # ── 公开方法（供 AgentService / 外部调用）──
-
-    def get_messages(self) -> list[dict]:
-        return self._openai_messages
-
-    def set_messages(self, messages: list[dict]) -> None:
-        self._openai_messages = list(messages)
-
-    def truncate_messages_to(self, index: int) -> None:
-        self._openai_messages = self._openai_messages[:index]
-
-    def set_permission_mode(self, mode: str) -> None:
-        self.permission_mode = mode
-
-    def steer(self, message: str) -> None:
-        if not hasattr(self, '_steer_queue') or self._steer_queue is None:
-            self._steer_queue = []
-        self._steer_queue.append(message)
-
-    async def save(self) -> None:
-        await self._auto_save()
-
-    @property
-    def last_response(self) -> str:
-        return self._last_assistant_text
-
-    @property
-    def aborted(self) -> bool:
-        return self._aborted
 
     async def drain_background_skill_tasks(self) -> None:
         """等待所有后台 Skill 任务完成。"""
@@ -1109,32 +1039,28 @@ class Agent:
         state = SessionState(
             session_id=self.session_id,
             model=self.model,
-            messages=self._openai_messages,
-            folded_memories=self._folded_session_memories,
-            turn_boundaries=self._session_lifecycle.turn_boundaries,
-            checkpoint_store=self._checkpoint_store,
             context_store=self._context_store,
         )
-        self._session_lifecycle.restore(state, data)
-        self._openai_messages = state.messages
-        self._folded_session_memories = state.folded_memories
+        self._session_lifecycle.restore(state, data, self.session)
         print_info(f"Session restored ({self._get_message_count()} messages).")
 
     #/rewind：回退对话 N 轮，同时把被修改的文件恢复到对应轮次开始时的状态。
     def rewind(self, n: int = 1) -> str:
-        from .core.session_lifecycle import SessionState
-        state = SessionState(
-            session_id=self.session_id,
-            model=self.model,
-            messages=self._openai_messages,
-            folded_memories=self._folded_session_memories,
-            turn_boundaries=self._session_lifecycle.turn_boundaries,
-            checkpoint_store=self._checkpoint_store,
-            context_store=self._context_store,
-        )
-        result = self._session_lifecycle.rewind(state, self._read_file_state, n)
-        self._openai_messages = state.messages
-        return result
+        return self._session_lifecycle.rewind(self.session, self._read_file_state, n)
+
+    # ── 三阶段恢复 ──
+    
+    def stage_revert(self, target_seq: int) -> dict:
+        """Stage：计算恢复计划，预览变更。"""
+        return self.session.stage_revert(target_seq)
+    
+    def clear_revert(self, current_snapshot: list[dict]) -> dict:
+        """Clear：取消恢复，恢复到原始状态。"""
+        return self.session.clear_revert(current_snapshot)
+    
+    def commit_revert(self, target_seq: int) -> dict:
+        """Commit：确认恢复。"""
+        return self.session.commit_revert(target_seq)
 
     #/fork：从当前会话创建一个完全相同的分支（新 session_id），并切换过去。
     def fork_session(self) -> str:
@@ -1142,60 +1068,28 @@ class Agent:
         state = SessionState(
             session_id=self.session_id,
             model=self.model,
-            messages=self._openai_messages,
-            folded_memories=self._folded_session_memories,
-            turn_boundaries=self._session_lifecycle.turn_boundaries,
-            checkpoint_store=self._checkpoint_store,
             context_store=self._context_store,
             start_time=self.session_start_time,
         )
-        result = self._session_lifecycle.fork(state)
-        self.session_id = state.session_id
-        self.session_start_time = state.start_time
-        self._openai_messages = state.messages
-        self._folded_session_memories = state.folded_memories
-        self._checkpoint_store = self._session_lifecycle.checkpoint_store
-        self._context_store = self._session_lifecycle.context_store
+        result, new_session = self._session_lifecycle.fork(state, self.session)
+        self.session = new_session
+        self.session_id = new_session.id
         return result
 
     #/context：返回上下文描述行（index/role/label/chars），供 REPL 渲染表格。
     def describe_context(self) -> list[dict]:
-        return self._session_lifecycle.describe(self._openai_messages)
+        return self._session_lifecycle.describe(self.session.get_messages_for_llm())
 
     #/ctx del N [N2 ...]：删除指定 index 所属的消息组（保持工具配对完整）。
     def delete_context_messages(self, indexes: list[int]) -> str:
-        from .core.session_lifecycle import SessionState
-        state = SessionState(
-            session_id=self.session_id,
-            model=self.model,
-            messages=self._openai_messages,
-            folded_memories=self._folded_session_memories,
-            turn_boundaries=self._session_lifecycle.turn_boundaries,
-            checkpoint_store=self._checkpoint_store,
-            context_store=self._context_store,
-        )
-        result = self._session_lifecycle.delete_messages(state, indexes)
-        self._openai_messages = state.messages
-        return result
+        return self._session_lifecycle.delete_messages(self.session, indexes)
 
     #/ctx keep N [N2 ...]：只保留指定组（+ system prompt），其余删除。
     def keep_context_messages(self, indexes: list[int]) -> str:
-        from .core.session_lifecycle import SessionState
-        state = SessionState(
-            session_id=self.session_id,
-            model=self.model,
-            messages=self._openai_messages,
-            folded_memories=self._folded_session_memories,
-            turn_boundaries=self._session_lifecycle.turn_boundaries,
-            checkpoint_store=self._checkpoint_store,
-            context_store=self._context_store,
-        )
-        result = self._session_lifecycle.keep_messages(state, indexes)
-        self._openai_messages = state.messages
-        return result
+        return self._session_lifecycle.keep_messages(self.session, indexes)
 
     def _get_message_count(self) -> int:
-        return len(self._openai_messages)
+        return len(self.session.get_messages_for_llm())
 
     # 记忆注入后的冷却轮数：冷却期内同一条 memory 不再参与召回，
     # 到期后自动解禁（替代旧的"整会话封杀"，避免长会话中记忆永久失效）。
@@ -1209,26 +1103,24 @@ class Agent:
         }
 
     async def _auto_save(self) -> None:
+        if self.is_sub_agent:
+            return
         try:
             from .core.session_lifecycle import SessionState
             state = SessionState(
                 session_id=self.session_id,
                 model=self.model,
-                messages=self._openai_messages,
-                folded_memories=self._folded_session_memories,
-                turn_boundaries=self._session_lifecycle.turn_boundaries,
-                checkpoint_store=self._checkpoint_store,
                 context_store=self._context_store,
                 start_time=self.session_start_time,
             )
-            await asyncio.to_thread(self._session_lifecycle._save_state, state)
+            await asyncio.to_thread(self._session_lifecycle._save_state, state, self.session)
         except Exception:
             pass
 
     #自动压缩
     async def _check_and_compact(self)->None:
         await self._compressor.check_and_compact(
-            self._openai_messages,
+            self.session.get_messages_for_llm(),
             self.last_input_token_count,
             self._build_side_query(max_tokens=6000),
             self.session_id,
@@ -1239,7 +1131,7 @@ class Agent:
 
     async def _compact_conversation(self, *, trigger: str = "manual")->bool:
         compacted = await self._compressor.compact(
-            self._openai_messages,
+            self.session.get_messages_for_llm(),
             trigger,
             self._build_side_query(max_tokens=6000),
             self.session_id,
@@ -1271,19 +1163,19 @@ class Agent:
 
     #多层级压缩流水线
     def _run_compression_pipeline(self)->None:
-        self._compressor.run_pipeline(self._openai_messages, self.last_input_token_count, self.last_api_call_time)
+        self._compressor.run_pipeline(self.session.get_messages_for_llm(), self.last_input_token_count, self.last_api_call_time)
 
     #第一层级压缩，预算压缩
     def _budget_tool_results_openai(self)->None:
-        self._compressor._budget(self._openai_messages, self.last_input_token_count)
+        self._compressor._budget(self.session.get_messages_for_llm(), self.last_input_token_count)
 
     #第二级策略：修剪过期的工具执行结果
     def _snip_stale_results_openai(self) -> None:
-        self._compressor._snip(self._openai_messages, self.last_input_token_count)
+        self._compressor._snip(self.session.get_messages_for_llm(), self.last_input_token_count)
 
     #微压缩
     def _microcompact_openai(self) -> None:
-        self._compressor._microcompact(self._openai_messages, self.last_api_call_time)
+        self._compressor._microcompact(self.session.get_messages_for_llm(), self.last_api_call_time)
 
     #大结果持久化
     #如果工具返回的结果太大（超过 30KB），不要硬塞进上下文里，而是把它存成一个临时文件。
@@ -1323,6 +1215,10 @@ class Agent:
                 span.record_error(TimeoutError(f"Tool '{name}' timed out after {timeout}s"))
                 print_error(f"[ERROR] Tool '{name}' timed out after {timeout}s")
                 return f"Error: tool '{name}' timed out after {timeout}s"
+            except TimeoutError as e:
+                span.record_error(e)
+                print_error(f"[ERROR] Tool '{name}' timed out: {e}")
+                return f"Error: tool '{name}' timed out: {e}"
             except Exception as e:
                 span.record_error(e)
                 print_error(f"[ERROR] Tool '{name}' failed: {type(e).__name__}: {e}")
@@ -1343,7 +1239,7 @@ class Agent:
             # Route MCP tool calls to the MCP manager
         if self._mcp_manager.is_mcp_tool(name):
             return await self._mcp_manager.call_tool(name, inp)
-        result = await execute_tool(name, inp, self._read_file_state, self._checkpoint_store)
+        result = await execute_tool(name, inp, self._read_file_state)
         if name in {"skill_create", "skill_evolve"}:
             try:
                 parsed = json.loads(result)
@@ -1427,8 +1323,7 @@ class Agent:
             self.permission_mode = "plan"
             self._plan_file_path =  self._generate_plan_file_path()
             self._system_prompt = self._base_system_prompt + self._build_plan_mode_prompt()
-            if self._openai_messages:
-                self._openai_messages[0]["content"] = self._system_prompt
+            self.session.system_prompt = self._system_prompt
             print_info("Entered plan mode (read-only). Plan file: " + self._plan_file_path)
             return f"Entered plan mode. You are now in read-only mode.\n\nYour plan file: {self._plan_file_path}\nWrite your plan to this file. This is the only file you can edit.\n\nWhen your plan is complete, call exit_plan_mode."
         if name == "exit_plan_mode":
@@ -1462,8 +1357,7 @@ class Agent:
                 saved_plan_path = self._plan_file_path
                 self._plan_file_path = None
                 self._system_prompt = self._base_system_prompt
-                if self._openai_messages:
-                    self._openai_messages[0]["content"] = self._system_prompt
+                self.session.system_prompt = self._system_prompt
 
                 if choice == "clear-and-execute":
                     self._clear_history_keep_system()
@@ -1486,8 +1380,7 @@ class Agent:
             self._pre_plan_mode = None
             self._plan_file_path = None
             self._system_prompt = self._base_system_prompt
-            if self._openai_messages:
-                self._openai_messages[0]["content"] = self._system_prompt
+            self.session.system_prompt = self._system_prompt
 
             print_info("Exited plan mode. Restored to " + self.permission_mode + " mode.")
             return f"Exited plan mode. Permission mode restored to: {self.permission_mode}\n\n## Your Plan:\n{plan_content}"
@@ -1496,8 +1389,8 @@ class Agent:
 
     def _clear_history_keep_system(self) -> None:
         """清空历史信息，但是保留系统prompt."""
-        self._openai_messages = []
-        self._openai_messages.append({"role": "system", "content": self._system_prompt})
+        self.session._log.clear()
+        self.session.system_prompt = self._system_prompt
         self.last_input_token_count = 0
         self._fold_last_time = 0.0
         self._fold_count = 0
@@ -1505,26 +1398,32 @@ class Agent:
         self._same_tool_repeat_count = 0
         self._last_tool_name = ""
 
-    async def _execute_agent_tool(self, inp:dict) -> str:
+    async def _execute_agent_tool(self, inp: dict) -> str:
         agent_type = inp.get("type", "general")
         description = inp.get("description", "sub-agent task")
         prompt = inp.get("prompt", "")
         print_sub_agent_start(agent_type, description)
         
-        # 生成子智能体 ID
         import uuid
         sub_agent_id = str(uuid.uuid4())[:8]
         
-        # 流式模式：推送 sub_agent_start 事件到队列（必须 await 确保事件先于子 agent 事件到达）
-        if self._stream_event_queue is not None:
-            await self._stream_event_queue.put({
-                "type": "sub_agent_start", 
-                "agent_type": agent_type, 
-                "description": description,
-                "agent_id": sub_agent_id
-            })
-            from .observability.trace import trace_event
-            trace_event("stream.sub_agent_start", agent_id=sub_agent_id, agent_type=agent_type, description=description)
+        # 创建独立的子智能体 Session
+        from agents.core.session import Session
+        sub_session = Session(
+            session_id=sub_agent_id,
+            parent_session=self.session_id,
+            origin="sub_agent",
+            agent_type=agent_type,
+        )
+        
+        self.session.append("sub_agent/start", {
+            "agent_id": sub_agent_id,
+            "agent_type": agent_type,
+            "description": description,
+            "sub_session_id": sub_session.id,
+        })
+        from .observability.trace import trace_event
+        trace_event("stream.sub_agent_start", agent_id=sub_agent_id, agent_type=agent_type, description=description)
 
         config = get_sub_agent_config(agent_type)
 
@@ -1535,41 +1434,38 @@ class Agent:
             label=agent_type,
         )
         
-        # 将子 agent 的事件流向父 agent 的队列
-        if self._stream_event_queue is not None:
-            sub_agent._stream_event_queue = self._stream_event_queue
-            sub_agent._current_sub_agent_id = sub_agent_id
+        # 子智能体使用独立的 Session
+        sub_agent.session = sub_session
+        sub_agent.session_id = sub_session.id
+        sub_agent._current_sub_agent_id = sub_agent_id
         
+        start_time = time.time()
         try:
             result = await sub_agent.run_once(prompt)
             self.total_input_tokens += result["tokens"]["input"]
             self.total_output_tokens += result["tokens"]["output"]
             print_sub_agent_end(agent_type, description)
-            # 流式模式：推送 sub_agent_end 事件到队列（await 确保事件顺序）
-            if self._stream_event_queue is not None:
-                await self._stream_event_queue.put({
-                    "type": "sub_agent_end", 
-                    "agent_type": agent_type, 
-                    "description": description,
-                    "agent_id": sub_agent_id
-                })
-                from .observability.trace import trace_event
-                trace_event("stream.sub_agent_end", agent_id=sub_agent_id, agent_type=agent_type, status="completed")
+            self.session.append("sub_agent/end", {
+                "agent_id": sub_agent_id,
+                "status": "completed",
+                "summary": (result["text"] or "")[:200],
+                "duration_ms": int((time.time() - start_time) * 1000),
+                "sub_session_id": sub_session.id,
+            })
+            trace_event("stream.sub_agent_end", agent_id=sub_agent_id, agent_type=agent_type, status="completed")
             if sub_agent._aborted:
                 return "(Sub-agent aborted)"
             return result["text"] or "(Sub-agent produced no output)"
         except Exception as e:
             print_sub_agent_end(agent_type, description)
-            # 流式模式：推送 sub_agent_end 事件到队列（await 确保事件顺序）
-            if self._stream_event_queue is not None:
-                await self._stream_event_queue.put({
-                    "type": "sub_agent_end", 
-                    "agent_type": agent_type, 
-                    "description": description,
-                    "agent_id": sub_agent_id
-                })
-                from .observability.trace import trace_event
-                trace_event("stream.sub_agent_end", agent_id=sub_agent_id, agent_type=agent_type, status="error", error=str(e))
+            self.session.append("sub_agent/end", {
+                "agent_id": sub_agent_id,
+                "status": "error",
+                "summary": str(e),
+                "duration_ms": int((time.time() - start_time) * 1000),
+                "sub_session_id": sub_session.id,
+            })
+            trace_event("stream.sub_agent_end", agent_id=sub_agent_id, agent_type=agent_type, status="error", error=str(e))
             return f"Sub-agent error: {e}"
 
     #openAI后端
@@ -1581,12 +1477,49 @@ class Agent:
         return await self._loop.call_model_stream()
 
     async def _confirm_dangerous(self, command: str) -> bool:
-        self._permission_gate.set_stream_event_queue(self._stream_event_queue) if self._stream_event_queue else None
+        self._permission_gate.set_session(self.session)
         self._permission_gate.set_confirm_fn(self.confirm_fn) if self.confirm_fn else None
         self._permission_gate.set_sub_agent_id(self._current_sub_agent_id)
         self._permission_gate.set_abort_fn(self._abort_requested)
         self._permission_gate.set_current_tool_name(getattr(self, '_current_tool_name', 'unknown'))
         return await self._permission_gate.confirm(command)
+    
+    async def request_permission(self, request_id: str, command: str, tool_name: str, 
+                                  message: str = "", sub_agent_id: str | None = None,
+                                  timeout: float = 300.0) -> bool:
+        """请求权限确认。通过 session 事件发送请求，等待响应。"""
+        rpc_id = str(uuid.uuid4())
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._permission_waiters[rpc_id] = future
+        
+        self.session.append("permission/request", {
+            "rpc_id": rpc_id,
+            "request_id": request_id,
+            "command": command,
+            "tool_name": tool_name,
+            "message": message,
+            "sub_agent_id": sub_agent_id,
+        })
+        
+        try:
+            result = await asyncio.wait_for(future, timeout=timeout)
+            allowed = result["allowed"]
+            self.session.append("permission/resolved", {
+                "rpc_id": rpc_id,
+                "outcome": "allowed" if allowed else "denied",
+            })
+            return allowed
+        except asyncio.TimeoutError:
+            self._permission_waiters.pop(rpc_id, None)
+            return False
+    
+    def respond_permission(self, rpc_id: str, allowed: bool) -> bool:
+        """响应权限请求。"""
+        future = self._permission_waiters.pop(rpc_id, None)
+        if not future:
+            return False
+        future.set_result({"allowed": allowed})
+        return True
     
     def set_permission_response(self, request_id: str, allowed: bool) -> None:
         self._permission_gate.set_response(request_id, allowed)

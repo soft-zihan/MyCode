@@ -3,13 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ..registry import command
-from ...ui import (
-    print_info,
-    print_error,
-    print_context_rows,
-    print_memory_entries,
-    print_skill_entries,
-)
+from ...logging import print_info, print_error
 from ...memory import list_memories
 from ...skills import discover_skills, skill_stats
 
@@ -27,7 +21,9 @@ async def cmd_context(agent: "Agent", args: str) -> None:
     if not rows:
         print_info("Context is empty.")
         return
-    print_context_rows(rows)
+    print_info(f"Context: {len(rows)} entries")
+    for row in rows:
+        print_info(f"  {row}")
 
 
 @command(
@@ -90,7 +86,9 @@ async def cmd_memory(agent: "Agent", args: str) -> None:
     if not memories:
         print_info("No memories saved yet.")
         return
-    print_memory_entries(memories)
+    print_info(f"Memories: {len(memories)} entries")
+    for m in memories:
+        print_info(f"  {m}")
 
 
 @command(
@@ -101,9 +99,11 @@ async def cmd_memory(agent: "Agent", args: str) -> None:
 async def cmd_skills(agent: "Agent", args: str) -> None:
     skills = discover_skills()
     if not skills:
-        print_info("No skills found. Add skills to .bear/skills/<name>/SKILL.md")
+        print_info("No skills found. Add skills to .mycode/skills/<name>/SKILL.md")
         return
-    print_skill_entries(skills)
+    print_info(f"Skills: {len(skills)} entries")
+    for s in skills:
+        print_info(f"  {s}")
 
 
 @command(
@@ -134,7 +134,6 @@ async def cmd_skill_eval(agent: "Agent", args: str) -> None:
 )
 async def cmd_trace(agent: "Agent", args: str) -> None:
     from ..trace import set_trace_enabled, trace_enabled, recent_events, trace_path
-    from ..ui import print_trace_rows
 
     arg = args.strip()
     if arg == "on":
@@ -147,4 +146,7 @@ async def cmd_trace(agent: "Agent", args: str) -> None:
         n = 20
         if arg.isdigit():
             n = max(1, int(arg))
-        print_trace_rows(recent_events(n), str(trace_path()), trace_enabled())
+        events = recent_events(n)
+        print_info(f"Trace ({len(events)} events, logging={'ON' if trace_enabled() else 'OFF'}): {trace_path()}")
+        for e in events:
+            print_info(f"  {e}")

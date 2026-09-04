@@ -60,12 +60,12 @@ function computeDiff(oldText: string, newText: string): DiffLine[] {
 }
 
 interface DiffViewerProps {
-  oldContent: string;
+  oldContent?: string;
   newContent: string;
   maxHeight?: number;
 }
 
-export function DiffViewer({ oldContent, newContent, maxHeight = 400 }: DiffViewerProps) {
+export function DiffViewer({ oldContent = '', newContent, maxHeight = 400 }: DiffViewerProps) {
   const lines = computeDiff(oldContent, newContent);
   
   const addedCount = lines.filter(l => l.type === 'added').length;

@@ -26,10 +26,10 @@ from agents.observability.trace import trace_event
 
 def get_kernel_venv_path() -> Path:
     """获取 skill 隔离 venv 路径。"""
-    override = os.environ.get("BEAR_SKILL_VENV", "").strip()
+    override = os.environ.get("MYCODE_SKILL_VENV", "").strip()
     if override:
         return Path(override)
-    return Path.home() / ".bear-code" / "skill-venv"
+    return Path.home() / ".my-code" / "skill-venv"
 
 
 def get_python_executable() -> str:

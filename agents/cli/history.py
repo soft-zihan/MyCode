@@ -53,7 +53,7 @@ class PromptHistory:
     """Manages prompt history with frecency ranking."""
     
     MAX_ENTRIES = 1000
-    HISTORY_FILE = ".MyCode_history.json"
+    HISTORY_FILE = ".MYCODE_history.json"
     
     def __init__(self, history_file: Path | None = None):
         self._entries: list[HistoryEntry] = []

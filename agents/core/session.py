@@ -5,10 +5,19 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from typing import Any
+from typing import Any, Callable, Iterator
 import json
 import os
 import time
+
+from .session_backend import SessionBackend
+from .session_backend_jsonl import JsonlSessionBackend
+
+
+# 只推不持久化的事件类型（流式事件）
+SSE_ONLY_TYPES = frozenset({
+    "thinking", "text", "tool_call", "tool_result", "stats",
+})
 
 
 def atomic_write_text(path: Path, content: str) -> None:
@@ -23,14 +32,34 @@ def atomic_write_json(path: Path, data: Any, indent: int = 2) -> None:
 
 
 def session_to_restore_dict(session: dict) -> dict:
-    """Extract the 5 keys needed to restore a session into a standardized dict."""
+    """Extract the keys needed to restore a session from event log."""
     return {
-        "openaiMessages": session.get("openaiMessages"),
-        "foldedSessionMemories": session.get("foldedSessionMemories"),
-        "checkpointStore": session.get("checkpointStore"),
-        "turnBoundaries": session.get("turnBoundaries"),
+        "events": session.get("events"),
         "contextStore": session.get("contextStore"),
     }
+
+
+# Global backend instance
+_backend: SessionBackend | None = None
+
+
+def get_session_backend() -> SessionBackend:
+    """Get the global session backend instance."""
+    global _backend
+    if _backend is None:
+        backend_type = os.environ.get("MYCODE_SESSION_BACKEND", "jsonl").strip().lower()
+        if backend_type == "sqlite":
+            from .session_backend_sqlite import SqliteSessionBackend
+            _backend = SqliteSessionBackend()
+        else:
+            _backend = JsonlSessionBackend()
+    return _backend
+
+
+def set_session_backend(backend: SessionBackend) -> None:
+    """Set the global session backend instance (for testing)."""
+    global _backend
+    _backend = backend
 
 
 # ============================================================
@@ -83,22 +112,399 @@ class SessionEntry:
 
 
 class Session:
-    """树形 Session 存储。
+    """Session 存储。
     
     支持：
-    - 添加条目到当前分支
-    - 从任意条目创建分支（fork）
-    - 获取当前分支的消息列表
+    - 树形结构：添加条目到当前分支、分支（fork）
+    - 事件日志：append/subscribe/replay（用于 SSE 和持久化）
+    - 消息派生：get_messages_for_llm（从事件日志提取 LLM 消息历史）
     - 持久化到文件
     """
     
-    def __init__(self, session_id: str | None = None) -> None:
-        self.id = session_id or str(uuid.uuid4())
+    def __init__(
+        self,
+        session_id: str | None = None,
+        parent_session: str | None = None,
+        origin: str | None = None,
+        agent_type: str | None = None,
+    ) -> None:
+        self.id = session_id or uuid.uuid4().hex[:8]
+        self.parent_session = parent_session  # 父 session ID（用于子智能体）
+        self.origin = origin  # 来源标记：'sub_agent' 表示子智能体
+        self.agent_type = agent_type  # 智能体类型（用于子智能体）
         self.entries: dict[str, SessionEntry] = {}
         self.children: dict[str | None, list[str]] = {}  # parent_id -> [entry_ids]
         self.current_branch: list[str] = []  # 当前分支的 entry_id 列表
         self.title: str | None = None
         self.summary: str | None = None
+        self.system_prompt: str | None = None  # 系统提示词（单独存储）
+        
+        self._log: list[dict[str, Any]] = []
+        self._subscribers: set[Callable[[dict], None]] = set()
+        
+        # Initialize projections with default values from registry
+        try:
+            from .session_projection_cache import get_projection_registry
+            self._projections: dict[str, Any] = get_projection_registry().init_state()
+        except Exception:
+            self._projections: dict[str, Any] = {}  # Fallback if registry not available
+    
+    @property
+    def seq(self) -> int:
+        return len(self._log)
+    
+    @property
+    def events(self) -> tuple[dict[str, Any], ...]:
+        return tuple(self._log)
+    
+    @property
+    def projections(self) -> dict[str, Any]:
+        """获取投影缓存（title, updatedAt, cwd, running）。"""
+        return self._projections
+    
+    def append(self, type: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+        """唯一写入入口。自动区分持久化和只推送。
+        
+        流式事件（thinking, text, tool_call, tool_result, stats）只推送不持久化。
+        聚合事件（user_message, assistant_message, tool_result_msg 等）持久化 + 推送。
+        
+        纯同步方法，asyncio 下天然原子。
+        """
+        event = {
+            "type": type,
+            "time": int(time.time() * 1000),
+            "session_id": self.id,
+            **(data or {}),
+        }
+        
+        # 调试日志
+        if type in ['turn/start', 'user_message', 'assistant_message']:
+            print(f"[DEBUG] Session.append: type={type}, self.id={self.id}, event.session_id={event.get('session_id')}, id(self)={id(self)}")
+        
+        if type in SSE_ONLY_TYPES:
+            # 流式事件：只推送，不持久化
+            for sub in list(self._subscribers):
+                try:
+                    sub(event)
+                except Exception:
+                    pass
+        else:
+            # 聚合事件：持久化 + 推送
+            event["seq"] = len(self._log)
+            self._log.append(event)
+            
+            # Persist to backend (skip for sub-agents)
+            if self.origin != "sub_agent":
+                try:
+                    backend = get_session_backend()
+                    backend.append(self.id, event)
+                except Exception:
+                    pass  # Fallback: in-memory only
+            
+            # Update projections
+            try:
+                from .session_projection_cache import get_projection_registry, get_projection_cache
+                registry = get_projection_registry()
+                self._projections = registry.apply_event(self._projections, event)
+                
+                # Check if we should write checkpoint
+                cache = get_projection_cache()
+                cache.record_event(self.id)
+                
+                # Force write on turn/end
+                if type == "turn/end":
+                    cache.force_write(self.id)
+                
+                if cache.should_write(self.id):
+                    from .session_projection_cache import ProjectionCheckpoint
+                    checkpoint = ProjectionCheckpoint(
+                        session_id=self.id,
+                        seq=event["seq"],
+                        projections=self._projections,
+                    )
+                    cache.save_checkpoint(checkpoint)
+            except Exception:
+                pass  # Projection cache is optional
+            
+            for sub in list(self._subscribers):
+                try:
+                    sub(event)
+                except Exception:
+                    pass
+        
+        # Broadcast to WebSocket subscribers
+        try:
+            # 使用与 main.py 相同的导入路径
+            from routers.websocket import broadcast_event
+            broadcast_event(event, target_session_id=self.id)
+            
+            # 如果是子智能体，也广播给父 session 的订阅者
+            if self.origin == "sub_agent" and self.parent_session:
+                broadcast_event(event, target_session_id=self.parent_session)
+        except (ImportError, TypeError):
+            pass  # WebSocket module not available or type evaluation error
+        
+        return event
+    
+    def subscribe(self, callback: Callable[[dict], None]) -> Callable[[], None]:
+        """订阅事件流。返回取消订阅函数。"""
+        self._subscribers.add(callback)
+        return lambda: self._subscribers.discard(callback)
+    
+    def replay(self, since_seq: int = 0) -> Iterator[dict[str, Any]]:
+        """从指定 seq 开始重放事件。"""
+        for event in self._log:
+            if event["seq"] >= since_seq:
+                yield event
+    
+    def get_messages_for_llm(self) -> list[dict[str, Any]]:
+        """从事件日志构建 LLM 消息历史。
+        
+        只读取完整消息事件（user_message, assistant_message, tool_result_msg），
+        忽略流式事件，直接提取，无需合并逻辑。
+        
+        这是唯一数据源，所有 LLM 调用都应使用此方法获取消息历史。
+        系统提示词会作为第一条消息自动添加。
+        """
+        messages = []
+        
+        # 添加系统提示词（如果有）
+        if self.system_prompt:
+            messages.append({"role": "system", "content": self.system_prompt})
+        
+        for event in self._log:
+            t = event["type"]
+            if t == "user_message":
+                messages.append({"role": "user", "content": event["content"]})
+            elif t == "assistant_message":
+                msg: dict[str, Any] = {"role": "assistant", "content": event.get("content", "")}
+                if event.get("thinking"):
+                    msg["thinking"] = event["thinking"]
+                if event.get("tool_calls"):
+                    msg["tool_calls"] = event["tool_calls"]
+                messages.append(msg)
+            elif t == "tool_result_msg":
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": event["call_id"],
+                    "content": event["content"],
+                })
+        return messages
+    
+    # ── 三阶段恢复 ──
+    
+    def _find_snapshot_at_seq(self, target_seq: int) -> dict | None:
+        """找到指定 seq 之前的最近的 snapshot/end 事件。"""
+        for event in reversed(self._log[:target_seq]):
+            if event.get("type") == "snapshot/end":
+                return event
+        return None
+    
+    def _capture_current_file_states(self) -> list[dict]:
+        """捕获当前文件状态（路径 + hash）。"""
+        import hashlib
+        from pathlib import Path
+        
+        files = []
+        try:
+            cwd = Path.cwd()
+            ignore_dirs = {".git", ".venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache"}
+            
+            for file_path in cwd.rglob("*"):
+                if not file_path.is_file():
+                    continue
+                if any(part.startswith(".") or part in ignore_dirs for part in file_path.parts):
+                    continue
+                try:
+                    content = file_path.read_bytes()
+                    files.append({
+                        "path": str(file_path.relative_to(cwd)),
+                        "hash": hashlib.md5(content).hexdigest()[:8],
+                        "size": len(content),
+                    })
+                except (OSError, PermissionError):
+                    pass
+        except Exception:
+            pass
+        return files
+    
+    def stage_revert(self, target_seq: int) -> dict:
+        """Stage：计算恢复计划，预览变更。
+        
+        Returns:
+            dict: 恢复计划，包含 current_snapshot, restore_plan, files_to_change
+        """
+        # 1. 捕获当前状态（用于取消）
+        current_snapshot = self._capture_current_file_states()
+        
+        # 2. 从事件日志读取目标快照
+        target_snapshot = self._find_snapshot_at_seq(target_seq)
+        if not target_snapshot:
+            return {
+                "error": f"No snapshot found before seq {target_seq}",
+                "current_snapshot": current_snapshot,
+                "restore_plan": {},
+                "files_to_change": [],
+            }
+        
+        target_files = target_snapshot.get("files", [])
+        
+        # 3. 计算恢复计划
+        restore_plan = {}
+        files_to_change = []
+        for file_info in target_files:
+            path = file_info["path"]
+            current_file = next((f for f in current_snapshot if f["path"] == path), None)
+            if not current_file or current_file["hash"] != file_info["hash"]:
+                files_to_change.append(path)
+                restore_plan[path] = file_info
+        
+        # 4. 返回预览（不执行）
+        return {
+            "current_snapshot": current_snapshot,
+            "target_seq": target_seq,
+            "restore_plan": restore_plan,
+            "files_to_change": files_to_change,
+        }
+    
+    def clear_revert(self, current_snapshot: list[dict]) -> dict:
+        """Clear：取消恢复，恢复到原始状态。
+        
+        Args:
+            current_snapshot: stage_revert 返回的 current_snapshot
+        
+        Returns:
+            dict: 恢复结果
+        """
+        # 恢复到原始状态
+        restored_files = []
+        for file_info in current_snapshot:
+            path = Path(file_info["path"])
+            if path.exists():
+                # 文件存在，检查是否需要恢复
+                import hashlib
+                try:
+                    current_hash = hashlib.md5(path.read_bytes()).hexdigest()[:8]
+                    if current_hash != file_info["hash"]:
+                        # 文件已被修改，需要恢复
+                        # 注意：这里假设我们有文件内容的备份
+                        # 实际实现中，我们需要从 snapshot 事件中获取文件内容
+                        restored_files.append(file_info["path"])
+                except (OSError, PermissionError):
+                    pass
+        
+        # 记录取消事件
+        self.append("revert/clear", {
+            "restored_files": len(restored_files),
+        })
+        
+        return {
+            "restored_files": restored_files,
+            "status": "cleared",
+        }
+    
+    def commit_revert(self, target_seq: int) -> dict:
+        """Commit：确认恢复。
+        
+        Args:
+            target_seq: 目标 seq
+        
+        Returns:
+            dict: 恢复结果
+        """
+        # 1. 从事件日志读取目标快照
+        target_snapshot = self._find_snapshot_at_seq(target_seq)
+        if not target_snapshot:
+            return {
+                "error": f"No snapshot found before seq {target_seq}",
+                "status": "failed",
+            }
+        
+        target_files = target_snapshot.get("files", [])
+        
+        # 2. 执行恢复（这里只是记录，实际文件恢复需要实现）
+        restored_files = []
+        for file_info in target_files:
+            restored_files.append(file_info["path"])
+        
+        # 3. 截断事件日志
+        self._log = self._log[:target_seq]
+        
+        # 4. 记录恢复事件
+        self.append("revert/commit", {
+            "target_seq": target_seq,
+            "restored_files": len(restored_files),
+        })
+        
+        return {
+            "restored_files": restored_files,
+            "status": "committed",
+        }
+    
+    @classmethod
+    def load_from_jsonl(cls, session_id: str) -> Session | None:
+        """从后端加载事件日志，验证 seq 连续性，应用崩溃恢复和投影缓存。"""
+        # 尝试从 JSON 文件读取元数据
+        json_path = session_dir() / f"{session_id}.json"
+        metadata = {}
+        if json_path.exists():
+            try:
+                metadata = json.loads(json_path.read_text())
+            except Exception:
+                pass
+        
+        session = cls(
+            session_id=session_id,
+            parent_session=metadata.get("parent_session"),
+            origin=metadata.get("origin"),
+            agent_type=metadata.get("agent_type"),
+        )
+        
+        # Load events from backend
+        try:
+            backend = get_session_backend()
+            events = backend.load_all_events(session_id)
+        except Exception:
+            # Fallback: try loading from JSONL file directly
+            events = []
+            path = cls._jsonl_path(session_id)
+            if path.exists():
+                for line in path.read_text(encoding="utf-8").strip().splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        event = json.loads(line)
+                        events.append(event)
+                    except json.JSONDecodeError:
+                        break
+        
+        if not events:
+            return None
+        
+        # Apply crash recovery (torn tail detection + auto-repair)
+        from .session_crash_recovery import validate_and_repair_events
+        events = validate_and_repair_events(events, session_id)
+        
+        # Validate seq continuity and load
+        expected_seq = 0
+        for event in events:
+            if event.get("seq") != expected_seq:
+                break
+            session._log.append(event)
+            expected_seq += 1
+        
+        # Build projections from events (with checkpoint optimization)
+        try:
+            from .session_projection_cache import restore_projections
+            session._projections = restore_projections(session_id, session._log)
+        except Exception:
+            pass  # Projection cache is optional
+        
+        return session if session._log else None
+    
+    @staticmethod
+    def _jsonl_path(session_id: str) -> Path:
+        return session_dir() / f"{session_id}.events.jsonl"
     
     def add_entry(self, entry: SessionEntry) -> str:
         """添加 entry 到当前分支。
@@ -209,6 +615,9 @@ class Session:
         """持久化到文件。"""
         data = {
             "id": self.id,
+            "parent_session": self.parent_session,
+            "origin": self.origin,
+            "agent_type": self.agent_type,
             "title": self.title,
             "summary": self.summary,
             "entries": [e.to_dict() for e in self.entries.values()],
@@ -231,7 +640,12 @@ class Session:
         if data is None:
             return None
         
-        session = cls(session_id)
+        session = cls(
+            session_id=session_id,
+            parent_session=data.get("parent_session"),
+            origin=data.get("origin"),
+            agent_type=data.get("agent_type"),
+        )
         session.title = data.get("title")
         session.summary = data.get("summary")
         
@@ -277,12 +691,12 @@ class Session:
 
 
 def session_dir() -> Path:
-    """会话存储目录。默认 ~/.bear-code/sessions/，
-    可用 BEAR_SESSION_DIR 环境变量重定向（测试用，避免污染真实目录）。"""
-    override = os.environ.get("BEAR_SESSION_DIR", "").strip()
+    """会话存储目录。默认 ~/.mycode/sessions/，
+    可用 MYCODE_SESSION_DIR 环境变量重定向（测试用，避免污染真实目录）。"""
+    override = os.environ.get("MYCODE_SESSION_DIR", "").strip()
     if override:
         return Path(override)
-    return Path.home() / ".bear-code" / "sessions"
+    return Path.home() / ".mycode" / "sessions"
 
 
 def _ensure_dir() -> None:
@@ -290,7 +704,7 @@ def _ensure_dir() -> None:
 
 
 def get_project_session_dir() -> Path:
-    d = Path.cwd() / ".bear" / "sessions"
+    d = Path.cwd() / ".mycode" / "sessions"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -334,13 +748,86 @@ def save_session_meta(session_id: str, meta: dict[str, Any]) -> bool:
 
 
 def list_sessions() -> list[dict[str, Any]]:
+    """列出所有 session，包括磁盘上的和内存中的。"""
+    _ensure_dir()
+    results = []
+    seen_ids = set()
+    
+    # 1. 先从内存中获取活跃的 session
+    try:
+        from agents.session_manager import get_session_manager
+        manager = get_session_manager()
+        for session in manager.active_sessions():
+            metadata = {
+                "id": session.id,
+                "name": session.title or session.id,
+                "cwd": session.projections.get("cwd", ""),
+                "startTime": session.projections.get("updated_at") or "",
+                "model": "",
+                "parent_session": session.parent_session,
+                "origin": session.origin,
+                "agent_type": session.agent_type,
+            }
+            results.append(metadata)
+            seen_ids.add(session.id)
+    except Exception:
+        pass  # session_manager 可能不可用
+    
+    # 2. 再从磁盘读取 session（去重）
+    for f in session_dir().glob("*.json"):
+        # 跳过 projcache 文件
+        if f.name.endswith(".projcache.json"):
+            continue
+        try:
+            data = json.loads(f.read_text())
+            if "metadata" in data:
+                metadata = data["metadata"]
+                session_id = metadata.get("id")
+                if session_id and session_id not in seen_ids:
+                    # 从 projcache 文件读取 updated_at
+                    projcache_path = session_dir() / f"{session_id}.projcache.json"
+                    if projcache_path.exists():
+                        try:
+                            projcache = json.loads(projcache_path.read_text())
+                            updated_at = projcache.get("projections", {}).get("updated_at", 0)
+                            if updated_at:
+                                metadata["startTime"] = updated_at
+                        except Exception:
+                            pass
+                    results.append(metadata)
+                    seen_ids.add(session_id)
+        except Exception:
+            pass
+    
+    return results
+
+
+def list_child_sessions(parent_session_id: str) -> list[dict[str, Any]]:
+    """列出指定父 session 的所有子 session。
+    
+    Args:
+        parent_session_id: 父 session ID
+    
+    Returns:
+        list[dict]: 子 session 元数据列表
+    """
     _ensure_dir()
     results = []
     for f in session_dir().glob("*.json"):
         try:
             data = json.loads(f.read_text())
-            if "metadata" in data:
-                results.append(data["metadata"])
+            # parent_session 在顶层，不在 metadata 中
+            if data.get("parent_session") == parent_session_id:
+                # 返回 metadata（如果存在）或基本信息
+                if "metadata" in data:
+                    results.append(data["metadata"])
+                else:
+                    results.append({
+                        "id": data.get("id", f.stem),
+                        "parent_session": data.get("parent_session"),
+                        "origin": data.get("origin"),
+                        "agent_type": data.get("agent_type"),
+                    })
         except Exception:
             pass
     return results

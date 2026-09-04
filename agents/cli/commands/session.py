@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from ..registry import command
 from ...core.session import list_sessions, load_session, delete_session, clean_sessions
-from ...ui import print_info, print_error, print_session_rows
+from ...logging import print_info, print_error
 
 if TYPE_CHECKING:
     from ..agent import Agent
@@ -88,65 +88,14 @@ async def cmd_sessions(agent: "Agent", args: str) -> None:
     
     sessions.sort(key=lambda s: s.get("startTime", ""), reverse=True)
     
-    # Try to use interactive dialog
-    try:
-        from ...tui.dialog import SelectDialog, DialogOption, DialogAction
-        
-        def on_switch(session_id: str):
-            """Switch to selected session."""
-            if session_id == agent.session_id:
-                return
-            session = load_session(session_id)
-            if session:
-                from agents.core.session import session_to_restore_dict
-                agent.session_id = session_id
-                agent.restore_session(session_to_restore_dict(session))
-                print_info(f"Switched to session {session_id[:8]}...")
-        
-        def on_delete(session_id: str):
-            """Delete selected session."""
-            if session_id == agent.session_id:
-                print_error("Cannot delete the current session.")
-                return
-            if delete_session(session_id):
-                print_info(f"Deleted session {session_id[:8]}...")
-            else:
-                print_error(f"Failed to delete session")
-        
-        # Build options
-        options = []
-        for s in sessions[:50]:  # Limit to 50 sessions
-            sid = s.get("id", "")
-            title = s.get("title", "Untitled")
-            start = s.get("startTime", "")
-            msgs = s.get("messageCount", 0)
-            
-            options.append(DialogOption(
-                title=title[:50],  # Truncate long titles
-                value=sid,
-                description=f"({msgs} msgs)",
-                footer=_format_session_time(start),
-                category=_get_session_category(start),
-            ))
-        
-        actions = [
-            DialogAction("Delete", "d", on_delete),
-        ]
-        
-        dialog = SelectDialog(
-            title="Sessions",
-            options=options,
-            actions=actions,
-            current=agent.session_id,
-        )
-        
-        selected = await dialog.run_async()
-        if selected:
-            on_switch(selected)
-    
-    except ImportError:
-        # Fallback to simple list
-        print_session_rows(sessions[:30], current_id=agent.session_id)
+    for s in sessions[:30]:
+        sid = s.get("id", "")[:8]
+        title = s.get("title", "Untitled")
+        start = s.get("startTime", "")
+        msgs = s.get("messageCount", 0)
+        time_str = _format_session_time(start)
+        marker = " *" if sid == agent.session_id else ""
+        print_info(f"{sid}... - {title} ({msgs} msgs, {time_str}){marker}")
 
 
 @command(
@@ -257,12 +206,7 @@ async def cmd_fork(agent: "Agent", args: str) -> None:
 )
 async def cmd_subagents(agent: "Agent", args: str) -> None:
     """View subagent task progress."""
-    from ...tui.subagent_tracker import get_tracker
-    from ...tui.output import print_subagent_progress
-    
-    tracker = get_tracker()
-    tasks = tracker.get_recent_tasks(20)
-    print_subagent_progress(tasks)
+    print_info("Subagent tracking not available in server mode.")
 
 
 @command(
@@ -332,7 +276,5 @@ async def cmd_export(agent: "Agent", args: str) -> None:
     category="session",
 )
 async def cmd_quit(agent: "Agent", args: str) -> None:
-    from ...ui import print_goodbye
-    print_goodbye()
     import sys
     sys.exit(0)

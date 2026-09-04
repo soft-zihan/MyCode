@@ -59,7 +59,7 @@ MyCode 计划集成 5 个开源 benchmark 建立完整的评估体系：
 ## 目录结构
 
 ```text
-BearAgent/
+mycodeAgent/
 ├── agents/
 │   ├── agent.py                   # Agent 协调器（~1400行）
 │   ├── agent_loop.py              # 推理循环（模型调用、工具调度、流式输出）
@@ -125,7 +125,7 @@ BearAgent/
 │   └── observability/             # 可观测性（trace、cost、audit）
 │
 ├── tests/                         # pytest 测试
-├── .bear/
+├── .mycode/
 │   ├── skills/                    # 项目级 Skills
 │   └── skill-evolution/           # Skills 自进化审计产物
 ├── wiki/                          # 项目文档中心
@@ -194,25 +194,25 @@ MODEL=deepseek-chat
 
 ```env
 # 注册端点：<ID> 只是把三行归为一组的内部标签，可任意起名，想加更多 API 再加一组
-BEAR_ENDPOINT_A_BASE_URL=https://host-a/v1
-BEAR_ENDPOINT_A_API_KEY=sk-aaa
-BEAR_ENDPOINT_A_MODEL=deepseek-v4-pro
+MYCODE_ENDPOINT_A_BASE_URL=https://host-a/v1
+MYCODE_ENDPOINT_A_API_KEY=sk-aaa
+MYCODE_ENDPOINT_A_MODEL=deepseek-v4-pro
 
-BEAR_ENDPOINT_B_BASE_URL=https://host-b/anthropic
-BEAR_ENDPOINT_B_API_KEY=sk-bbb
-BEAR_ENDPOINT_B_MODEL=claude-sonnet-4-6
+MYCODE_ENDPOINT_B_BASE_URL=https://host-b/anthropic
+MYCODE_ENDPOINT_B_API_KEY=sk-bbb
+MYCODE_ENDPOINT_B_MODEL=claude-sonnet-4-6
 
 # 子 Agent 路由：值写【模型名】，注册表自动找到提供该模型的端点
-BEAR_MODEL_EXPLORE=claude-sonnet-4-6
-BEAR_MODEL_PLAN=claude-sonnet-4-6
-BEAR_MODEL_GENERAL=deepseek-v4-pro
+MYCODE_MODEL_EXPLORE=claude-sonnet-4-6
+MYCODE_MODEL_PLAN=claude-sonnet-4-6
+MYCODE_MODEL_GENERAL=deepseek-v4-pro
 
 # side query 路由（记忆召回/会话折叠/skill 进化等轻量调用）
-BEAR_SIDE_MODEL=deepseek-v4-pro
+MYCODE_SIDE_MODEL=deepseek-v4-pro
 
 ```
 
-自定义子 Agent 也可以在 `.bear/agents/<name>.md` frontmatter 里写 `model: <模型名>` 自行配置，无需环境变量。
+自定义子 Agent 也可以在 `.mycode/agents/<name>.md` frontmatter 里写 `model: <模型名>` 自行配置，无需环境变量。
 
 ### 3. 启动 REPL
 
@@ -258,29 +258,29 @@ MyCode 的核心特色是 **自进化 Skills**。它可以从用户明确反馈�
 
 ### 1. 开启自动自进化
 
-默认 `BEAR_AUTO_SKILL_EVOLUTION` 是开启的。为了明确配置，建议在 `.env` 中写：
+默认 `MYCODE_AUTO_SKILL_EVOLUTION` 是开启的。为了明确配置，建议在 `.env` 中写：
 
 ```env
-BEAR_AUTO_SKILL_EVOLUTION=1
-BEAR_AUTO_SKILL_TARGET=project
+MYCODE_AUTO_SKILL_EVOLUTION=1
+MYCODE_AUTO_SKILL_TARGET=project
 ```
 
 含义：
 
-- `BEAR_AUTO_SKILL_EVOLUTION=1`：启用在线 Skill 自进化。
-- `BEAR_AUTO_SKILL_TARGET=project`：自动新增的 Skill 写入当前项目 `.bear/skills/`。
+- `MYCODE_AUTO_SKILL_EVOLUTION=1`：启用在线 Skill 自进化。
+- `MYCODE_AUTO_SKILL_TARGET=project`：自动新增的 Skill 写入当前项目 `.mycode/skills/`。
 
 如果希望沉淀为所有项目共享的个人 Skill：
 
 ```env
-BEAR_AUTO_SKILL_TARGET=user
+MYCODE_AUTO_SKILL_TARGET=user
 ```
 
 对应路径：
 
 ```text
-project: <project>/.bear/skills/<skill_name>/SKILL.md
-user:    ~/.bear/skills/<skill_name>/SKILL.md
+project: <project>/.mycode/skills/<skill_name>/SKILL.md
+user:    ~/.mycode/skills/<skill_name>/SKILL.md
 ```
 
 ### 2. 用允许写入的权限模式启动
@@ -288,8 +288,8 @@ user:    ~/.bear/skills/<skill_name>/SKILL.md
 后台自动写入 Skill 需要当前权限模式允许写文件。推荐使用：
 
 ```bash
-BEAR_AUTO_SKILL_EVOLUTION=1 \
-BEAR_AUTO_SKILL_TARGET=project \
+MYCODE_AUTO_SKILL_EVOLUTION=1 \
+MYCODE_AUTO_SKILL_TARGET=project \
 python3 -m agents.main --accept-edits
 ```
 
@@ -352,12 +352,12 @@ agents/evolution/evolution.py
 审计产物：
 
 ```text
-.bear/skill-evolution/usage.jsonl
-.bear/skill-evolution/online_provenance.jsonl
-.bear/skill-evolution/online_skill_provenance.json
-.bear/skill-evolution/skill_usage_stats.json
-.bear/skill-evolution/history/
-.bear/skill-evolution/pruned/
+.mycode/skill-evolution/usage.jsonl
+.mycode/skill-evolution/online_provenance.jsonl
+.mycode/skill-evolution/online_skill_provenance.json
+.mycode/skill-evolution/skill_usage_stats.json
+.mycode/skill-evolution/history/
+.mycode/skill-evolution/pruned/
 ```
 
 ### 5. 手动触发当前窗口抽取
@@ -437,7 +437,7 @@ agents/evolution/evolution.py
 - 提示符上方状态行实时显示：当前模型、当前上下文 token/窗口（利用率）、会话累计 in/out tokens（注意：单位是 token，`/context` 表格显示的是字符数）。
 - 输入中用 `@路径` 引用文件/目录，内容会自动注入本轮输入（单文件上限 32KB）。
 - Tab 键自动补全 `/` 命令与 `@` 路径。
-- 流式输出结束后自动擦除原文并用 rich 重渲染 Markdown（`BEAR_MD_RENDER=0` 可关闭）。
+- 流式输出结束后自动擦除原文并用 rich 重渲染 Markdown（`MYCODE_MD_RENDER=0` 可关闭）。
 - `/` 开头但不是已知命令也不是可调用 skill 时直接报错，不会发给模型。
 
 ## Skills 是什么
@@ -447,8 +447,8 @@ Skill 是一个可复用能力说明文件，通常是一个带 frontmatter 的 
 Skill 路径：
 
 ```text
-用户级：~/.bear/skills/<skill_name>/SKILL.md
-项目级：<project>/.bear/skills/<skill_name>/SKILL.md
+用户级：~/.mycode/skills/<skill_name>/SKILL.md
+项目级：<project>/.mycode/skills/<skill_name>/SKILL.md
 ```
 
 示例：
@@ -485,8 +485,8 @@ MyCode 支持 MCP 外部工具扩展。MCP Server 可以通过 stdio JSON-RPC �
 配置来源：
 
 ```text
-~/.bear/settings.json
-<project>/.bear/settings.json
+~/.mycode/settings.json
+<project>/.mycode/settings.json
 <project>/.mcp.json
 ```
 
@@ -515,7 +515,7 @@ mcp__<serverName>__<toolName>
 构建镜像：
 
 ```bash
-docker build -t bear-code .
+docker build -t my-code .
 ```
 
 启动交互式会话：
@@ -524,9 +524,9 @@ docker build -t bear-code .
 docker run --rm -it \
   --env-file .env \
   -v "$PWD:/workspace" \
-  -v bear-code-sessions:/root/.bear-code \
-  -v bear-code-memory:/root/.MyCode \
-  bear-code
+  -v my-code-sessions:/root/.my-code \
+  -v my-code-memory:/root/.MyCode \
+  my-code
 ```
 
 允许自动沉淀 Skills：
@@ -534,12 +534,12 @@ docker run --rm -it \
 ```bash
 docker run --rm -it \
   --env-file .env \
-  -e BEAR_AUTO_SKILL_EVOLUTION=1 \
-  -e BEAR_AUTO_SKILL_TARGET=project \
+  -e MYCODE_AUTO_SKILL_EVOLUTION=1 \
+  -e MYCODE_AUTO_SKILL_TARGET=project \
   -v "$PWD:/workspace" \
-  -v bear-code-sessions:/root/.bear-code \
-  -v bear-code-memory:/root/.MyCode \
-  bear-code --accept-edits
+  -v my-code-sessions:/root/.my-code \
+  -v my-code-memory:/root/.MyCode \
+  my-code --accept-edits
 ```
 
 ## 重要数据路径
@@ -547,14 +547,14 @@ docker run --rm -it \
 
 | 数据              | 路径                                           |
 | ------------------- | ------------------------------------------------ |
-| 项目级 Skills     | `.bear/skills/<skill_name>/SKILL.md`           |
-| 用户级 Skills     | `~/.bear/skills/<skill_name>/SKILL.md`         |
-| Skills 自进化审计 | `.bear/skill-evolution/`                       |
+| 项目级 Skills     | `.mycode/skills/<skill_name>/SKILL.md`           |
+| 用户级 Skills     | `~/.mycode/skills/<skill_name>/SKILL.md`         |
+| Skills 自进化审计 | `.mycode/skill-evolution/`                       |
 | 长期记忆          | `~/.MyCode/projects/<project_hash>/memory/`  |
-| 会话历史          | `~/.bear-code/sessions/`                       |
-| 大工具结果        | `~/.bear-code/tool-results/`                   |
-| Plan Mode 计划    | `~/.bear/plans/`                               |
-| 文件回退快照      | `~/.bear-code/checkpoints/<session_id>/files/` |
+| 会话历史          | `~/.my-code/sessions/`                       |
+| 大工具结果        | `~/.my-code/tool-results/`                   |
+| Plan Mode 计划    | `~/.mycode/plans/`                               |
+| 文件回退快照      | `~/.my-code/checkpoints/<session_id>/files/` |
 
 ## 文档入口
 

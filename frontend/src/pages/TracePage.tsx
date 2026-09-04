@@ -44,12 +44,14 @@ export default function TracePage() {
     setFilesLoading(true);
     try {
       const data = await fetchTraceFiles();
-      setTraceFiles(data.files);
-      if (!selectedSession && data.files.length > 0) {
-        setSelectedSession(data.files[0].session_id);
+      const files = data.files || [];
+      setTraceFiles(files);
+      if (!selectedSession && files.length > 0) {
+        setSelectedSession(files[0].session_id);
       }
     } catch (err) {
       console.error('Failed to load trace files:', err);
+      setTraceFiles([]);
     } finally {
       setFilesLoading(false);
     }
@@ -71,7 +73,7 @@ export default function TracePage() {
       }
       
       setEnabled(data.enabled);
-      setTracePath(data.path);
+      setTracePath(data.path || '');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load trace');
     } finally {
@@ -81,7 +83,9 @@ export default function TracePage() {
 
   useEffect(() => {
     loadTraceFiles();
-  }, [loadTraceFiles]);
+    // 初始加载时也调用 loadTrace，即使没有 selectedSession
+    loadTrace();
+  }, []);
 
   useEffect(() => {
     if (selectedSession) {
@@ -89,7 +93,7 @@ export default function TracePage() {
       lastEventCountRef.current = 0;
       loadTrace();
     }
-  }, [selectedSession, loadTrace]);
+  }, [selectedSession]);
 
   useEffect(() => {
     if (!autoRefresh) return;

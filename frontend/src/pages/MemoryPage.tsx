@@ -265,7 +265,7 @@ export default function MemoryPage() {
                     <li><strong>Reference:</strong> Important facts and documentation</li>
                   </ul>
                   <p><strong>Recall:</strong> Memories are automatically retrieved based on semantic similarity to the current conversation context using a side query model.</p>
-                  <p><strong>Storage:</strong> Memories are stored as Markdown files in <code className="bg-blue-100 px-1 rounded">~/.bear-code/memories/</code></p>
+                  <p><strong>Storage:</strong> Memories are stored as Markdown files in <code className="bg-blue-100 px-1 rounded">~/.my-code/memories/</code></p>
                 </div>
               </div>
             )}

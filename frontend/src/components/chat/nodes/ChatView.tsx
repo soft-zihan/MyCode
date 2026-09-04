@@ -1,13 +1,13 @@
 import { memo, useRef, useEffect, useState } from 'react';
 import { ChevronDown, Loader2, GitBranch } from 'lucide-react';
-import type { ChatSnapshot } from './types';
+import type { ChatSnapshot, UserNode } from './types';
 import { ChatNodeSeat } from './ChatNodeSeat';
 
 interface ChatViewProps {
   snapshot: ChatSnapshot;
   isStreaming: boolean;
   isWaitingResponse?: boolean;
-  onEditMessage?: (index: number) => void;
+  onEditMessage?: (node: UserNode, restoreFiles: boolean) => void;
   onFileClick?: (path: string) => void;
   onFork?: (beforeIndex: number) => void;
 }
@@ -54,6 +54,8 @@ export const ChatView = memo(function ChatView({ snapshot, isStreaming, isWaitin
     );
   }
 
+  let userMsgIdx = 0;
+
   return (
     <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-4 py-4">
       <div className="space-y-4">
@@ -61,8 +63,10 @@ export const ChatView = memo(function ChatView({ snapshot, isStreaming, isWaitin
           const node = nodes.get(key);
           if (!node) return null;
           
-          // Add fork button before each user message (except the first one)
-          const showForkButton = node.kind === 'user' && idx > 0 && !isStreaming;
+          const isUserNode = node.kind === 'user';
+          const thisUserMsgIdx = isUserNode ? userMsgIdx++ : -1;
+          
+          const showForkButton = isUserNode && idx > 0 && !isStreaming;
           
           return (
             <div key={key}>
@@ -70,7 +74,10 @@ export const ChatView = memo(function ChatView({ snapshot, isStreaming, isWaitin
                 <div className="flex items-center gap-2 py-2 my-2 group/fork">
                   <div className="flex-1 h-px bg-gray-200"></div>
                   <button
-                    onClick={() => onFork?.(idx)}
+                    onClick={() => {
+                      console.log('[FORK] button clicked, thisUserMsgIdx:', thisUserMsgIdx, 'nodeKey:', key);
+                      onFork?.(thisUserMsgIdx);
+                    }}
                     className="flex items-center gap-1 px-2 py-1 text-xs text-gray-400 hover:text-green-600 hover:bg-green-50 rounded transition-colors opacity-0 group-hover/fork:opacity-100"
                     title="Fork from this point"
                   >

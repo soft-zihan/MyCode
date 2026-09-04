@@ -1,11 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { 
   FolderTree, ChevronRight, ChevronDown, File, Folder, X, 
-  Plus, Edit3, Check, Pencil, Trash2
+  Plus, Edit3, Check, Pencil, Trash2, FolderPlus
 } from 'lucide-react';
 import {
   fetchWorkspaceTree, WorkspaceNode,
   deleteWorkspaceFile, renameWorkspaceFile, createWorkspaceFile,
+  moveWorkspaceFile,
 } from '../../../api/client';
 
 interface FileTreeNodeProps {
@@ -13,24 +14,98 @@ interface FileTreeNodeProps {
   level: number;
   onFileSelect: (path: string) => void;
   onAddToChat: (path: string) => void;
-  selectedFile: string | null;
+  selectedPath: string | null;
+  onSelectPath: (path: string | null) => void;
   editMode?: boolean;
   cwd?: string | null;
   onRefresh?: () => void;
+  onDragStart?: (path: string, type: 'file' | 'directory') => void;
+  onDragEnd?: () => void;
+  dragTarget?: string | null;
+  onDragOver?: (path: string) => void;
+  onDragLeave?: () => void;
+  onDrop?: (targetPath: string) => void;
+  creatingInPath: string | null;
+  creatingType: 'file' | 'folder' | null;
+  onCreated: (fullPath: string) => void;
 }
 
-function FileTreeNode({ node, level, onFileSelect, onAddToChat, selectedFile, editMode, cwd, onRefresh }: FileTreeNodeProps) {
+function InlineCreateInput({ type, onCreated, onCancel, level }: {
+  type: 'file' | 'folder';
+  onCreated: (name: string) => void;
+  onCancel: () => void;
+  level: number;
+}) {
+  const [name, setName] = useState('');
+
+  const handleConfirm = () => {
+    if (name.trim()) onCreated(name.trim());
+  };
+
+  return (
+    <div
+      className={`flex items-center px-2 py-1 ${type === 'folder' ? 'bg-purple-50' : 'bg-green-50'}`}
+      style={{ paddingLeft: `${level * 16 + 8}px` }}
+    >
+      {type === 'folder' ? (
+        <FolderPlus className="w-4 h-4 mr-2 text-purple-500 flex-shrink-0" />
+      ) : (
+        <File className="w-4 h-4 mr-2 text-green-500 flex-shrink-0" />
+      )}
+      <input
+        type="text"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === 'Enter') handleConfirm();
+          if (e.key === 'Escape') onCancel();
+        }}
+        onClick={(e) => e.stopPropagation()}
+        placeholder={type === 'folder' ? '文件夹名' : '文件名'}
+        className={`flex-1 px-1 py-0 text-sm border rounded focus:outline-none ${
+          type === 'folder' ? 'border-purple-400' : 'border-green-400'
+        }`}
+        autoFocus
+      />
+      <button onClick={handleConfirm} className="p-0.5 ml-1 hover:bg-green-100 rounded text-green-600">
+        <Check className="w-3 h-3" />
+      </button>
+      <button onClick={onCancel} className="p-0.5 ml-0.5 hover:bg-gray-200 rounded text-gray-500">
+        <X className="w-3 h-3" />
+      </button>
+    </div>
+  );
+}
+
+function FileTreeNode({ 
+  node, level, onFileSelect, onAddToChat, selectedPath, onSelectPath,
+  editMode, cwd, onRefresh, onDragStart, onDragEnd, dragTarget, onDragOver, onDragLeave, onDrop,
+  creatingInPath, creatingType, onCreated
+}: FileTreeNodeProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [isRenaming, setIsRenaming] = useState(false);
   const [newName, setNewName] = useState(node.name);
-  const isSelected = selectedFile === node.path;
+  const isSelected = selectedPath === node.path;
+  const isDragTarget = dragTarget === node.path;
+  const isCreatingHere = creatingInPath === node.path;
 
-  const handleClick = () => {
+  useEffect(() => {
+    if (isCreatingHere && !isExpanded) {
+      setIsExpanded(true);
+    }
+  }, [isCreatingHere, isExpanded]);
+
+  const handleClick = (e: React.MouseEvent) => {
     if (isRenaming) return;
+    e.stopPropagation();
+    
     if (node.type === 'directory') {
       setIsExpanded(!isExpanded);
+      onSelectPath(isSelected ? null : node.path);
     } else {
       onFileSelect(node.path);
+      onSelectPath(node.path);
     }
   };
 
@@ -45,6 +120,7 @@ function FileTreeNode({ node, level, onFileSelect, onAddToChat, selectedFile, ed
     
     try {
       await deleteWorkspaceFile(node.path, cwd || undefined);
+      if (isSelected) onSelectPath(null);
       onRefresh?.();
     } catch (err) {
       alert(err instanceof Error ? err.message : '删除失败');
@@ -79,28 +155,74 @@ function FileTreeNode({ node, level, onFileSelect, onAddToChat, selectedFile, ed
     setNewName(node.name);
   };
 
+  const handleDragStart = (e: React.DragEvent) => {
+    e.stopPropagation();
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', node.path);
+    onDragStart?.(node.path, node.type as 'file' | 'directory');
+  };
+
+  const handleDragEnd = (e: React.DragEvent) => {
+    e.stopPropagation();
+    onDragEnd?.();
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (node.type === 'directory') {
+      e.dataTransfer.dropEffect = 'move';
+      onDragOver?.(node.path);
+    }
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onDragLeave?.();
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (node.type === 'directory') {
+      onDrop?.(node.path);
+    }
+  };
+
+  const handleCreateConfirm = (itemName: string) => {
+    const prefix = node.path === '.' ? '' : node.path + '/';
+    onCreated(prefix + itemName);
+  };
+
   return (
     <div>
       <div
-        className={`flex items-center px-2 py-1 cursor-pointer hover:bg-gray-100 group ${
+        className={`flex items-center px-2 py-1 cursor-pointer hover:bg-gray-100 group transition-colors ${
           isSelected ? 'bg-blue-50 text-blue-700' : ''
-        }`}
+        } ${isDragTarget ? 'bg-green-100 ring-1 ring-green-400' : ''}`}
         style={{ paddingLeft: `${level * 16 + 8}px` }}
         onClick={handleClick}
+        draggable={!editMode && !isRenaming}
+        onDragStart={handleDragStart}
+        onDragEnd={handleDragEnd}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
       >
         {node.type === 'directory' ? (
           <>
             {isExpanded ? (
-              <ChevronDown className="w-4 h-4 mr-1" />
+              <ChevronDown className="w-4 h-4 mr-1 flex-shrink-0" />
             ) : (
-              <ChevronRight className="w-4 h-4 mr-1" />
+              <ChevronRight className="w-4 h-4 mr-1 flex-shrink-0" />
             )}
-            <Folder className="w-4 h-4 mr-2 text-blue-500" />
+            <Folder className="w-4 h-4 mr-2 text-blue-500 flex-shrink-0" />
           </>
         ) : (
           <>
-            <span className="w-4 mr-1" />
-            <File className="w-4 h-4 mr-2 text-gray-500" />
+            <span className="w-4 mr-1 flex-shrink-0" />
+            <File className="w-4 h-4 mr-2 text-gray-500 flex-shrink-0" />
           </>
         )}
         
@@ -169,21 +291,39 @@ function FileTreeNode({ node, level, onFileSelect, onAddToChat, selectedFile, ed
           </button>
         )}
       </div>
-      {node.type === 'directory' && isExpanded && node.children && (
+      {node.type === 'directory' && isExpanded && (
         <div>
-          {node.children.map(child => (
+          {node.children?.map(child => (
             <FileTreeNode
               key={child.path}
               node={child}
               level={level + 1}
               onFileSelect={onFileSelect}
               onAddToChat={onAddToChat}
-              selectedFile={selectedFile}
+              selectedPath={selectedPath}
+              onSelectPath={onSelectPath}
               editMode={editMode}
               cwd={cwd}
               onRefresh={onRefresh}
+              onDragStart={onDragStart}
+              onDragEnd={onDragEnd}
+              dragTarget={dragTarget}
+              onDragOver={onDragOver}
+              onDragLeave={onDragLeave}
+              onDrop={onDrop}
+              creatingInPath={creatingInPath}
+              creatingType={creatingType}
+              onCreated={onCreated}
             />
           ))}
+          {isCreatingHere && creatingType && (
+            <InlineCreateInput
+              type={creatingType}
+              level={level + 1}
+              onCreated={handleCreateConfirm}
+              onCancel={() => onCreated('')}
+            />
+          )}
         </div>
       )}
     </div>
@@ -199,18 +339,20 @@ interface FileTreeProps {
   refreshTrigger?: number;
 }
 
-// In-memory cache for file trees (sessionStorage has ~5MB quota)
 const fileTreeCache = new Map<string, WorkspaceNode>();
 
 export function FileTree({ onFileSelect, onAddToChat, selectedFile, cwd, visible, refreshTrigger }: FileTreeProps) {
   const [tree, setTree] = useState<WorkspaceNode | null>(null);
   const [loading, setLoading] = useState(true);
   const [editMode, setEditMode] = useState(false);
-  const [isCreating, setIsCreating] = useState(false);
-  const [newFileName, setNewFileName] = useState('');
+  const [selectedPath, setSelectedPath] = useState<string | null>(selectedFile);
+  const [dragSource, setDragSource] = useState<{ path: string; type: 'file' | 'directory' } | null>(null);
+  const [dragTarget, setDragTarget] = useState<string | null>(null);
+  const [creatingInPath, setCreatingInPath] = useState<string | null>(null);
+  const [creatingType, setCreatingType] = useState<'file' | 'folder' | null>(null);
   const cacheKey = cwd || 'default';
 
-  const loadTree = (forceRefresh = false) => {
+  const loadTree = useCallback((forceRefresh = false) => {
     if (!forceRefresh) {
       const cached = fileTreeCache.get(cacheKey);
       if (cached) {
@@ -228,43 +370,112 @@ export function FileTree({ onFileSelect, onAddToChat, selectedFile, cwd, visible
       })
       .catch(console.error)
       .finally(() => setLoading(false));
-  };
+  }, [cacheKey, cwd]);
 
   useEffect(() => {
     loadTree();
-  }, [cwd]);
+  }, [loadTree]);
 
   useEffect(() => {
     if (visible) {
       loadTree(true);
     }
-  }, [visible]);
+  }, [visible, loadTree]);
 
   useEffect(() => {
     if (refreshTrigger && refreshTrigger > 0) {
       loadTree(true);
     }
-  }, [refreshTrigger]);
+  }, [refreshTrigger, loadTree]);
 
-  const handleCreateFile = async () => {
-    if (!newFileName.trim()) {
-      setIsCreating(false);
-      return;
+  useEffect(() => {
+    setSelectedPath(selectedFile);
+  }, [selectedFile]);
+
+  const findNode = (root: WorkspaceNode | null, path: string): WorkspaceNode | null => {
+    if (!root) return null;
+    if (root.path === path) return root;
+    if (root.children) {
+      for (const child of root.children) {
+        const found = findNode(child, path);
+        if (found) return found;
+      }
     }
-    
+    return null;
+  };
+
+  const getTargetDir = (): string => {
+    if (!selectedPath) return tree?.path || '.';
+    const node = findNode(tree, selectedPath);
+    if (node?.type === 'directory') return node.path;
+    return selectedPath.split('/').slice(0, -1).join('/') || tree?.path || '.';
+  };
+
+  const startCreate = (type: 'file' | 'folder') => {
+    const dir = getTargetDir();
+    setCreatingInPath(dir);
+    setCreatingType(type);
+    const node = findNode(tree, dir);
+    if (node?.type === 'directory') {
+      // auto-expand handled below
+    }
+  };
+
+  const handleCreated = async (fullPath: string) => {
+    setCreatingInPath(null);
+    setCreatingType(null);
+    if (!fullPath) return;
     try {
-      await createWorkspaceFile(newFileName.trim(), cwd || undefined);
-      setIsCreating(false);
-      setNewFileName('');
+      await createWorkspaceFile(fullPath, cwd || undefined);
       loadTree(true);
     } catch (err) {
       alert(err instanceof Error ? err.message : '创建失败');
     }
   };
 
-  const handleCreateCancel = () => {
-    setIsCreating(false);
-    setNewFileName('');
+  const handleDragStart = (path: string, type: 'file' | 'directory') => {
+    setDragSource({ path, type });
+  };
+
+  const handleDragEnd = () => {
+    setDragSource(null);
+    setDragTarget(null);
+  };
+
+  const handleDragOver = (path: string) => {
+    if (dragSource && dragSource.path !== path) {
+      setDragTarget(path);
+    }
+  };
+
+  const handleDragLeave = () => {
+    setDragTarget(null);
+  };
+
+  const handleDrop = async (targetPath: string) => {
+    if (!dragSource) return;
+    
+    const sourcePath = dragSource.path;
+    if (sourcePath === targetPath) {
+      handleDragEnd();
+      return;
+    }
+
+    const sourceName = sourcePath.split('/').pop() || '';
+    const targetFullPath = targetPath === '.' ? sourceName : `${targetPath}/${sourceName}`;
+
+    try {
+      await moveWorkspaceFile(sourcePath, targetFullPath, cwd || undefined);
+      loadTree(true);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '移动失败');
+    }
+    
+    handleDragEnd();
+  };
+
+  const handleRootCreateConfirm = (name: string) => {
+    handleCreated(name);
   };
 
   if (loading && !tree) {
@@ -275,8 +486,10 @@ export function FileTree({ onFileSelect, onAddToChat, selectedFile, cwd, visible
     return <div className="p-4 text-sm text-red-500">Failed to load</div>;
   }
 
+  const isCreatingAtRoot = creatingInPath === tree.path;
+
   return (
-    <div className="h-full overflow-y-auto">
+    <div className="h-full overflow-y-auto flex flex-col">
       <div className="p-3 border-b border-gray-200 bg-gray-50 flex items-center justify-between">
         <div className="flex items-center text-sm font-medium text-gray-700">
           <FolderTree className="w-4 h-4 mr-2" />
@@ -284,15 +497,26 @@ export function FileTree({ onFileSelect, onAddToChat, selectedFile, cwd, visible
         </div>
         <div className="flex items-center gap-1">
           <button
-            onClick={() => setIsCreating(!isCreating)}
+            onClick={() => startCreate('file')}
             className={`p-1 rounded transition-colors ${
-              isCreating 
+              creatingInPath && creatingType === 'file'
                 ? 'bg-green-100 text-green-700 hover:bg-green-200' 
                 : 'hover:bg-gray-200 text-gray-600'
             }`}
-            title={isCreating ? '取消新建' : '新建文件'}
+            title="新建文件"
           >
             <Plus className="w-4 h-4" />
+          </button>
+          <button
+            onClick={() => startCreate('folder')}
+            className={`p-1 rounded transition-colors ${
+              creatingInPath && creatingType === 'folder'
+                ? 'bg-purple-100 text-purple-700 hover:bg-purple-200' 
+                : 'hover:bg-gray-200 text-gray-600'
+            }`}
+            title="新建文件夹"
+          >
+            <FolderPlus className="w-4 h-4" />
           </button>
           <button
             onClick={() => setEditMode(!editMode)}
@@ -307,40 +531,7 @@ export function FileTree({ onFileSelect, onAddToChat, selectedFile, cwd, visible
           </button>
         </div>
       </div>
-      {isCreating && (
-        <div className="px-3 py-2 border-b border-gray-200 bg-green-50">
-          <div className="flex items-center gap-2">
-            <File className="w-4 h-4 text-green-600" />
-            <input
-              type="text"
-              value={newFileName}
-              onChange={(e) => setNewFileName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleCreateFile();
-                if (e.key === 'Escape') handleCreateCancel();
-              }}
-              placeholder="输入文件名（如 src/new.ts）"
-              className="flex-1 px-2 py-1 text-sm border border-green-400 rounded focus:outline-none focus:ring-1 focus:ring-green-500"
-              autoFocus
-            />
-            <button
-              onClick={handleCreateFile}
-              className="p-1 hover:bg-green-200 rounded text-green-700"
-              title="确认"
-            >
-              <Check className="w-4 h-4" />
-            </button>
-            <button
-              onClick={handleCreateCancel}
-              className="p-1 hover:bg-gray-200 rounded text-gray-600"
-              title="取消"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-      )}
-      <div className="py-2">
+      <div className="py-2 flex-1">
         {tree.children?.map(child => (
           <FileTreeNode
             key={child.path}
@@ -348,12 +539,30 @@ export function FileTree({ onFileSelect, onAddToChat, selectedFile, cwd, visible
             level={0}
             onFileSelect={onFileSelect}
             onAddToChat={onAddToChat}
-            selectedFile={selectedFile}
+            selectedPath={selectedPath}
+            onSelectPath={setSelectedPath}
             editMode={editMode}
             cwd={cwd}
-            onRefresh={loadTree}
+            onRefresh={() => loadTree(true)}
+            onDragStart={handleDragStart}
+            onDragEnd={handleDragEnd}
+            dragTarget={dragTarget}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            creatingInPath={creatingInPath}
+            creatingType={creatingType}
+            onCreated={handleCreated}
           />
         ))}
+        {isCreatingAtRoot && creatingType && (
+          <InlineCreateInput
+            type={creatingType}
+            level={0}
+            onCreated={handleRootCreateConfirm}
+            onCancel={() => { setCreatingInPath(null); setCreatingType(null); }}
+          />
+        )}
       </div>
     </div>
   );

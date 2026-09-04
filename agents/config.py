@@ -1,6 +1,6 @@
 """JSON 配置管理模块。
 
-配置文件位置：~/.bear-code/config.json
+配置文件位置：~/.my-code/config.json
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ from typing import Any, Optional
 
 
 def config_path() -> Path:
-    """配置文件路径：~/.bear-code/config.json"""
-    return Path.home() / ".bear-code" / "config.json"
+    """配置文件路径：~/.my-code/config.json"""
+    return Path.home() / ".my-code" / "config.json"
 
 
 @dataclass

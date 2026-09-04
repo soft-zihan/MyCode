@@ -1,14 +1,28 @@
-import { memo } from 'react';
-import { File, RotateCcw } from 'lucide-react';
+import { memo, useState, useRef, useEffect } from 'react';
+import { File, RotateCcw, ChevronDown } from 'lucide-react';
 import type { UserNode } from './types';
 
 interface UserNodeViewProps {
   node: UserNode;
-  onEdit?: (index: number) => void;
-  index?: number;
+  onEdit?: (node: UserNode, restoreFiles: boolean) => void;
 }
 
-export const UserNodeView = memo(function UserNodeView({ node, onEdit, index }: UserNodeViewProps) {
+export const UserNodeView = memo(function UserNodeView({ node, onEdit }: UserNodeViewProps) {
+  const [showMenu, setShowMenu] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setShowMenu(false);
+      }
+    };
+    if (showMenu) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showMenu]);
+
   return (
     <div className="flex justify-end group">
       <div className="max-w-2xl">
@@ -35,13 +49,34 @@ export const UserNodeView = memo(function UserNodeView({ node, onEdit, index }: 
           </div>
         </div>
         {onEdit && (
-          <button
-            onClick={() => onEdit(index || 0)}
-            className="opacity-0 group-hover:opacity-100 mt-1 p-1 text-blue-600 hover:bg-blue-50 rounded transition-opacity"
-            title="回退到此消息并重新发送"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-          </button>
+          <div className="relative opacity-0 group-hover:opacity-100 transition-opacity" ref={menuRef}>
+            <button
+              onClick={() => setShowMenu(!showMenu)}
+              className="mt-1 p-1 text-blue-600 hover:bg-blue-50 rounded flex items-center gap-0.5"
+              title="回退到此消息"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <ChevronDown className="w-3 h-3" />
+            </button>
+            {showMenu && (
+              <div className="fixed left-auto top-auto mt-1 bg-white border border-gray-200 rounded shadow-lg z-[9999] min-w-[160px]" style={{ position: 'absolute' }}>
+                <button
+                  onClick={() => { onEdit(node, true); setShowMenu(false); }}
+                  className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
+                >
+                  <RotateCcw className="w-3.5 h-3.5 text-blue-500" />
+                  回退并恢复文件
+                </button>
+                <button
+                  onClick={() => { onEdit(node, false); setShowMenu(false); }}
+                  className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
+                >
+                  <RotateCcw className="w-3.5 h-3.5 text-gray-400" />
+                  仅截断对话
+                </button>
+              </div>
+            )}
+          </div>
         )}
       </div>
     </div>

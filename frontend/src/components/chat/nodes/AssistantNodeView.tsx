@@ -1,4 +1,4 @@
-import { memo, useState } from 'react';
+import { memo, useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Brain, ChevronDown, ChevronRight, Copy, Check } from 'lucide-react';
@@ -29,8 +29,28 @@ const fileLinkRenderer = (onFileClick?: (path: string) => void) => (props: React
 };
 
 export const AssistantNodeView = memo(function AssistantNodeView({ node, onFileClick }: AssistantNodeViewProps) {
-  const [showThinking, setShowThinking] = useState(false);
+  const [showThinking, setShowThinking] = useState(node.streaming && !!node.thinking && !node.content);
   const [copied, setCopied] = useState(false);
+  const prevStreamingRef = useRef(node.streaming);
+  const prevHasContentRef = useRef(!!node.content);
+  
+  // 当 streaming 开始时，如果有 thinking 且没有 content，自动展开
+  // 当开始输出 content 时，自动折叠 thinking
+  useEffect(() => {
+    const hadContent = prevHasContentRef.current;
+    
+    // streaming 开始且有 thinking，展开
+    if (node.streaming && !!node.thinking && !node.content) {
+      setShowThinking(true);
+    }
+    // 开始输出 content，折叠 thinking
+    else if (!hadContent && !!node.content) {
+      setShowThinking(false);
+    }
+    
+    prevStreamingRef.current = node.streaming;
+    prevHasContentRef.current = !!node.content;
+  }, [node.streaming, node.thinking, node.content]);
   
   if (!node.content && !node.thinking && !node.streaming) return null;
 

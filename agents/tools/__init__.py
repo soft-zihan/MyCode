@@ -82,7 +82,6 @@ async def execute_tool(
     name: str,
     inp: dict,
     read_file_state: dict[str, float] | None = None,
-    checkpoint_store: Any | None = None,
 ) -> str:
     """执行工具调用。"""
     import asyncio
@@ -115,12 +114,15 @@ async def execute_tool(
         else:
             abs_path = str(_resolve_tool_path(inp["file_path"], must_exist=(name == "edit_file")).resolve())
         if not isinstance(rt, DockerRuntime) and os.path.exists(abs_path):
-            if abs_path not in read_file_state:
-                verb = "writing" if name == "write_file" else "editing"
-                return f"Error: You must read this file before {verb}. Use read_file first to see its current contents."
-            if os.path.getmtime(abs_path) != read_file_state[abs_path]:
-                verb = "writing" if name == "write_file" else "editing"
-                return f"Warning: {inp['file_path']} was modified externally since your last read. Please read_file again before {verb}."
+            # 允许写入空文件（刚创建的文件）
+            file_size = os.path.getsize(abs_path)
+            if file_size > 0:
+                if abs_path not in read_file_state:
+                    verb = "writing" if name == "write_file" else "editing"
+                    return f"Error: You must read this file before {verb}. Use read_file first to see its current contents."
+                if os.path.getmtime(abs_path) != read_file_state[abs_path]:
+                    verb = "writing" if name == "write_file" else "editing"
+                    return f"Warning: {inp['file_path']} was modified externally since your last read. Please read_file again before {verb}."
 
     if name == "tool_search":
         query = (inp.get("query") or "").lower()
@@ -189,13 +191,6 @@ async def execute_tool(
 
     if not handler:
         return f"Unknown tool: {name}"
-
-    if name in ("write_file", "edit_file") and checkpoint_store is not None:
-        try:
-            target = _resolve_tool_path(inp.get("file_path", ""), must_exist=(name == "edit_file"))
-            checkpoint_store.snapshot(target)
-        except Exception:
-            pass
 
     # Run blocking handlers in thread pool to avoid blocking event loop
     result = await asyncio.to_thread(handler, inp)

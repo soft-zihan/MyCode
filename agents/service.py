@@ -24,7 +24,7 @@ class AgentService:
     def __init__(self, agent: Any) -> None:
         self._agent = agent
         if AgentService._global_semaphore is None:
-            max_concurrent = int(os.environ.get("BEAR_MAX_CONCURRENT", "3"))
+            max_concurrent = int(os.environ.get("MYCODE_MAX_CONCURRENT", "3"))
             AgentService._global_semaphore = asyncio.Semaphore(max_concurrent)
 
     # ── 并发控制 ──
@@ -111,6 +111,20 @@ class AgentService:
 
     def rewind(self, n: int = 1) -> str:
         return self._agent.rewind(n)
+
+    # ── 三阶段恢复 ──
+    
+    def stage_revert(self, target_seq: int) -> dict:
+        """Stage：计算恢复计划，预览变更。"""
+        return self._agent.stage_revert(target_seq)
+    
+    def clear_revert(self, current_snapshot: list[dict]) -> dict:
+        """Clear：取消恢复，恢复到原始状态。"""
+        return self._agent.clear_revert(current_snapshot)
+    
+    def commit_revert(self, target_seq: int) -> dict:
+        """Commit：确认恢复。"""
+        return self._agent.commit_revert(target_seq)
 
     def fork(self) -> str:
         return self._agent.fork_session()

@@ -71,8 +71,8 @@ def _resolve_includes(
 
 
 def _load_rules_dir(directory: Path) -> str:
-    """Load all .md files from .bear/rules/ directory."""
-    rules_dir = directory / ".bear" / "rules"
+    """Load all .md files from .mycode/rules/ directory."""
+    rules_dir = directory / ".mycode" / "rules"
     if not rules_dir.is_dir():
         return ""
     try:
@@ -109,7 +109,7 @@ def load_claude_md() -> str:
         if parent == d:
             break
         d = parent
-    # Load .bear/rules/*.md from cwd
+    # Load .mycode/rules/*.md from cwd
     rules = _load_rules_dir(Path.cwd())
     claude_md = ""
     if parts:

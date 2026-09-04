@@ -1,13 +1,12 @@
 """轻量 trace 事件日志 — 用于监控运行状态与定位问题。
 
 设计：
-- JSONL 写入：~/.bear-code/trace/{session_id}.jsonl
-- session_id 来源：BEAR_TRACE_SESSION 环境变量 / set_trace_session() 设置
-- 如果未设置 session_id，使用日期作为文件名（向后兼容）
-- 开启方式：启动参数 --trace / 环境变量 BEAR_TRACE=1 / REPL 内 /trace on
+- OTel 导出：通过 OpenTelemetry 导出到 Phoenix 等后端
+- session_id 来源：MYCODE_TRACE_SESSION 环境变量 / set_trace_session() 设置
+- 开启方式：启动参数 --trace / 环境变量 MYCODE_TRACE=1 / REPL 内 /trace on
 - 线程安全（后台 shell watcher 线程也会发事件）
 - 关闭时零开销：trace_event 立即返回，不做任何 IO
-- 支持可替换 Sink（JsonlFileSink / NoopSink / 自定义）
+- 支持可替换 Sink（NoopSink / 自定义）
 
 事件 schema：{"ts": ISO8601, "kind": str, ...fields}
 常用 kind：
@@ -41,22 +40,6 @@ class TraceSink(Protocol):
     def emit(self, event: dict[str, Any]) -> None: ...
 
 
-class JsonlFileSink:
-    """默认 Sink：写入 JSONL 文件。"""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-
-    def emit(self, event: dict[str, Any]) -> None:
-        try:
-            with self._lock:
-                trace_dir().mkdir(parents=True, exist_ok=True)
-                with open(trace_path(), "a", encoding="utf-8") as f:
-                    f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
-        except OSError:
-            pass
-
-
 class NoopSink:
     """空 Sink：丢弃所有事件。"""
 
@@ -72,7 +55,7 @@ _LOCK = threading.Lock()
 _enabled: bool | None = None
 _session_id: str | None = None
 _session_created_at: str | None = None
-_sink: TraceSink = JsonlFileSink()
+_sink: TraceSink = NoopSink()
 
 
 def set_trace_sink(sink: TraceSink) -> None:
@@ -91,23 +74,23 @@ def get_trace_sink() -> TraceSink:
 
 
 def trace_dir() -> Path:
-    override = os.environ.get("BEAR_TRACE_DIR", "").strip()
+    override = os.environ.get("MYCODE_TRACE_DIR", "").strip()
     if override:
         return Path(override)
-    return Path.home() / ".bear-code" / "trace"
+    return Path.home() / ".mycode" / "trace"
 
 
 def set_trace_session(session_id: str) -> None:
     global _session_id, _session_created_at
     _session_id = session_id
     _session_created_at = datetime.now().strftime("%Y%m%d_%H%M%S")
-    os.environ["BEAR_TRACE_SESSION"] = session_id
+    os.environ["MYCODE_TRACE_SESSION"] = session_id
 
 
 def get_trace_session() -> str | None:
     global _session_id
     if _session_id is None:
-        _session_id = os.environ.get("BEAR_TRACE_SESSION", "").strip() or None
+        _session_id = os.environ.get("MYCODE_TRACE_SESSION", "").strip() or None
     return _session_id
 
 
@@ -142,14 +125,11 @@ def set_trace_enabled(value: bool) -> None:
 
 
 def trace_event(kind: str, **fields: Any) -> None:
+    """记录 trace 事件（仅用于调试，不再写入 JSONL）。"""
     if not trace_enabled():
         return
-    event: dict[str, Any] = {
-        "ts": datetime.now().isoformat(timespec="milliseconds"),
-        "kind": kind,
-    }
-    event.update(fields)
-    _sink.emit(event)
+    # 不再写入 JSONL，只通过 OTel 导出
+    # 如果需要调试，可以启用 NoopSink 的日志输出
 
 
 def _preview(value: Any, limit: int = 300) -> str:
@@ -222,11 +202,11 @@ def trace_timeout(
 
 def otel_enabled() -> bool:
     """检查 OTel 是否启用。"""
-    return os.environ.get("BEAR_OTEL", "").strip() not in ("", "0")
+    return os.environ.get("MYCODE_OTEL", "").strip() not in ("", "0")
 
 
 class TraceSpan:
-    """Trace span 上下文管理器 — 同时写入 JSONL 和 OTel。
+    """Trace span 上下文管理器 — 只写入 OTel。
     
     业务代码只调用这个 API，不需要知道 OTel 的存在。
     """
@@ -240,13 +220,11 @@ class TraceSpan:
     
     def __enter__(self) -> "TraceSpan":
         self._start_time = time.time()
-        # 写入 JSONL start 事件
-        trace_event(f"{self._kind}.start", **self._attributes)
         # 创建 OTel span（如果启用）
         if otel_enabled():
             try:
-                from agents.observability.otel_exporter import otel_span
-                self._otel_cm = otel_span(self._kind, self._attributes)
+                from agents.observability.tracer import tracer
+                self._otel_cm = tracer.span(self._kind, self._attributes)
                 self._otel_span = self._otel_cm.__enter__()
             except Exception:
                 pass  # OTel 初始化失败不影响主流程
@@ -254,13 +232,6 @@ class TraceSpan:
     
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         duration_s = time.time() - self._start_time if self._start_time else 0
-        # 写入 JSONL end 事件（包含所有属性）
-        end_attrs = dict(self._attributes)
-        end_attrs["duration_s"] = round(duration_s, 2)
-        end_attrs["success"] = exc_type is None
-        if exc_type:
-            end_attrs["error"] = str(exc_val)[:300]
-        trace_event(f"{self._kind}.end", **end_attrs)
         # 结束 OTel span（如果启用）
         if self._otel_cm:
             try:
@@ -301,32 +272,21 @@ def trace_span(kind: str, **attributes: Any) -> TraceSpan:
     return TraceSpan(kind, **attributes)
 
 
-
 # ============================================================
-# 查询 API
+# 查询 API（从 Phoenix 读取）
 # ============================================================
 
 
 def recent_events(n: int = 20) -> list[dict]:
-    path = trace_path()
-    if not path.exists():
-        return []
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-    events = []
-    for line in lines[-n:]:
-        try:
-            events.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return events
+    """从 Phoenix 读取最近的 trace 事件。"""
+    # TODO: 实现从 Phoenix API 读取
+    return []
 
 
 def format_recent_events(n: int = 20) -> str:
+    """格式化最近的 trace 事件。"""
     events = recent_events(n)
-    header = f"Trace file: {trace_path()} ({'ON' if trace_enabled() else 'OFF'})"
+    header = f"Trace source: Phoenix ({'ON' if otel_enabled() else 'OFF'})"
     if not events:
         return header + "\n(no events yet)"
     lines = []

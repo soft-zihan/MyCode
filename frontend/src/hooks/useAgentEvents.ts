@@ -1,21 +1,18 @@
 import { useCallback, useRef, useState } from 'react';
 
-export interface AgentStats {
-  turns: number;
-  steps: number;
-  llm_ms: number;
-  tool_ms: number;
-  ttft_ms: number;
-  tokens_per_sec: number;
-  cache_hit_percent: number;
-  input_tokens: number;
-  output_tokens: number;
+export interface SessionEvent {
+  seq: number;
+  type: string;
+  time: number;
+  session_id: string;
+  [key: string]: unknown;
 }
 
-export interface ContextInfo {
-  used_tokens: number;
-  total_tokens: number;
-  occupancy_percent: number;
+export interface AgentStats {
+  input_tokens: number;
+  output_tokens: number;
+  context_window: number;
+  last_input_token_count?: number;
 }
 
 export interface ToolCallEvent {
@@ -26,6 +23,7 @@ export interface ToolCallEvent {
   result?: string;
   duration_ms?: number;
   snapshot?: { file_path: string; old_content: string; new_content: string };
+  sub_agent_id?: string;
 }
 
 export interface SubAgentEvent {
@@ -36,42 +34,50 @@ export interface SubAgentEvent {
   summary?: string;
   tokens?: number;
   duration_ms?: number;
-  // 子智能体的完整运行过程
   thinking?: string;
   text?: string;
   tool_calls: ToolCallEvent[];
 }
 
+export interface ContextInfo {
+  used_tokens: number;
+  total_tokens: number;
+  occupancy_percent: number;
+}
+
 export interface PermissionRequest {
+  rpc_id: string;
   request_id: string;
-  action: string;
-  resource: string;
+  command: string;
+  tool_name: string;
   message: string;
+  sub_agent_id?: string;
 }
 
 export interface AgentEventsState {
   stats: AgentStats | null;
-  context: ContextInfo | null;
   toolCalls: Map<string, ToolCallEvent>;
   subAgents: Map<string, SubAgentEvent>;
   permissionRequest: PermissionRequest | null;
   isStreaming: boolean;
+  lastSeq: number;
 }
 
 interface UseAgentEventsReturn {
   state: AgentEventsState;
+  handleSessionEvent: (event: SessionEvent) => void;
   handleSSEEvent: (event: MessageEvent) => void;
   resetState: () => void;
-  respondPermission: (requestId: string, allowed: boolean) => Promise<void>;
+  respondPermission: (rpcId: string, allowed: boolean) => Promise<void>;
 }
 
 const initialState: AgentEventsState = {
   stats: null,
-  context: null,
   toolCalls: new Map(),
   subAgents: new Map(),
   permissionRequest: null,
   isStreaming: false,
+  lastSeq: 0,
 };
 
 export function useAgentEvents(sessionId: string | null): UseAgentEventsReturn {
@@ -79,177 +85,110 @@ export function useAgentEvents(sessionId: string | null): UseAgentEventsReturn {
   const stateRef = useRef(state);
   stateRef.current = state;
 
-  const handleSSEEvent = useCallback((event: MessageEvent) => {
-    try {
-      const data = JSON.parse(event.data);
-      console.log('[useAgentEvents] SSE event:', data);
-      
-      setState(prev => {
-        const next = { ...prev };
-        let changed = false;
+  const handleSessionEvent = useCallback((event: SessionEvent) => {
+    setState(prev => {
+      const next = { ...prev };
+      let changed = false;
 
-        // Thinking event
-        if (data.thinking !== undefined) {
-          const { sub_agent_id, content } = data.thinking;
-          // 如果属于子智能体，更新子智能体的 thinking
-          if (sub_agent_id && prev.subAgents.has(sub_agent_id)) {
+      next.lastSeq = Math.max(prev.lastSeq, event.seq);
+      changed = true;
+
+      switch (event.type) {
+        case 'thinking': {
+          const content = event.content as string;
+          const subAgentId = event.sub_agent_id as string | undefined;
+          if (subAgentId && prev.subAgents.has(subAgentId)) {
             const newSubAgents = new Map(prev.subAgents);
-            const agent = newSubAgents.get(sub_agent_id)!;
-            newSubAgents.set(sub_agent_id, {
+            const agent = newSubAgents.get(subAgentId)!;
+            newSubAgents.set(subAgentId, {
               ...agent,
               thinking: (agent.thinking || '') + content,
             });
             next.subAgents = newSubAgents;
-            changed = true;
           }
-          // 主智能体的 thinking 由 message content parser 处理
-          return changed ? next : prev;
+          break;
         }
 
-        // Text chunk (from sub-agent)
-        if (data.text !== undefined) {
-          const { sub_agent_id, content } = data.text;
-          // 如果属于子智能体，更新子智能体的 text
-          if (sub_agent_id && prev.subAgents.has(sub_agent_id)) {
+        case 'text': {
+          const content = event.content as string;
+          const subAgentId = event.sub_agent_id as string | undefined;
+          if (subAgentId && prev.subAgents.has(subAgentId)) {
             const newSubAgents = new Map(prev.subAgents);
-            const agent = newSubAgents.get(sub_agent_id)!;
-            newSubAgents.set(sub_agent_id, {
+            const agent = newSubAgents.get(subAgentId)!;
+            newSubAgents.set(subAgentId, {
               ...agent,
               text: (agent.text || '') + content,
             });
             next.subAgents = newSubAgents;
-            changed = true;
           }
-          // 主智能体的 text 由 message content parser 处理
-          return changed ? next : prev;
+          break;
         }
 
-        // Tool call start
-        if (data.tool_call) {
-          const { name, input, call_id, sub_agent_id } = data.tool_call;
-          const id = call_id || `tc_${Date.now()}`;
+        case 'tool_call': {
+          const callId = event.call_id as string;
+          const name = event.name as string;
+          const input = event.input as Record<string, unknown>;
+          const subAgentId = event.sub_agent_id as string | undefined;
+          
           const toolCall: ToolCallEvent = {
-            call_id: id,
+            call_id: callId,
             name,
             input,
             status: 'pending',
+            sub_agent_id: subAgentId,
           };
-          
-          // 如果属于子智能体，存储到子智能体的 tool_calls 中
-          if (sub_agent_id && prev.subAgents.has(sub_agent_id)) {
+
+          if (subAgentId && prev.subAgents.has(subAgentId)) {
             const newSubAgents = new Map(prev.subAgents);
-            const agent = newSubAgents.get(sub_agent_id)!;
-            newSubAgents.set(sub_agent_id, {
+            const agent = newSubAgents.get(subAgentId)!;
+            newSubAgents.set(subAgentId, {
               ...agent,
               tool_calls: [...agent.tool_calls, toolCall],
             });
             next.subAgents = newSubAgents;
           } else {
-            // 否则存储到主工具调用映射中
             const newToolCalls = new Map(prev.toolCalls);
-            newToolCalls.set(id, toolCall);
+            newToolCalls.set(callId, toolCall);
             next.toolCalls = newToolCalls;
           }
-          changed = true;
+          break;
         }
 
-        // Tool result
-        if (data.tool_result) {
-          const { name, result, status, call_id, snapshot, duration_ms, sub_agent_id } = data.tool_result;
-          
-          // 如果属于子智能体，更新子智能体的 tool_calls
-          if (sub_agent_id && prev.subAgents.has(sub_agent_id)) {
+        case 'tool_result': {
+          const callId = event.call_id as string;
+          const result = event.result as string;
+          const status = (event.status as string) || 'success';
+          const subAgentId = event.sub_agent_id as string | undefined;
+
+          if (subAgentId && prev.subAgents.has(subAgentId)) {
             const newSubAgents = new Map(prev.subAgents);
-            const agent = newSubAgents.get(sub_agent_id)!;
+            const agent = newSubAgents.get(subAgentId)!;
             const toolCalls = [...agent.tool_calls];
-            
-            // Find by call_id or by name (fallback)
-            let targetId = call_id;
-            if (!targetId) {
-              for (const tc of toolCalls) {
-                if (tc.name === name && tc.status === 'pending') {
-                  targetId = tc.call_id;
-                  break;
-                }
-              }
-            }
-            
-            const idx = toolCalls.findIndex(tc => tc.call_id === targetId);
+            const idx = toolCalls.findIndex(tc => tc.call_id === callId);
             if (idx !== -1) {
-              toolCalls[idx] = {
-                ...toolCalls[idx],
-                result,
-                status: status || 'success',
-                snapshot,
-                duration_ms,
-              };
-            } else {
-              // Create new entry if not found
-              const newId = call_id || `tc_${Date.now()}`;
-              toolCalls.push({
-                call_id: newId,
-                name,
-                input: {},
-                status: status || 'success',
-                result,
-                snapshot,
-                duration_ms,
-              });
+              toolCalls[idx] = { ...toolCalls[idx], result, status: status as ToolCallEvent['status'] };
             }
-            
-            newSubAgents.set(sub_agent_id, {
-              ...agent,
-              tool_calls: toolCalls,
-            });
+            newSubAgents.set(subAgentId, { ...agent, tool_calls: toolCalls });
             next.subAgents = newSubAgents;
           } else {
-            // 否则更新主工具调用映射
             const newToolCalls = new Map(prev.toolCalls);
-            // Find by call_id or by name (fallback)
-            let targetId = call_id;
-            if (!targetId) {
-              for (const [id, tc] of newToolCalls) {
-                if (tc.name === name && tc.status === 'pending') {
-                  targetId = id;
-                  break;
-                }
-              }
-            }
-            if (targetId && newToolCalls.has(targetId)) {
-              const existing = newToolCalls.get(targetId)!;
-              newToolCalls.set(targetId, {
-                ...existing,
-                result,
-                status: status || 'success',
-                snapshot,
-                duration_ms,
-              });
-            } else {
-              // Create new entry if not found
-              const newId = call_id || `tc_${Date.now()}`;
-              newToolCalls.set(newId, {
-                call_id: newId,
-                name,
-                input: {},
-                status: status || 'success',
-                result,
-                snapshot,
-                duration_ms,
-              });
+            if (newToolCalls.has(callId)) {
+              const existing = newToolCalls.get(callId)!;
+              newToolCalls.set(callId, { ...existing, result, status: status as ToolCallEvent['status'] });
             }
             next.toolCalls = newToolCalls;
           }
-          changed = true;
+          break;
         }
 
-        // Sub-agent start
-        if (data.sub_agent_start) {
-          const { agent_type, description, agent_id } = data.sub_agent_start;
+        case 'sub_agent/start': {
+          const agentId = event.agent_id as string;
+          const agentType = event.agent_type as string;
+          const description = event.description as string;
           const newSubAgents = new Map(prev.subAgents);
-          const id = agent_id || `sa_${Date.now()}`;
-          newSubAgents.set(id, {
-            agent_id: id,
-            agent_type,
+          newSubAgents.set(agentId, {
+            agent_id: agentId,
+            agent_type: agentType,
             description,
             status: 'running',
             thinking: '',
@@ -257,114 +196,74 @@ export function useAgentEvents(sessionId: string | null): UseAgentEventsReturn {
             tool_calls: [],
           });
           next.subAgents = newSubAgents;
-          changed = true;
+          break;
         }
 
-        // Sub-agent end
-        if (data.sub_agent_end) {
-          const { agent_type, description, agent_id, summary, tokens, duration_ms } = data.sub_agent_end;
+        case 'sub_agent/end': {
+          const agentId = event.agent_id as string;
+          const status = (event.status as string) || 'completed';
+          const summary = event.summary as string | undefined;
+          const durationMs = event.duration_ms as number | undefined;
+          
           const newSubAgents = new Map(prev.subAgents);
-          // Find by agent_id or agent_type
-          let targetId = agent_id;
-          if (!targetId) {
-            for (const [id, sa] of newSubAgents) {
-              if (sa.agent_type === agent_type && sa.status === 'running') {
-                targetId = id;
-                break;
-              }
-            }
-          }
-          if (targetId && newSubAgents.has(targetId)) {
-            const existing = newSubAgents.get(targetId)!;
-            newSubAgents.set(targetId, {
+          if (newSubAgents.has(agentId)) {
+            const existing = newSubAgents.get(agentId)!;
+            newSubAgents.set(agentId, {
               ...existing,
-              status: 'completed',
+              status: status as SubAgentEvent['status'],
               summary,
-              tokens,
-              duration_ms,
-            });
-          } else {
-            const newId = agent_id || `sa_${Date.now()}`;
-            newSubAgents.set(newId, {
-              agent_id: newId,
-              agent_type,
-              description: description || '',
-              status: 'completed',
-              summary,
-              tokens,
-              duration_ms,
-              thinking: '',
-              text: '',
-              tool_calls: [],
+              duration_ms: durationMs,
             });
           }
           next.subAgents = newSubAgents;
-          changed = true;
+          break;
         }
 
-        // Stats update
-        if (data.stats && typeof data.stats === 'object') {
-          console.log('[useAgentEvents] Stats update:', data.stats);
+        case 'stats': {
           next.stats = {
-            turns: data.stats.turns ?? 0,
-            steps: data.stats.steps ?? 0,
-            llm_ms: data.stats.llm_ms ?? 0,
-            tool_ms: data.stats.tool_ms ?? 0,
-            ttft_ms: data.stats.ttft_ms ?? 0,
-            tokens_per_sec: data.stats.tokens_per_sec ?? 0,
-            cache_hit_percent: data.stats.cache_hit_percent ?? 0,
-            input_tokens: data.stats.input_tokens ?? 0,
-            output_tokens: data.stats.output_tokens ?? 0,
+            input_tokens: event.input_tokens as number,
+            output_tokens: event.output_tokens as number,
+            context_window: event.context_window as number,
+            last_input_token_count: event.last_input_token_count as number | undefined,
           };
-          changed = true;
+          break;
         }
 
-        // Context update
-        if (data.context && typeof data.context === 'object') {
-          next.context = {
-            used_tokens: data.context.used_tokens ?? 0,
-            total_tokens: data.context.total_tokens ?? 0,
-            occupancy_percent: data.context.occupancy_percent ?? 0,
+        case 'permission/request': {
+          next.permissionRequest = {
+            rpc_id: event.rpc_id as string,
+            request_id: event.request_id as string,
+            command: event.command as string,
+            tool_name: event.tool_name as string,
+            message: event.message as string,
+            sub_agent_id: event.sub_agent_id as string | undefined,
           };
-          changed = true;
+          break;
         }
 
-        // Permission request
-        if (data.permission_request) {
-          next.permissionRequest = data.permission_request;
-          changed = true;
+        case 'turn/start': {
+          next.isStreaming = true;
+          break;
         }
 
-        // Steering injected
-        if (data.steering_injected) {
-          // Could show a notification
-          return prev;
-        }
-
-        // Info message
-        if (data.info) {
-          // Could show a notification
-          return prev;
-        }
-
-        // Done
-        if (data.done) {
+        case 'turn/end': {
           next.isStreaming = false;
-          changed = true;
+          break;
         }
+      }
 
-        // Error
-        if (data.error) {
-          next.isStreaming = false;
-          changed = true;
-        }
+      return changed ? next : prev;
+    });
+  }, []);
 
-        return changed ? next : prev;
-      });
+  const handleSSEEvent = useCallback((event: MessageEvent) => {
+    try {
+      const data = JSON.parse(event.data);
+      handleSessionEvent(data);
     } catch (e) {
       console.error('Failed to parse SSE event:', e);
     }
-  }, []);
+  }, [handleSessionEvent]);
 
   const resetState = useCallback(() => {
     setState({
@@ -374,12 +273,12 @@ export function useAgentEvents(sessionId: string | null): UseAgentEventsReturn {
     });
   }, []);
 
-  const respondPermission = useCallback(async (requestId: string, allowed: boolean) => {
+  const respondPermission = useCallback(async (rpcId: string, allowed: boolean) => {
     try {
-      await fetch('/api/permission/respond', {
+      await fetch('/api/events/respond', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ request_id: requestId, allowed, session_id: sessionId }),
+        body: JSON.stringify({ rpc_id: rpcId, allowed, session_id: sessionId }),
       });
       setState(prev => ({ ...prev, permissionRequest: null }));
     } catch (e) {
@@ -389,6 +288,7 @@ export function useAgentEvents(sessionId: string | null): UseAgentEventsReturn {
 
   return {
     state,
+    handleSessionEvent,
     handleSSEEvent,
     resetState,
     respondPermission,

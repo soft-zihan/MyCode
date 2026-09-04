@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
-import { ChevronRight, Folder, Clock, Plus, Pencil, Trash2, X } from 'lucide-react';
+import { ChevronRight, Folder, Clock, Plus, Pencil, Trash2, X, ChevronDown } from 'lucide-react';
 import {
   fetchSessions, deleteSession, Session,
   fetchDirectories, DirectoryList,
   updateSessionName,
+  fetchProjects, deleteProject, registerProject, Project,
 } from '../../../api/client';
 
 function formatRelativeTime(timeStr: string): string {
@@ -130,47 +131,68 @@ interface SessionsPanelProps {
   refreshTrigger?: number;
 }
 
-// In-memory cache for sessions (sessionStorage has ~5MB quota)
+// In-memory cache for sessions and projects
 let sessionsCache: Session[] | null = null;
+let projectsCache: Project[] | null = null;
 
 export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId, visible, refreshTrigger }: SessionsPanelProps) {
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [showDirPicker, setShowDirPicker] = useState(false);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState<string>('');
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set());
 
-  const loadSessions = async (forceRefresh = false) => {
-    if (!forceRefresh && sessionsCache) {
+  const toggleProjectCollapse = (cwd: string) => {
+    setCollapsedProjects(prev => {
+      const next = new Set(prev);
+      if (next.has(cwd)) {
+        next.delete(cwd);
+      } else {
+        next.add(cwd);
+      }
+      return next;
+    });
+  };
+
+  const loadData = async (forceRefresh = false) => {
+    if (!forceRefresh && sessionsCache && projectsCache) {
       setSessions(sessionsCache);
+      setProjects(projectsCache);
       setLoading(false);
       return;
     }
 
     try {
-      const data = await fetchSessions();
-      setSessions(data);
-      sessionsCache = data;
+      const [sessionsData, projectsData] = await Promise.all([
+        fetchSessions(),
+        fetchProjects(),
+      ]);
+      setSessions(sessionsData);
+      setProjects(projectsData);
+      sessionsCache = sessionsData;
+      projectsCache = projectsData;
     } catch (err) {
-      console.error('Failed to load sessions:', err);
+      console.error('Failed to load data:', err);
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    loadSessions();
+    loadData();
   }, []);
 
   useEffect(() => {
     if (visible) {
-      loadSessions(true);
+      loadData(true);
     }
   }, [visible]);
 
   useEffect(() => {
     if (refreshTrigger && refreshTrigger > 0) {
-      loadSessions(true);
+      loadData(true);
     }
   }, [refreshTrigger]);
 
@@ -182,6 +204,11 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
       const updated = sessions.filter(s => s.id !== id);
       setSessions(updated);
       sessionsCache = updated;
+      
+      // 如果删除的是当前显示的 session，切换到新对话
+      if (currentSessionId === id) {
+        onNewSession();
+      }
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to delete');
     }
@@ -215,17 +242,29 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
     setEditingSessionId(null);
   };
 
-  const handleDirSelect = (path: string) => {
+  const handleDirSelect = async (path: string) => {
+    // 立刻注册 project
+    try {
+      await registerProject(path);
+    } catch (err) {
+      console.error('Failed to register project:', err);
+    }
     onNewSession(path);
     setShowDirPicker(false);
+    // 刷新 project 列表
+    loadData(true);
   };
 
-  const grouped = sessions.reduce((acc, session) => {
+  // 按 project 分组：先初始化所有 project 为空数组，再填充 session
+  const grouped: Record<string, Session[]> = {};
+  for (const project of projects) {
+    grouped[project.cwd] = [];
+  }
+  for (const session of sessions) {
     const cwd = session.cwd || 'Unknown';
-    if (!acc[cwd]) acc[cwd] = [];
-    acc[cwd].push(session);
-    return acc;
-  }, {} as Record<string, Session[]>);
+    if (!grouped[cwd]) grouped[cwd] = [];
+    grouped[cwd].push(session);
+  }
 
   if (loading) return <div className="p-4 text-sm text-gray-500">Loading...</div>;
 
@@ -237,7 +276,7 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
           className="w-full flex items-center justify-center px-3 py-2 text-xs font-medium text-green-600 bg-green-50 rounded hover:bg-green-100 transition-colors"
         >
           <Plus className="w-3 h-3 mr-1" />
-          New Project Session
+          New Project
         </button>
       </div>
       {showDirPicker && (
@@ -246,16 +285,31 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
           onCancel={() => setShowDirPicker(false)}
         />
       )}
-      {Object.keys(grouped).length === 0 ? (
-        <div className="p-4 text-sm text-gray-500 text-center">No sessions yet.<br/>Click above to create a new session!</div>
+      {projects.length === 0 ? (
+        <div className="p-4 text-sm text-gray-500 text-center">No projects yet.<br/>Click above to create a new session!</div>
       ) : (
-        Object.entries(grouped).map(([cwd, projectSessions]) => (
+        Object.entries(grouped).map(([cwd, projectSessions]) => {
+          const isCollapsed = collapsedProjects.has(cwd);
+          return (
           <div key={cwd} className="border-b border-gray-100">
-            <div className="px-3 py-2 bg-gray-50 flex items-center justify-between">
-              <div className="text-xs font-medium text-gray-600 truncate flex-1" title={cwd}>
-                📁 {cwd.split('/').pop() || cwd}
+            <div 
+              className="px-3 py-2 bg-gray-50 flex items-center justify-between cursor-pointer hover:bg-gray-100"
+              onClick={() => toggleProjectCollapse(cwd)}
+            >
+              <div className="flex items-center flex-1 min-w-0">
+                {isCollapsed ? (
+                  <ChevronRight className="w-3 h-3 mr-1 text-gray-400 flex-shrink-0" />
+                ) : (
+                  <ChevronDown className="w-3 h-3 mr-1 text-gray-400 flex-shrink-0" />
+                )}
+                <div className="text-xs font-medium text-gray-600 truncate" title={cwd}>
+                  📁 {cwd.split('/').pop() || cwd}
+                  {projectSessions.length > 0 && (
+                    <span className="ml-1 text-gray-400">({projectSessions.length})</span>
+                  )}
+                </div>
               </div>
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
                 <button
                   onClick={() => onNewSession(cwd)}
                   className="p-1 hover:bg-gray-200 rounded text-gray-500 transition-colors"
@@ -266,24 +320,34 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
                 <button
                   onClick={async (e) => {
                     e.stopPropagation();
-                    if (!confirm(`Delete all ${projectSessions.length} session(s) in this project?`)) return;
+                    const msg = projectSessions.length > 0
+                      ? `Delete project and all ${projectSessions.length} session(s)?`
+                      : `Delete this project?`;
+                    if (!confirm(msg)) return;
                     try {
+                      // 删除所有 session
                       await Promise.all(projectSessions.map(s => deleteSession(s.id)));
-                      const updated = sessions.filter(s => s.cwd !== cwd);
-                      setSessions(updated);
-                      sessionsCache = updated;
+                      // 删除 project
+                      await deleteProject(cwd);
+                      // 刷新数据
+                      loadData(true);
+                      
+                      // 如果删除的 session 中包含当前显示的 session，切换到新对话
+                      if (currentSessionId && projectSessions.some(s => s.id === currentSessionId)) {
+                        onNewSession();
+                      }
                     } catch (err) {
                       alert(err instanceof Error ? err.message : 'Failed to delete');
                     }
                   }}
                   className="p-1 hover:bg-red-100 rounded text-red-400 transition-colors"
-                  title="Delete all sessions in this project"
+                  title="Delete project and all sessions"
                 >
                   <Trash2 className="w-3 h-3" />
                 </button>
               </div>
             </div>
-            {projectSessions.map(session => (
+            {!isCollapsed && projectSessions.map(session => (
               <div
                 key={session.id}
                 onClick={() => onSessionSelect(session.id)}
@@ -337,7 +401,8 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
               </div>
             ))}
           </div>
-        ))
+          );
+        })
       )}
     </div>
   );

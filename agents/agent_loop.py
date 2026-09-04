@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agents.tools.registry import CONCURRENCY_SAFE_TOOLS, get_active_tool_definitions
@@ -77,38 +79,119 @@ class AgentLoop:
             self._agent.run_compression_pipeline()
             await self._consume_memory_prefetch()
 
-            if not self._agent.is_sub_agent:
-                from agents.tui.spinner import start_spinner, stop_spinner
-                start_spinner()
+            self._agent.session.append("step/start", {
+                "turn": self._agent._current_turn,
+                "step": self._agent._current_step + 1,
+            })
+            self._agent._current_step += 1
+
+            # 步骤开始前拍快照
+            start_snapshot = self._capture_file_states()
+            self._agent.session.append("snapshot/start", {
+                "turn": self._agent._current_turn,
+                "step": self._agent._current_step,
+                "phase": "start",
+                "files": start_snapshot,
+            })
 
             response = await self.call_model_stream()
-
-            if not self._agent.is_sub_agent:
-                from agents.tui.spinner import stop_spinner
-                stop_spinner()
 
             self._update_token_stats(response)
 
             choice = response.get("choices", [{}])[0] if response.get("choices") else {}
             message = choice.get("message", {})
-            self._agent.append_message(message)
-
+            
+            thinking_content = message.get("thinking")
+            content = message.get("content") or ""
             tool_calls = message.get("tool_calls")
+            
+            # 总是写入 assistant_message（包含 turn 和 step 信息）
+            # 即使有 tool_calls 也要写入，否则工具调用信息会丢失
+            self._agent.session.append("assistant_message", {
+                "turn": self._agent._current_turn,
+                "step": self._agent._current_step,
+                "thinking": thinking_content,
+                "content": content,
+                "tool_calls": tool_calls,
+            })
+            
+            self._agent.session.append("step/end", {
+                "turn": self._agent._current_turn,
+                "step": self._agent._current_step,
+            })
+
             if not tool_calls:
+                # 步骤完成后拍快照
+                end_snapshot = self._capture_file_states()
+                self._agent.session.append("snapshot/end", {
+                    "turn": self._agent._current_turn,
+                    "step": self._agent._current_step,
+                    "phase": "end",
+                    "files": end_snapshot,
+                })
                 await self._finalize_text_response()
                 break
 
             self._agent.increment_turns()
             budget = self._agent.check_budget()
             if budget["exceeded"]:
-                from agents.tui.output import print_info
+                from agents.logging import print_info
                 print_info(f"Budget exceeded: {budget['reason']}")
+                # 异常时也拍快照
+                error_snapshot = self._capture_file_states()
+                self._agent.session.append("snapshot/end", {
+                    "turn": self._agent._current_turn,
+                    "step": self._agent._current_step,
+                    "phase": "error",
+                    "files": error_snapshot,
+                    "error": "budget_exceeded",
+                })
                 break
 
             await self._handle_tool_calls(tool_calls)
+            
+            # 工具执行后拍快照
+            tool_snapshot = self._capture_file_states()
+            self._agent.session.append("snapshot/end", {
+                "turn": self._agent._current_turn,
+                "step": self._agent._current_step,
+                "phase": "after_tools",
+                "files": tool_snapshot,
+            })
+            
             self._agent.clear_context_flag()
             self._agent.refresh_runtime_system_prompt()
             await self._agent.check_and_compact()
+
+    def _capture_file_states(self) -> list[dict]:
+        """捕获当前文件状态（路径 + hash）。
+        
+        只扫描工作目录下的文件，返回文件路径和哈希值的列表。
+        """
+        files = []
+        try:
+            cwd = Path.cwd()
+            # 扫描工作目录下的文件（排除隐藏目录和常见忽略目录）
+            ignore_dirs = {".git", ".venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache"}
+            
+            for file_path in cwd.rglob("*"):
+                if not file_path.is_file():
+                    continue
+                # 跳过隐藏目录和忽略目录
+                if any(part.startswith(".") or part in ignore_dirs for part in file_path.parts):
+                    continue
+                try:
+                    content = file_path.read_bytes()
+                    files.append({
+                        "path": str(file_path.relative_to(cwd)),
+                        "hash": hashlib.md5(content).hexdigest()[:8],
+                        "size": len(content),
+                    })
+                except (OSError, PermissionError):
+                    pass
+        except Exception:
+            pass
+        return files
 
     async def _prepare_turn(self, user_message: str) -> None:
         """准备轮次：清理消息、重置状态。"""
@@ -153,31 +236,23 @@ class AgentLoop:
             a.add_output_tokens(response["usage"]["completion_tokens"])
             a.set_last_input_tokens(response["usage"]["prompt_tokens"])
             
-            if a.stream_event_queue is not None and not a.is_sub_agent:
-                stats_event = {
-                    "type": "stats",
+            if not a.is_sub_agent:
+                # 流式事件只发送 SSE，不持久化到事件日志
+                a.session.append("stats", {
                     "input_tokens": a.total_input_tokens,
                     "output_tokens": a.total_output_tokens,
                     "context_window": a.context_window,
                     "last_input_token_count": a.last_input_token_count,
-                }
-                a.publish_stream_event(stats_event)
+                })
 
     async def _finalize_text_response(self) -> None:
         """完成文本响应：刷新 markdown、打印成本。"""
-        a = self._agent
-        if not a.is_sub_agent:
-            from agents.tui.markdown import md_track_flush
-            from agents.tui.output import print_cost
-            md_track_flush()
-            print_cost(a.total_input_tokens, a.total_output_tokens)
+        pass
 
     async def _handle_tool_calls(self, tool_calls: list[dict]) -> None:
         """处理工具调用：权限检查、执行、结果收集。"""
         from agents.tools.permissions import check_permission
-        from agents.tui.tool_render import print_tool_call, print_tool_result
         from agents.observability.trace import trace_event
-        from agents.tui.output import print_info
 
         a = self._agent
         oai_checked: list[dict] = []
@@ -196,13 +271,11 @@ class AgentLoop:
             except Exception:
                 inp = {}
 
-            print_tool_call(fn_name, inp)
             a.publish_tool_call_event(tc["id"], fn_name, inp)
 
             perm = check_permission(fn_name, inp, a.permission_mode, a.plan_file_path)
 
             if perm["action"] == "deny":
-                print_info(f"Denied: {perm.get('message', '')}")
                 a.record_tool_outcome(fn_name, False)
                 deny_result = f"Action denied: {perm.get('message', '')}"
                 oai_checked.append({"tc": tc, "fn": fn_name, "inp": inp, "allowed": False, "result": deny_result})
@@ -227,7 +300,6 @@ class AgentLoop:
 
     async def _execute_tool_batches(self, oai_checked: list[dict]) -> None:
         """执行工具批次：并发安全工具并行执行，其他顺序执行。"""
-        from agents.tui.tool_render import print_tool_result
         from agents.observability.trace import trace_event
 
         a = self._agent
@@ -253,7 +325,6 @@ class AgentLoop:
 
     async def _execute_concurrent_batch(self, items: list[dict]) -> None:
         """并发执行工具批次。"""
-        from agents.tui.tool_render import print_tool_result
         from agents.observability.trace import trace_event
 
         a = self._agent
@@ -262,7 +333,6 @@ class AgentLoop:
             raw = await a.execute_tool_call(ct_item["fn"], ct_item["inp"])
             raw = _safe_utf8_text(raw)
             res = a.persist_large_result(ct_item["fn"], raw)
-            print_tool_result(ct_item["fn"], res)
             a.publish_tool_result_event(ct_item["tc"]["id"], ct_item["fn"], res, "ok")
             return ct_item, res
 
@@ -276,7 +346,6 @@ class AgentLoop:
 
     async def _execute_sequential_batch(self, items: list[dict]) -> bool:
         """顺序执行工具批次。返回是否触发上下文清理。"""
-        from agents.tui.tool_render import print_tool_result
         from agents.observability.trace import trace_event
 
         a = self._agent
@@ -290,7 +359,6 @@ class AgentLoop:
             raw = await a.execute_tool_call(ct["fn"], ct["inp"])
             raw = _safe_utf8_text(raw)
             res = a.persist_large_result(ct["fn"], raw)
-            print_tool_result(ct["fn"], res)
             a.publish_tool_result_event(ct["tc"]["id"], ct["fn"], res, "ok")
             a.record_tool_outcome(ct["fn"], not a.looks_like_tool_failure(ct["fn"], raw, res))
 
@@ -311,9 +379,6 @@ class AgentLoop:
     async def call_model_stream(self) -> dict:
         """流式模型调用。"""
         from agents.observability.trace import trace_event, trace_span
-        from agents.tui.markdown import md_track_begin
-        from agents.tui.thinking import reset_thinking_window, print_thinking_text, thinking_visible
-        from agents.tui.spinner import stop_spinner
         from agents.agent import _with_retry
 
         a = self._agent
@@ -331,11 +396,8 @@ class AgentLoop:
                 )
 
                 content = ""
-                first_text = True
-                first_thinking = True
                 if not a.is_sub_agent:
-                    reset_thinking_window()
-                    md_track_begin()
+                    pass
                 tool_calls: dict[int, dict] = {}
                 finish_reason = ""
                 usage = None
@@ -358,22 +420,13 @@ class AgentLoop:
                     reasoning = getattr(delta, "reasoning_content", None)
                     if reasoning:
                         a.append_thinking_text(reasoning)
-                        if a.stream_event_queue is not None:
-                            event = {"type": "thinking", "content": reasoning}
-                            if a.current_sub_agent_id:
-                                event["sub_agent_id"] = a.current_sub_agent_id
-                            a.publish_stream_event(event)
-                        if thinking_visible():
-                            if first_thinking:
-                                stop_spinner()
-                                first_thinking = False
-                            print_thinking_text(reasoning)
+                        # 流式事件只发送 SSE，不持久化到事件日志
+                        event_data = {"content": reasoning, "turn": a._current_turn, "step": a._current_step}
+                        if a.current_sub_agent_id:
+                            event_data["sub_agent_id"] = a.current_sub_agent_id
+                        a.session.append("thinking", event_data)
 
                     if delta and delta.content:
-                        if first_text:
-                            stop_spinner()
-                            a.emit_text("\n")
-                            first_text = False
                         a.emit_text(delta.content)
                         content += _safe_utf8_text(delta.content)
 
@@ -416,7 +469,7 @@ class AgentLoop:
                 }
 
             try:
-                model_timeout = int(os.environ.get("BEAR_MODEL_TIMEOUT", "120"))
+                model_timeout = int(os.environ.get("MYCODE_MODEL_TIMEOUT", "120"))
                 result = await asyncio.wait_for(_with_retry(_do), timeout=model_timeout)
                 usage = result.get("usage", {}) if isinstance(result, dict) else {}
                 input_tokens = usage.get("prompt_tokens", 0)

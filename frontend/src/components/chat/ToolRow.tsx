@@ -102,7 +102,9 @@ const getToolSummary = (name: string, input: Record<string, unknown>): string =>
     return (input.url as string) || '';
   }
   if (name === 'list_files') {
-    return (input.path as string) || '';
+    const pattern = (input.pattern as string) || '';
+    const path = (input.path as string) || '.';
+    return pattern ? `${pattern}${path !== '.' ? ` in ${path}` : ''}` : path;
   }
   if (name === 'agent') {
     return (input.description as string) || (input.type as string) || '';
@@ -115,6 +117,38 @@ const formatDuration = (ms?: number): string => {
   if (ms === undefined) return '';
   if (ms < 1000) return `${Math.round(ms)}ms`;
   return `${(ms / 1000).toFixed(1)}s`;
+};
+
+// Diff 视图组件，用于显示 edit_file 的结果
+const DiffView: React.FC<{ content: string }> = ({ content }) => {
+  const lines = content.split('\n');
+  
+  return (
+    <div className="text-xs bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded p-2 overflow-x-auto max-h-48 overflow-y-auto font-mono">
+      {lines.map((line, i) => {
+        let className = 'text-gray-700 dark:text-gray-300';
+        let bgColor = '';
+        
+        if (line.startsWith('@@')) {
+          className = 'text-blue-600 dark:text-blue-400 font-medium';
+        } else if (line.startsWith('- ')) {
+          className = 'text-red-700 dark:text-red-400';
+          bgColor = 'bg-red-50 dark:bg-red-900/20';
+        } else if (line.startsWith('+ ')) {
+          className = 'text-green-700 dark:text-green-400';
+          bgColor = 'bg-green-50 dark:bg-green-900/20';
+        } else if (line.startsWith('Successfully')) {
+          className = 'text-gray-500 dark:text-gray-400 italic';
+        }
+        
+        return (
+          <div key={i} className={`${className} ${bgColor} px-1`}>
+            {line || '\u00A0'}
+          </div>
+        );
+      })}
+    </div>
+  );
 };
 
 export const ToolRow: React.FC<ToolRowProps> = ({ call }) => {
@@ -172,9 +206,12 @@ export const ToolRow: React.FC<ToolRowProps> = ({ call }) => {
         )}
         
         {/* Summary - truncated */}
-        <span className={`text-sm truncate min-w-0 ${
-          isError ? 'text-red-600 dark:text-red-400' : 'text-gray-500 dark:text-gray-400'
-        }`}>
+        <span 
+          className={`text-sm truncate min-w-0 ${
+            isError ? 'text-red-600 dark:text-red-400' : 'text-gray-500 dark:text-gray-400'
+          }`}
+          title={displaySummary}
+        >
           {displaySummary}
         </span>
         
@@ -200,16 +237,21 @@ export const ToolRow: React.FC<ToolRowProps> = ({ call }) => {
         <div className="border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/50">
           {/* Input/Output card style */}
           <div className="p-2.5 space-y-2">
-            {/* Input section */}
+            {/* Output section */}
             {call.result && (
               <div className="space-y-1">
                 <span className="text-[10px] font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider">
                   Output
                 </span>
-                <pre className="text-xs bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded p-2 overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap text-gray-700 dark:text-gray-300 font-mono">
-                  {call.result.slice(0, 3000)}
-                  {call.result.length > 3000 && '\n\n... (truncated)'}
-                </pre>
+                {/* 对于 edit_file，显示 diff 格式 */}
+                {call.name === 'edit_file' ? (
+                  <DiffView content={call.result.slice(0, 3000)} />
+                ) : (
+                  <pre className="text-xs bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded p-2 overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap text-gray-700 dark:text-gray-300 font-mono">
+                    {call.result.slice(0, 3000)}
+                    {call.result.length > 3000 && '\n\n... (truncated)'}
+                  </pre>
+                )}
               </div>
             )}
             

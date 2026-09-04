@@ -3,7 +3,7 @@ import {
   fetchAgents, fetchAgent, fetchConfig, saveConfig, 
   Agent, AgentDetail, AppConfig, ModelEndpointConfig 
 } from '../api/client';
-import { Bot, Server, RefreshCw, Wrench, Save, Plus, Trash2, ChevronDown, ChevronRight, Globe, Cpu, Search, CheckCircle, XCircle, Loader, Edit2, X, Settings } from 'lucide-react';
+import { Bot, Server, RefreshCw, Wrench, Save, Plus, Trash2, ChevronDown, ChevronRight, Globe, Cpu, Search, CheckCircle, XCircle, Loader, Edit2, X } from 'lucide-react';
 
 interface ApiProvider {
   id: string;
@@ -205,7 +205,7 @@ export default function AgentsPage() {
     if (!selectedAgent) return;
     const currentTools = selectedAgent.custom_config?.allowed_tools || [];
     const newTools = currentTools.includes(toolName)
-      ? currentTools.filter(t => t !== toolName)
+      ? currentTools.filter((t: string) => t !== toolName)
       : [...currentTools, toolName];
     
     // Update local state immediately

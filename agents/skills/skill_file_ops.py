@@ -21,7 +21,7 @@ HISTORY_DIR = "history"
 
 
 def get_evolution_dir() -> Path:
-    return Path.cwd() / ".bear" / "skill-evolution"
+    return Path.cwd() / ".mycode" / "skill-evolution"
 
 
 def _today() -> str:
@@ -204,12 +204,12 @@ def resolve_skill_file(skill_name: str, *, target: str = "active", active_dir: s
             return skill_file
 
     if target in ("project", "active"):
-        found = _find_skill_file_by_name(Path.cwd() / ".bear" / "skills", skill_name)
+        found = _find_skill_file_by_name(Path.cwd() / ".mycode" / "skills", skill_name)
         if found:
             return found
 
     if target in ("user", "active"):
-        found = _find_skill_file_by_name(Path.home() / ".bear" / "skills", skill_name)
+        found = _find_skill_file_by_name(Path.home() / ".mycode" / "skills", skill_name)
         if found:
             return found
 
@@ -219,8 +219,8 @@ def resolve_skill_file(skill_name: str, *, target: str = "active", active_dir: s
 def _skills_root(target: str) -> Path:
     target = (target or "project").strip().lower()
     if target == "user":
-        return Path.home() / ".bear" / "skills"
-    return Path.cwd() / ".bear" / "skills"
+        return Path.home() / ".mycode" / "skills"
+    return Path.cwd() / ".mycode" / "skills"
 
 
 def _normalize_context(context: str | None) -> str:
@@ -455,10 +455,10 @@ def record_skill_usage_judgments(judgments: list[dict[str, Any]]) -> dict[str, A
 
 
 def _maybe_prune_stale_skill(skill_name: str, stats: dict[str, Any]) -> bool:
-    min_retrieved = _parse_int(os.environ.get("BEAR_SKILL_USAGE_PRUNE_MIN_RETRIEVED"), 40)
-    max_used = _parse_int(os.environ.get("BEAR_SKILL_USAGE_PRUNE_MAX_USED"), 0)
+    min_retrieved = _parse_int(os.environ.get("MYCODE_SKILL_USAGE_PRUNE_MIN_RETRIEVED"), 40)
+    max_used = _parse_int(os.environ.get("MYCODE_SKILL_USAGE_PRUNE_MAX_USED"), 0)
     source = str(stats.get("source") or "").strip().lower()
-    if source != "user" and os.environ.get("BEAR_SKILL_PRUNE_PROJECT", "").strip().lower() not in {"1", "true", "yes", "on"}:
+    if source != "user" and os.environ.get("MYCODE_SKILL_PRUNE_PROJECT", "").strip().lower() not in {"1", "true", "yes", "on"}:
         return False
     if int(stats.get("retrieved", 0)) < min_retrieved:
         return False

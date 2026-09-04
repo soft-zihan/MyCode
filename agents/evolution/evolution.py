@@ -1,10 +1,10 @@
 """全 Harness 进化执行引擎。
 
 接收 RefinementProposal，应用 edits 到四类 harness 组件：
-- prompt notes (.bear/prompts/*.md)
-- memory entries (.bear/memories/*.md)
-- skills (.bear/skills/*/SKILL.md)
-- subagent specs (.bear/agents/*.md)
+- prompt notes (.mycode/prompts/*.md)
+- memory entries (.mycode/memories/*.md)
+- skills (.mycode/skills/*/SKILL.md)
+- subagent specs (.mycode/agents/*.md)
 
 设计参考：Prime Agent / HCL (arXiv:2605.09998) 的 guarded harness evolution。
 """

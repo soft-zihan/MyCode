@@ -104,7 +104,7 @@ def api_delete_skill(skill_name: str) -> dict[str, Any]:
 
 @router.get("/api/skill-evolution/report")
 def api_skill_evolution_report() -> dict[str, Any]:
-    report_path = project_root / ".bear" / "skill-evolution" / "online_eval_report.json"
+    report_path = project_root / ".mycode" / "skill-evolution" / "online_eval_report.json"
     if not report_path.exists():
         return {"status": "no_report"}
     try:
@@ -116,7 +116,7 @@ def api_skill_evolution_report() -> dict[str, Any]:
 
 @router.get("/api/skill-evolution/provenance")
 def api_skill_evolution_provenance() -> list[dict[str, Any]]:
-    provenance_path = project_root / ".bear" / "skill-evolution" / "online_provenance.jsonl"
+    provenance_path = project_root / ".mycode" / "skill-evolution" / "online_provenance.jsonl"
     if not provenance_path.exists():
         return []
     try:
@@ -128,7 +128,7 @@ def api_skill_evolution_provenance() -> list[dict[str, Any]]:
 
 @router.get("/api/skill-evolution/usage")
 def api_skill_evolution_usage() -> dict[str, Any]:
-    usage_path = project_root / ".bear" / "skill-evolution" / "skill_usage_stats.json"
+    usage_path = project_root / ".mycode" / "skill-evolution" / "skill_usage_stats.json"
     if not usage_path.exists():
         return {}
     try:

@@ -51,7 +51,7 @@ async def api_verify_model(data: ModelVerifyRequest) -> dict[str, Any]:
     try:
         chat_url = f"{data.base_url.rstrip('/')}/chat/completions"
         headers = {
-            "Authorization": f"Bearer {data.api_key}",
+            "Authorization": f"mycodeer {data.api_key}",
             "Content-Type": "application/json"
         }
         

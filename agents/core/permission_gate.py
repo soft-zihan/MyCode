@@ -16,19 +16,19 @@ import asyncio
 import uuid
 from typing import Any, Awaitable, Callable, Optional
 
-from agents.ui import print_confirmation
+from agents.logging import print_confirmation
 
 
 class PermissionGate:
     def __init__(
         self,
         *,
-        stream_event_queue: Optional[asyncio.Queue] = None,
+        session: Any = None,
         confirm_fn: Optional[Callable[[str], Awaitable[bool]]] = None,
         sub_agent_id: Optional[str] = None,
         abort_fn: Optional[Callable[[], bool]] = None,
     ) -> None:
-        self._stream_event_queue = stream_event_queue
+        self._session = session
         self._confirm_fn = confirm_fn
         self._sub_agent_id = sub_agent_id
         self._abort_fn = abort_fn
@@ -41,8 +41,8 @@ class PermissionGate:
     def confirmed_paths(self) -> set[str]:
         return self._confirmed_paths
 
-    def set_stream_event_queue(self, queue: asyncio.Queue) -> None:
-        self._stream_event_queue = queue
+    def set_session(self, session: Any) -> None:
+        self._session = session
 
     def set_confirm_fn(self, fn: Callable[[str], Awaitable[bool]]) -> None:
         self._confirm_fn = fn
@@ -62,8 +62,8 @@ class PermissionGate:
         if self._confirm_fn:
             return await self._confirm_fn(command)
 
-        if self._stream_event_queue is not None:
-            return await self._confirm_via_sse(command)
+        if self._session is not None:
+            return await self._confirm_via_session(command)
 
         try:
             answer = input("  Allow? (y/n): ")
@@ -71,18 +71,16 @@ class PermissionGate:
         except EOFError:
             return False
 
-    async def _confirm_via_sse(self, command: str) -> bool:
+    async def _confirm_via_session(self, command: str) -> bool:
         request_id = str(uuid.uuid4())[:8]
 
-        event = {
-            "type": "permission_request",
+        self._session.append("permission/request", {
+            "rpc_id": request_id,
             "request_id": request_id,
             "command": command,
             "tool_name": self._current_tool_name,
-        }
-        if self._sub_agent_id:
-            event["sub_agent_id"] = self._sub_agent_id
-        await self._stream_event_queue.put(event)
+            "sub_agent_id": self._sub_agent_id,
+        })
 
         for _ in range(3000):
             await asyncio.sleep(0.1)

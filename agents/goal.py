@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .ui import print_info, print_warning
+from .logging import print_info, print_warning
 
 SideQueryFn = Callable[[str, str], Any]  # actually Awaitable[str]
 

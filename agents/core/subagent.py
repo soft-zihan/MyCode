@@ -1,6 +1,6 @@
 """子代理系统 —— 内置代理类型 + 自定义代理类型的 fork-return 模式。
 镜像了 Claude Code 的 AgentTool：explore（只读）、plan（结构化）、general（全量工具），
-另外支持通过 .bear/agents/*.md 定义用户自定义代理。"""
+另外支持通过 .mycode/agents/*.md 定义用户自定义代理。"""
 
 from __future__ import annotations
 
@@ -12,12 +12,12 @@ from agents.tools import tool_definitions, ToolDef
 
 
 def get_agent_model_ref_env(agent_type: str) -> str:
-    """读取 BEAR_MODEL_<TYPE> 环境变量（端点 ID 或裸模型名），未配置返回空串。
+    """读取 MYCODE_MODEL_<TYPE> 环境变量（端点 ID 或裸模型名），未配置返回空串。
 
     与 model_registry.get_agent_model_ref 行为一致；此处内联以避免循环导入。
     """
     sanitized = "".join(ch.upper() if ch.isalnum() else "_" for ch in agent_type)
-    return os.environ.get(f"BEAR_MODEL_{sanitized}", "").strip()
+    return os.environ.get(f"MYCODE_MODEL_{sanitized}", "").strip()
 
 # ─── Read-only tools (for explore and plan agents) ──────────
 
@@ -37,7 +37,7 @@ def _load_subagent_prompt(name: str) -> str:
 
 # ─── Custom agent discovery ─────────────────────────────────
 
-# 自定义代理发现结果的进程内缓存；读取 .bear/agents/*.md 后会复用，避免每次调用 agent 工具都扫目录。
+# 自定义代理发现结果的进程内缓存；读取 .mycode/agents/*.md 后会复用，避免每次调用 agent 工具都扫目录。
 _cached_custom_agents: dict[str, dict] | None = None
 
 
@@ -49,9 +49,9 @@ def _discover_custom_agents() -> dict[str, dict]:
 
     agents: dict[str, dict] = {}
     # User-level (lower priority)
-    _load_agents_from_dir(Path.home() / ".bear" / "agents", agents)
+    _load_agents_from_dir(Path.home() / ".mycode" / "agents", agents)
     # Project-level (higher priority, overwrites)
-    _load_agents_from_dir(Path.cwd() / ".bear" / "agents", agents)
+    _load_agents_from_dir(Path.cwd() / ".mycode" / "agents", agents)
 
     _cached_custom_agents = agents
     return agents
@@ -94,7 +94,7 @@ def get_sub_agent_config(agent_type: str) -> dict:
     model_ref 是"端点 ID 或裸模型名"的引用，真正解析成完整端点在
     agent.py 里通过 model_registry 完成。优先级：
       1. 自定义代理 frontmatter 中的 model: 字段
-      2. 环境变量 BEAR_MODEL_<TYPE>
+      2. 环境变量 MYCODE_MODEL_<TYPE>
       3. 空串（继承父 Agent 端点）
     """
     # 子智能体不应具备的工具：
@@ -150,6 +150,6 @@ def build_agent_descriptions() -> str:
 
 
 def reset_agent_cache() -> None:
-    """清空自定义代理缓存；测试或运行中刷新 .bear/agents 配置时使用。"""
+    """清空自定义代理缓存；测试或运行中刷新 .mycode/agents 配置时使用。"""
     global _cached_custom_agents
     _cached_custom_agents = None

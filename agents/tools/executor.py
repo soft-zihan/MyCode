@@ -27,7 +27,7 @@ def persist_large_result(tool_name: str, result: str) -> str:
     if len(result.encode()) <= THRESHOLD:
         return result
 
-    d = Path.home() / ".bear-code" / "tool-results"
+    d = Path.home() / ".my-code" / "tool-results"
     d.mkdir(parents=True, exist_ok=True)
     filename = f"{int(time.time() * 1000)}-{tool_name}.txt"
     filepath = d / filename

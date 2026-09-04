@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .frontmatter import parse_frontmatter, format_frontmatter
-from agents.ui import print_warning
+from agents.logging import print_warning
 from typing import Callable
 # side query 是一个异步函数：输入 system prompt 和 user prompt，返回模型文本。
 # 这里标成 Any 是为了避免在运行时引入复杂 Awaitable 类型约束。

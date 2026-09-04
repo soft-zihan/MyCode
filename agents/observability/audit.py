@@ -5,29 +5,33 @@ Phoenix 无原生 Audit 支持，通过自定义 Span 实现。
 
 from __future__ import annotations
 
-from .otel_exporter import otel_audit, otel_span
+from .tracer import tracer
 
 
 class AuditLogger:
 
     def log_permission_decision(self, tool: str, decision: str, risk_level: str = "low", reason: str = ""):
-        with otel_audit(decision, tool, risk_level) as span:
+        with tracer.span(f"audit.{tool}", {
+            "mycode.audit.decision": decision,
+            "mycode.audit.risk_level": risk_level,
+            "openinference.span.kind": "GUARDRAIL",
+        }) as span:
             if span:
-                span.set_attribute("MyCode.audit.reason", reason)
+                span.set_attribute("mycode.audit.reason", reason)
 
     def log_dangerous_operation(self, tool: str, input_summary: str, risk_level: str):
-        with otel_span(f"audit.dangerous.{tool}", {
-            "MyCode.audit.risk_level": risk_level,
-            "MyCode.audit.requires_approval": risk_level in ("high", "critical"),
+        with tracer.span(f"audit.dangerous.{tool}", {
+            "mycode.audit.risk_level": risk_level,
+            "mycode.audit.requires_approval": risk_level in ("high", "critical"),
             "tool.input_summary": input_summary[:500],
         }) as span:
             pass
 
     def log_file_modification(self, file_path: str, operation: str, diff_summary: str = ""):
-        with otel_span(f"audit.file.{operation}", {
-            "MyCode.audit.file_path": file_path,
-            "MyCode.audit.operation": operation,
-            "MyCode.audit.diff_summary": diff_summary[:1000],
+        with tracer.span(f"audit.file.{operation}", {
+            "mycode.audit.file_path": file_path,
+            "mycode.audit.operation": operation,
+            "mycode.audit.diff_summary": diff_summary[:1000],
         }) as span:
             pass
 

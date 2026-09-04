@@ -7,6 +7,9 @@ from .config import router as config_router
 from .workspace import router as workspace_router
 from .trace import router as trace_router
 from .mcp import router as mcp_router
+from .events import router as events_router
+from .projects import router as projects_router
+from .websocket import router as websocket_router
 
 __all__ = [
     "sessions_router",
@@ -18,4 +21,7 @@ __all__ = [
     "workspace_router",
     "trace_router",
     "mcp_router",
+    "events_router",
+    "projects_router",
+    "websocket_router",
 ]

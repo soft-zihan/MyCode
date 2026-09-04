@@ -29,6 +29,7 @@ export default function ChatPage() {
     currentCwd,
     isStreaming,
     isWaitingResponse,
+    isCompacting,
     fileSnapshots,
     fileTreeRefreshTrigger,
     yoloMode,
@@ -37,8 +38,8 @@ export default function ChatPage() {
     pendingPermission,
     sessionRefreshTrigger,
     chatSnapshot,
-    pendingSteerMessage,
-    setPendingSteerMessage,
+    pendingSteerMessages,
+    setPendingSteerMessages,
     goalState,
     handleAddToChat,
     handleRemoveContext,
@@ -109,15 +110,15 @@ export default function ChatPage() {
               </span>
               <button
                 onClick={handleCompactSession}
-                disabled={!currentSessionId || isStreaming}
+                disabled={!currentSessionId || isStreaming || isCompacting}
                 className={`p-1 rounded transition-colors ${
-                  !currentSessionId || isStreaming
+                  !currentSessionId || isStreaming || isCompacting
                     ? 'text-gray-300 cursor-not-allowed'
                     : 'text-gray-600 hover:text-blue-600 hover:bg-blue-50'
                 }`}
-                title={!currentSessionId ? 'Start a session first' : isStreaming ? 'Wait for response to complete' : '压缩上下文'}
+                title={!currentSessionId ? 'Start a session first' : isStreaming ? 'Wait for response to complete' : isCompacting ? 'Compressing...' : '压缩上下文'}
               >
-                <Zap className="w-3.5 h-3.5" />
+                <Zap className={`w-3.5 h-3.5 ${isCompacting ? 'animate-pulse' : ''}`} />
               </button>
             </div>
           </div>
@@ -267,6 +268,63 @@ export default function ChatPage() {
 
         {/* Input Area */}
         <div className="border-t border-gray-200 bg-white px-4 py-3">
+          {/* Pending Steer Messages Indicator - 在输入框上方 */}
+          {pendingSteerMessages.length > 0 && (
+            <div className="mb-2 px-3 py-2 bg-gradient-to-r from-amber-50 to-orange-50 border border-amber-200 rounded-lg">
+              <div className="flex items-start gap-2">
+                <div className="flex-shrink-0 mt-0.5">
+                  <div className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-pulse" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-xs font-medium text-amber-900">Queued Messages ({pendingSteerMessages.length})</span>
+                    <span className="text-xs text-amber-600">Will send after current response</span>
+                  </div>
+                  <div className="space-y-1">
+                    {pendingSteerMessages.map((msg, i) => (
+                      <div key={i} className="text-sm text-gray-700 bg-white/60 px-2 py-1 rounded border border-amber-100 truncate">
+                        {msg.content}
+                        {msg.contextFiles && msg.contextFiles.length > 0 && (
+                          <div className="flex items-center gap-1 mt-1">
+                            <File className="w-3 h-3 text-blue-500" />
+                            <span className="text-xs text-blue-600">{msg.contextFiles.length} files</span>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <button
+                  onClick={() => setPendingSteerMessages([])}
+                  className="flex-shrink-0 p-1 text-amber-600 hover:text-amber-800 hover:bg-amber-100 rounded transition-colors"
+                  title="Cancel all queued messages"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
+          {/* Context Files - 在输入框上方 */}
+          {contextFiles.length > 0 && (
+            <div className="flex items-center gap-2 flex-wrap mb-2 px-2 py-1.5 bg-blue-50 rounded">
+              <span className="text-xs font-medium text-blue-700">Context:</span>
+              {contextFiles.map(file => (
+                <span
+                  key={file}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 bg-white border border-blue-200 rounded text-xs text-blue-700"
+                >
+                  <File className="w-3 h-3" />
+                  {file.split('/').pop()}
+                  <button
+                    onClick={() => handleRemoveContext(file)}
+                    className="hover:text-red-500"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
           <div className="flex items-end gap-3">
             <textarea
               value={inputValue}
@@ -294,53 +352,6 @@ export default function ChatPage() {
               </button>
             )}
           </div>
-          {/* Pending Steer Message Indicator */}
-          {pendingSteerMessage && (
-            <div className="mt-2 px-3 py-2 bg-gradient-to-r from-amber-50 to-orange-50 border border-amber-200 rounded-lg">
-              <div className="flex items-start gap-2">
-                <div className="flex-shrink-0 mt-0.5">
-                  <div className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-pulse" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-xs font-medium text-amber-900">Queued Steer Message</span>
-                    <span className="text-xs text-amber-600">Will send after current response</span>
-                  </div>
-                  <div className="text-sm text-gray-700 bg-white/60 px-2 py-1 rounded border border-amber-100 truncate">
-                    {pendingSteerMessage.content}
-                  </div>
-                </div>
-                <button
-                  onClick={() => setPendingSteerMessage(null)}
-                  className="flex-shrink-0 p-1 text-amber-600 hover:text-amber-800 hover:bg-amber-100 rounded transition-colors"
-                  title="Cancel steer message"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
-          )}
-          {/* Context Files */}
-          {contextFiles.length > 0 && (
-            <div className="flex items-center gap-2 flex-wrap mt-2 px-2 py-1.5 bg-blue-50 rounded">
-              <span className="text-xs font-medium text-blue-700">Context:</span>
-              {contextFiles.map(file => (
-                <span
-                  key={file}
-                  className="inline-flex items-center gap-1 px-2 py-0.5 bg-white border border-blue-200 rounded text-xs text-blue-700"
-                >
-                  <File className="w-3 h-3" />
-                  {file.split('/').pop()}
-                  <button
-                    onClick={() => handleRemoveContext(file)}
-                    className="hover:text-red-500"
-                  >
-                    <X className="w-3 h-3" />
-                  </button>
-                </span>
-              ))}
-            </div>
-          )}
           {/* Agent and Model Selection */}
           <div className="flex items-center gap-2 mt-2">
             <select

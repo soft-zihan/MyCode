@@ -22,13 +22,16 @@ from routers import (
     workspace_router,
     trace_router,
     mcp_router,
+    events_router,
+    projects_router,
+    websocket_router,
 )
 
 app = FastAPI(title="MyCode API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://localhost:8090"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -43,6 +46,9 @@ app.include_router(config_router)
 app.include_router(workspace_router)
 app.include_router(trace_router)
 app.include_router(mcp_router)
+app.include_router(events_router)
+app.include_router(projects_router)
+app.include_router(websocket_router)
 
 
 @app.get("/api/health")
@@ -52,4 +58,4 @@ def api_health() -> dict[str, str]:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=5555)
+    uvicorn.run(app, host="0.0.0.0", port=5555, ws_max_size=10*1024*1024)  # 10MB

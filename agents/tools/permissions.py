@@ -68,8 +68,8 @@ def load_permission_rules() -> dict:
     allow: list[dict] = []
     deny: list[dict] = []
 
-    user_settings = _load_settings(Path.home() / ".bear" / "settings.json")
-    project_settings = _load_settings(Path.cwd() / ".bear" / "settings.json")
+    user_settings = _load_settings(Path.home() / ".mycode" / "settings.json")
+    project_settings = _load_settings(Path.cwd() / ".mycode" / "settings.json")
 
     for settings in [user_settings, project_settings]:
         if not settings or "permissions" not in settings:

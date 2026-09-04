@@ -1,4 +1,4 @@
-export type ChatNodeKind = 'user' | 'assistant' | 'thinking' | 'tool-call' | 'sub-agent' | 'error' | 'turn-status';
+export type ChatNodeKind = 'user' | 'assistant' | 'thinking' | 'tool-call' | 'sub-agent' | 'error' | 'turn-status' | 'system';
 
 export interface BaseNode {
   key: string;
@@ -70,6 +70,12 @@ export interface TurnStatusNode extends BaseNode {
   startTime: number;
 }
 
+export interface SystemNode extends BaseNode {
+  kind: 'system';
+  message: string;
+  timestamp: string;
+}
+
 export type ChatNode = 
   | UserNode 
   | AssistantNode 
@@ -77,7 +83,8 @@ export type ChatNode =
   | ToolCallNode 
   | SubAgentNode 
   | ErrorNode 
-  | TurnStatusNode;
+  | TurnStatusNode
+  | SystemNode;
 
 export interface ChatSnapshot {
   order: string[];

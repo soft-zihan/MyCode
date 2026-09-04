@@ -316,7 +316,7 @@ def format_folded_memory(memory: dict[str, Any]) -> str:
 
 def get_project_folded_memories_dir() -> Path:
     """获取当前项目的折叠记忆目录"""
-    d = Path.cwd() / ".bear" / "sessions"
+    d = Path.cwd() / ".mycode" / "sessions"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

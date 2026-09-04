@@ -2,8 +2,8 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
-PIDFILE_BACKEND="$PROJECT_ROOT/.backend.pid"
-PIDFILE_FRONTEND="$PROJECT_ROOT/.frontend.pid"
+PIDFILE_BACKEND="$PROJECT_ROOT/logs/.backend.pid"
+PIDFILE_FRONTEND="$PROJECT_ROOT/logs/.frontend.pid"
 
 BACKEND_PORT=5555
 FRONTEND_PORT=8090
@@ -49,7 +49,7 @@ start_backend() {
     log "启动后端 (FastAPI @ port $BACKEND_PORT) ..."
     cd "$PROJECT_ROOT"
     source .venv/bin/activate
-    nohup python frontend/server/main.py > "$PROJECT_ROOT/.backend.log" 2>&1 &
+    nohup python frontend/server/main.py > "$PROJECT_ROOT/logs/.backend.log" 2>&1 &
     echo $! > "$PIDFILE_BACKEND"
     log "后端已启动 (pid=$!, log=.backend.log)"
 }
@@ -57,7 +57,7 @@ start_backend() {
 start_frontend() {
     log "启动前端 (Vite @ port $FRONTEND_PORT) ..."
     cd "$PROJECT_ROOT/frontend"
-    nohup npm run dev > "$PROJECT_ROOT/.frontend.log" 2>&1 &
+    nohup npm run dev > "$PROJECT_ROOT/logs/.frontend.log" 2>&1 &
     echo $! > "$PIDFILE_FRONTEND"
     log "前端已启动 (pid=$!, log=.frontend.log)"
 }
@@ -85,7 +85,7 @@ do_start() {
     wait_ready "$BACKEND_PORT"  "后端"
     wait_ready "$FRONTEND_PORT" "前端"
     echo ""
-    log "🚀 全部就绪:"
+    log "   全部就绪:"
     log "   前端  → http://localhost:$FRONTEND_PORT"
     log "   后端  → http://localhost:$BACKEND_PORT"
     log ""
