@@ -64,7 +64,7 @@ export const AssistantNodeView = memo(function AssistantNodeView({ node, onFileC
 
   return (
     <div className="flex justify-start">
-      <div className="max-w-2xl w-full">
+      <div className="max-w-full w-full">
         <div className="rounded-lg px-4 py-3 bg-gray-100 text-gray-900">
           {/* Thinking section */}
           {node.thinking && (

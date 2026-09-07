@@ -11,14 +11,15 @@ import { SystemNodeView } from './SystemNodeView';
 interface ChatNodeSeatProps {
   node: ChatNode;
   index: number;
+  sessionId?: string;
   onEditMessage?: (node: UserNode, restoreFiles: boolean) => void;
   onFileClick?: (path: string) => void;
 }
 
-export const ChatNodeSeat = memo(function ChatNodeSeat({ node, onEditMessage, onFileClick }: ChatNodeSeatProps) {
+export const ChatNodeSeat = memo(function ChatNodeSeat({ node, sessionId, onEditMessage, onFileClick }: ChatNodeSeatProps) {
   switch (node.kind) {
     case 'user':
-      return <UserNodeView node={node} onEdit={onEditMessage} />;
+      return <UserNodeView node={node} sessionId={sessionId} onEdit={onEditMessage} />;
     case 'assistant':
       return <AssistantNodeView node={node} onFileClick={onFileClick} />;
     case 'thinking':

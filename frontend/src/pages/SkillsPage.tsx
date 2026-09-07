@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { fetchSkills, fetchSkillEvolutionReport, fetchSkillEvolutionProvenance, fetchSkillEvolutionUsage, deleteSkill, Skill } from '../api/client';
 import { Wrench, RefreshCw, Activity, Edit3, Save, X, User, Folder, ChevronDown, ChevronRight, Trash2, Info, Power } from 'lucide-react';
+import { PageLayout } from '../components/PageLayout';
 
 interface SkillDetail extends Skill {
   prompt_template?: string;
@@ -142,25 +143,94 @@ export default function SkillsPage() {
   }
 
   return (
-    <div className="h-full flex flex-col bg-white">
-      <div className="p-6 border-b border-gray-200">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900">Skills</h1>
-            <p className="text-sm text-gray-500 mt-1">
-              {skills.length} skills ({userSkills.length} user, {projectSkills.length} project)
-            </p>
+    <PageLayout
+      sidebarContent={
+        activeTab === 'skills' ? (
+          <div className="flex flex-col h-full">
+            <div className="p-3 border-b border-gray-200">
+              <div className="flex items-center justify-between mb-2">
+                <div>
+                  <h2 className="text-sm font-semibold text-gray-900">Skills</h2>
+                  <p className="text-[10px] text-gray-500 mt-0.5">
+                    {skills.length} skills ({userSkills.length} user, {projectSkills.length} project)
+                  </p>
+                </div>
+                <button
+                  onClick={loadData}
+                  className="p-1.5 text-gray-500 hover:bg-gray-100 rounded transition-colors"
+                  title="Refresh"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <div className="flex gap-1">
+                {(['all', 'user', 'project'] as const).map(src => (
+                  <button
+                    key={src}
+                    onClick={() => setFilterSource(src)}
+                    className={`px-2 py-0.5 text-[10px] rounded transition-colors ${
+                      filterSource === src
+                        ? 'bg-blue-100 text-blue-700'
+                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                    }`}
+                  >
+                    {src === 'all' ? `All (${skills.length})` : src === 'user' ? `User (${userSkills.length})` : `Project (${projectSkills.length})`}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              <div className="divide-y divide-gray-100">
+                {filteredSkills.map(skill => (
+                  <div
+                    key={skill.name}
+                    onClick={() => handleSkillClick(skill)}
+                    className={`px-3 py-2 cursor-pointer transition-colors group ${
+                      selectedSkill?.name === skill.name
+                        ? 'bg-blue-50 border-l-2 border-blue-500'
+                        : 'hover:bg-gray-50'
+                    } ${disabledSkills.has(skill.name) ? 'opacity-50' : ''}`}
+                  >
+                    <div className="flex items-center gap-1.5 mb-0.5">
+                      {skill.source === 'user' ? (
+                        <User className="w-3 h-3 text-purple-500" />
+                      ) : (
+                        <Folder className="w-3 h-3 text-green-500" />
+                      )}
+                      <span className="font-medium text-xs text-gray-900 truncate">{skill.name}</span>
+                      <div className="ml-auto flex items-center gap-0.5 opacity-0 group-hover:opacity-100">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleSkill(skill.name);
+                          }}
+                          className={`p-0.5 rounded transition-colors ${
+                            disabledSkills.has(skill.name)
+                              ? 'bg-gray-200 text-gray-600 hover:bg-gray-300'
+                              : 'bg-green-100 text-green-700 hover:bg-green-200'
+                          }`}
+                          title={disabledSkills.has(skill.name) ? 'Enable skill' : 'Disable skill'}
+                        >
+                          <Power className="w-2.5 h-2.5" />
+                        </button>
+                      </div>
+                    </div>
+                    <p className="text-[10px] text-gray-500 line-clamp-2">{skill.description}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
-          <button
-            onClick={loadData}
-            className="flex items-center px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
-          >
-            <RefreshCw className="w-4 h-4 mr-2" />
-            Refresh
-          </button>
-        </div>
-
-        <div className="flex gap-4 border-b border-gray-200">
+        ) : (
+          <div className="p-3">
+            <p className="text-xs text-gray-500">Evolution tab content</p>
+          </div>
+        )
+      }
+    >
+    <div className="h-full flex flex-col bg-white">
+      <div className="p-4 border-b border-gray-200">
+        <div className="flex gap-4">
           <button
             className={`px-4 py-2 text-sm font-medium transition-colors ${
               activeTab === 'skills'
@@ -189,73 +259,6 @@ export default function SkillsPage() {
       <div className="flex-1 overflow-y-auto">
         {activeTab === 'skills' && (
           <div className="flex h-full">
-            {/* Left: Skills list */}
-            <div className="w-80 border-r border-gray-200 overflow-y-auto flex-shrink-0">
-              <div className="p-3 border-b border-gray-100">
-                <div className="flex gap-1">
-                  {(['all', 'user', 'project'] as const).map(src => (
-                    <button
-                      key={src}
-                      onClick={() => setFilterSource(src)}
-                      className={`px-2 py-1 text-xs rounded transition-colors ${
-                        filterSource === src
-                          ? 'bg-blue-100 text-blue-700'
-                          : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                      }`}
-                    >
-                      {src === 'all' ? `All (${skills.length})` : src === 'user' ? `User (${userSkills.length})` : `Project (${projectSkills.length})`}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div className="divide-y divide-gray-100">
-                {filteredSkills.map(skill => (
-                  <div
-                    key={skill.name}
-                    onClick={() => handleSkillClick(skill)}
-                    className={`p-3 cursor-pointer transition-colors group ${
-                      selectedSkill?.name === skill.name
-                        ? 'bg-blue-50 border-l-2 border-blue-500'
-                        : 'hover:bg-gray-50'
-                    } ${disabledSkills.has(skill.name) ? 'opacity-50' : ''}`}
-                  >
-                    <div className="flex items-center gap-2 mb-1">
-                      {skill.source === 'user' ? (
-                        <User className="w-3 h-3 text-purple-500" />
-                      ) : (
-                        <Folder className="w-3 h-3 text-green-500" />
-                      )}
-                      <span className="font-medium text-sm text-gray-900">{skill.name}</span>
-                      <div className="ml-auto flex items-center gap-1">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            toggleSkill(skill.name);
-                          }}
-                          className={`flex items-center gap-1 px-1.5 py-0.5 text-xs rounded transition-colors ${
-                            disabledSkills.has(skill.name)
-                              ? 'bg-gray-200 text-gray-600 hover:bg-gray-300'
-                              : 'bg-green-100 text-green-700 hover:bg-green-200'
-                          }`}
-                          title={disabledSkills.has(skill.name) ? 'Enable skill' : 'Disable skill'}
-                        >
-                          <Power className="w-3 h-3" />
-                        </button>
-                        <button
-                          onClick={(e) => handleDelete(skill.name, e)}
-                          className="flex items-center px-1.5 py-0.5 text-xs rounded text-red-400 hover:bg-red-100 hover:text-red-600 transition-colors opacity-0 group-hover:opacity-100"
-                          title="Delete skill"
-                        >
-                          <Trash2 className="w-3 h-3" />
-                        </button>
-                      </div>
-                    </div>
-                    <p className="text-xs text-gray-500 line-clamp-2">{skill.description}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-
             {/* Right: Skill detail / editor */}
             <div className="flex-1 flex flex-col overflow-hidden">
               {selectedSkill ? (
@@ -481,5 +484,6 @@ export default function SkillsPage() {
         )}
       </div>
     </div>
+    </PageLayout>
   );
 }

@@ -58,8 +58,10 @@ export interface Agent {
   description: string;
   model_ref: string;
   is_custom: boolean;
+  has_override: boolean;
   allowed_tools?: string[];
   has_system_prompt: boolean;
+  category: 'primary' | 'sub' | 'hidden' | 'custom';
 }
 
 export interface AgentDetail extends Agent {
@@ -67,6 +69,7 @@ export interface AgentDetail extends Agent {
   tools: string[];
   system_prompt_preview: string;
   custom_config: any;
+  category: 'primary' | 'sub' | 'hidden' | 'custom';
 }
 
 export interface Endpoint {
@@ -456,9 +459,10 @@ export async function abortSession(sessionId: string): Promise<void> {
   if (!res.ok) throw new Error('Failed to abort session');
 }
 
-export async function compactSession(sessionId: string): Promise<void> {
+export async function compactSession(sessionId: string): Promise<{ success: boolean; message: string }> {
   const res = await fetch(`${API_BASE}/sessions/${sessionId}/compact`, { method: 'POST' });
   if (!res.ok) throw new Error('Failed to compact session');
+  return res.json();
 }
 
 export async function rewindSession(sessionId: string, turns: number): Promise<{ message: string }> {
@@ -608,4 +612,124 @@ export async function truncateSession(sessionId: string, keepUserMessages: numbe
   });
   if (!res.ok) throw new Error('Failed to truncate session');
   console.log('[API] truncateSession done');
+}
+
+export interface Snapshot {
+  id: string;
+  tree_hash: string;
+  file_count: number;
+  created_at: number;
+  label?: string;
+  message_id?: string;
+}
+
+export interface FileDiff {
+  path: string;
+  status: 'added' | 'modified' | 'deleted';
+  patch: string;
+  additions: number;
+  deletions: number;
+}
+
+export interface SnapshotInspection {
+  id: string;
+  tree_hash: string;
+  created_at: number;
+  label?: string;
+  files: FileDiff[];
+}
+
+export interface RevertPlan {
+  id: string;
+  session_id: string;
+  snapshot_id: string;
+  original_snapshot_id: string;
+  changes: FileDiff[];
+  created_at: number;
+  expires_at: number;
+  message_id?: string;
+}
+
+export interface RevertResult {
+  plan_id: string;
+  restored_files: string[];
+  action: 'committed' | 'cleared';
+}
+
+export async function createSnapshot(
+  sessionId: string,
+  label?: string,
+  messageId?: string
+): Promise<Snapshot> {
+  const res = await fetch(`${API_BASE}/snapshots`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, label, message_id: messageId }),
+  });
+  if (!res.ok) throw new Error('Failed to create snapshot');
+  const data = await res.json();
+  return data.snapshot;
+}
+
+export async function listSnapshots(sessionId?: string): Promise<Snapshot[]> {
+  const params = sessionId ? `?session_id=${sessionId}` : '';
+  const res = await fetch(`${API_BASE}/snapshots${params}`);
+  if (!res.ok) throw new Error('Failed to list snapshots');
+  const data = await res.json();
+  return data.snapshots;
+}
+
+export async function inspectSnapshot(snapshotId: string): Promise<SnapshotInspection> {
+  const res = await fetch(`${API_BASE}/snapshots/${snapshotId}`);
+  if (!res.ok) throw new Error('Failed to inspect snapshot');
+  const data = await res.json();
+  return data.inspection;
+}
+
+export async function restoreSnapshot(snapshotId: string, files?: string[]): Promise<string[]> {
+  const res = await fetch(`${API_BASE}/snapshots/${snapshotId}/restore`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ snapshot_id: snapshotId, files }),
+  });
+  if (!res.ok) throw new Error('Failed to restore snapshot');
+  const data = await res.json();
+  return data.restored_files;
+}
+
+export async function stageRevert(
+  sessionId: string,
+  snapshotId: string,
+  messageId?: string
+): Promise<RevertPlan> {
+  const res = await fetch(`${API_BASE}/revert/stage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, snapshot_id: snapshotId, message_id: messageId }),
+  });
+  if (!res.ok) throw new Error('Failed to stage revert');
+  const data = await res.json();
+  return data.plan;
+}
+
+export async function commitRevert(planId: string): Promise<RevertResult> {
+  const res = await fetch(`${API_BASE}/revert/commit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ plan_id: planId }),
+  });
+  if (!res.ok) throw new Error('Failed to commit revert');
+  const data = await res.json();
+  return data.result;
+}
+
+export async function clearRevert(planId: string): Promise<RevertResult> {
+  const res = await fetch(`${API_BASE}/revert/clear`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ plan_id: planId }),
+  });
+  if (!res.ok) throw new Error('Failed to clear revert');
+  const data = await res.json();
+  return data.result;
 }

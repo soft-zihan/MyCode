@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Server, RefreshCw, Wrench, Cpu, Power } from 'lucide-react';
 import { fetchMcpServers, fetchNativeTools } from '../api/client';
+import { PageLayout } from '../components/PageLayout';
 
 interface McpServer {
   name: string;
@@ -115,7 +116,68 @@ export default function McpPage() {
     );
   }
 
+  const sidebarContent = (
+    <div className="flex flex-col h-full">
+      <div className="p-3 border-b border-gray-200">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-sm font-semibold text-gray-900">MCP Servers</h2>
+            <p className="text-xs text-gray-500 mt-0.5">
+              {servers.length} server{servers.length !== 1 ? 's' : ''}
+            </p>
+          </div>
+          <button
+            onClick={() => { loadServers(); loadTools(); }}
+            className="p-1.5 text-gray-500 hover:bg-gray-100 rounded transition-colors"
+            title="Refresh"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+      <div className="flex-1 overflow-y-auto">
+        {servers.length === 0 ? (
+          <div className="p-4 text-center text-xs text-gray-500">
+            No servers configured
+          </div>
+        ) : (
+          <div className="divide-y divide-gray-100">
+            {servers.map(server => {
+              const tools = serverTools.find(s => s.server === server.name);
+              const isDisabled = disabledServers.has(server.name);
+              return (
+                <div
+                  key={server.name}
+                  className={`px-3 py-2 cursor-pointer hover:bg-gray-50 ${isDisabled ? 'opacity-50' : ''} ${
+                    expandedServer === server.name ? 'bg-blue-50 border-l-2 border-blue-500' : ''
+                  }`}
+                  onClick={() => setExpandedServer(expandedServer === server.name ? null : server.name)}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5">
+                      <Server className="w-3.5 h-3.5 text-green-500" />
+                      <h3 className="text-xs font-medium text-gray-900 truncate">
+                        {server.name}
+                      </h3>
+                    </div>
+                    <span className="text-[10px] text-gray-500">
+                      {tools?.tool_count || 0} tools
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-gray-500 truncate mt-0.5">
+                    {server.command} {server.args.join(' ')}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
   return (
+    <PageLayout sidebarContent={sidebarContent}>
     <div className="h-full flex flex-col bg-white">
       <div className="p-6 border-b border-gray-200">
         <div className="flex items-center justify-between">
@@ -306,5 +368,6 @@ export default function McpPage() {
         </div>
       </div>
     </div>
+    </PageLayout>
   );
 }

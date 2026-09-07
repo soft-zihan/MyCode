@@ -9,7 +9,7 @@ interface SystemNodeViewProps {
 export const SystemNodeView = memo(function SystemNodeView({ node }: SystemNodeViewProps) {
   return (
     <div className="flex justify-center">
-      <div className="max-w-2xl">
+      <div className="max-w-full">
         <div className="rounded-lg px-4 py-3 bg-blue-50 border border-blue-200">
           <div className="flex items-center gap-2 text-blue-700">
             <Info className="w-4 h-4" />

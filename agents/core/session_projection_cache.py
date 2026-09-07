@@ -189,11 +189,39 @@ def _apply_running(state: bool, event: dict[str, Any]) -> bool:
     return state
 
 
+def _init_context_used() -> int:
+    return 0
+
+
+def _apply_context_used(state: int, event: dict[str, Any]) -> int:
+    event_type = event.get("type")
+    if event_type == "stats":
+        return event.get("last_input_token_count", state)
+    if event_type == "context/compacted":
+        return event.get("last_input_token_count", state)
+    return state
+
+
+def _init_context_total() -> int:
+    return 128000
+
+
+def _apply_context_total(state: int, event: dict[str, Any]) -> int:
+    event_type = event.get("type")
+    if event_type == "stats":
+        return event.get("context_window", state)
+    if event_type == "context/compacted":
+        return event.get("context_window", state)
+    return state
+
+
 # 注册默认投影
 register_projection("title", _init_title, _apply_title)
 register_projection("updated_at", _init_updated_at, _apply_updated_at)
 register_projection("cwd", _init_cwd, _apply_cwd)
 register_projection("running", _init_running, _apply_running)
+register_projection("context_used", _init_context_used, _apply_context_used)
+register_projection("context_total", _init_context_total, _apply_context_total)
 
 
 class ProjectionCache:

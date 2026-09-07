@@ -1,13 +1,12 @@
 """
 MCP 客户端模块。
 
-这个文件负责连接基于 stdio 的 MCP Server，完成工具发现，并把 Agent 发起的工具调用
+这个文件负责连接 MCP Server，完成工具发现，并把 Agent 发起的工具调用
 转发到对应的 MCP Server。
 
-实现方式：
-- 不依赖 MCP SDK，直接通过标准输入/标准输出传输 JSON-RPC 消息。
-- 每个 MCP Server 都由一个子进程承载。
-- 每个 MCP 工具都会被包装成 `mcp__serverName__toolName` 形式，避免和本地工具重名。
+支持两种传输方式：
+- stdio：通过标准输入/标准输出传输 JSON-RPC 消息，每个 Server 由一个子进程承载。
+- Streamable HTTP：通过 HTTP POST 传输 JSON-RPC 消息，支持 SSE 流式响应。
 
 配置来源：
 - 全局配置：`~/.mycode/settings.json`
@@ -17,10 +16,14 @@ MCP 客户端模块。
 配置格式示例：
 {
     "mcpServers": {
-        "name": {
+        "stdio-server": {
             "command": "...",
             "args": [...],
             "env": {...}
+        },
+        "http-server": {
+            "url": "http://localhost:8080/mcp",
+            "headers": {"Authorization": "Bearer ..."}
         }
     }
 }
@@ -29,11 +32,14 @@ MCP 客户端模块。
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import subprocess
 from pathlib import Path
 from typing import Any
+
+import httpx
 
 from agents.logging import print_error, print_info
 
@@ -201,6 +207,202 @@ class McpConnection:
         self._pending.clear()
 
 
+# ─── Streamable HTTP MCP 连接（2026-07-28 无状态） ──────────────────────────────────
+
+
+MCP_PROTOCOL_VERSION = "2026-07-28"
+_BASE64_SENTINEL = "=?base64?"
+
+
+def _encode_header_value(value: Any) -> str:
+    """按 2026-07-28 规范编码 HTTP 头值。"""
+    if isinstance(value, bool):
+        s = "true" if value else "false"
+    elif isinstance(value, int):
+        s = str(value)
+    else:
+        s = str(value)
+    if s.startswith(_BASE64_SENTINEL):
+        return "=?" + "base64?" + base64.b64encode(s.encode()).decode() + "?="
+    if s.isascii() and s == s.strip() and "\n" not in s and "\r" not in s:
+        return s
+    return _BASE64_SENTINEL + base64.b64encode(s.encode()).decode() + "?="
+
+
+class McpHttpConnection:
+    """通过 Streamable HTTP 传输与 MCP Server 通信（协议版本 2026-07-28，无状态）。"""
+
+    def __init__(self, server_name: str, url: str,
+                 headers: dict[str, str] | None = None,
+                 timeout: float = 30.0):
+        self.server_name = server_name
+        self.url = url
+        self._extra_headers = headers or {}
+        self._timeout = timeout
+        self._client: httpx.AsyncClient | None = None
+        self._next_id = 1
+        self._tool_schemas: dict[str, dict] = {}
+
+    async def connect(self) -> None:
+        self._client = httpx.AsyncClient(timeout=self._timeout)
+
+    def _build_meta(self) -> dict:
+        return {
+            "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+            "io.modelcontextprotocol/clientInfo": {"name": "mini-claude", "version": "1.0.0"},
+            "io.modelcontextprotocol/clientCapabilities": {},
+        }
+
+    def _build_headers(self, method: str, name: str | None = None,
+                       param_headers: dict[str, str] | None = None) -> dict[str, str]:
+        h = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+            "Mcp-Method": method,
+        }
+        if name is not None:
+            h["Mcp-Name"] = _encode_header_value(name)
+        for k, v in (param_headers or {}).items():
+            h[f"Mcp-Param-{k}"] = v
+        h.update(self._extra_headers)
+        return h
+
+    def _extract_param_headers(self, tool_name: str, args: dict) -> dict[str, str]:
+        schema = self._tool_schemas.get(tool_name, {})
+        properties = schema.get("properties", {})
+        result = {}
+        for prop_name, prop_schema in properties.items():
+            x_mcp_header = prop_schema.get("x-mcp-header")
+            if not x_mcp_header:
+                continue
+            if prop_name not in args or args[prop_name] is None:
+                continue
+            prop_type = prop_schema.get("type")
+            if prop_type not in ("string", "integer", "boolean"):
+                continue
+            result[x_mcp_header] = _encode_header_value(args[prop_name])
+        return result
+
+    async def _send_request(self, method: str, params: dict | None = None,
+                            mcp_name: str | None = None,
+                            param_headers: dict[str, str] | None = None) -> Any:
+        assert self._client
+        req_id = self._next_id
+        self._next_id += 1
+        full_params = dict(params or {})
+        full_params["_meta"] = self._build_meta()
+        body = json.dumps({"jsonrpc": "2.0", "id": req_id, "method": method, "params": full_params})
+        headers = self._build_headers(method, mcp_name, param_headers)
+        resp = await self._client.post(self.url, content=body, headers=headers)
+
+        if resp.status_code == 202:
+            return None
+        if resp.status_code >= 400:
+            raise RuntimeError(f"MCP HTTP {resp.status_code}: {resp.text[:200]}")
+
+        content_type = resp.headers.get("content-type", "")
+        if "text/event-stream" in content_type:
+            return await self._parse_sse_response(resp, req_id)
+        return self._parse_json_response(resp, req_id)
+
+    async def _parse_sse_response(self, resp: httpx.Response, req_id: int) -> Any:
+        result = None
+        buffer = ""
+        async for chunk in resp.aiter_text():
+            buffer += chunk
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                stripped = line.strip()
+                if not stripped or stripped.startswith(":"):
+                    continue
+                if not stripped.startswith("data:"):
+                    continue
+                data = stripped[5:].strip()
+                if not data or data == "[DONE]":
+                    continue
+                try:
+                    msg = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                if msg.get("id") == req_id:
+                    if "error" in msg:
+                        e = msg["error"]
+                        raise RuntimeError(f"MCP error {e.get('code')}: {e.get('message')}")
+                    result = msg.get("result")
+                    break
+            if result is not None:
+                break
+        if result is None:
+            raise RuntimeError(f"MCP HTTP SSE: no response for request {req_id}")
+        return result
+
+    def _parse_json_response(self, resp: httpx.Response, req_id: int) -> Any:
+        msg = resp.json()
+        if msg.get("id") != req_id:
+            raise RuntimeError("MCP HTTP: response id mismatch")
+        if "error" in msg:
+            e = msg["error"]
+            raise RuntimeError(f"MCP error {e.get('code')}: {e.get('message')}")
+        return msg.get("result")
+
+    async def initialize(self) -> None:
+        try:
+            await self._send_request("initialize", {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "mini-claude", "version": "1.0.0"},
+            })
+        except RuntimeError as e:
+            if "404" in str(e) or "-32601" in str(e):
+                pass
+            else:
+                raise
+
+    async def list_tools(self) -> list[dict]:
+        result = await self._send_request("tools/list")
+        if not result or not isinstance(result.get("tools"), list):
+            return []
+        tools = []
+        for t in result["tools"]:
+            name = t["name"]
+            schema = t.get("inputSchema") or {}
+            self._tool_schemas[name] = schema
+            tools.append({
+                "name": name,
+                "description": t.get("description", ""),
+                "inputSchema": schema,
+                "serverName": self.server_name,
+            })
+        return tools
+
+    async def call_tool(self, name: str, args: dict) -> str:
+        param_headers = self._extract_param_headers(name, args)
+        result = await self._send_request(
+            "tools/call",
+            {"name": name, "arguments": args},
+            mcp_name=name,
+            param_headers=param_headers,
+        )
+        if isinstance(result, dict) and isinstance(result.get("content"), list):
+            return "\n".join(
+                c["text"] for c in result["content"] if c.get("type") == "text"
+            )
+        return json.dumps(result)
+
+    def close(self) -> None:
+        if self._client:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(self._client.aclose())
+                else:
+                    loop.run_until_complete(self._client.aclose())
+            except Exception:
+                pass
+            self._client = None
+
+
 # ─── MCP 管理器：统一管理多个 MCP Server 连接和工具路由 ─────────────────────────────
 
 
@@ -215,18 +417,18 @@ class McpManager:
     """
 
     def __init__(self):
-        # 已连接的 MCP Server。key 是 server name，value 是对应连接对象。
-        self._connections: dict[str, McpConnection] = {}
+        self._connections: dict[str, McpConnection | McpHttpConnection] = {}
         # 所有 MCP Server 发现出来的工具定义，保持接近 MCP 原始格式。
         self._tools: list[dict] = []
         # 防止重复连接。load_and_connect() 只应真正执行一次。
         self._connected = False
 
-    async def load_and_connect(self) -> None:
-        """读取配置，连接所有配置的 MCP Server，并发现它们提供的工具。"""
+    async def load_and_connect(self, disabled_servers: set[str] | None = None) -> None:
+        """读取配置，连接所有启用的 MCP Server，并发现它们提供的工具。"""
         if self._connected:
             return
         self._connected = True
+        disabled_servers = disabled_servers or set()
 
         # 合并全局、项目和 .mcp.json 配置。后读取的配置会覆盖同名 Server。
         configs = self._load_configs()
@@ -237,13 +439,16 @@ class McpManager:
         timeout = 15.0
 
         for name, cfg in configs.items():
-            # 根据配置创建一个独立连接对象。
-            conn = McpConnection(
-                name,
-                cfg["command"],
-                cfg.get("args"),
-                cfg.get("env"),
-            )
+            if name in disabled_servers:
+                continue
+            if "url" in cfg:
+                conn: McpConnection | McpHttpConnection = McpHttpConnection(
+                    name, cfg["url"], cfg.get("headers"),
+                )
+            else:
+                conn = McpConnection(
+                    name, cfg["command"], cfg.get("args"), cfg.get("env"),
+                )
             try:
                 # 连接子进程 -> MCP 初始化握手 -> 查询工具列表。
                 await conn.connect()
@@ -324,14 +529,11 @@ class McpManager:
             return
         try:
             raw = json.loads(path.read_text())
-            # 支持两种格式：
-            # 1. {"mcpServers": {"name": {...}}}
-            # 2. {"name": {...}}
             servers = raw.get("mcpServers", raw)
             for name, config in servers.items():
-                # 只接收包含 command 的对象；无效配置直接忽略。
-                if isinstance(config, dict) and "command" in config:
+                if not isinstance(config, dict):
+                    continue
+                if "command" in config or "url" in config:
                     target[name] = config
         except Exception:
-            # 配置文件格式错误时跳过，避免一个坏配置导致整个 Agent 启动失败。
             pass

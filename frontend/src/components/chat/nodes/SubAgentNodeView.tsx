@@ -64,7 +64,7 @@ export const SubAgentNodeView = memo(function SubAgentNodeView({ node }: SubAgen
 
   return (
     <div className="flex justify-start">
-      <div className="max-w-2xl w-full">
+      <div className="max-w-full w-full">
         <div className={`rounded-lg border overflow-hidden transition-colors ${
           isRunning ? 'border-purple-300 bg-purple-50/30' :
           isError ? 'border-red-300 bg-red-50/30' :

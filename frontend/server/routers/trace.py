@@ -39,25 +39,57 @@ def api_trace_events(n: int = 50, session: Optional[str] = None) -> dict[str, An
 
 @router.get("/api/trace/files")
 def api_trace_files() -> dict[str, Any]:
-    """列出所有 trace 文件。
+    """列出所有 session 事件文件（作为 trace 文件）。"""
+    from pathlib import Path
     
-    注意：现在 trace 数据存储在 Phoenix/OTel 中，不再写入本地文件。
-    此端点返回空列表以保持向后兼容。
-    """
-    return {"files": []}
+    sessions_dir = Path.home() / ".mycode" / "sessions"
+    files = []
+    
+    if sessions_dir.exists():
+        for f in sorted(sessions_dir.glob("*.events.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True):
+            stat = f.stat()
+            session_id = f.stem.replace(".events", "")
+            files.append({
+                "session_id": session_id,
+                "filename": f.name,
+                "size": stat.st_size,
+                "line_count": sum(1 for _ in open(f)),
+                "created_at": stat.st_mtime,
+            })
+    
+    return {"files": files}
 
 
 @router.get("/api/trace/{session_id}")
 def api_trace_session_events(session_id: str, n: int = 1000) -> dict[str, Any]:
-    """Get trace events for a specific session (from Phoenix)."""
+    """Get trace events for a specific session from session event files."""
+    from pathlib import Path
+    import json
+    
+    sessions_dir = Path.home() / ".mycode" / "sessions"
+    events_file = sessions_dir / f"{session_id}.events.jsonl"
+    
+    events = []
+    if events_file.exists():
+        with open(events_file) as f:
+            for line in f:
+                try:
+                    event = json.loads(line.strip())
+                    events.append(event)
+                except json.JSONDecodeError:
+                    continue
+    
+    # Limit to last n events
+    if len(events) > n:
+        events = events[-n:]
+    
     phoenix_endpoint = get_phoenix_endpoint()
     
-    # TODO: 实现从 Phoenix GraphQL API 读取
     return {
         "session_id": session_id,
         "phoenix_endpoint": phoenix_endpoint,
-        "events": [],
-        "message": "Phoenix integration pending - use Phoenix UI directly at http://localhost:6006",
+        "events": events,
+        "event_count": len(events),
     }
 
 

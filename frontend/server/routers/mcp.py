@@ -11,6 +11,26 @@ from fastapi import APIRouter
 router = APIRouter(tags=["mcp"])
 
 project_root = Path(__file__).parent.parent.parent.parent
+_config_path = Path.home() / ".mycode" / "config" / "disabled_mcp_servers.json"
+
+
+@router.get("/api/config/disabled-mcp-servers")
+def api_get_disabled_mcp_servers() -> list[str]:
+    """Get list of disabled MCP server names."""
+    if _config_path.exists():
+        try:
+            return json.loads(_config_path.read_text())
+        except Exception:
+            pass
+    return []
+
+
+@router.put("/api/config/disabled-mcp-servers")
+def api_set_disabled_mcp_servers(servers: list[str]) -> dict[str, str]:
+    """Save list of disabled MCP server names."""
+    _config_path.parent.mkdir(parents=True, exist_ok=True)
+    _config_path.write_text(json.dumps(servers))
+    return {"status": "ok"}
 
 
 @router.get("/api/mcp")
@@ -36,12 +56,10 @@ def api_list_mcp_servers() -> list[dict[str, Any]]:
 
 @router.get("/api/mcp/tools")
 async def api_list_mcp_tools() -> list[dict[str, Any]]:
-    from agents.tools.mcp import McpManager
+    from frontend.server.mcp_manager import global_mcp_manager
 
-    manager = McpManager()
     try:
-        await manager.load_and_connect()
-        tools = manager.get_tool_definitions()
+        tools = global_mcp_manager.get_tool_definitions()
         server_tools: dict[str, list[dict]] = {}
         for t in tools:
             parts = t["name"].split("__", 2)
@@ -53,7 +71,7 @@ async def api_list_mcp_tools() -> list[dict[str, Any]]:
                 "name": tool_name,
                 "full_name": t["name"],
                 "description": t.get("description", ""),
-                "input_schema": t.get("input_schema", {}),
+                "input_schema": t.get("input_schema") or t.get("inputSchema") or {"type": "object", "properties": {}},
             })
         return [
             {"server": name, "tools": tlist, "tool_count": len(tlist)}
@@ -61,8 +79,6 @@ async def api_list_mcp_tools() -> list[dict[str, Any]]:
         ]
     except Exception as e:
         return [{"error": str(e)}]
-    finally:
-        await manager.disconnect_all()
 
 
 @router.get("/api/tools/native")

@@ -25,7 +25,11 @@ from routers import (
     events_router,
     projects_router,
     websocket_router,
+    snapshots_router,
 )
+
+# Import global MCP manager from dedicated module
+from frontend.server.mcp_manager import global_mcp_manager
 
 app = FastAPI(title="MyCode API", version="1.0.0")
 
@@ -49,6 +53,38 @@ app.include_router(mcp_router)
 app.include_router(events_router)
 app.include_router(projects_router)
 app.include_router(websocket_router)
+app.include_router(snapshots_router)
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize MCP connections at startup, respecting disabled servers."""
+    import asyncio
+    import json
+    from pathlib import Path
+    
+    # Load disabled servers from config
+    disabled_servers = set()
+    config_path = Path.home() / ".mycode" / "config" / "disabled_mcp_servers.json"
+    if config_path.exists():
+        try:
+            disabled_servers = set(json.loads(config_path.read_text()))
+        except Exception:
+            pass
+    
+    try:
+        # Connect only enabled servers
+        await asyncio.wait_for(global_mcp_manager.load_and_connect(disabled_servers), timeout=30.0)
+        print(f"[STARTUP] MCP initialized: {len(global_mcp_manager._tools)} tools from {len(global_mcp_manager._connections)} servers")
+    except Exception as e:
+        print(f"[STARTUP] MCP initialization failed: {e}")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup MCP connections at shutdown."""
+    await global_mcp_manager.disconnect_all()
+    print("[SHUTDOWN] MCP connections closed")
 
 
 @app.get("/api/health")

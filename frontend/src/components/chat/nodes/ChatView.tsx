@@ -5,14 +5,16 @@ import { ChatNodeSeat } from './ChatNodeSeat';
 
 interface ChatViewProps {
   snapshot: ChatSnapshot;
+  sessionId?: string;
   isStreaming: boolean;
+  isLoadingSession?: boolean;
   isWaitingResponse?: boolean;
   onEditMessage?: (node: UserNode, restoreFiles: boolean) => void;
   onFileClick?: (path: string) => void;
   onFork?: (beforeIndex: number) => void;
 }
 
-export const ChatView = memo(function ChatView({ snapshot, isStreaming, isWaitingResponse, onEditMessage, onFileClick, onFork }: ChatViewProps) {
+export const ChatView = memo(function ChatView({ snapshot, sessionId, isStreaming, isLoadingSession, isWaitingResponse, onEditMessage, onFileClick, onFork }: ChatViewProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
@@ -41,6 +43,16 @@ export const ChatView = memo(function ChatView({ snapshot, isStreaming, isWaitin
   const { order, nodes } = snapshot;
 
   if (order.length === 0 && !isStreaming) {
+    if (isLoadingSession) {
+      return (
+        <div className="flex-1 overflow-y-auto px-4 py-4 flex items-center justify-center text-gray-400">
+          <div className="flex items-center gap-2">
+            <Loader2 className="w-5 h-5 animate-spin" />
+            <span className="text-sm">Loading session...</span>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="flex-1 overflow-y-auto px-4 py-4 flex items-center justify-center text-gray-400">
         <div className="text-center">
@@ -90,6 +102,7 @@ export const ChatView = memo(function ChatView({ snapshot, isStreaming, isWaitin
               <ChatNodeSeat
                 node={node}
                 index={idx}
+                sessionId={sessionId}
                 onEditMessage={onEditMessage}
                 onFileClick={onFileClick}
               />

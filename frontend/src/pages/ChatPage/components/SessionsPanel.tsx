@@ -124,18 +124,16 @@ function DirectoryPicker({ onSelect, onCancel }: DirectoryPickerProps) {
 }
 
 interface SessionsPanelProps {
-  onSessionSelect: (id: string) => void;
-  onNewSession: (cwd?: string) => void;
-  currentSessionId: string | null;
-  visible?: boolean;
+  onSessionSelect?: (id: string) => void;
+  onNewSession?: (cwd?: string) => void;
+  currentSessionId?: string | null;
   refreshTrigger?: number;
 }
 
-// In-memory cache for sessions and projects
 let sessionsCache: Session[] | null = null;
 let projectsCache: Project[] | null = null;
 
-export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId, visible, refreshTrigger }: SessionsPanelProps) {
+export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId, refreshTrigger }: SessionsPanelProps) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
@@ -185,15 +183,7 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
   }, []);
 
   useEffect(() => {
-    if (visible) {
-      loadData(true);
-    }
-  }, [visible]);
-
-  useEffect(() => {
-    if (refreshTrigger && refreshTrigger > 0) {
-      loadData(true);
-    }
+    loadData(true);
   }, [refreshTrigger]);
 
   const handleDelete = async (id: string, e: React.MouseEvent) => {
@@ -205,9 +195,8 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
       setSessions(updated);
       sessionsCache = updated;
       
-      // 如果删除的是当前显示的 session，切换到新对话
       if (currentSessionId === id) {
-        onNewSession();
+        onNewSession?.();
       }
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to delete');
@@ -243,19 +232,16 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
   };
 
   const handleDirSelect = async (path: string) => {
-    // 立刻注册 project
     try {
       await registerProject(path);
     } catch (err) {
       console.error('Failed to register project:', err);
     }
-    onNewSession(path);
+    onNewSession?.(path);
     setShowDirPicker(false);
-    // 刷新 project 列表
     loadData(true);
   };
 
-  // 按 project 分组：先初始化所有 project 为空数组，再填充 session
   const grouped: Record<string, Session[]> = {};
   for (const project of projects) {
     grouped[project.cwd] = [];
@@ -266,14 +252,12 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
     grouped[cwd].push(session);
   }
 
-  if (loading) return <div className="p-4 text-sm text-gray-500">Loading...</div>;
-
   return (
-    <div className="h-full overflow-y-auto">
+    <div className="flex flex-col h-full">
       <div className="p-2 border-b border-gray-200">
         <button
           onClick={() => setShowDirPicker(true)}
-          className="w-full flex items-center justify-center px-3 py-2 text-xs font-medium text-green-600 bg-green-50 rounded hover:bg-green-100 transition-colors"
+          className="w-full flex items-center justify-center px-3 py-1.5 text-xs font-medium text-green-600 bg-green-50 rounded hover:bg-green-100 transition-colors"
         >
           <Plus className="w-3 h-3 mr-1" />
           New Project
@@ -285,122 +269,119 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
           onCancel={() => setShowDirPicker(false)}
         />
       )}
-      {projects.length === 0 ? (
-        <div className="p-4 text-sm text-gray-500 text-center">No projects yet.<br/>Click above to create a new session!</div>
+      {loading ? (
+        <div className="p-4 text-sm text-gray-500">Loading...</div>
+      ) : projects.length === 0 ? (
+        <div className="p-4 text-sm text-gray-500 text-center">No projects yet.</div>
       ) : (
         Object.entries(grouped).map(([cwd, projectSessions]) => {
           const isCollapsed = collapsedProjects.has(cwd);
           return (
-          <div key={cwd} className="border-b border-gray-100">
-            <div 
-              className="px-3 py-2 bg-gray-50 flex items-center justify-between cursor-pointer hover:bg-gray-100"
-              onClick={() => toggleProjectCollapse(cwd)}
-            >
-              <div className="flex items-center flex-1 min-w-0">
-                {isCollapsed ? (
-                  <ChevronRight className="w-3 h-3 mr-1 text-gray-400 flex-shrink-0" />
-                ) : (
-                  <ChevronDown className="w-3 h-3 mr-1 text-gray-400 flex-shrink-0" />
-                )}
-                <div className="text-xs font-medium text-gray-600 truncate" title={cwd}>
-                  📁 {cwd.split('/').pop() || cwd}
-                  {projectSessions.length > 0 && (
-                    <span className="ml-1 text-gray-400">({projectSessions.length})</span>
-                  )}
-                </div>
-              </div>
-              <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
-                <button
-                  onClick={() => onNewSession(cwd)}
-                  className="p-1 hover:bg-gray-200 rounded text-gray-500 transition-colors"
-                  title="New session in this project"
-                >
-                  <Plus className="w-3 h-3" />
-                </button>
-                <button
-                  onClick={async (e) => {
-                    e.stopPropagation();
-                    const msg = projectSessions.length > 0
-                      ? `Delete project and all ${projectSessions.length} session(s)?`
-                      : `Delete this project?`;
-                    if (!confirm(msg)) return;
-                    try {
-                      // 删除所有 session
-                      await Promise.all(projectSessions.map(s => deleteSession(s.id)));
-                      // 删除 project
-                      await deleteProject(cwd);
-                      // 刷新数据
-                      loadData(true);
-                      
-                      // 如果删除的 session 中包含当前显示的 session，切换到新对话
-                      if (currentSessionId && projectSessions.some(s => s.id === currentSessionId)) {
-                        onNewSession();
-                      }
-                    } catch (err) {
-                      alert(err instanceof Error ? err.message : 'Failed to delete');
-                    }
-                  }}
-                  className="p-1 hover:bg-red-100 rounded text-red-400 transition-colors"
-                  title="Delete project and all sessions"
-                >
-                  <Trash2 className="w-3 h-3" />
-                </button>
-              </div>
-            </div>
-            {!isCollapsed && projectSessions.map(session => (
-              <div
-                key={session.id}
-                onClick={() => onSessionSelect(session.id)}
-                className={`flex items-center justify-between px-3 py-2 cursor-pointer group ${
-                  currentSessionId === session.id
-                    ? 'bg-blue-50 border-l-2 border-blue-500'
-                    : 'hover:bg-gray-50'
-                }`}
+            <div key={cwd} className="border-b border-gray-100">
+              <div 
+                className="px-2 py-1.5 bg-gray-50 flex items-center justify-between cursor-pointer hover:bg-gray-100"
+                onClick={() => toggleProjectCollapse(cwd)}
               >
-                <div className="flex items-center text-sm text-gray-700 flex-1 min-w-0">
-                  <Clock className="w-3 h-3 mr-2 text-gray-400 flex-shrink-0" />
-                  {editingSessionId === session.id ? (
-                    <input
-                      type="text"
-                      value={editingName}
-                      onChange={(e) => setEditingName(e.target.value)}
-                      onClick={(e) => e.stopPropagation()}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') handleSaveName(session.id);
-                        if (e.key === 'Escape') handleCancelEdit();
-                      }}
-                      className="flex-1 px-1 py-0 text-sm border border-blue-400 rounded focus:outline-none"
-                      autoFocus
-                    />
+                <div className="flex items-center flex-1 min-w-0">
+                  {isCollapsed ? (
+                    <ChevronRight className="w-3 h-3 mr-1 text-gray-400 flex-shrink-0" />
                   ) : (
-                    <span 
-                      className="truncate cursor-text"
-                      onDoubleClick={(e) => handleStartEditName(session, e)}
-                      title={session.name || formatRelativeTime(session.startTime)}
-                    >
-                      {session.name || formatRelativeTime(session.startTime)}
-                    </span>
+                    <ChevronDown className="w-3 h-3 mr-1 text-gray-400 flex-shrink-0" />
                   )}
+                  <div className="text-xs font-medium text-gray-600 truncate" title={cwd}>
+                    {cwd.split('/').pop() || cwd}
+                    {projectSessions.length > 0 && (
+                      <span className="ml-1 text-gray-400">({projectSessions.length})</span>
+                    )}
+                  </div>
                 </div>
-                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                <div className="flex items-center gap-0.5" onClick={e => e.stopPropagation()}>
                   <button
-                    onClick={(e) => handleStartEditName(session, e)}
-                    className="p-1 hover:bg-blue-100 rounded text-blue-500"
-                    title="Edit name"
+                    onClick={() => onNewSession?.(cwd)}
+                    className="p-0.5 hover:bg-gray-200 rounded text-gray-500 transition-colors"
+                    title="New session"
                   >
-                    <Pencil className="w-3 h-3" />
+                    <Plus className="w-3 h-3" />
                   </button>
                   <button
-                    onClick={(e) => handleDelete(session.id, e)}
-                    className="p-1 hover:bg-red-100 rounded text-red-500"
-                    title="Delete session"
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      const msg = projectSessions.length > 0
+                        ? `Delete project and all ${projectSessions.length} session(s)?`
+                        : `Delete this project?`;
+                      if (!confirm(msg)) return;
+                      try {
+                        await Promise.all(projectSessions.map(s => deleteSession(s.id)));
+                        await deleteProject(cwd);
+                        loadData(true);
+                        if (currentSessionId && projectSessions.some(s => s.id === currentSessionId)) {
+                          onNewSession?.();
+                        }
+                      } catch (err) {
+                        alert(err instanceof Error ? err.message : 'Failed to delete');
+                      }
+                    }}
+                    className="p-0.5 hover:bg-red-100 rounded text-red-400 transition-colors"
+                    title="Delete project"
                   >
                     <Trash2 className="w-3 h-3" />
                   </button>
                 </div>
               </div>
-            ))}
-          </div>
+              {!isCollapsed && projectSessions.map(session => (
+                <div
+                  key={session.id}
+                  onClick={() => onSessionSelect?.(session.id)}
+                  className={`flex items-center justify-between px-2 py-1.5 cursor-pointer group text-xs ${
+                    currentSessionId === session.id
+                      ? 'bg-blue-50 border-l-2 border-blue-500'
+                      : 'hover:bg-gray-50'
+                  }`}
+                >
+                  <div className="flex items-center text-gray-700 flex-1 min-w-0">
+                    <Clock className="w-3 h-3 mr-1.5 text-gray-400 flex-shrink-0" />
+                    {editingSessionId === session.id ? (
+                      <input
+                        type="text"
+                        value={editingName}
+                        onChange={(e) => setEditingName(e.target.value)}
+                        onClick={(e) => e.stopPropagation()}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleSaveName(session.id);
+                          if (e.key === 'Escape') handleCancelEdit();
+                        }}
+                        className="flex-1 px-1 py-0 text-xs border border-blue-400 rounded focus:outline-none"
+                        autoFocus
+                      />
+                    ) : (
+                      <span 
+                        className="truncate cursor-text"
+                        onDoubleClick={(e) => handleStartEditName(session, e)}
+                        title={session.name || formatRelativeTime(session.startTime)}
+                      >
+                        {session.name || formatRelativeTime(session.startTime)}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button
+                      onClick={(e) => handleStartEditName(session, e)}
+                      className="p-0.5 hover:bg-blue-100 rounded text-blue-500"
+                      title="Edit name"
+                    >
+                      <Pencil className="w-3 h-3" />
+                    </button>
+                    <button
+                      onClick={(e) => handleDelete(session.id, e)}
+                      className="p-0.5 hover:bg-red-100 rounded text-red-500"
+                      title="Delete"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
           );
         })
       )}

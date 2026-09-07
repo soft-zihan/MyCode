@@ -169,7 +169,7 @@ class Agent:
         self.thinking = thinking
         self.model = model
         self.is_sub_agent = is_sub_agent
-        self.tools = custom_tools or tool_definitions
+        self.tools = custom_tools if custom_tools is not None else tool_definitions
         self.max_cost_usd = max_cost_usd
         self.max_turns = max_turns
         self.confirm_fn = confirm_fn
@@ -639,6 +639,8 @@ class Agent:
                 error=type(e).__name__,
                 duration_s=round(time.time() - _turn_t0, 2),
             )
+            # Send error event to frontend
+            self.session.append("error", {"message": str(e), "error_type": type(e).__name__, "sub_agent_id": self._current_sub_agent_id})
             self.session.append("turn/end", {"turn": self._current_turn, "reason": "error", "error": str(e), "sub_agent_id": self._current_sub_agent_id})
             return
         finally:
@@ -740,6 +742,8 @@ class Agent:
 
     def _refresh_runtime_system_prompt(self) -> None:
         if self._custom_system_prompt is not None:
+            # 使用自定义system prompt时，仍然需要设置session.system_prompt
+            self.session.system_prompt = self._custom_system_prompt
             return
         self._base_system_prompt = build_system_prompt()
         if self.permission_mode == "plan":
@@ -867,9 +871,12 @@ class Agent:
     def mark_aborted(self) -> None:
         self._aborted = True
 
-    def append_user_message(self, content: str) -> None:
+    def append_user_message(self, content: str, snapshot_id: str | None = None) -> None:
         """追加用户消息到事件日志。"""
-        self.session.append("user_message", {"content": content})
+        data = {"content": content}
+        if snapshot_id:
+            data["snapshot_id"] = snapshot_id
+        self.session.append("user_message", data)
 
     def append_tool_message(self, tool_call_id: str, content: str) -> None:
         """追加工具结果消息到事件日志。"""

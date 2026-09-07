@@ -194,13 +194,34 @@ class AgentLoop:
         return files
 
     async def _prepare_turn(self, user_message: str) -> None:
-        """准备轮次：清理消息、重置状态。"""
+        """准备轮次：清理消息、重置状态、创建快照。"""
         from agents.memory.memory import MemoryPrefetch, start_memory_prefetch
+        from agents.core.snapshot_service import SnapshotService
+        from pathlib import Path
         
         a = self._agent
         user_message = _safe_utf8_text(user_message)
         clean_message = re.sub(r"\n*<retrieved_skills>.*?</retrieved_skills>\s*", "", user_message, flags=re.DOTALL).strip()
-        a.append_user_message(clean_message)
+        
+        snapshot_id = None
+        if not a.is_sub_agent:
+            cwd = a.session.projections.get("cwd")
+            if cwd:
+                try:
+                    snapshot_dir = Path.home() / ".mycode" / "snapshots"
+                    svc = SnapshotService(cwd, snapshot_dir)
+                    snapshot = await svc.capture(
+                        session_id=a.session.id,
+                        label=f"Before: {clean_message[:50]}",
+                    )
+                    snapshot_id = snapshot.id
+                    print(f"[DEBUG] snapshot created: {snapshot_id}")
+                except Exception as e:
+                    print(f"[ERROR] Failed to create snapshot: {type(e).__name__}: {e}")
+                    import traceback
+                    traceback.print_exc()
+        
+        a.append_user_message(clean_message, snapshot_id=snapshot_id)
         a.reset_repeat_chain()
 
         if not a.is_sub_agent:
@@ -387,13 +408,16 @@ class AgentLoop:
         with trace_span("model_call", model=a.model, provider="openai") as span:
 
             async def _do():
-                stream = await a.openai_client.chat.completions.create(
-                    model=a.model,
-                    tools=_sanitize_for_utf8(_to_openai_tools(get_active_tool_definitions(a.tools))),
-                    messages=_sanitize_for_utf8(a.messages),
-                    stream=True,
-                    stream_options={"include_usage": True},
-                )
+                tool_defs = get_active_tool_definitions(a.tools)
+                create_params = {
+                    "model": a.model,
+                    "messages": _sanitize_for_utf8(a.messages),
+                    "stream": True,
+                    "stream_options": {"include_usage": True},
+                }
+                if tool_defs:
+                    create_params["tools"] = _sanitize_for_utf8(_to_openai_tools(tool_defs))
+                stream = await a.openai_client.chat.completions.create(**create_params)
 
                 content = ""
                 if not a.is_sub_agent:
@@ -429,6 +453,10 @@ class AgentLoop:
                     if delta and delta.content:
                         a.emit_text(delta.content)
                         content += _safe_utf8_text(delta.content)
+                        # Debug for title agent
+                        if a.is_sub_agent and a._custom_system_prompt and "标题" in a._custom_system_prompt:
+                            import sys
+                            print(f"[TITLE-DEBUG] delta.content='{delta.content}'", file=sys.stderr)
 
                     if delta and delta.tool_calls:
                         for tc in delta.tool_calls:
@@ -454,6 +482,11 @@ class AgentLoop:
                     ]
 
                 thinking_content = a.get_thinking_content()
+                
+                # Debug: log content for title agent
+                if a.is_sub_agent and a._custom_system_prompt and "标题" in a._custom_system_prompt:
+                    import sys
+                    print(f"[TITLE-DEBUG] content='{content}', thinking='{thinking_content[:100] if thinking_content else None}...'", file=sys.stderr)
                 
                 return {
                     "choices": [{

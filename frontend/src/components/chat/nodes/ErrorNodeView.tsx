@@ -9,7 +9,7 @@ interface ErrorNodeViewProps {
 export const ErrorNodeView = memo(function ErrorNodeView({ node }: ErrorNodeViewProps) {
   return (
     <div className="flex justify-start">
-      <div className="max-w-2xl">
+      <div className="max-w-full">
         <div className="rounded-lg px-4 py-3 bg-red-50 border border-red-200">
           <div className="flex items-center gap-2 text-red-700">
             <AlertCircle className="w-4 h-4" />

@@ -16,7 +16,7 @@ from .session_backend_jsonl import JsonlSessionBackend
 
 # 只推不持久化的事件类型（流式事件）
 SSE_ONLY_TYPES = frozenset({
-    "thinking", "text", "tool_call", "tool_result", "stats",
+    "thinking", "text", "tool_call", "tool_result",
 })
 
 

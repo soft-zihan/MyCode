@@ -200,7 +200,9 @@ def api_delete_session(session_id: str) -> dict[str, bool]:
 async def generate_session_title(message: str) -> str:
     """使用 title agent 生成会话标题。"""
     import asyncio
+    import sys
     fallback_name = message[:20] + "..." if len(message) > 20 else message
+    print(f"[TITLE] Starting title generation for message: {message[:50]}...", file=sys.stderr)
     try:
         from agents.agent import Agent
         from agents.core.agent_mode import BUILTIN_HIDDEN_AGENTS
@@ -234,12 +236,13 @@ async def generate_session_title(message: str) -> str:
                     api_key=endpoint.api_key,
                     api_base=endpoint.base_url,
                     custom_system_prompt=title_config.system_prompt,
+                    custom_tools=[],  # 禁用工具，避免模型调用工具
                     is_sub_agent=True,  # 避免保存 session 文件
                 )
                 svc = AgentService(agent)
-                await asyncio.wait_for(svc.run_once(message), timeout=10.0)
+                await asyncio.wait_for(svc.run_once(message), timeout=30.0)
                 name = svc.last_response.strip()
-                print(f"[TITLE] Generated name: {name}")
+                print(f"[TITLE] Generated name: '{name}' (len={len(name)})")
                 
                 if saved_session_id:
                     set_trace_session(saved_session_id)
@@ -247,13 +250,20 @@ async def generate_session_title(message: str) -> str:
                 if name:
                     name = name.replace('"', '').replace("'", "").strip()
                     return name[:30] if len(name) > 30 else name
-            except (asyncio.TimeoutError, Exception):
+            except (asyncio.TimeoutError, Exception) as e:
+                import traceback
+                print(f"[TITLE] Endpoint {endpoint.model} failed: {e}")
+                print(f"[TITLE] Traceback: {traceback.format_exc()}")
                 if saved_session_id:
                     set_trace_session(saved_session_id)
                 continue
         
+        print(f"[TITLE] All endpoints failed, returning fallback: {fallback_name}")
         return fallback_name
-    except Exception:
+    except Exception as e:
+        import traceback
+        print(f"[TITLE] Outer exception: {e}")
+        print(f"[TITLE] Traceback: {traceback.format_exc()}")
         return fallback_name
 
 
@@ -403,6 +413,12 @@ async def api_truncate_session(session_id: str, data: TruncateRequest) -> dict[s
     
     save_session(session_id, session_data)
     print(f"[TRUNCATE] after: {len(session_data['events'])} events, {len(session_data['openaiMessages'])} openaiMessages")
+    
+    # 3.5 同步更新 events.jsonl 文件
+    from agents.core.session_backend_jsonl import JsonlSessionBackend
+    backend = JsonlSessionBackend()
+    backend.truncate(session_id, truncate_at)
+    print(f"[TRUNCATE] truncated events.jsonl at seq={truncate_at}")
     
     # 4. 同步更新内存中的 session（如果活跃）
     session_info = _active_sessions.get(session_id)

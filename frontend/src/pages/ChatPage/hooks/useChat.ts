@@ -24,10 +24,11 @@ export function useChat() {
   const [currentProject, setCurrentProject] = useState<string | null>(null);
   const [currentCwd, setCurrentCwd] = useState<string | null>(null);
   const [isWaitingResponse, setIsWaitingResponse] = useState(false);
+  const [isLoadingSession, setIsLoadingSession] = useState(false);
   const [fileTreeRefreshTrigger, setFileTreeRefreshTrigger] = useState(0);
   const pendingSessionNameRef = useRef<string | null>(null);
   
-  const [yoloMode, setYoloMode] = useState(true);
+  const [permissionMode, setPermissionMode] = useState<'default' | 'acceptEdits' | 'bypassPermissions'>('bypassPermissions');
   const [contextTotal, setContextTotal] = useState(128000);
   
   const [sessionRefreshTrigger, setSessionRefreshTrigger] = useState(0);
@@ -300,12 +301,19 @@ export function useChat() {
     
     // Reset UI state
     resetNodes(sessionId);
+    setIsLoadingSession(true);
     pendingSessionNameRef.current = null;
     
     // Load session data with lazy loading
     try {
       // Load session metadata
       const sessionResponse = await fetch(`/api/sessions/${sessionId}`);
+      
+      // Check if session changed during fetch
+      if (currentSessionIdRef.current !== sessionId) {
+        logger.info('[SESSION] session changed during metadata fetch, aborting');
+        return;
+      }
       
       if (sessionResponse.ok) {
         const data = await sessionResponse.json();
@@ -328,6 +336,12 @@ export function useChat() {
       // Load recent events with pagination
       const eventsResponse = await fetch(`/api/sessions/${sessionId}/events?limit=50`);
       
+      // Check if session changed during fetch
+      if (currentSessionIdRef.current !== sessionId) {
+        logger.info('[SESSION] session changed during events fetch, aborting');
+        return;
+      }
+      
       if (eventsResponse.ok) {
         const { events, has_more, base_seq, total_count } = await eventsResponse.json();
         logger.info('[SESSION] loaded:', {
@@ -338,6 +352,15 @@ export function useChat() {
           baseSeq: base_seq,
         });
         
+        // Restore context stats from events
+        for (let i = events.length - 1; i >= 0; i--) {
+          const e = events[i];
+          if (e.type === 'stats' && e.last_input_token_count) {
+            sessionStore.setContextStats(sessionId, e.last_input_token_count, e.context_window || 128000);
+            break;
+          }
+        }
+        
         // Update pagination state
         const lastSeq = events.length > 0 ? Math.max(...events.map((e: any) => e.seq ?? 0)) : -1;
         sessionStore.setPagination(sessionId, has_more, base_seq, lastSeq);
@@ -347,6 +370,11 @@ export function useChat() {
       }
     } catch (err) {
       console.error('Failed to load session:', err);
+    } finally {
+      // Only reset loading state if this is still the current session
+      if (currentSessionIdRef.current === sessionId) {
+        setIsLoadingSession(false);
+      }
     }
   };
 
@@ -472,7 +500,7 @@ export function useChat() {
           context_files: contextFiles.length > 0 ? contextFiles : undefined,
           agent: selectedAgent,
           model: selectedModel || undefined,
-          permission_mode: yoloMode ? 'bypassPermissions' : 'default',
+          permission_mode: permissionMode,
           cwd: currentCwd!,
         }),
       });
@@ -556,8 +584,12 @@ export function useChat() {
     if (!currentSessionId || isCompacting) return;
     try {
       setIsCompacting(true);
-      await compactSession(currentSessionId);
-      alert('上下文压缩成功');
+      const result = await compactSession(currentSessionId);
+      if (result.success) {
+        alert('上下文压缩成功');
+      } else {
+        alert('压缩失败: ' + result.message);
+      }
     } catch (err) {
       console.error('Failed to compact session:', err);
       alert('上下文压缩失败');
@@ -566,18 +598,20 @@ export function useChat() {
     }
   }, [currentSessionId, isCompacting]);
 
-  const handleToggleYoloMode = useCallback(async () => {
-    const newMode = !yoloMode;
-    setYoloMode(newMode);
+  const handleCyclePermissionMode = useCallback(async () => {
+    const modes: Array<'default' | 'acceptEdits' | 'bypassPermissions'> = ['default', 'acceptEdits', 'bypassPermissions'];
+    const currentIndex = modes.indexOf(permissionMode);
+    const nextMode = modes[(currentIndex + 1) % modes.length];
+    setPermissionMode(nextMode);
     
     if (currentSessionId) {
       try {
-        await updatePermissionMode(currentSessionId, newMode ? 'bypassPermissions' : 'default');
+        await updatePermissionMode(currentSessionId, nextMode);
       } catch (err) {
         console.error('Failed to update permission mode:', err);
       }
     }
-  }, [currentSessionId, yoloMode]);
+  }, [currentSessionId, permissionMode]);
 
   const handleForkSession = useCallback(async () => {
     if (!currentSessionId) return;
@@ -728,11 +762,12 @@ export function useChat() {
     currentProject,
     currentCwd,
     isStreaming,
+    isLoadingSession,
     isWaitingResponse,
     isCompacting,
     fileSnapshots,
     fileTreeRefreshTrigger,
-    yoloMode,
+    permissionMode,
     contextUsed,
     contextTotal,
     pendingPermission,
@@ -750,7 +785,7 @@ export function useChat() {
     handleSendMessage,
     handleStopStreaming,
     handleCompactSession,
-    handleToggleYoloMode,
+    handleCyclePermissionMode,
     handleForkSession,
     handleForkAtPoint,
     handleEditMessage,

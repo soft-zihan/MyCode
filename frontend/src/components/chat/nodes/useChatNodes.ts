@@ -358,11 +358,20 @@ export function useChatNodes(): UseChatNodesReturn {
         const agentId = data.agent_id as string;
         if (agentId) {
           const subAgentKey = `subagent_${agentId}`;
+          const summary = data.summary as string | undefined;
+          const durationMs = data.duration_ms as number | undefined;
+          const tokens = data.tokens as number | undefined;
           updateSnap(prev => {
             const node = prev.nodes.get(subAgentKey);
             if (!node || node.kind !== 'sub-agent') return prev;
             const newNodes = new Map(prev.nodes);
-            newNodes.set(subAgentKey, { ...node, status: 'completed' } as SubAgentNode);
+            newNodes.set(subAgentKey, { 
+              ...node, 
+              status: 'completed',
+              text: summary || node.text,
+              durationMs: durationMs ?? node.durationMs,
+              tokens: tokens ?? node.tokens,
+            } as SubAgentNode);
             return { order: prev.order, nodes: newNodes };
           });
         }
@@ -413,7 +422,7 @@ export function useChatNodes(): UseChatNodesReturn {
     }
   }, []);
 
-  const addUserMessage = useCallback((sessionId: string, content: string, contextFiles?: string[], agent?: string, model?: string) => {
+  const addUserMessage = useCallback((sessionId: string, content: string, contextFiles?: string[], agent?: string, model?: string, snapshotId?: string, messageId?: string) => {
     const key = nextKey('user');
     const node: ChatNode = {
       key,
@@ -424,6 +433,8 @@ export function useChatNodes(): UseChatNodesReturn {
       agent,
       model,
       timestamp: new Date().toISOString(),
+      snapshotId,
+      messageId,
     };
     sessionStore.updateSnapshot(sessionId, prev => {
       const newNodes = new Map(prev.nodes);
@@ -465,8 +476,10 @@ export function useChatNodes(): UseChatNodesReturn {
       switch (type) {
         case 'user_message': {
           const content = event.content as string;
+          const snapshotId = event.snapshot_id as string | undefined;
+          const messageId = event.message_id as string | undefined;
           if (content && content.trim()) {
-            addUserMessage(sessionId, content);
+            addUserMessage(sessionId, content, undefined, undefined, undefined, snapshotId, messageId);
           }
           break;
         }
@@ -525,7 +538,13 @@ export function useChatNodes(): UseChatNodesReturn {
         
         case 'sub_agent/end': {
           const agentId = event.agent_id as string;
-          handleSSEEvent(sessionId, { type: 'sub_agent/end', agent_id: agentId });
+          handleSSEEvent(sessionId, { 
+            type: 'sub_agent/end', 
+            agent_id: agentId,
+            summary: event.summary,
+            duration_ms: event.duration_ms,
+            tokens: event.tokens,
+          });
           break;
         }
         
@@ -563,6 +582,8 @@ export function useChatNodes(): UseChatNodesReturn {
       switch (type) {
         case 'user_message': {
           const content = event.content as string;
+          const snapshotId = event.snapshot_id as string | undefined;
+          const messageId = event.message_id as string | undefined;
           if (content && content.trim()) {
             newNodes.push({
               key: nextKey('user'),
@@ -570,6 +591,8 @@ export function useChatNodes(): UseChatNodesReturn {
               seq: nextSeq(),
               content,
               timestamp: new Date(event.time as number).toISOString(),
+              snapshotId,
+              messageId,
             });
           }
           break;
