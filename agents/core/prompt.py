@@ -109,12 +109,25 @@ def load_claude_md() -> str:
         if parent == d:
             break
         d = parent
-    # Load .mycode/rules/*.md from cwd
     rules = _load_rules_dir(Path.cwd())
     claude_md = ""
     if parts:
         claude_md = "\n\n# Project Instructions (CLAUDE.md)\n" + "\n\n---\n\n".join(parts)
-    return claude_md + rules
+    rules_md = _load_rules_md(Path.cwd())
+    return claude_md + rules + rules_md
+
+
+def _load_rules_md(directory: Path) -> str:
+    """Load .mycode/RULES.md — always-on project rules."""
+    rules_file = directory / ".mycode" / "RULES.md"
+    if not rules_file.is_file():
+        return ""
+    try:
+        content = rules_file.read_text(encoding="utf-8")
+        content = _resolve_includes(content, rules_file.parent)
+        return "\n\n# Project Rules (RULES.md)\n\n" + content
+    except Exception:
+        return ""
 
 
 def get_git_context() -> str:

@@ -38,6 +38,9 @@ class SkillDefinition:
     executable: bool = False
     # 可执行 skill 的 import name
     import_name: str = ""
+    # Hook 机制：关键词匹配直接召回
+    hook_keywords: list[str] | None = None  # 触发关键词列表
+    hook_mode: str = "inject"  # "inject" | "inline" | "fork"
 
 
 # skills 只在首次读取时扫描磁盘，后续复用缓存；修改 skill 后需要重启或 reset。
@@ -176,6 +179,25 @@ def _parse_skill_file(file_path: Path, source: str, skill_dir: str) -> SkillDefi
             else:
                 allowed_tools = [s.strip() for s in raw_tools.split(",")]
 
+        # Hook 机制：解析 hook-keywords 和 hook-mode
+        hook_keywords: list[str] | None = None
+        if "hook-keywords" in meta:
+            raw_keywords = meta["hook-keywords"]
+            # hook-keywords 支持 JSON 数组字符串，也支持逗号分隔
+            if raw_keywords.startswith("["):
+                try:
+                    hook_keywords = json.loads(raw_keywords)
+                except Exception:
+                    hook_keywords = [s.strip() for s in raw_keywords.strip("[]").split(",")]
+            else:
+                hook_keywords = [s.strip() for s in raw_keywords.split(",")]
+            # 过滤空字符串
+            hook_keywords = [k for k in hook_keywords if k]
+        
+        hook_mode = str(meta.get("hook-mode") or "inject").strip().lower()
+        if hook_mode not in ("inject", "inline", "fork"):
+            hook_mode = "inject"
+
         return SkillDefinition(
             name=name,
             description=meta.get("description", ""),
@@ -189,6 +211,8 @@ def _parse_skill_file(file_path: Path, source: str, skill_dir: str) -> SkillDefi
             model=str(meta.get("model") or "").strip(),
             executable=executable,
             import_name=import_name,
+            hook_keywords=hook_keywords,
+            hook_mode=hook_mode,
         )
 
     except Exception:

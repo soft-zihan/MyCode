@@ -1,11 +1,166 @@
-import { useState, useEffect } from 'react';
-import { fetchSkills, fetchSkillEvolutionReport, fetchSkillEvolutionProvenance, fetchSkillEvolutionUsage, deleteSkill, Skill } from '../api/client';
-import { Wrench, RefreshCw, Activity, Edit3, Save, X, User, Folder, ChevronDown, ChevronRight, Trash2, Info, Power } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { fetchSkills, fetchSkillEvolutionStatus, fetchReplayPool, fetchChampion, fetchSkillProvenance, deleteSkill, Skill, SkillEvolutionStatus, ReplayPoolData, ChampionData } from '../api/client';
+import { Wrench, RefreshCw, Activity, Edit3, Save, X, User, Folder, Trash2, Power, Star, CheckCircle, AlertTriangle, Eye, EyeOff, Circle } from 'lucide-react';
 import { PageLayout } from '../components/PageLayout';
 
 interface SkillDetail extends Skill {
   prompt_template?: string;
   raw_content?: string;
+}
+
+function SkillEvolutionDetail({
+  skillName,
+  status,
+  replayPool,
+  champion,
+  provenance,
+  getStatusBadge,
+}: {
+  skillName: string;
+  status: SkillEvolutionStatus;
+  replayPool: ReplayPoolData | null;
+  champion: ChampionData | null;
+  provenance: any[];
+  getStatusBadge: (s: string) => React.ReactNode;
+}) {
+  const [expandedProv, setExpandedProv] = useState<number | null>(null);
+  const usage = status.usage_stats;
+  const maxUsage = Math.max(usage.retrieved, usage.relevant, usage.used, 1);
+
+  return (
+    <div className="space-y-4 border border-gray-200 rounded-lg p-4 bg-white">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <h3 className="text-sm font-bold text-gray-900">{skillName}</h3>
+          {getStatusBadge(status.status)}
+        </div>
+        {status.current_version && (
+          <span className="text-xs text-gray-500 font-mono">v{status.current_version}</span>
+        )}
+      </div>
+
+      {status.reasons.length > 0 && (
+        <div className="text-xs text-gray-500 bg-gray-50 rounded p-2">
+          {status.reasons.map((r, i) => <span key={i}>{r}{i < status.reasons.length - 1 ? ' · ' : ''}</span>)}
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-4">
+        <div>
+          <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Usage Stats</h4>
+          <div className="space-y-1.5">
+            {[
+              { label: 'Retrieved', value: usage.retrieved, color: 'bg-blue-500' },
+              { label: 'Relevant', value: usage.relevant, color: 'bg-green-500' },
+              { label: 'Used', value: usage.used, color: 'bg-purple-500' },
+            ].map(item => (
+              <div key={item.label} className="flex items-center gap-2 text-xs">
+                <span className="text-gray-500 w-16">{item.label}</span>
+                <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
+                  <div className={`h-full ${item.color} rounded-full`} style={{ width: `${(item.value / maxUsage) * 100}%` }} />
+                </div>
+                <span className="font-mono text-gray-700 w-8 text-right">{item.value}</span>
+              </div>
+            ))}
+            <div className="flex items-center justify-between text-xs pt-1 border-t border-gray-100">
+              <span className="text-gray-500">Pass rate</span>
+              <span className="font-mono font-medium text-gray-700">
+                {((status.rule_summary?.pass_rate || 0) * 100).toFixed(0)}%
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Evaluation Rules</h4>
+          <div className="space-y-1">
+            {(status.rule_summary?.outcomes || []).map((outcome: any, idx: number) => (
+              <div key={idx} className="flex items-center justify-between text-xs">
+                <span className="text-gray-600 truncate max-w-[160px]">{outcome.label || outcome.rule_id}</span>
+                <span className={outcome.passed ? 'text-green-600' : 'text-red-500'}>
+                  {outcome.passed ? 'PASS' : 'FAIL'}
+                </span>
+              </div>
+            ))}
+            {(!status.rule_summary?.outcomes || status.rule_summary.outcomes.length === 0) && (
+              <div className="text-xs text-gray-400">No rule outcomes</div>
+            )}
+          </div>
+          <div className="mt-2 pt-2 border-t border-gray-100 flex items-center justify-between text-xs">
+            <span className="text-gray-500">Hard failures</span>
+            <span className={`font-mono font-medium ${(status.rule_summary?.hard_failures || 0) > 0 ? 'text-red-600' : 'text-green-600'}`}>
+              {status.rule_summary?.hard_failures || 0}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {replayPool && replayPool.total_samples > 0 && (
+        <div>
+          <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
+            Replay Pool ({replayPool.total_samples} samples: {replayPool.dev_count} dev / {replayPool.test_count} test)
+          </h4>
+          <div className="max-h-40 overflow-y-auto space-y-1">
+            {replayPool.samples.map((sample, idx) => (
+              <div key={idx} className="flex items-center gap-2 text-[11px] py-1 px-2 bg-gray-50 rounded">
+                <span className={sample.ok ? 'text-green-500' : 'text-red-500'}>{sample.ok ? '✓' : '✗'}</span>
+                <span className="text-gray-500 font-mono">{sample.source_type}</span>
+                <span className={`px-1 py-0.5 rounded text-[10px] ${
+                  sample.split === 'promotion_test' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
+                }`}>{sample.split === 'promotion_test' ? 'test' : 'dev'}</span>
+                <span className="text-gray-600 truncate flex-1">{sample.latest_user}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {champion?.has_champion && champion.champion && (
+        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
+          <h4 className="text-xs font-semibold text-yellow-800 mb-2 flex items-center gap-1">
+            <Star className="w-3 h-3" /> Champion Version
+          </h4>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div><span className="text-gray-500">Version:</span> <span className="font-mono font-medium">{champion.champion.version}</span></div>
+            <div><span className="text-gray-500">Score:</span> <span className="font-mono font-medium">{champion.champion.average_score?.toFixed(2)}</span></div>
+            <div><span className="text-gray-500">Hard failures:</span> <span className="font-mono font-medium">{champion.champion.hard_failures}</span></div>
+            <div><span className="text-gray-500">Promoted:</span> <span className="font-mono">{champion.champion.promoted_at}</span></div>
+          </div>
+        </div>
+      )}
+
+      {provenance.length > 0 && (
+        <div>
+          <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
+            Evolution Timeline ({provenance.length} events)
+          </h4>
+          <div className="relative pl-4 border-l-2 border-gray-200 space-y-2 max-h-64 overflow-y-auto">
+            {provenance.map((entry, idx) => (
+              <div key={idx} className="relative">
+                <div className="absolute -left-[21px] top-1 w-3 h-3 rounded-full bg-blue-400 border-2 border-white" />
+                <div
+                  className="text-xs cursor-pointer hover:bg-gray-50 rounded p-1.5"
+                  onClick={() => setExpandedProv(expandedProv === idx ? null : idx)}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-gray-500 font-mono text-[10px]">{entry.time || ''}</span>
+                    <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded text-[10px]">{entry.action || 'event'}</span>
+                    {entry.version && <span className="font-mono text-gray-600">v{entry.version}</span>}
+                  </div>
+                  {entry.description && <div className="text-gray-600 mt-0.5">{entry.description}</div>}
+                  {expandedProv === idx && (
+                    <pre className="mt-1 text-[10px] font-mono text-gray-500 bg-gray-50 p-2 rounded overflow-x-auto">
+                      {JSON.stringify(entry, null, 2)}
+                    </pre>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function SkillsPage() {
@@ -14,15 +169,17 @@ export default function SkillsPage() {
   const [editContent, setEditContent] = useState<string>('');
   const [isEditing, setIsEditing] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [evolutionReport, setEvolutionReport] = useState<any>(null);
-  const [evolutionProvenance, setEvolutionProvenance] = useState<any[]>([]);
-  const [evolutionUsage, setEvolutionUsage] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'skills' | 'evolution'>('skills');
   const [filterSource, setFilterSource] = useState<'all' | 'user' | 'project'>('all');
-  const [expandedProvenance, setExpandedProvenance] = useState<number | null>(null);
   const [disabledSkills, setDisabledSkills] = useState<Set<string>>(new Set());
+  const [evoSkillStatuses, setEvoSkillStatuses] = useState<Map<string, SkillEvolutionStatus>>(new Map());
+  const [evoSelectedSkill, setEvoSelectedSkill] = useState<string | null>(null);
+  const [evoReplayPool, setEvoReplayPool] = useState<ReplayPoolData | null>(null);
+  const [evoChampion, setEvoChampion] = useState<ChampionData | null>(null);
+  const [evoProvenance, setEvoProvenance] = useState<any[]>([]);
+  const [evoLoading, setEvoLoading] = useState(false);
 
   // Load disabled skills from localStorage
   useEffect(() => {
@@ -47,16 +204,8 @@ export default function SkillsPage() {
     setLoading(true);
     setError(null);
     try {
-      const [skillsData, reportData, provenanceData, usageData] = await Promise.all([
-        fetchSkills(),
-        fetchSkillEvolutionReport(),
-        fetchSkillEvolutionProvenance(),
-        fetchSkillEvolutionUsage(),
-      ]);
+      const skillsData = await fetchSkills();
       setSkills(skillsData);
-      setEvolutionReport(reportData);
-      setEvolutionProvenance(provenanceData);
-      setEvolutionUsage(usageData);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load data');
     } finally {
@@ -125,6 +274,73 @@ export default function SkillsPage() {
 
   const userSkills = skills.filter(s => s.source === 'user');
   const projectSkills = skills.filter(s => s.source === 'project');
+
+  const loadEvolutionData = useCallback(async () => {
+    setEvoLoading(true);
+    try {
+      const statuses = await Promise.all(
+        skills.map(async (s) => {
+          try {
+            const status = await fetchSkillEvolutionStatus(s.name);
+            return [s.name, status] as const;
+          } catch {
+            return null;
+          }
+        })
+      );
+      const map = new Map<string, SkillEvolutionStatus>();
+      for (const entry of statuses) {
+        if (entry) {
+          map.set(entry[0], entry[1]);
+        }
+      }
+      setEvoSkillStatuses(map);
+    } catch (err) {
+      console.error('Failed to load evolution data:', err);
+    } finally {
+      setEvoLoading(false);
+    }
+  }, [skills]);
+
+  useEffect(() => {
+    if (activeTab === 'evolution' && skills.length > 0) {
+      loadEvolutionData();
+    }
+  }, [activeTab, skills, loadEvolutionData]);
+
+  const loadEvoSkillDetail = useCallback(async (skillName: string) => {
+    setEvoSelectedSkill(skillName);
+    try {
+      const [pool, champion, prov] = await Promise.all([
+        fetchReplayPool(skillName).catch(() => null),
+        fetchChampion(skillName).catch(() => null),
+        fetchSkillProvenance(skillName).catch(() => []),
+      ]);
+      setEvoReplayPool(pool);
+      setEvoChampion(champion);
+      setEvoProvenance(prov);
+    } catch (err) {
+      console.error('Failed to load evolution detail:', err);
+    }
+  }, []);
+
+  const statusConfig: Record<string, { color: string; icon: React.ReactNode; label: string }> = {
+    healthy: { color: 'text-green-600 bg-green-50 border-green-200', icon: <CheckCircle className="w-3 h-3" />, label: 'Healthy' },
+    watch: { color: 'text-yellow-600 bg-yellow-50 border-yellow-200', icon: <AlertTriangle className="w-3 h-3" />, label: 'Watch' },
+    incubating: { color: 'text-blue-600 bg-blue-50 border-blue-200', icon: <Circle className="w-3 h-3" />, label: 'Incubating' },
+    unobserved: { color: 'text-gray-500 bg-gray-50 border-gray-200', icon: <EyeOff className="w-3 h-3" />, label: 'Unobserved' },
+    pruned: { color: 'text-red-600 bg-red-50 border-red-200', icon: <Eye className="w-3 h-3" />, label: 'Pruned' },
+  };
+
+  const getStatusBadge = (status: string) => {
+    const cfg = statusConfig[status] || statusConfig.unobserved;
+    return (
+      <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-medium ${cfg.color}`}>
+        {cfg.icon}
+        {cfg.label}
+      </span>
+    );
+  };
 
   if (loading) {
     return (
@@ -339,145 +555,95 @@ export default function SkillsPage() {
         )}
 
         {activeTab === 'evolution' && (
-          <div className="p-6 space-y-6">
-            {/* Introduction */}
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-              <div className="flex items-start gap-3">
-                <Info className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
-                <div className="text-sm text-gray-700">
-                  <p className="font-semibold text-blue-900 mb-2">What is Skill Evolution?</p>
-                  <p className="mb-2">
-                    Skills can automatically improve through usage. When you use a skill, the system analyzes the interaction 
-                    and may suggest improvements to the skill's prompt template. This creates a feedback loop where skills 
-                    become more effective over time.
-                  </p>
-                  <p className="mb-2">
-                    <strong>How it works:</strong> After each skill invocation, the system evaluates the outcome and generates 
-                    evolution suggestions. These suggestions are tracked in the provenance log, showing how skills have changed 
-                    and why.
-                  </p>
-                  <p>
-                    <strong>Below you'll find:</strong> Evolution reports showing improvement metrics, provenance logs tracking 
-                    all changes, and usage statistics showing how often each skill is invoked.
-                  </p>
-                </div>
+          <div className="h-full flex flex-col">
+            <div className="p-4 border-b border-gray-200 flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                  <Activity className="w-5 h-5 text-blue-500" />
+                  Skill Evolution
+                </h2>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  {evoSkillStatuses.size} skills evaluated
+                  {evoLoading && ' (loading...)'}
+                </p>
               </div>
+              <button
+                onClick={loadEvolutionData}
+                disabled={evoLoading}
+                className="flex items-center gap-1 px-3 py-1.5 bg-blue-500 text-white rounded text-xs hover:bg-blue-600 transition-colors disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3 h-3 ${evoLoading ? 'animate-spin' : ''}`} />
+                Refresh
+              </button>
             </div>
 
-            {/* Evolution Report */}
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                <Activity className="w-5 h-5 text-blue-500" />
-                Evolution Report
-              </h2>
-              <p className="text-sm text-gray-600 mb-3">
-                Shows improvement metrics for skills that have undergone evolution. Higher scores indicate better performance after evolution.
-              </p>
-              {evolutionReport?.status === 'no_report' ? (
-                <div className="text-sm text-gray-500 bg-gray-50 rounded-lg p-4">No evolution report available</div>
-              ) : evolutionReport?.status === 'ok' && evolutionReport.report ? (
-                <div className="space-y-4">
-                  {Object.entries(evolutionReport.report).map(([key, value]) => (
-                    <div key={key} className="bg-gray-50 rounded-lg p-4 border border-gray-200">
-                      <h3 className="text-sm font-semibold text-gray-700 mb-2 uppercase tracking-wider">{key}</h3>
-                      {typeof value === 'object' && value !== null ? (
-                        <div className="space-y-2">
-                          {Object.entries(value as Record<string, any>).map(([k, v]) => (
-                            <div key={k} className="flex items-start gap-2">
-                              <span className="text-xs font-medium text-gray-500 min-w-[120px]">{k}:</span>
-                              <span className="text-sm text-gray-900">
-                                {typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v)}
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              <div className="bg-gray-50 rounded-lg border border-gray-200 overflow-hidden">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="bg-gray-100 border-b border-gray-200">
+                      <th className="text-left px-3 py-2 font-medium text-gray-600">Skill</th>
+                      <th className="text-left px-3 py-2 font-medium text-gray-600">Status</th>
+                      <th className="text-right px-3 py-2 font-medium text-gray-600">Retrieved</th>
+                      <th className="text-right px-3 py-2 font-medium text-gray-600">Used</th>
+                      <th className="text-right px-3 py-2 font-medium text-gray-600">Replay</th>
+                      <th className="text-left px-3 py-2 font-medium text-gray-600">Champion</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {skills.map(skill => {
+                      const evoStatus = evoSkillStatuses.get(skill.name);
+                      return (
+                        <tr
+                          key={skill.name}
+                          className={`border-b border-gray-100 cursor-pointer hover:bg-blue-50 transition-colors ${
+                            evoSelectedSkill === skill.name ? 'bg-blue-50' : ''
+                          }`}
+                          onClick={() => loadEvoSkillDetail(skill.name)}
+                        >
+                          <td className="px-3 py-2">
+                            <span className="font-medium text-gray-900">{skill.name}</span>
+                          </td>
+                          <td className="px-3 py-2">
+                            {evoStatus ? getStatusBadge(evoStatus.status) : (
+                              <span className="text-gray-400">—</span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono text-gray-700">
+                            {evoStatus?.usage_stats?.retrieved ?? '—'}
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono text-gray-700">
+                            {evoStatus?.usage_stats?.used ?? '—'}
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono text-gray-700">
+                            {evoStatus?.replay_pool_size ?? '—'}
+                          </td>
+                          <td className="px-3 py-2">
+                            {evoStatus?.champion?.version ? (
+                              <span className="px-1.5 py-0.5 bg-yellow-100 text-yellow-700 rounded text-[10px] font-mono">
+                                <Star className="w-2.5 h-2.5 inline mr-0.5" />
+                                {evoStatus.champion.version}
                               </span>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <span className="text-sm text-gray-900">{String(value)}</span>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-sm text-red-500">Error: {evolutionReport?.error || 'Unknown error'}</div>
-              )}
-            </div>
+                            ) : (
+                              <span className="text-gray-400">—</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
 
-            {/* Provenance Log */}
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                <Activity className="w-5 h-5 text-purple-500" />
-                Provenance Log ({evolutionProvenance.length} entries)
-              </h2>
-              {evolutionProvenance.length === 0 ? (
-                <div className="text-sm text-gray-500 bg-gray-50 rounded-lg p-4">No provenance data available</div>
-              ) : (
-                <div className="space-y-2">
-                  {evolutionProvenance.map((entry, idx) => (
-                    <div key={idx} className="bg-gray-50 rounded-lg border border-gray-200 overflow-hidden">
-                      <div
-                        className="p-3 cursor-pointer hover:bg-gray-100 flex items-center justify-between"
-                        onClick={() => setExpandedProvenance(expandedProvenance === idx ? null : idx)}
-                      >
-                        <div className="flex items-center gap-3">
-                          {expandedProvenance === idx ? (
-                            <ChevronDown className="w-4 h-4 text-gray-400" />
-                          ) : (
-                            <ChevronRight className="w-4 h-4 text-gray-400" />
-                          )}
-                          <span className="text-sm font-medium text-gray-900">
-                            {entry.action || entry.event || `Entry ${idx + 1}`}
-                          </span>
-                          {entry.skill_name && (
-                            <span className="px-2 py-0.5 text-xs bg-blue-100 text-blue-700 rounded">
-                              {entry.skill_name}
-                            </span>
-                          )}
-                        </div>
-                        {entry.timestamp && (
-                          <span className="text-xs text-gray-400">{entry.timestamp}</span>
-                        )}
-                      </div>
-                      {expandedProvenance === idx && (
-                        <div className="p-3 border-t border-gray-200 bg-white">
-                          <pre className="text-xs font-mono text-gray-700 whitespace-pre-wrap overflow-x-auto">
-                            {JSON.stringify(entry, null, 2)}
-                          </pre>
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Usage Statistics */}
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900 mb-3 flex items-center gap-2">
-                <Activity className="w-5 h-5 text-green-500" />
-                Usage Statistics
-              </h2>
-              {Object.keys(evolutionUsage || {}).length === 0 ? (
-                <div className="text-sm text-gray-500 bg-gray-50 rounded-lg p-4">No usage data available</div>
-              ) : (
-                <div className="space-y-3">
-                  {Object.entries(evolutionUsage).map(([skillName, stats]) => (
-                    <div key={skillName} className="bg-gray-50 rounded-lg p-4 border border-gray-200">
-                      <h3 className="text-sm font-semibold text-gray-900 mb-2">{skillName}</h3>
-                      {typeof stats === 'object' && stats !== null ? (
-                        <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-                          {Object.entries(stats as Record<string, any>).map(([k, v]) => (
-                            <div key={k} className="bg-white rounded p-2 border border-gray-100">
-                              <div className="text-xs text-gray-500">{k}</div>
-                              <div className="text-sm font-semibold text-gray-900">{String(v)}</div>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <span className="text-sm text-gray-900">{String(stats)}</span>
-                      )}
-                    </div>
-                  ))}
-                </div>
+              {evoSelectedSkill && evoSkillStatuses.get(evoSelectedSkill) && (
+                <SkillEvolutionDetail
+                  skillName={evoSelectedSkill}
+                  status={evoSkillStatuses.get(evoSelectedSkill)!}
+                  replayPool={evoReplayPool}
+                  champion={evoChampion}
+                  provenance={evoProvenance}
+                  getStatusBadge={getStatusBadge}
+                />
               )}
             </div>
           </div>

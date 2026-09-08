@@ -115,62 +115,73 @@ class SessionLifecycle:
         return describe_messages(messages, True)
 
     def delete_messages(self, session: Any, indexes: list[int]) -> str:
-        from .context_edit import delete_message_group
+        """删除指定 index 的消息组。
+        
+        使用 mark_deleted() 写入标记事件，不重建事件日志。
+        """
+        from .context_edit import message_group
+        
+        # 建立 message index -> event seq 的映射
         messages = session.get_messages_for_llm()
-        referenced_before = _referenced_store_keys(messages)
-        total_deleted = 0
+        index_to_seqs = {}
+        msg_idx = 0
+        for event in session._log:
+            t = event.get("type")
+            if t in ("user_message", "assistant_message", "tool_result_msg"):
+                index_to_seqs[msg_idx] = event.get("seq")
+                msg_idx += 1
+        
+        # 找出要删除的 seq
+        seqs_to_delete = []
         for idx in sorted(set(indexes)):
-            messages, deleted = delete_message_group(messages, idx, True)
-            total_deleted += deleted
+            if idx < 0 or idx >= len(messages):
+                continue
+            # 找出该 index 对应的消息组
+            group = message_group(messages, idx, True)
+            for group_idx in group:
+                if group_idx in index_to_seqs:
+                    seqs_to_delete.append(index_to_seqs[group_idx])
         
-        # 重建事件日志
-        self._rebuild_event_log(session, messages)
-        _drop_orphaned_store_entries(self._context_store, referenced_before, messages)
-        return f"Deleted {total_deleted} message(s). Context now: {len(messages)} messages."
-
+        # 标记为删除
+        session.mark_deleted(seqs_to_delete, trigger="manual")
+        
+        return f"Deleted {len(seqs_to_delete)} message(s)."
+    
     def keep_messages(self, session: Any, indexes: list[int]) -> str:
-        from .context_edit import keep_only_groups
+        """只保留指定 index 的消息组。
+        
+        使用 mark_deleted() 写入标记事件，不重建事件日志。
+        """
+        from .context_edit import message_group
+        
+        # 建立 message index -> event seq 的映射
         messages = session.get_messages_for_llm()
-        referenced_before = _referenced_store_keys(messages)
-        kept, deleted = keep_only_groups(messages, indexes, True)
+        index_to_seqs = {}
+        msg_idx = 0
+        for event in session._log:
+            t = event.get("type")
+            if t in ("user_message", "assistant_message", "tool_result_msg"):
+                index_to_seqs[msg_idx] = event.get("seq")
+                msg_idx += 1
         
-        # 重建事件日志
-        self._rebuild_event_log(session, kept)
-        _drop_orphaned_store_entries(self._context_store, referenced_before, kept)
-        return f"Kept {len(kept)} message(s), removed {deleted}. Context now: {len(kept)} messages."
-
-    def _rebuild_event_log(self, session: Any, messages: list[dict]) -> None:
-        """从消息列表重建事件日志。"""
-        # 保留非消息事件（如 turn/start, turn/end 等）
-        non_msg_events = [e for e in session._log if e.get("type") not in ("user_message", "assistant_message", "tool_result_msg")]
+        # 找出要保留的 seq
+        seqs_to_keep = set()
+        for idx in sorted(set(indexes)):
+            if idx < 0 or idx >= len(messages):
+                continue
+            group = message_group(messages, idx, True)
+            for group_idx in group:
+                if group_idx in index_to_seqs:
+                    seqs_to_keep.add(index_to_seqs[group_idx])
         
-        # 重建消息事件
-        new_events = []
-        for msg in messages:
-            role = msg.get("role")
-            if role == "system":
-                continue  # 系统提示词单独存储
-            elif role == "user":
-                new_events.append({"type": "user_message", "content": msg.get("content", "")})
-            elif role == "assistant":
-                new_events.append({
-                    "type": "assistant_message",
-                    "content": msg.get("content", ""),
-                    "thinking": msg.get("thinking"),
-                    "tool_calls": msg.get("tool_calls"),
-                })
-            elif role == "tool":
-                new_events.append({
-                    "type": "tool_result_msg",
-                    "call_id": msg.get("tool_call_id"),
-                    "content": msg.get("content", ""),
-                })
+        # 找出要删除的 seq（所有消息 seq - 要保留的 seq）
+        all_msg_seqs = set(index_to_seqs.values())
+        seqs_to_delete = list(all_msg_seqs - seqs_to_keep)
         
-        # 合并事件（保留顺序）
-        session._log = non_msg_events + new_events
-        # 重新编号
-        for i, event in enumerate(session._log):
-            event["seq"] = i
+        # 标记为删除
+        session.mark_deleted(seqs_to_delete, trigger="manual")
+        
+        return f"Kept {len(seqs_to_keep)} message(s), removed {len(seqs_to_delete)}."
 
     # ── 序列化 ──
 

@@ -76,7 +76,6 @@ class AgentLoop:
                 self._agent.mark_aborted()
                 break
 
-            self._agent.run_compression_pipeline()
             await self._consume_memory_prefetch()
 
             self._agent.session.append("step/start", {
@@ -435,6 +434,7 @@ class AgentLoop:
                         usage = {
                             "prompt_tokens": chunk.usage.prompt_tokens,
                             "completion_tokens": chunk.usage.completion_tokens,
+                            "cached_tokens": chunk.usage.prompt_tokens_details.cached_tokens if chunk.usage.prompt_tokens_details else 0,
                         }
 
                     if not chunk.choices:
@@ -507,11 +507,17 @@ class AgentLoop:
                 usage = result.get("usage", {}) if isinstance(result, dict) else {}
                 input_tokens = usage.get("prompt_tokens", 0)
                 output_tokens = usage.get("completion_tokens", 0)
+                cached_tokens = usage.get("cached_tokens", 0)
                 duration_s = round(time.time() - _model_t0, 2)
                 span.set_attribute("input_tokens", input_tokens)
                 span.set_attribute("output_tokens", output_tokens)
+                span.set_attribute("cached_tokens", cached_tokens)
                 span.set_attribute("duration_s", duration_s)
                 span.set_attribute("success", True)
+                
+                from agents.observability.cost_tracker import record_tokens
+                record_tokens(a.model, input_tokens, output_tokens, cached_tokens)
+                
                 return result
             except asyncio.TimeoutError:
                 duration_s = round(time.time() - _model_t0, 2)

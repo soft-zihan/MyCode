@@ -247,7 +247,7 @@ paper/
 .playwright-mcp/
 .idea/
 .mycode/
-.mycode/
+.bear/
 
 # Project learning (cloned repos for reference)
 project-learning/
@@ -271,4 +271,4 @@ output/
 data/
 .opencode/
 projects/
-.bear/
+.mycode/

@@ -733,3 +733,124 @@ export async function clearRevert(planId: string): Promise<RevertResult> {
   const data = await res.json();
   return data.result;
 }
+
+export interface CompressionStats {
+  utilization: number;
+  token_count: number;
+  effective_window: number;
+  context_window: number;
+  l1_budget: { triggered: number; tokens_saved: number };
+  l2_snip: { triggered: number; tokens_saved: number };
+  l3_microcompact: { triggered: number; tokens_saved: number };
+  l4_fold: { triggered: number; last_fold_time: string | null };
+  folded_memories: any[];
+}
+
+export async function fetchCompressionStats(sessionId: string): Promise<CompressionStats> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/compression-stats`);
+  if (!res.ok) throw new Error('Failed to fetch compression stats');
+  return res.json();
+}
+
+export interface ContextStoreEntry {
+  key: string;
+  raw_size: number;
+  abstract: string;
+  dropped: boolean;
+}
+
+export interface ContextStoreData {
+  entries: ContextStoreEntry[];
+  total_entries: number;
+  total_raw_size: number;
+  active_entries: number;
+}
+
+export async function fetchContextStore(sessionId: string): Promise<ContextStoreData> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/context-store`);
+  if (!res.ok) throw new Error('Failed to fetch context store');
+  return res.json();
+}
+
+export interface SkillEvolutionStatus {
+  skill_name: string;
+  status: string;
+  reasons: string[];
+  rule_summary: any;
+  usage_stats: { retrieved: number; relevant: number; used: number; relevance_rate: number; used_rate: number };
+  replay_pool_size: number;
+  replay: any;
+  champion: any;
+  rules: any[];
+  current_version: string;
+  lineage_id: string;
+}
+
+export async function fetchSkillEvolutionStatus(skillName: string): Promise<SkillEvolutionStatus> {
+  const res = await fetch(`${API_BASE}/skill-evolution/status/${skillName}`);
+  if (!res.ok) throw new Error('Failed to fetch skill evolution status');
+  return res.json();
+}
+
+export interface ReplayPoolSample {
+  sample_id: string;
+  source_type: string;
+  split: string;
+  time: string;
+  ok: boolean;
+  latest_user: string;
+  latest_assistant: string;
+}
+
+export interface ReplayPoolData {
+  skill_name: string;
+  total_samples: number;
+  dev_count: number;
+  test_count: number;
+  samples: ReplayPoolSample[];
+}
+
+export async function fetchReplayPool(skillName: string): Promise<ReplayPoolData> {
+  const res = await fetch(`${API_BASE}/skill-evolution/replay-pool/${skillName}`);
+  if (!res.ok) throw new Error('Failed to fetch replay pool');
+  return res.json();
+}
+
+export interface ChampionData {
+  skill_name: string;
+  has_champion: boolean;
+  champion?: {
+    version: string;
+    average_score: number;
+    hard_failures: number;
+    promoted_at: string;
+    summary: any;
+  };
+}
+
+export async function fetchChampion(skillName: string): Promise<ChampionData> {
+  const res = await fetch(`${API_BASE}/skill-evolution/champion/${skillName}`);
+  if (!res.ok) throw new Error('Failed to fetch champion');
+  return res.json();
+}
+
+export async function fetchSkillProvenance(skillName: string): Promise<any[]> {
+  const res = await fetch(`${API_BASE}/skill-evolution/provenance/${skillName}`);
+  if (!res.ok) throw new Error('Failed to fetch skill provenance');
+  return res.json();
+}
+
+export interface TraceStatus {
+  enabled: boolean;
+  otel_enabled: boolean;
+  phoenix_endpoint: string;
+  phoenix_reachable: boolean;
+  path: string;
+  events: any[];
+}
+
+export async function fetchTraceStatus(): Promise<TraceStatus> {
+  const res = await fetch(`${API_BASE}/trace`);
+  if (!res.ok) throw new Error('Failed to fetch trace status');
+  return res.json();
+}

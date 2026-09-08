@@ -197,7 +197,7 @@ def _apply_context_used(state: int, event: dict[str, Any]) -> int:
     event_type = event.get("type")
     if event_type == "stats":
         return event.get("last_input_token_count", state)
-    if event_type == "context/compacted":
+    if event_type in ("context/compacted", "context/tool_snipped", "context/session_folded", "context/events_deleted"):
         return event.get("last_input_token_count", state)
     return state
 
@@ -210,7 +210,7 @@ def _apply_context_total(state: int, event: dict[str, Any]) -> int:
     event_type = event.get("type")
     if event_type == "stats":
         return event.get("context_window", state)
-    if event_type == "context/compacted":
+    if event_type in ("context/compacted", "context/tool_snipped", "context/session_folded", "context/events_deleted"):
         return event.get("context_window", state)
     return state
 

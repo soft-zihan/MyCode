@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Clock, RefreshCw, Power, Filter, Activity, Cpu, HardDrive, Zap } from 'lucide-react';
-import { fetchTraceEvents, fetchTraceFiles, toggleTrace, TraceEvent, TraceFile } from '../api/client';
+import { Clock, RefreshCw, Power, Filter, Activity, Cpu, HardDrive, Zap, ExternalLink } from 'lucide-react';
+import { fetchTraceEvents, fetchTraceFiles, toggleTrace, fetchTraceStatus, TraceEvent, TraceFile, TraceStatus } from '../api/client';
 import { TrajectoryTimeline } from '../components/chat/TrajectoryTimeline';
 import { PageLayout } from '../components/PageLayout';
 
@@ -40,6 +40,7 @@ export default function TracePage() {
   
   const lastEventCountRef = useRef(0);
   const isInitialLoadRef = useRef(true);
+  const [traceStatus, setTraceStatus] = useState<TraceStatus | null>(null);
 
   const loadTraceFiles = useCallback(async () => {
     setFilesLoading(true);
@@ -84,8 +85,8 @@ export default function TracePage() {
 
   useEffect(() => {
     loadTraceFiles();
-    // 初始加载时也调用 loadTrace，即使没有 selectedSession
     loadTrace();
+    fetchTraceStatus().then(setTraceStatus).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -285,6 +286,36 @@ export default function TracePage() {
     </div>
   );
 
+  const otelEnabled = traceStatus?.otel_enabled ?? enabled;
+  const phoenixEndpoint = traceStatus?.phoenix_endpoint || tracePath;
+  const phoenixReachable = traceStatus?.phoenix_reachable ?? false;
+
+  if (otelEnabled && phoenixReachable) {
+    return (
+      <div className="h-full flex flex-col bg-white">
+        <div className="flex items-center gap-3 px-4 py-2 border-b bg-green-50 border-green-200">
+          <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+          <span className="text-sm font-medium text-green-800">OTel Active</span>
+          <span className="text-sm text-gray-500">
+            Phoenix: <a href={phoenixEndpoint} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">{phoenixEndpoint}</a>
+          </span>
+          <button
+            onClick={() => window.open(phoenixEndpoint, '_blank')}
+            className="ml-auto flex items-center gap-1 text-sm px-3 py-1 bg-white border border-green-300 rounded hover:bg-green-50 transition-colors"
+          >
+            <ExternalLink className="w-3 h-3" />
+            Open in new tab
+          </button>
+        </div>
+        <iframe
+          src={phoenixEndpoint}
+          className="flex-1 w-full border-0"
+          title="Phoenix Trace Viewer"
+        />
+      </div>
+    );
+  }
+
   return (
     <PageLayout sidebarContent={sidebarContent}>
       <div className="h-full flex flex-col bg-white">
@@ -297,9 +328,21 @@ export default function TracePage() {
               </h1>
               <p className="text-xs text-gray-500 mt-1">
                 {timelineEvents.length} events •
-                Status: <span className={enabled ? 'text-green-600 font-medium' : 'text-gray-400'}>
-                  {enabled ? 'ON' : 'OFF'}
+                Status: <span className={otelEnabled ? 'text-green-600 font-medium' : 'text-gray-400'}>
+                  {otelEnabled ? 'ON' : 'OFF'}
                 </span>
+                {otelEnabled && !phoenixReachable && phoenixEndpoint && (
+                  <span className="ml-2 text-yellow-600">
+                    Phoenix unreachable — showing fallback view
+                  </span>
+                )}
+                {phoenixEndpoint && (
+                  <span className="ml-2">
+                    <a href={phoenixEndpoint} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">
+                      Open Phoenix ↗
+                    </a>
+                  </span>
+                )}
               </p>
             </div>
             <div className="flex items-center gap-2">

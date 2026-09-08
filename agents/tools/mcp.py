@@ -23,7 +23,7 @@ MCP 客户端模块。
         },
         "http-server": {
             "url": "http://localhost:8080/mcp",
-            "headers": {"Authorization": "Bearer ..."}
+            "headers": {"Authorization": "Mycode ..."}
         }
     }
 }

@@ -22,18 +22,27 @@ def get_phoenix_endpoint() -> str:
 
 @router.get("/api/trace")
 def api_trace_events(n: int = 50, session: Optional[str] = None) -> dict[str, Any]:
-    """获取 trace 事件（从 Phoenix 读取）。"""
+    otel_enabled = os.environ.get("MYCODE_OTEL", "").strip() not in ("", "0")
     phoenix_endpoint = get_phoenix_endpoint()
-    
-    # TODO: 实现从 Phoenix GraphQL API 读取
-    # 目前返回空列表，前端会显示 "Phoenix 未启动" 提示
+
+    phoenix_reachable = False
+    if otel_enabled:
+        try:
+            import httpx
+            with httpx.Client(timeout=2) as client:
+                resp = client.get(f"{phoenix_endpoint}/health")
+                phoenix_reachable = resp.status_code == 200
+        except Exception:
+            pass
+
     return {
-        "enabled": True,
+        "enabled": otel_enabled,
         "path": phoenix_endpoint,
         "phoenix_endpoint": phoenix_endpoint,
+        "phoenix_reachable": phoenix_reachable,
+        "otel_enabled": otel_enabled,
         "session": session,
         "events": [],
-        "message": "Phoenix integration pending - use Phoenix UI directly at http://localhost:6006",
     }
 
 

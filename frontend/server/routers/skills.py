@@ -135,3 +135,121 @@ def api_skill_evolution_usage() -> dict[str, Any]:
         return json.loads(usage_path.read_text())
     except Exception:
         return {}
+
+
+def _load_eval_report() -> dict[str, Any] | None:
+    report_path = project_root / ".mycode" / "skill-evolution" / "online_eval_report.json"
+    if not report_path.exists():
+        return None
+    try:
+        return json.loads(report_path.read_text())
+    except Exception:
+        return None
+
+
+def _find_skill_in_report(report: dict[str, Any], skill_name: str) -> dict[str, Any] | None:
+    skills = report.get("skills") if isinstance(report.get("skills"), list) else []
+    for s in skills:
+        if s.get("skill") == skill_name:
+            return s
+    return None
+
+
+@router.get("/api/skill-evolution/status/{skill_name}")
+def api_skill_evolution_status(skill_name: str) -> dict[str, Any]:
+    report = _load_eval_report()
+    if report is None:
+        raise HTTPException(status_code=404, detail="No evaluation report available. Run evaluation first.")
+    skill_data = _find_skill_in_report(report, skill_name)
+    if skill_data is None:
+        raise HTTPException(status_code=404, detail=f"Skill not found in report: {skill_name}")
+    return {
+        "skill_name": skill_name,
+        "status": skill_data.get("status", "unknown"),
+        "reasons": skill_data.get("reasons", []),
+        "rule_summary": skill_data.get("eval", {}),
+        "usage_stats": {
+            "retrieved": skill_data.get("retrieved", 0),
+            "relevant": skill_data.get("relevant", 0),
+            "used": skill_data.get("used", 0),
+            "relevance_rate": skill_data.get("relevance_rate", 0),
+            "used_rate": skill_data.get("used_rate", 0),
+        },
+        "replay_pool_size": skill_data.get("replay", {}).get("count", 0),
+        "replay": skill_data.get("replay", {}),
+        "champion": skill_data.get("artifacts", {}).get("promotion", {}),
+        "rules": skill_data.get("eval", {}).get("rules", []),
+        "current_version": skill_data.get("current_version", ""),
+        "lineage_id": skill_data.get("lineage_id", ""),
+    }
+
+
+@router.get("/api/skill-evolution/replay-pool/{skill_name}")
+def api_skill_evolution_replay_pool(skill_name: str) -> dict[str, Any]:
+    from agents.skills.eval_replay import _build_replay_pool, _rows_by_skill, _active_skill_snapshots
+    from agents.skills.eval_rules import _compile_eval_rules
+    from agents.skills.eval_champion import _lineage_id_for_skill
+    from agents._utils import read_jsonl as _read_jsonl, read_json as _read_json
+    from agents.skills.skill_file_ops import ONLINE_PROVENANCE_LOG, SKILL_USAGE_STATS, get_evolution_dir
+
+    root = get_evolution_dir()
+    provenance_rows = _read_jsonl(root / ONLINE_PROVENANCE_LOG)
+    provenance_index = _read_json(root / "online_provenance_index.json", {})
+    grouped_rows = _rows_by_skill(provenance_rows)
+    lineage_raw = provenance_index.get(skill_name, {}) if isinstance(provenance_index, dict) else {}
+    lineage = lineage_raw if isinstance(lineage_raw, dict) else {}
+    active_skills = _active_skill_snapshots()
+    snapshot = active_skills.get(skill_name, {"name": skill_name, "description": "", "when_to_use": "", "instructions": ""})
+
+    pool = _build_replay_pool(skill_name, grouped_rows.get(skill_name, []), lineage, freeze=False)
+    return {
+        "skill_name": skill_name,
+        "total_samples": len(pool),
+        "dev_count": len([s for s in pool if s.get("split") == "mutate_dev"]),
+        "test_count": len([s for s in pool if s.get("split") == "promotion_test"]),
+        "samples": [
+            {
+                "sample_id": s.get("sample_id", ""),
+                "source_type": s.get("source_type", ""),
+                "split": s.get("split", ""),
+                "time": s.get("time", ""),
+                "ok": s.get("ok", True),
+                "latest_user": (s.get("latest_user", "") or "")[:200],
+                "latest_assistant": (s.get("latest_assistant", "") or "")[:200],
+            }
+            for s in pool
+        ],
+    }
+
+
+@router.get("/api/skill-evolution/champion/{skill_name}")
+def api_skill_evolution_champion(skill_name: str) -> dict[str, Any]:
+    from agents.skills.eval_champion import _lineage_id_for_skill, _load_champion
+    lineage_id = _lineage_id_for_skill(skill_name)
+    champion = _load_champion(lineage_id)
+    if not champion:
+        return {"skill_name": skill_name, "has_champion": False}
+    return {
+        "skill_name": skill_name,
+        "has_champion": True,
+        "champion": {
+            "version": champion.get("version", ""),
+            "average_score": champion.get("average_score", 0),
+            "hard_failures": champion.get("hard_failures", 0),
+            "promoted_at": champion.get("promoted_at", ""),
+            "summary": champion.get("summary", {}),
+        },
+    }
+
+
+@router.get("/api/skill-evolution/provenance/{skill_name}")
+def api_skill_evolution_skill_provenance(skill_name: str) -> list[dict[str, Any]]:
+    provenance_path = project_root / ".mycode" / "skill-evolution" / "online_provenance.jsonl"
+    if not provenance_path.exists():
+        return []
+    try:
+        lines = provenance_path.read_text().splitlines()
+        all_entries = [json.loads(line) for line in lines if line.strip()]
+        return [e for e in all_entries if e.get("skill") == skill_name or e.get("skill_name") == skill_name]
+    except Exception:
+        return []

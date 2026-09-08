@@ -1,7 +1,14 @@
-"""运行时抽象层 - 支持本地和 Docker 容器执行"""
+"""运行时抽象层 - 支持本地和 Docker 容器执行
+
+环境变量：
+- MYCODE_DOCKER_CONTAINER: Docker 容器 ID，设置后自动启用 DockerRuntime
+- MYCODE_DOCKER_WORKDIR: 容器内工作目录（默认 /testbed）
+- MYCODE_DOCKER_CONDA: conda 环境名（默认 testbed）
+"""
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Protocol
@@ -183,10 +190,27 @@ class DockerRuntime:
 
 # 全局运行时实例
 _current_runtime: Runtime | None = None
+_initialized: bool = False
+
+
+def _auto_init() -> None:
+    """根据环境变量自动初始化运行时。"""
+    global _initialized
+    if _initialized:
+        return
+    _initialized = True
+    container = os.environ.get("MYCODE_DOCKER_CONTAINER", "").strip()
+    if container:
+        set_docker_runtime(
+            container,
+            workdir=os.environ.get("MYCODE_DOCKER_WORKDIR", "/testbed"),
+            conda_env=os.environ.get("MYCODE_DOCKER_CONDA", "testbed"),
+        )
 
 
 def get_runtime() -> Runtime:
     """获取当前运行时"""
+    _auto_init()
     return _current_runtime or LocalRuntime()
 
 

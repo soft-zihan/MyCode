@@ -49,9 +49,11 @@ start_backend() {
     log "启动后端 (FastAPI @ port $BACKEND_PORT) ..."
     cd "$PROJECT_ROOT"
     source .venv/bin/activate
+    export MYCODE_OTEL="${MYCODE_OTEL:-1}"
+    export MYCODE_OTEL_ENDPOINT="${MYCODE_OTEL_ENDPOINT:-http://localhost:4317}"
     nohup python frontend/server/main.py > "$PROJECT_ROOT/logs/.backend.log" 2>&1 &
     echo $! > "$PIDFILE_BACKEND"
-    log "后端已启动 (pid=$!, log=.backend.log)"
+    log "后端已启动 (pid=$!, log=.backend.log) [OTEL=$MYCODE_OTEL]"
 }
 
 start_frontend() {

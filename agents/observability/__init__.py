@@ -34,3 +34,9 @@ def init_tracing() -> None:
             OpenAIInstrumentor().instrument()
         except ImportError:
             pass
+
+    try:
+        from .cost_tracker import init_cost_metrics
+        init_cost_metrics()
+    except ImportError:
+        pass

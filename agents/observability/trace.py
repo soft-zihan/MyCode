@@ -4,9 +4,7 @@
 - OTel 导出：通过 OpenTelemetry 导出到 Phoenix 等后端
 - session_id 来源：MYCODE_TRACE_SESSION 环境变量 / set_trace_session() 设置
 - 开启方式：启动参数 --trace / 环境变量 MYCODE_TRACE=1 / REPL 内 /trace on
-- 线程安全（后台 shell watcher 线程也会发事件）
 - 关闭时零开销：trace_event 立即返回，不做任何 IO
-- 支持可替换 Sink（NoopSink / 自定义）
 
 事件 schema：{"ts": ISO8601, "kind": str, ...fields}
 常用 kind：
@@ -24,48 +22,19 @@ from __future__ import annotations
 
 import json
 import os
-import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
-
-
-# ============================================================
-# Sink 抽象
-# ============================================================
-
-
-class TraceSink(Protocol):
-    def emit(self, event: dict[str, Any]) -> None: ...
-
-
-class NoopSink:
-    """空 Sink：丢弃所有事件。"""
-
-    def emit(self, event: dict[str, Any]) -> None:
-        pass
+from typing import Any
 
 
 # ============================================================
 # 全局状态
 # ============================================================
 
-_LOCK = threading.Lock()
 _enabled: bool | None = None
 _session_id: str | None = None
 _session_created_at: str | None = None
-_sink: TraceSink = NoopSink()
-
-
-def set_trace_sink(sink: TraceSink) -> None:
-    """替换 trace 事件的后端 Sink。"""
-    global _sink
-    _sink = sink
-
-
-def get_trace_sink() -> TraceSink:
-    return _sink
 
 
 # ============================================================
@@ -125,11 +94,9 @@ def set_trace_enabled(value: bool) -> None:
 
 
 def trace_event(kind: str, **fields: Any) -> None:
-    """记录 trace 事件（仅用于调试，不再写入 JSONL）。"""
+    """记录 trace 事件（通过 OTel 导出）。"""
     if not trace_enabled():
         return
-    # 不再写入 JSONL，只通过 OTel 导出
-    # 如果需要调试，可以启用 NoopSink 的日志输出
 
 
 def _preview(value: Any, limit: int = 300) -> str:

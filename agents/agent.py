@@ -219,7 +219,6 @@ class Agent:
         from .skills.skill_orchestrator import SkillOrchestrator
         self._compressor = ContextCompressor(
             self._context_store,
-            auto_compact_threshold=self.auto_compact_threshold,
             effective_window=self.effective_window,
         )
         self._permission_gate = PermissionGate()
@@ -967,9 +966,6 @@ class Agent:
     def refresh_runtime_system_prompt(self) -> None:
         self._refresh_runtime_system_prompt()
 
-    def run_compression_pipeline(self) -> None:
-        self._run_compression_pipeline()
-
     def check_and_compact(self):
         return self._check_and_compact()
 
@@ -1126,25 +1122,23 @@ class Agent:
 
     #自动压缩
     async def _check_and_compact(self)->None:
-        await self._compressor.check_and_compact(
-            self.session.get_messages_for_llm(),
+        folded = await self._compressor.run_pipeline(
+            self.session,
             self.last_input_token_count,
+            self.last_api_call_time,
             self._build_side_query(max_tokens=6000),
             self.session_id,
             self._folded_session_memories,
-            self._refresh_runtime_system_prompt,
-            self._get_message_count,
         )
+        if folded:
+            self.last_input_token_count = 0
 
     async def _compact_conversation(self, *, trigger: str = "manual")->bool:
-        compacted = await self._compressor.compact(
-            self.session.get_messages_for_llm(),
-            trigger,
+        compacted = await self._compressor.compact_manual(
+            self.session,
             self._build_side_query(max_tokens=6000),
             self.session_id,
             self._folded_session_memories,
-            self._refresh_runtime_system_prompt,
-            self._get_message_count,
         )
         if compacted:
             from .observability.trace import trace_event
@@ -1163,26 +1157,18 @@ class Agent:
 
     async def _generate_folded_session_memory(self, transcript: str) -> dict[str, Any]:
         side_query = self._build_side_query(max_tokens=6000)
-        return await self._compressor._generate_folded_memory(transcript, side_query)
+        from .core.session_memory import fallback_folded_memory
+        return fallback_folded_memory(transcript)
 
     async def _record_folded_session_memory(self, trigger: str, memory: dict[str, Any]) -> None:
-        await self._compressor._record_folded_memory(trigger, memory, self.session_id, self._folded_session_memories)
-
-    #多层级压缩流水线
-    def _run_compression_pipeline(self)->None:
-        self._compressor.run_pipeline(self.session.get_messages_for_llm(), self.last_input_token_count, self.last_api_call_time)
-
-    #第一层级压缩，预算压缩
-    def _budget_tool_results_openai(self)->None:
-        self._compressor._budget(self.session.get_messages_for_llm(), self.last_input_token_count)
-
-    #第二级策略：修剪过期的工具执行结果
-    def _snip_stale_results_openai(self) -> None:
-        self._compressor._snip(self.session.get_messages_for_llm(), self.last_input_token_count)
-
-    #微压缩
-    def _microcompact_openai(self) -> None:
-        self._compressor._microcompact(self.session.get_messages_for_llm(), self.last_api_call_time)
+        import time
+        record = {
+            "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "trigger": trigger,
+            "session_id": self.session_id,
+            **memory,
+        }
+        self._folded_session_memories.append(record)
 
     #大结果持久化
     #如果工具返回的结果太大（超过 30KB），不要硬塞进上下文里，而是把它存成一个临时文件。

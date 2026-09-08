@@ -746,6 +746,82 @@ def api_session_stats(session_id: str) -> dict[str, Any]:
     raise HTTPException(status_code=404, detail="Session not found")
 
 
+@router.get("/api/sessions/{session_id}/compression-stats")
+def api_compression_stats(session_id: str) -> dict[str, Any]:
+    from agents.session_manager import get_session_manager
+    sm = get_session_manager()
+    session_info = _active_sessions.get(session_id)
+    if session_info and session_info.get("svc"):
+        svc = session_info["svc"]
+        agent = svc.agent
+        compressor = agent._compressor
+        context_store = agent._context_store
+        token_count = agent.last_input_token_count
+        effective_window = compressor.effective_window
+        utilization = token_count / effective_window if effective_window else 0
+        stats = compressor.get_stats()
+        folded_memories = []
+        try:
+            folded_memories = getattr(agent, "_folded_session_memories", [])
+        except Exception:
+            pass
+        return {
+            "utilization": round(utilization, 3),
+            "token_count": token_count,
+            "effective_window": effective_window,
+            "context_window": agent.context_window,
+            **stats,
+            "folded_memories": folded_memories,
+        }
+    session_data = load_session(session_id)
+    if session_data:
+        return {
+            "utilization": 0,
+            "token_count": 0,
+            "effective_window": 108800,
+            "context_window": 200000,
+            "l1_budget": {"triggered": 0, "tokens_saved": 0},
+            "l2_snip": {"triggered": 0, "tokens_saved": 0},
+            "l3_microcompact": {"triggered": 0, "tokens_saved": 0},
+            "l4_fold": {"triggered": 0, "last_fold_time": None},
+            "folded_memories": session_data.get("foldedSessionMemories", []),
+        }
+    raise HTTPException(status_code=404, detail="Session not found")
+
+
+@router.get("/api/sessions/{session_id}/context-store")
+def api_context_store(session_id: str) -> dict[str, Any]:
+    from agents.session_manager import get_session_manager
+    sm = get_session_manager()
+    session_info = _active_sessions.get(session_id)
+    if session_info and session_info.get("svc"):
+        svc = session_info["svc"]
+        context_store = svc.agent._context_store
+        entries = []
+        for key, entry in context_store._entries.items():
+            entries.append({
+                "key": key,
+                "raw_size": len(entry.get("raw", "")),
+                "abstract": (entry.get("abstract", "") or "")[:200],
+                "dropped": entry.get("dropped", False),
+            })
+        return {
+            "entries": entries,
+            "total_entries": len(entries),
+            "total_raw_size": sum(e["raw_size"] for e in entries),
+            "active_entries": len([e for e in entries if not e["dropped"]]),
+        }
+    session_data = load_session(session_id)
+    if session_data:
+        return {
+            "entries": [],
+            "total_entries": 0,
+            "total_raw_size": 0,
+            "active_entries": 0,
+        }
+    raise HTTPException(status_code=404, detail="Session not found")
+
+
 @router.get("/api/sessions/{session_id}/events")
 def api_get_session_events(
     session_id: str,

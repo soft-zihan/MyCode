@@ -118,6 +118,7 @@ class Session:
     - 树形结构：添加条目到当前分支、分支（fork）
     - 事件日志：append/subscribe/replay（用于 SSE 和持久化）
     - 消息派生：get_messages_for_llm（从事件日志提取 LLM 消息历史）
+    - 统一标记方案：删除、工具折叠、会话折叠都使用标记事件
     - 持久化到文件
     """
     
@@ -260,20 +261,53 @@ class Session:
     def get_messages_for_llm(self) -> list[dict[str, Any]]:
         """从事件日志构建 LLM 消息历史。
         
-        只读取完整消息事件（user_message, assistant_message, tool_result_msg），
-        忽略流式事件，直接提取，无需合并逻辑。
-        
-        这是唯一数据源，所有 LLM 调用都应使用此方法获取消息历史。
-        系统提示词会作为第一条消息自动添加。
+        使用统一标记方案：
+        1. 收集所有 deleted_seqs（从 context/events_deleted 事件）
+        2. 收集所有 snipped（从 context/tool_snipped 事件）
+        3. 遍历事件，跳过 deleted_seqs 中的 seq
+        4. 遇到 tool_result_msg 时，检查是否被 snipped，如果是则用占位符替换
+        5. 遇到 context/session_folded 时，插入摘要消息
         """
         messages = []
         
-        # 添加系统提示词（如果有）
+        # 1. 收集所有标记事件
+        deleted_seqs = set()
+        snipped_map = {}  # seq -> key
+        fold_summaries = []  # [(seq, summary), ...]
+        
+        for event in self._log:
+            t = event.get("type")
+            if t == "context/events_deleted":
+                deleted_seqs.update(event.get("deleted_seqs", []))
+            elif t == "context/tool_snipped":
+                for item in event.get("snipped", []):
+                    snipped_map[item["seq"]] = item["key"]
+            elif t == "context/session_folded":
+                fold_summaries.append((event.get("seq"), event.get("summary", "")))
+        
+        # 2. 添加系统提示词
         if self.system_prompt:
             messages.append({"role": "system", "content": self.system_prompt})
         
+        # 3. 插入最早的折叠摘要（如果有）
+        if fold_summaries:
+            earliest_summary = fold_summaries[0][1]
+            messages.append({"role": "assistant", "content": earliest_summary})
+        
+        # 4. 遍历事件，构建消息
         for event in self._log:
-            t = event["type"]
+            seq = event.get("seq")
+            t = event.get("type")
+            
+            # 跳过被删除的事件
+            if seq in deleted_seqs:
+                continue
+            
+            # 跳过标记事件本身
+            if t in ("context/events_deleted", "context/tool_snipped", "context/session_folded"):
+                continue
+            
+            # 处理消息事件
             if t == "user_message":
                 messages.append({"role": "user", "content": event["content"]})
             elif t == "assistant_message":
@@ -284,12 +318,71 @@ class Session:
                     msg["tool_calls"] = event["tool_calls"]
                 messages.append(msg)
             elif t == "tool_result_msg":
+                # 检查是否被 snipped
+                if seq in snipped_map:
+                    from .context_store import snipped_placeholder
+                    key = snipped_map[seq]
+                    # 尝试从 ContextStore 获取 abstract
+                    abstract = ""
+                    try:
+                        from agents.agent import _current_agent
+                        if _current_agent and hasattr(_current_agent, '_context_store'):
+                            abstract = _current_agent._context_store.get_abstract(key)
+                    except Exception:
+                        pass
+                    content = snipped_placeholder(key, abstract)
+                else:
+                    content = event["content"]
+                
                 messages.append({
                     "role": "tool",
                     "tool_call_id": event["call_id"],
-                    "content": event["content"],
+                    "content": content,
                 })
+        
         return messages
+    
+    def mark_deleted(self, seqs: list[int], trigger: str = "manual") -> None:
+        """标记指定 seq 的事件为已删除。
+        
+        Args:
+            seqs: 要删除的事件 seq 列表
+            trigger: 触发方式 "manual" | "auto"
+        
+        行为：
+        1. 写入 "context/events_deleted" 标记事件（append-only）
+        2. 广播删除通知给前端
+        
+        原子性保证：
+        - 只追加新事件，不修改已有事件
+        - 标记事件持久化后，重启时从标记事件恢复 deleted_seqs 状态
+        """
+        if not seqs:
+            return
+        
+        self.append("context/events_deleted", {
+            "deleted_seqs": seqs,
+            "trigger": trigger,
+        })
+    
+    def mark_tool_snipped(self, snipped: list[dict], trigger: str = "auto") -> None:
+        """标记工具结果被替换为占位符。
+        
+        Args:
+            snipped: [{"seq": 3, "key": "snip:call_001"}, ...]
+            trigger: 触发方式
+        
+        行为：
+        1. 写入 "context/tool_snipped" 标记事件（append-only）
+        2. 广播通知给前端
+        """
+        if not snipped:
+            return
+        
+        self.append("context/tool_snipped", {
+            "snipped": snipped,
+            "trigger": trigger,
+        })
     
     # ── 三阶段恢复 ──
     

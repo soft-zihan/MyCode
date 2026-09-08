@@ -96,8 +96,32 @@ class SkillOrchestrator:
     # ── 消息增强 ──
 
     def augment_message(self, user_message: str) -> tuple[str, dict[str, Any] | None]:
-        """用检索到的 Skill 上下文增强用户消息。"""
+        """用检索到的 Skill 上下文增强用户消息。
+        
+        优先检查 hook 匹配（关键词直接召回），如果没有匹配则走 BM25 检索。
+        """
         try:
+            # 1. 先检查 hook 匹配（关键词直接召回）
+            from agents.skills.skills import discover_skills
+            from .skill_hook import match_skill_hooks, format_hook_skill_context
+            
+            all_skills = discover_skills()
+            hook_matches = match_skill_hooks(user_message, all_skills)
+            
+            if hook_matches:
+                # Hook 匹配成功，直接注入
+                context = format_hook_skill_context(hook_matches)
+                # 构建 top_ref 用于后续追踪
+                top_ref = {
+                    "name": hook_matches[0]["name"],
+                    "matched_keywords": hook_matches[0]["matched_keywords"],
+                    "source": "hook",
+                    "all_hits": hook_matches,
+                }
+                self._last_retrieved_skill_hits = hook_matches
+                return f"{user_message}\n\n{context}", top_ref
+            
+            # 2. 没有 hook 匹配，走正常的 BM25 检索
             from agents.skills.skills import format_retrieved_skill_context
 
             context, top_ref = format_retrieved_skill_context(user_message, limit=3)

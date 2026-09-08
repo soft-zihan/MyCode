@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react';
 import { 
-  MessageSquare, PanelRight, Send, Square, Zap, File, X
+  MessageSquare, PanelRight, Send, Square, Zap, File, X, Database
 } from 'lucide-react';
 import { ReviewPanel } from '../../components/ReviewPanel';
 import { DiffViewer } from '../../components/DiffViewer';
@@ -8,12 +8,14 @@ import { ChatView } from '../../components/chat/nodes';
 import { FileTree } from './components/FileTree';
 import { FileViewer } from './components/FileViewer';
 import { SessionsPanel } from './components/SessionsPanel';
+import ContextPanel from '../../components/agent/ContextPanel';
 import { PageLayout } from '../../components/PageLayout';
 import { useChat } from './hooks/useChat';
 
 export default function ChatPage() {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [rightSidebarOpen, setRightSidebarOpen] = useState(true);
+  const [rightTab, setRightTab] = useState<'files' | 'context'>('files');
 
   const {
     inputValue,
@@ -414,21 +416,45 @@ export default function ChatPage() {
           </div>
         </div>
 
-        {/* Right Sidebar - Files Only */}
+        {/* Right Sidebar - Files / Context */}
         {rightSidebarOpen && (
           <div className="w-72 border-l border-gray-200 bg-white flex flex-col">
-            <div className="flex items-center justify-between px-3 py-2 border-b border-gray-200">
-              <span className="text-xs font-medium text-gray-600">Files</span>
+            <div className="flex border-b border-gray-200">
+              <button
+                onClick={() => setRightTab('files')}
+                className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
+                  rightTab === 'files' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <File className="w-3 h-3 inline mr-1" />
+                Files
+              </button>
+              <button
+                onClick={() => setRightTab('context')}
+                className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
+                  rightTab === 'context' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <Database className="w-3 h-3 inline mr-1" />
+                Context
+              </button>
             </div>
             <div className="flex-1 overflow-hidden">
-              <FileTree
-                onFileSelect={setSelectedFile}
-                onAddToChat={handleAddToChat}
-                selectedFile={selectedFile}
-                cwd={currentCwd}
-                visible={true}
-                refreshTrigger={fileTreeRefreshTrigger}
-              />
+              {rightTab === 'files' ? (
+                <FileTree
+                  onFileSelect={setSelectedFile}
+                  onAddToChat={handleAddToChat}
+                  selectedFile={selectedFile}
+                  cwd={currentCwd}
+                  visible={true}
+                  refreshTrigger={fileTreeRefreshTrigger}
+                />
+              ) : (
+                <ContextPanel
+                  sessionId={currentSessionId}
+                  isStreaming={isStreaming}
+                />
+              )}
             </div>
           </div>
         )}

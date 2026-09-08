@@ -70,3 +70,17 @@ Focus text output on:
 - Errors or blockers that change the plan
 
 If you can say it in one sentence, don't use three. Prefer short, direct sentences over long explanations. This does not apply to code or tool calls.
+
+{{claude_md}}
+
+{{skills}}
+
+{{agents}}
+
+{{memory}}
+
+{{workspace_structure}}
+
+{{git_context}}
+
+{{deferred_tools}}

@@ -18,6 +18,8 @@ class OnlineSkillCandidate:
     instructions: str = ""
     evidence: str = ""
     tags: list[str] = field(default_factory=list)
+    kind: str = "skill"
+    rule_text: str = ""
 
 
 def _parse_json_object(text: str) -> dict[str, Any]:
@@ -58,9 +60,18 @@ def _candidate_search_text(candidate: OnlineSkillCandidate) -> str:
 def _coerce_candidate(obj: dict[str, Any]) -> OnlineSkillCandidate | None:
     name = str(obj.get("name") or "").strip()
     description = str(obj.get("description") or "").strip()
+    kind = str(obj.get("kind") or "skill").strip().lower()
+
+    rule_text = str(obj.get("rule_text") or "").strip()
     instructions = str(obj.get("instructions") or obj.get("prompt") or "").strip()
-    if not name or not description or not instructions:
-        return None
+
+    if kind == "rule":
+        if not name or not description or not rule_text:
+            return None
+    else:
+        if not name or not description or not instructions:
+            return None
+
     tags_raw = obj.get("tags") or []
     if isinstance(tags_raw, str):
         tags = [part.strip() for part in re.split(r"[,，]", tags_raw) if part.strip()]
@@ -75,6 +86,8 @@ def _coerce_candidate(obj: dict[str, Any]) -> OnlineSkillCandidate | None:
         instructions=instructions,
         evidence=str(obj.get("evidence") or "").strip(),
         tags=tags[:8],
+        kind=kind,
+        rule_text=rule_text,
     )
 
 
@@ -86,18 +99,36 @@ async def extract_online_skill_candidate(
     hint: str = "",
 ) -> OnlineSkillCandidate | None:
     system = (
-        "You are MyCode's online Skill Extractor.\n"
-        "Extract at most ONE reusable skill candidate from a live conversation window.\n"
-        "Output ONLY strict JSON: {\"skills\": []} or {\"skills\": [{...}]}.\n\n"
-        "Candidate fields: name, description, when_to_use, instructions, evidence, tags.\n\n"
-        "Rules:\n"
+        "You are MyCode's online Experience Extractor.\n"
+        "Extract at most ONE reusable experience from a live conversation window.\n"
+        "Output ONLY strict JSON: {\"experiences\": []} or {\"experiences\": [{...}]}.\n\n"
+        "Each experience must have a \"kind\" field: \"skill\" or \"rule\".\n\n"
+        "Kind classification:\n"
+        "- \"rule\": Global constraints that should ALWAYS apply. No trigger condition needed.\n"
+        "  Examples: \"Always use type hints\", \"Never commit secrets\", \"Use Chinese for comments\",\n"
+        "  \"Prefer functional style\", \"No eval() allowed\".\n"
+        "  Rule characteristics: short (<200 chars), unconditional, applies to all tasks.\n\n"
+        "- \"skill\": Conditional workflows triggered by specific situations.\n"
+        "  Examples: \"When user asks to commit, use conventional commits format\",\n"
+        "  \"When reviewing PR, check for security issues\", \"When running tests, check permissions first\".\n"
+        "  Skill characteristics: multi-step workflow, has when_to_use trigger, needs version control.\n\n"
+        "Candidate fields:\n"
+        "- kind: \"skill\" or \"rule\"\n"
+        "- name: short identifier\n"
+        "- description: what this experience captures\n"
+        "- when_to_use: (for skill only) trigger condition\n"
+        "- instructions: (for skill) detailed workflow steps\n"
+        "- rule_text: (for rule only) concise rule statement (<200 chars)\n"
+        "- evidence: why this was extracted\n"
+        "- tags: relevant keywords\n\n"
+        "Extraction rules:\n"
         "- USER turns are the primary evidence. Assistant turns are context only.\n"
         "- A next user feedback turn may confirm, reject, or refine the prior assistant behavior.\n"
         "- Do not extract assistant-only guesses, weak confirmations, one-off task payload, secrets, project facts, URLs, account IDs, exact dates, or temporary parameters.\n"
         "- Extract only durable workflow, output policy, implementation preference, correction, or repeated constraint likely useful for future similar tasks.\n"
         "- Remove entity names and runtime-specific payload; use placeholders where needed.\n"
         "- retrieved_reference is identity context only; never treat it as new user evidence.\n"
-        "- If evidence is weak, generic, or low-value, return {\"skills\": []}.\n"
+        "- If evidence is weak, generic, or low-value, return {\"experiences\": []}.\n"
     )
     payload = {
         "messages": messages,
@@ -105,10 +136,10 @@ async def extract_online_skill_candidate(
         "retrieved_reference": retrieved_reference or None,
     }
     parsed = _parse_json_object(await side_query(system, json.dumps(payload, ensure_ascii=False)))
-    skills = parsed.get("skills")
-    if not isinstance(skills, list) or not skills:
+    experiences = parsed.get("experiences")
+    if not isinstance(experiences, list) or not experiences:
         return None
-    first = skills[0]
+    first = experiences[0]
     if not isinstance(first, dict):
         return None
     return _coerce_candidate(first)
@@ -281,16 +312,25 @@ async def online_ingest(
         )
         return result
 
-    try:
-        result = await maintain_online_skill_candidate(
-            candidate=candidate,
-            side_query=side_query,
-            retrieved_reference=retrieved_reference,
-            confirm_write=confirm_write,
-            target=target,
-        )
-    except Exception as exc:
-        result = {"ok": False, "action": "failed", "skill": candidate.name, "error": str(exc)}
+    if candidate.kind == "rule":
+        try:
+            result = await _maintain_rule_candidate(
+                candidate=candidate,
+                confirm_write=confirm_write,
+            )
+        except Exception as exc:
+            result = {"ok": False, "action": "failed", "skill": candidate.name, "error": str(exc)}
+    else:
+        try:
+            result = await maintain_online_skill_candidate(
+                candidate=candidate,
+                side_query=side_query,
+                retrieved_reference=retrieved_reference,
+                confirm_write=confirm_write,
+                target=target,
+            )
+        except Exception as exc:
+            result = {"ok": False, "action": "failed", "skill": candidate.name, "error": str(exc)}
 
     record_online_provenance(
         action=str(result.get("action") or "none"),
@@ -302,6 +342,66 @@ async def online_ingest(
         error="" if result.get("ok") else str(result.get("error") or ""),
     )
     return result
+
+
+async def _maintain_rule_candidate(
+    *,
+    candidate: OnlineSkillCandidate,
+    confirm_write: ConfirmWrite | None = None,
+) -> dict[str, Any]:
+    """Handle Rule candidate: create or update RULES.md."""
+    from .rule_file_ops import create_rule, evolve_rule, load_rules
+
+    current_rules = load_rules()
+
+    rule_text = candidate.rule_text.strip()
+    existing_similar = ""
+    if current_rules:
+        for line in current_rules.split("\n"):
+            line = line.strip().lstrip("- ").strip()
+            if line and (rule_text in line or line in rule_text):
+                existing_similar = line
+                break
+
+    write_summary = f"online rule evolution: {'evolve' if existing_similar else 'create'} {candidate.name}"
+    if confirm_write is not None and not await confirm_write(write_summary):
+        return {
+            "ok": False,
+            "action": f"{'evolve' if existing_similar else 'create'}_denied",
+            "skill": candidate.name,
+            "error": "permission denied",
+        }
+
+    if existing_similar:
+        result = evolve_rule(
+            old_rule_text=existing_similar,
+            new_rule_text=rule_text,
+            category=_infer_category(candidate),
+            evidence=candidate.evidence,
+            rationale=f"Online rule evolution: {candidate.description}",
+        )
+        return {"action": "evolve", "skill": candidate.name, "kind": "rule", **result}
+    else:
+        result = create_rule(
+            rule_text=rule_text,
+            category=_infer_category(candidate),
+            evidence=candidate.evidence,
+        )
+        return {"action": "create", "skill": candidate.name, "kind": "rule", **result}
+
+
+def _infer_category(candidate: OnlineSkillCandidate) -> str:
+    """Infer rule category from candidate tags."""
+    tags_lower = [t.lower() for t in candidate.tags]
+    if any(t in tags_lower for t in ["style", "format", "formatting"]):
+        return "style"
+    if any(t in tags_lower for t in ["security", "secret", "auth"]):
+        return "security"
+    if any(t in tags_lower for t in ["git", "commit", "version"]):
+        return "git"
+    if any(t in tags_lower for t in ["test", "testing"]):
+        return "testing"
+    return "general"
 
 
 async def judge_retrieved_skill_usage(
