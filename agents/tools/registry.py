@@ -14,10 +14,10 @@ from typing import Any, Callable, Awaitable
 ToolDef = dict
 PermissionMode = str
 
-READ_TOOLS = {"read_file", "list_files", "grep_search", "compact_context", "shell_status"}
-EDIT_TOOLS = {"write_file", "edit_file", "skill_evolve", "skill_create"}
+READ_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "compact_context", "shell_status", "search_history", "list_task_notes"}
+EDIT_TOOLS = {"write_file", "edit_file", "skill_create", "write_workflow_pattern"}
 
-CONCURRENCY_SAFE_TOOLS = {"read_file", "list_files", "grep_search", "shell_status"}
+CONCURRENCY_SAFE_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "shell_status"}
 
 MAX_RESULT_CHARS = 50000
 
@@ -73,16 +73,17 @@ class ToolExecutionMode:
 
 TOOL_EXECUTION_MODES: dict[str, str] = {
     "read_file": "parallel",
+    "outline_file": "parallel",
     "list_files": "parallel",
     "grep_search": "parallel",
     "shell_status": "parallel",
+    "search_history": "parallel",
+    "list_task_notes": "parallel",
     "write_file": "sequential",
     "edit_file": "sequential",
     "run_shell": "sequential",
-    "memory": "sequential",
-    "skill": "sequential",
-    "skill_evolve": "sequential",
     "skill_create": "sequential",
+    "write_workflow_pattern": "sequential",
     "compact_context": "sequential",
     "context_restore": "sequential",
     "enter_plan_mode": "sequential",
@@ -106,6 +107,17 @@ tool_definitions: list[ToolDef] = [
                 "file_path": {"type": "string", "description": "The path to the file to read"},
                 "offset": {"type": "integer", "description": "Line number to start reading from (1-indexed, default: 1)"},
                 "limit": {"type": "integer", "description": "Maximum number of lines to read (default: all lines)"},
+            },
+            "required": ["file_path"],
+        },
+    },
+    {
+        "name": "outline_file",
+        "description": "Show the structural outline of a file: classes/functions with line ranges (Python), heading sections (Markdown), top-level declarations and class members (TS/JS). Use it on large files BEFORE read_file to decide which section to read with offset/limit, instead of loading the whole file.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "The path to the file to outline"},
             },
             "required": ["file_path"],
         },
@@ -184,18 +196,6 @@ tool_definitions: list[ToolDef] = [
         },
     },
     {
-        "name": "skill",
-        "description": "Invoke a registered skill by name. Skills are prompt templates loaded from .mycode/skills/. Returns the skill's resolved prompt to follow.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "skill_name": {"type": "string", "description": "The name of the skill to invoke"},
-                "args": {"type": "string", "description": "Optional arguments to pass to the skill"},
-            },
-            "required": ["skill_name"],
-        },
-    },
-    {
         "name": "compact_context",
         "description": "Compact the current conversation context into structured session memory when the context is long, tool results are noisy, or a strategy reset is useful. This preserves task progress, current next steps, and tool-use experience, then continues from the folded memory.",
         "input_schema": {
@@ -220,46 +220,37 @@ tool_definitions: list[ToolDef] = [
         },
     },
     {
-        "name": "memory",
-        "description": "Manage persistent project memories. Use action='add' to save a new memory, action='replace' to update an existing one (locate it with a unique substring of its name/filename/description), action='remove' to delete an outdated one. Prefer replace over adding near-duplicates. The MEMORY.md index and modified timestamps are maintained automatically.",
+        "name": "search_history",
+        "description": "Search the conversation history (including hidden/folded messages) for keywords. Returns matching messages with sequence numbers. If hidden tool results are found, you can use context_restore to recover them.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["add", "replace", "remove"],
-                    "description": "add: create a new memory; replace: overwrite an existing memory's content; remove: delete a memory",
-                },
-                "name": {"type": "string", "description": "Short memory name (required for add)"},
-                "type": {
-                    "type": "string",
-                    "enum": ["user", "feedback", "project", "reference"],
-                    "description": "Memory category (for add; defaults to project)",
-                },
-                "description": {"type": "string", "description": "One-line description used for recall selection"},
-                "content": {"type": "string", "description": "Memory body (add/replace)"},
-                "match": {"type": "string", "description": "Unique substring of name/filename/description locating the memory (replace/remove)"},
+                "query": {"type": "string", "description": "Keywords to search for in the conversation history"},
+                "limit": {"type": "integer", "description": "Maximum number of results to return (default: 20)"},
             },
-            "required": ["action"],
+            "required": ["query"],
         },
     },
     {
-        "name": "skill_evolve",
-        "description": "Persist an explicit reusable user correction or workflow preference into an existing skill. Creates a version snapshot before editing the skill.",
+        "name": "list_task_notes",
+        "description": "List all task notes from previous sessions. Returns a list of session IDs with titles and timestamps. The latest task note content is included in the result for immediate reference.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "skill_name": {"type": "string", "description": "The registered skill name to evolve"},
-                "lesson": {"type": "string", "description": "Durable reusable rule to add to the skill"},
-                "rationale": {"type": "string", "description": "Why this lesson should affect future similar tasks"},
-                "target": {
-                    "type": "string",
-                    "enum": ["active", "project", "user"],
-                    "description": "Which skill file to update. Defaults to active.",
-                },
+                "limit": {"type": "integer", "description": "Maximum number of task notes to list (default: 10)"},
             },
-            "required": ["skill_name", "lesson"],
         },
+    },
+    {
+        "name": "read_task_notes",
+        "description": "Read the full content of a specific task note by session ID. This tool is automatically invoked when you need to read a specific task note.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "description": "The session ID to read task notes for. If omitted, reads the current session's notes."},
+            },
+        },
+        "deferred": True,
     },
     {
         "name": "skill_create",
@@ -322,6 +313,21 @@ tool_definitions: list[ToolDef] = [
                 "query": {"type": "string", "description": "Tool name or search keywords"},
             },
             "required": ["query"],
+        },
+    },
+    {
+        "name": "write_workflow_pattern",
+        "description": "Create a workflow_pattern entry in the wiki. Use this to record reusable troubleshooting workflows or operational procedures. The pattern will be automatically compiled into a skill when applied multiple times (applied_count >= 2).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Pattern name (e.g., 'db-connection-timeout')"},
+                "symptom": {"type": "string", "description": "Symptom description (what the user observes)"},
+                "root_cause": {"type": "string", "description": "Root cause description"},
+                "workaround": {"type": "string", "description": "Solution/troubleshooting steps"},
+                "description": {"type": "string", "description": "Optional short description"},
+            },
+            "required": ["name", "symptom", "root_cause", "workaround"],
         },
     },
 ]

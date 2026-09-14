@@ -77,6 +77,7 @@ class AgentLoop:
                 break
 
             await self._consume_memory_prefetch()
+            await self._consume_wiki_prefetch()
 
             self._agent.session.append("step/start", {
                 "turn": self._agent._current_turn,
@@ -164,32 +165,33 @@ class AgentLoop:
 
     def _capture_file_states(self) -> list[dict]:
         """捕获当前文件状态（路径 + hash）。
-        
-        只扫描工作目录下的文件，返回文件路径和哈希值的列表。
+
+        只扫描会话工作区（agent.workspace）下的文件，返回文件路径和哈希值的列表。
         """
+        cwd = self._agent.workspace
         files = []
+        # 扫描工作区下的文件（排除隐藏目录和常见忽略目录）
+        ignore_dirs = {".git", ".venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache"}
         try:
-            cwd = Path.cwd()
-            # 扫描工作目录下的文件（排除隐藏目录和常见忽略目录）
-            ignore_dirs = {".git", ".venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache"}
-            
             for file_path in cwd.rglob("*"):
-                if not file_path.is_file():
-                    continue
-                # 跳过隐藏目录和忽略目录
-                if any(part.startswith(".") or part in ignore_dirs for part in file_path.parts):
-                    continue
                 try:
+                    if not file_path.is_file():
+                        continue
+                    # 隐藏/忽略目录判断基于相对工作区的路径（工作区本身可能位于隐藏路径下）
+                    rel = file_path.relative_to(cwd)
+                    if any(part.startswith(".") or part in ignore_dirs for part in rel.parts):
+                        continue
                     content = file_path.read_bytes()
                     files.append({
-                        "path": str(file_path.relative_to(cwd)),
+                        "path": str(rel),
                         "hash": hashlib.md5(content).hexdigest()[:8],
                         "size": len(content),
                     })
-                except (OSError, PermissionError):
-                    pass
-        except Exception:
-            pass
+                except OSError:
+                    continue
+        except OSError as e:
+            from agents.observability.trace import trace_event
+            trace_event("snapshot.capture_failed", error=str(e), workspace=str(cwd))
         return files
 
     async def _prepare_turn(self, user_message: str) -> None:
@@ -227,6 +229,7 @@ class AgentLoop:
             sq = a.build_side_query()
             if sq:
                 a.start_memory_prefetch(user_message, sq)
+                a.start_wiki_prefetch(user_message, sq)
 
     async def _consume_memory_prefetch(self) -> None:
         """消费记忆预取结果。"""
@@ -240,11 +243,38 @@ class AgentLoop:
                 if memories:
                     injection_text = format_memories_for_injection(memories)
                     injection_text = _safe_utf8_text(injection_text)
-                    a.append_user_message(injection_text)
+                    a.append_memory_injection(injection_text)
                     for m in memories:
                         a.record_memory_surface(m.path, len(m.content.encode()))
             except Exception:
                 pass
+
+    async def _consume_wiki_prefetch(self) -> None:
+        a = self._agent
+        if a._wiki_prefetch is None or a._wiki_prefetch_consumed:
+            return
+        # 等待 prefetch 完成（最多 20 秒，embedding 冷启动可能较慢）
+        if not a._wiki_prefetch.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(a._wiki_prefetch), timeout=20.0)
+            except asyncio.TimeoutError:
+                print(f"[wiki_recall] timeout after 20s, skipping injection")
+                return
+        a._wiki_prefetch_consumed = True
+        try:
+            entries = a._wiki_prefetch.result()
+            if entries:
+                from agents.wiki.wiki_manager import format_wiki_for_injection
+                injection_text = format_wiki_for_injection(entries)
+                injection_text = _safe_utf8_text(injection_text)
+                a.append_memory_injection(injection_text)
+                for e in entries:
+                    a._wiki_surfaced_at[e.rel_path] = a._turn_number
+                print(f"[wiki_recall] injected {len(entries)} entries: {[e.rel_path for e in entries]}")
+            else:
+                print(f"[wiki_recall] no entries found")
+        except Exception as e:
+            print(f"[wiki_recall] error: {type(e).__name__}: {e}")
 
     def _update_token_stats(self, response: dict) -> None:
         """更新 token 统计并发布流式事件。"""
@@ -407,15 +437,44 @@ class AgentLoop:
         with trace_span("model_call", model=a.model, provider="openai") as span:
 
             async def _do():
+                _asm_t0 = time.perf_counter()
+
+                _t1 = time.perf_counter()
                 tool_defs = get_active_tool_definitions(a.tools)
+                _tool_defs_ms = (time.perf_counter() - _t1) * 1000
+
+                _t2 = time.perf_counter()
+                raw_messages = a.messages
+                _msg_history_ms = (time.perf_counter() - _t2) * 1000
+
+                _t3 = time.perf_counter()
+                sanitized_messages = _sanitize_for_utf8(raw_messages)
+                _sanitize_msgs_ms = (time.perf_counter() - _t3) * 1000
+
                 create_params = {
                     "model": a.model,
-                    "messages": _sanitize_for_utf8(a.messages),
+                    "messages": sanitized_messages,
                     "stream": True,
                     "stream_options": {"include_usage": True},
                 }
                 if tool_defs:
-                    create_params["tools"] = _sanitize_for_utf8(_to_openai_tools(tool_defs))
+                    _t4 = time.perf_counter()
+                    openai_tools = _to_openai_tools(tool_defs)
+                    _convert_tools_ms = (time.perf_counter() - _t4) * 1000
+
+                    _t5 = time.perf_counter()
+                    create_params["tools"] = _sanitize_for_utf8(openai_tools)
+                    _sanitize_tools_ms = (time.perf_counter() - _t5) * 1000
+                else:
+                    _convert_tools_ms = 0
+                    _sanitize_tools_ms = 0
+
+                _assembly_ms = (time.perf_counter() - _asm_t0) * 1000
+
+                _msg_count = len(raw_messages)
+                _msg_chars = sum(len(str(m.get("content", ""))) for m in raw_messages)
+                _tool_count = len(tool_defs)
+
                 stream = await a.openai_client.chat.completions.create(**create_params)
 
                 content = ""
@@ -499,6 +558,17 @@ class AgentLoop:
                         "finish_reason": finish_reason or "stop",
                     }],
                     "usage": usage or {"prompt_tokens": 0, "completion_tokens": 0},
+                    "_assembly_metrics": {
+                        "assembly_ms": round(_assembly_ms, 2),
+                        "tool_defs_ms": round(_tool_defs_ms, 2),
+                        "msg_history_ms": round(_msg_history_ms, 2),
+                        "sanitize_msgs_ms": round(_sanitize_msgs_ms, 2),
+                        "convert_tools_ms": round(_convert_tools_ms, 2),
+                        "sanitize_tools_ms": round(_sanitize_tools_ms, 2),
+                        "msg_count": _msg_count,
+                        "msg_chars": _msg_chars,
+                        "tool_count": _tool_count,
+                    },
                 }
 
             try:
@@ -509,11 +579,29 @@ class AgentLoop:
                 output_tokens = usage.get("completion_tokens", 0)
                 cached_tokens = usage.get("cached_tokens", 0)
                 duration_s = round(time.time() - _model_t0, 2)
-                span.set_attribute("input_tokens", input_tokens)
-                span.set_attribute("output_tokens", output_tokens)
-                span.set_attribute("cached_tokens", cached_tokens)
+                # Langfuse 官方 usage 映射（llm.token_count.*），驱动 UI 成本/Token 统计
+                span.set_attribute("llm.token_count.prompt", input_tokens)
+                span.set_attribute("llm.token_count.completion", output_tokens)
+                span.set_attribute("llm.token_count.total", input_tokens + output_tokens)
+                span.set_attribute("langfuse.observation.metadata.cached_tokens", cached_tokens)
+                span.set_attribute(
+                    "langfuse.observation.metadata.cache_hit_rate",
+                    round(cached_tokens / input_tokens, 3) if input_tokens else 0.0,
+                )
                 span.set_attribute("duration_s", duration_s)
                 span.set_attribute("success", True)
+
+                asm = result.pop("_assembly_metrics", None) if isinstance(result, dict) else None
+                if asm:
+                    span.set_attribute("assembly.total_ms", asm["assembly_ms"])
+                    span.set_attribute("assembly.tool_defs_ms", asm["tool_defs_ms"])
+                    span.set_attribute("assembly.msg_history_ms", asm["msg_history_ms"])
+                    span.set_attribute("assembly.sanitize_msgs_ms", asm["sanitize_msgs_ms"])
+                    span.set_attribute("assembly.convert_tools_ms", asm["convert_tools_ms"])
+                    span.set_attribute("assembly.sanitize_tools_ms", asm["sanitize_tools_ms"])
+                    span.set_attribute("assembly.msg_count", asm["msg_count"])
+                    span.set_attribute("assembly.msg_chars", asm["msg_chars"])
+                    span.set_attribute("assembly.tool_count", asm["tool_count"])
                 
                 from agents.observability.cost_tracker import record_tokens
                 record_tokens(a.model, input_tokens, output_tokens, cached_tokens)

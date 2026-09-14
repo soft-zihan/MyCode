@@ -4,6 +4,7 @@
 
 工具分类：
 - file_tools: 文件操作 (read_file, write_file, edit_file, list_files)
+- outline_tools: 结构化预读 (outline_file)
 - shell_tools: Shell 命令 (run_shell, shell_status)
 - search_tools: 搜索 (grep_search)
 - permissions: 权限检查
@@ -39,8 +40,9 @@ from agents.tools.file_tools import (
     write_file,
     edit_file,
     list_files,
-    _resolve_tool_path,
 )
+from agents.tools.outline_tools import outline_file
+from agents.tools.paths import resolve_tool_path
 
 # Backward compatibility aliases
 _read_file = read_file
@@ -70,6 +72,12 @@ from agents.tools.search_tools import (
 _grep_search = grep_search
 _grep_python = grep_python
 
+from agents.tools.wiki_tools import write_workflow_pattern as _write_workflow_pattern_tool
+
+
+def _handle_write_workflow_pattern(inp: dict) -> str:
+    return _write_workflow_pattern_tool(inp)
+
 from agents.tools.permissions import (
     check_permission,
     is_dangerous,
@@ -97,7 +105,7 @@ async def execute_tool(
                     abs_path = f"{rt.workdir}/{abs_path}"
                 read_file_state[abs_path] = 0
             else:
-                abs_path = str(_resolve_tool_path(inp["file_path"]).resolve())
+                abs_path = str(resolve_tool_path(inp["file_path"]).resolve())
                 try:
                     read_file_state[abs_path] = os.path.getmtime(abs_path)
                 except OSError:
@@ -112,7 +120,7 @@ async def execute_tool(
             if not abs_path.startswith("/"):
                 abs_path = f"{rt.workdir}/{abs_path}"
         else:
-            abs_path = str(_resolve_tool_path(inp["file_path"], must_exist=(name == "edit_file")).resolve())
+            abs_path = str(resolve_tool_path(inp["file_path"], must_exist=(name == "edit_file")).resolve())
         if not isinstance(rt, DockerRuntime) and os.path.exists(abs_path):
             # 允许写入空文件（刚创建的文件）
             file_size = os.path.getsize(abs_path)
@@ -142,28 +150,6 @@ async def execute_tool(
             indent=2,
         )
 
-    if name == "memory":
-        from agents.memory.memory import memory_tool
-        result = memory_tool(
-            action=inp.get("action", ""),
-            name=inp.get("name", ""),
-            type=inp.get("type", ""),
-            description=inp.get("description", ""),
-            content=inp.get("content", ""),
-            match=inp.get("match", ""),
-        )
-        return _truncate_result(json.dumps(result, ensure_ascii=False, indent=2))
-
-    if name == "skill_evolve":
-        from agents.skills.skills import evolve_skill
-        result = evolve_skill(
-            skill_name=inp.get("skill_name", ""),
-            lesson=inp.get("lesson", ""),
-            rationale=inp.get("rationale", ""),
-            target=inp.get("target", "active"),
-        )
-        return _truncate_result(json.dumps(result, ensure_ascii=False, indent=2))
-
     if name == "skill_create":
         from agents.skills.skills import create_skill
         result = create_skill(
@@ -180,12 +166,14 @@ async def execute_tool(
         return _truncate_result(json.dumps(result, ensure_ascii=False, indent=2))
 
     handlers: dict = {
+        "outline_file": outline_file,
         "write_file": write_file,
         "edit_file": edit_file,
         "list_files": list_files,
         "grep_search": grep_search,
         "run_shell": run_shell,
         "shell_status": shell_status,
+        "write_workflow_pattern": _handle_write_workflow_pattern,
     }
     handler = handlers.get(name)
 
@@ -197,7 +185,7 @@ async def execute_tool(
     result = _truncate_result(result)
 
     if name in ("write_file", "edit_file") and read_file_state is not None and not result.startswith("Error"):
-        abs_path = str(_resolve_tool_path(inp["file_path"], must_exist=False).resolve())
+        abs_path = str(resolve_tool_path(inp["file_path"], must_exist=False).resolve())
         try:
             read_file_state[abs_path] = os.path.getmtime(abs_path)
         except OSError:
@@ -226,6 +214,7 @@ __all__ = [
     "load_permission_rules",
     "reset_permission_cache",
     "set_background_done_callback",
+    "outline_file",
     # Backward compatibility
     "read_file",
     "write_file",
@@ -243,5 +232,5 @@ __all__ = [
     "_shell_status",
     "_grep_search",
     "_grep_python",
-    "_resolve_tool_path",
+    "resolve_tool_path",
 ]
