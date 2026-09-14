@@ -625,6 +625,10 @@ class Agent:
         original_user_message = _safe_utf8_text(user_message)
         ready_skill_extraction_window: dict[str, Any] | None = None
         self._skill_orchestrator.last_retrieved_skill_reference = None
+        # 提前设置 session_id，确保 skill.recall span 能继承
+        if not self.is_sub_agent:
+            from .observability.tracer import set_current_session_id
+            set_current_session_id(self.session_id)
         if not self.is_sub_agent:
             ready_skill_extraction_window = self._skill_orchestrator.pop_pending_extraction_window(
                 original_user_message, self._tool_error_streak
@@ -656,9 +660,6 @@ class Agent:
         }
         if not self.is_sub_agent:
             trace_kwargs["session"] = self.session_id
-            # 绑定 Langfuse session（子智能体经 contextvars 自动继承，不覆盖）
-            from .observability.tracer import set_current_session_id
-            set_current_session_id(self.session_id)
 
         _turn_t0 = time.time()
         _turn_start_input_tokens = self.total_input_tokens
