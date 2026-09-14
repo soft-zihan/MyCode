@@ -73,36 +73,45 @@ def write_wiki_entry(
     extra_meta: dict[str, str] | None = None,
     sub_dir: str = "",
 ) -> Path:
+    from agents.observability.tracer import tracer
     from agents.wiki.evolution.normalise_meta import infer_facets
     from agents.wiki.evolution.wiki_commit import record_wiki_change
 
-    wiki_dir = get_wiki_dir()
-    type_dir = _ensure_type_dir(wiki_dir, wiki_type)
-    if sub_dir:
-        type_dir = type_dir / sub_dir
-        type_dir.mkdir(parents=True, exist_ok=True)
+    with tracer.span("wiki.write", {
+        "langfuse.observation.type": "chain",
+        "mycode.wiki.wiki_type": wiki_type,
+        "mycode.wiki.name": name[:100],
+        "mycode.wiki.description": description[:100],
+    }) as span:
+        wiki_dir = get_wiki_dir()
+        type_dir = _ensure_type_dir(wiki_dir, wiki_type)
+        if sub_dir:
+            type_dir = type_dir / sub_dir
+            type_dir.mkdir(parents=True, exist_ok=True)
 
-    slug = _slugify(name)
-    filename = f"{slug}.md"
-    filepath = type_dir / filename
+        slug = _slugify(name)
+        filename = f"{slug}.md"
+        filepath = type_dir / filename
 
-    raw_meta: dict[str, str] = {
-        "name": name,
-        "type": wiki_type,
-        "description": description,
-        "modified": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "applied_count": "0",
-    }
-    if extra_meta:
-        raw_meta.update(extra_meta)
+        raw_meta: dict[str, str] = {
+            "name": name,
+            "type": wiki_type,
+            "description": description,
+            "modified": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "applied_count": "0",
+        }
+        if extra_meta:
+            raw_meta.update(extra_meta)
 
-    meta = infer_facets(raw_meta, wiki_type)
+        meta = infer_facets(raw_meta, wiki_type)
 
-    filepath.write_text(format_frontmatter(meta, content))
-    record_wiki_change(str(filepath.relative_to(wiki_dir)))
-    _git_commit(f"wiki: add {wiki_type}/{slug}")
-    update_wiki_index()
-    return filepath
+        filepath.write_text(format_frontmatter(meta, content))
+        record_wiki_change(str(filepath.relative_to(wiki_dir)))
+        _git_commit(f"wiki: add {wiki_type}/{slug}")
+        update_wiki_index()
+        if span:
+            span.set_attribute("mycode.wiki.filepath", str(filepath.relative_to(wiki_dir)))
+        return filepath
 
 
 def write_workflow_pattern(
@@ -239,17 +248,31 @@ async def preflight_wiki_search(
     Returns:
         [(entry, score), ...] 按分数降序
     """
+    from agents.observability.tracer import tracer
     from agents.wiki.evolution.recall import hybrid_recall
-    try:
-        results = await hybrid_recall(
-            query=content,
-            wiki_types=[wiki_type],
-            score_threshold=0.3,
-            max_results=top_k,
-        )
-        return results
-    except Exception:
-        return []
+    with tracer.span("wiki.preflight", {
+        "langfuse.observation.type": "chain",
+        "mycode.wiki.query": content[:200],
+        "mycode.wiki.wiki_type": wiki_type,
+        "mycode.wiki.top_k": top_k,
+    }) as span:
+        try:
+            results = await hybrid_recall(
+                query=content,
+                wiki_types=[wiki_type],
+                score_threshold=0.3,
+                max_results=top_k,
+            )
+            if span:
+                span.set_attribute("mycode.wiki.found_count", len(results))
+                if results:
+                    span.set_attribute("mycode.wiki.max_similarity", round(results[0][1], 3))
+                    span.set_attribute("mycode.wiki.entries", [r[0].rel_path for r in results[:5]])
+            return results
+        except Exception as e:
+            if span:
+                span.record_error(e)
+            return []
 
 
 def merge_wiki_entry(
@@ -375,15 +398,30 @@ def _format_wiki_manifest(entries: list[WikiEntry]) -> str:
 
 async def _try_compile_skill(pattern_rel_path: str, side_query: Any) -> None:
     """尝试将高频 workflow_pattern 编译为 skill。"""
-    try:
-        from agents.wiki.wiki_compiler import compile_to_skill
-        skill_path = await compile_to_skill(pattern_rel_path, side_query)
-        if skill_path:
-            print(f"[skill_compile] compiled {pattern_rel_path} -> {skill_path}")
-        else:
-            print(f"[skill_compile] skipped {pattern_rel_path} (applied_count < 2 or already compiled)")
-    except Exception as e:
-        print(f"[skill_compile] error: {type(e).__name__}: {e}")
+    from agents.observability.tracer import tracer
+    with tracer.span("skill.compile", {
+        "langfuse.observation.type": "chain",
+        "mycode.skill.pattern_rel_path": pattern_rel_path,
+    }) as span:
+        try:
+            from agents.wiki.wiki_compiler import compile_to_skill
+            skill_path = await compile_to_skill(pattern_rel_path, side_query)
+            if skill_path:
+                if span:
+                    span.set_attribute("mycode.skill.compiled", True)
+                    span.set_attribute("mycode.skill.skill_path", str(skill_path))
+                print(f"[skill_compile] compiled {pattern_rel_path} -> {skill_path}")
+            else:
+                if span:
+                    span.set_attribute("mycode.skill.compiled", False)
+                    span.set_attribute("mycode.skill.reason", "skipped")
+                print(f"[skill_compile] skipped {pattern_rel_path} (applied_count < 2 or already compiled)")
+        except Exception as e:
+            if span:
+                span.record_error(e)
+                span.set_attribute("mycode.skill.compiled", False)
+                span.set_attribute("mycode.skill.reason", "error")
+            print(f"[skill_compile] error: {type(e).__name__}: {e}")
 
 
 async def select_relevant_wiki_entries(
@@ -392,75 +430,101 @@ async def select_relevant_wiki_entries(
     already_surfaced: set[str],
 ) -> list[WikiEntry]:
     import time
+    from agents.observability.tracer import tracer
     t0 = time.time()
-    entries = list_wiki_entries()
-    if not entries:
-        print(f"[wiki_select] no entries, took {time.time()-t0:.2f}s")
-        return []
+    
+    with tracer.span("wiki.recall", {
+        "langfuse.observation.type": "chain",
+        "mycode.wiki.query": query[:200],
+        "mycode.wiki.already_surfaced_count": len(already_surfaced),
+    }) as span:
+        entries = list_wiki_entries()
+        if not entries:
+            if span:
+                span.set_attribute("mycode.wiki.recalled_count", 0)
+                span.set_attribute("mycode.wiki.reason", "no_entries")
+            print(f"[wiki_select] no entries, took {time.time()-t0:.2f}s")
+            return []
 
-    candidates = [e for e in entries if e.rel_path not in already_surfaced]
-    if not candidates:
-        print(f"[wiki_select] all entries already surfaced, took {time.time()-t0:.2f}s")
-        return []
+        candidates = [e for e in entries if e.rel_path not in already_surfaced]
+        if not candidates:
+            if span:
+                span.set_attribute("mycode.wiki.recalled_count", 0)
+                span.set_attribute("mycode.wiki.reason", "all_already_surfaced")
+            print(f"[wiki_select] all entries already surfaced, took {time.time()-t0:.2f}s")
+            return []
 
-    try:
-        from agents.wiki.evolution.recall import hybrid_recall
-        t1 = time.time()
-        scored = await hybrid_recall(query, max_results=10)
-        recall_time = time.time() - t1
-        if scored:
-            result: list[WikiEntry] = []
-            for entry, score in scored[:5]:
-                increment_applied_count(entry.rel_path)
-                # 重新读取 entry 以获取更新后的 applied_count
-                updated_entry = read_wiki_entry(entry.rel_path)
-                if updated_entry:
-                    entry = updated_entry
-                # 检查是否需要编译为 skill
-                if entry.type == "workflow_pattern":
-                    applied_count = int(entry.meta.get("applied_count", "0"))
-                    if applied_count >= 2 and not entry.meta.get("compiled_to_skill"):
-                        # 异步编译 skill
-                        asyncio.create_task(
-                            _try_compile_skill(entry.rel_path, side_query)
-                        )
-                        print(f"[skill_compile] triggered for {entry.rel_path} (applied_count={applied_count})")
-                result.append(entry)
-            print(f"[wiki_select] hybrid_recall found {len(scored)} entries in {recall_time:.2f}s, returning {len(result)}")
+        try:
+            from agents.wiki.evolution.recall import hybrid_recall
+            t1 = time.time()
+            scored = await hybrid_recall(query, max_results=10)
+            recall_time = time.time() - t1
+            if scored:
+                result: list[WikiEntry] = []
+                for entry, score in scored[:5]:
+                    increment_applied_count(entry.rel_path)
+                    # 重新读取 entry 以获取更新后的 applied_count
+                    updated_entry = read_wiki_entry(entry.rel_path)
+                    if updated_entry:
+                        entry = updated_entry
+                    # 检查是否需要编译为 skill
+                    if entry.type == "workflow_pattern":
+                        applied_count = int(entry.meta.get("applied_count", "0"))
+                        if applied_count >= 2 and not entry.meta.get("compiled_to_skill"):
+                            # 异步编译 skill
+                            asyncio.create_task(
+                                _try_compile_skill(entry.rel_path, side_query)
+                            )
+                            print(f"[skill_compile] triggered for {entry.rel_path} (applied_count={applied_count})")
+                    result.append(entry)
+                if span:
+                    span.set_attribute("mycode.wiki.recalled_count", len(result))
+                    span.set_attribute("mycode.wiki.recall_time_s", round(recall_time, 3))
+                    span.set_attribute("mycode.wiki.entries", [e.rel_path for e in result])
+                print(f"[wiki_select] hybrid_recall found {len(scored)} entries in {recall_time:.2f}s, returning {len(result)}")
+                return result
+            else:
+                if span:
+                    span.set_attribute("mycode.wiki.recalled_count", 0)
+                    span.set_attribute("mycode.wiki.recall_time_s", round(recall_time, 3))
+                print(f"[wiki_select] hybrid_recall found 0 entries in {recall_time:.2f}s")
+        except Exception as e:
+            if span:
+                span.record_error(e)
+            print(f"[wiki_select] hybrid_recall error: {type(e).__name__}: {e}")
+
+        manifest = _format_wiki_manifest(candidates)
+        try:
+            import json as json_mod
+            text = await side_query(
+                SELECT_WIKI_PROMPT,
+                f"Query: {query}\n\nAvailable wiki entries:\n{manifest}",
+            )
+            match = re.search(r"\{[\s\S]*\}", text)
+            selected_paths: list[str] = []
+            if match:
+                try:
+                    parsed = json_mod.loads(match.group(0))
+                    selected_paths = parsed.get("selected_entries", [])
+                except Exception:
+                    selected_paths = []
+            if not selected_paths:
+                selected_paths = [e.rel_path for e in candidates if e.rel_path in text]
+
+            by_path = {e.rel_path: e for e in candidates}
+            selected = [by_path[p] for p in selected_paths if p in by_path][:5]
+
+            result = []
+            for e in selected:
+                increment_applied_count(e.rel_path)
+                result.append(e)
+            if span:
+                span.set_attribute("mycode.wiki.recalled_count", len(result))
+                span.set_attribute("mycode.wiki.method", "side_query")
+                span.set_attribute("mycode.wiki.entries", [e.rel_path for e in result])
             return result
-        else:
-            print(f"[wiki_select] hybrid_recall found 0 entries in {recall_time:.2f}s")
-    except Exception as e:
-        print(f"[wiki_select] hybrid_recall error: {type(e).__name__}: {e}")
-
-    manifest = _format_wiki_manifest(candidates)
-    try:
-        import json as json_mod
-        text = await side_query(
-            SELECT_WIKI_PROMPT,
-            f"Query: {query}\n\nAvailable wiki entries:\n{manifest}",
-        )
-        match = re.search(r"\{[\s\S]*\}", text)
-        selected_paths: list[str] = []
-        if match:
-            try:
-                parsed = json_mod.loads(match.group(0))
-                selected_paths = parsed.get("selected_entries", [])
-            except Exception:
-                selected_paths = []
-        if not selected_paths:
-            selected_paths = [e.rel_path for e in candidates if e.rel_path in text]
-
-        by_path = {e.rel_path: e for e in candidates}
-        selected = [by_path[p] for p in selected_paths if p in by_path][:5]
-
-        result = []
-        for e in selected:
-            increment_applied_count(e.rel_path)
-            result.append(e)
-        return result
-    except Exception:
-        return []
+        except Exception:
+            return []
 
 
 def format_wiki_for_injection(entries: list[WikiEntry]) -> str:

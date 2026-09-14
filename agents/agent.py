@@ -43,6 +43,11 @@ from agents.logging import print_info, print_divider, print_assistant_text, prin
     print_error, print_retry
 
 
+class ContentLevelError(Exception):
+    """模型返回内容级错误（空响应、截断、畸形 tool_call 等）。"""
+    pass
+
+
 # 指数退避重试
 
 
@@ -52,6 +57,8 @@ def _is_retryable(error: Exception) -> bool:
         return True
     msg = str(error)
     if "overloaded" in msg or "ECONNRESET" in msg or "ETIMEDOUT" in msg:
+        return True
+    if isinstance(error, ContentLevelError):
         return True
     return False
 
@@ -951,9 +958,10 @@ class Agent:
         """
         self.session.append("memory_injection", {"content": content})
 
-    def append_tool_message(self, tool_call_id: str, content: str) -> None:
+    def append_tool_message(self, tool_call_id: str, content: str, tool_name: str = "") -> None:
         """追加工具结果消息到事件日志。"""
-        self.session.append("tool_result_msg", {"call_id": tool_call_id, "content": content})
+        wrapped = f"<tool_result tool=\"{tool_name}\">\n{content}\n</tool_result>"
+        self.session.append("tool_result_msg", {"call_id": tool_call_id, "content": wrapped})
 
     def reset_repeat_chain(self) -> None:
         self._repeat_chain_key = ""
@@ -1659,6 +1667,8 @@ class Agent:
         self._last_tool_name = ""
 
     async def _execute_agent_tool(self, inp: dict) -> str:
+        from agents.observability.tracer import tracer
+        
         agent_type = inp.get("type", "general")
         description = inp.get("description", "sub-agent task")
         prompt = inp.get("prompt", "")
@@ -1667,66 +1677,87 @@ class Agent:
         import uuid
         sub_agent_id = str(uuid.uuid4())[:8]
         
-        # 创建独立的子智能体 Session
-        from agents.core.session import Session
-        sub_session = Session(
-            session_id=sub_agent_id,
-            parent_session=self.session_id,
-            origin="sub_agent",
-            agent_type=agent_type,
-        )
-        
-        self.session.append("sub_agent/start", {
-            "agent_id": sub_agent_id,
-            "agent_type": agent_type,
-            "description": description,
-            "sub_session_id": sub_session.id,
-        })
-        from .observability.trace import trace_event
-        trace_event("stream.sub_agent_start", agent_id=sub_agent_id, agent_type=agent_type, description=description)
-
-        config = get_sub_agent_config(agent_type)
-
-        sub_agent = self._spawn_sub_agent(
-            system_prompt=config["system_prompt"],
-            tools=config["tools"],
-            model_ref=config.get("model_ref", ""),
-            label=agent_type,
-        )
-        
-        # 子智能体使用独立的 Session
-        sub_agent.session = sub_session
-        sub_agent.session_id = sub_session.id
-        sub_agent._current_sub_agent_id = sub_agent_id
-        
-        start_time = time.time()
-        try:
-            result = await sub_agent.run_once(prompt)
-            self.total_input_tokens += result["tokens"]["input"]
-            self.total_output_tokens += result["tokens"]["output"]
-            print_sub_agent_end(agent_type, description)
-            self.session.append("sub_agent/end", {
+        with tracer.span("sub_agent.execute", {
+            "langfuse.observation.type": "agent",
+            "mycode.agent.type": agent_type,
+            "mycode.agent.id": sub_agent_id,
+            "mycode.agent.description": description[:200],
+            "mycode.agent.prompt": prompt[:500],
+        }) as span:
+            # 创建独立的子智能体 Session
+            from agents.core.session import Session
+            sub_session = Session(
+                session_id=sub_agent_id,
+                parent_session=self.session_id,
+                origin="sub_agent",
+                agent_type=agent_type,
+            )
+            
+            self.session.append("sub_agent/start", {
                 "agent_id": sub_agent_id,
-                "status": "completed",
-                "summary": (result["text"] or "")[:200],
-                "duration_ms": int((time.time() - start_time) * 1000),
+                "agent_type": agent_type,
+                "description": description,
                 "sub_session_id": sub_session.id,
             })
-            trace_event("stream.sub_agent_end", agent_id=sub_agent_id, agent_type=agent_type, status="completed")
-            if sub_agent._aborted:
-                return "(Sub-agent aborted)"
-            return result["text"] or "(Sub-agent produced no output)"
-        except Exception as e:
-            print_sub_agent_end(agent_type, description)
-            self.session.append("sub_agent/end", {
-                "agent_id": sub_agent_id,
-                "status": "error",
-                "summary": str(e),
-                "duration_ms": int((time.time() - start_time) * 1000),
-                "sub_session_id": sub_session.id,
-            })
-            trace_event("stream.sub_agent_end", agent_id=sub_agent_id, agent_type=agent_type, status="error", error=str(e))
-            return f"Sub-agent error: {e}"
+            from .observability.trace import trace_event
+            trace_event("stream.sub_agent_start", agent_id=sub_agent_id, agent_type=agent_type, description=description)
+
+            config = get_sub_agent_config(agent_type)
+
+            sub_agent = self._spawn_sub_agent(
+                system_prompt=config["system_prompt"],
+                tools=config["tools"],
+                model_ref=config.get("model_ref", ""),
+                label=agent_type,
+            )
+            
+            # 子智能体使用独立的 Session
+            sub_agent.session = sub_session
+            sub_agent.session_id = sub_session.id
+            sub_agent._current_sub_agent_id = sub_agent_id
+            
+            start_time = time.time()
+            try:
+                result = await sub_agent.run_once(prompt)
+                duration_s = round(time.time() - start_time, 2)
+                self.total_input_tokens += result["tokens"]["input"]
+                self.total_output_tokens += result["tokens"]["output"]
+                print_sub_agent_end(agent_type, description)
+                self.session.append("sub_agent/end", {
+                    "agent_id": sub_agent_id,
+                    "status": "completed",
+                    "summary": (result["text"] or "")[:200],
+                    "duration_ms": int(duration_s * 1000),
+                    "sub_session_id": sub_session.id,
+                })
+                trace_event("stream.sub_agent_end", agent_id=sub_agent_id, agent_type=agent_type, status="completed")
+                if span:
+                    span.set_attribute("mycode.agent.status", "completed")
+                    span.set_attribute("mycode.agent.duration_s", duration_s)
+                    span.set_attribute("mycode.agent.input_tokens", result["tokens"]["input"])
+                    span.set_attribute("mycode.agent.output_tokens", result["tokens"]["output"])
+                    span.set_attribute("mycode.agent.summary", (result["text"] or "")[:500])
+                if sub_agent._aborted:
+                    if span:
+                        span.set_attribute("mycode.agent.status", "aborted")
+                    return "(Sub-agent aborted)"
+                return result["text"] or "(Sub-agent produced no output)"
+            except Exception as e:
+                duration_s = round(time.time() - start_time, 2)
+                print_sub_agent_end(agent_type, description)
+                self.session.append("sub_agent/end", {
+                    "agent_id": sub_agent_id,
+                    "status": "error",
+                    "summary": str(e),
+                    "duration_ms": int(duration_s * 1000),
+                    "sub_session_id": sub_session.id,
+                })
+                trace_event("stream.sub_agent_end", agent_id=sub_agent_id, agent_type=agent_type, status="error", error=str(e))
+                if span:
+                    span.set_attribute("mycode.agent.status", "error")
+                    span.set_attribute("mycode.agent.duration_s", duration_s)
+                    span.record_error(e)
+                return f"Sub-agent error: {e}"
 
     #openAI后端
 

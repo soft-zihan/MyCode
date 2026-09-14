@@ -128,6 +128,28 @@ def check_permission(
     plan_file_path: str | None = None,
 ) -> dict:
     """Returns {"action": "allow"|"deny"|"confirm", "message": ...}"""
+    from agents.observability.tracer import tracer
+    
+    with tracer.span("permission.check", {
+        "langfuse.observation.type": "guardrail",
+        "mycode.permission.tool_name": tool_name,
+        "mycode.permission.mode": mode,
+    }) as span:
+        result = _check_permission_inner(tool_name, inp, mode, plan_file_path)
+        if span:
+            span.set_attribute("mycode.permission.action", result["action"])
+            if result.get("message"):
+                span.set_attribute("mycode.permission.message", result["message"][:200])
+        return result
+
+
+def _check_permission_inner(
+    tool_name: str,
+    inp: dict,
+    mode: str = "default",
+    plan_file_path: str | None = None,
+) -> dict:
+    """Internal permission check logic."""
     if mode == "bypassPermissions":
         return {"action": "allow"}
 

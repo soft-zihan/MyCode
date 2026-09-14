@@ -287,10 +287,11 @@ class AgentLoop:
             a.set_last_input_tokens(response["usage"]["prompt_tokens"])
             
             if not a.is_sub_agent:
-                # 流式事件只发送 SSE，不持久化到事件日志
+                cached_tokens = response["usage"].get("cached_tokens", 0)
                 a.session.append("stats", {
                     "input_tokens": a.total_input_tokens,
                     "output_tokens": a.total_output_tokens,
+                    "cached_tokens": cached_tokens,
                     "context_window": a.context_window,
                     "last_input_token_count": a.last_input_token_count,
                 })
@@ -307,9 +308,15 @@ class AgentLoop:
         a = self._agent
         oai_checked: list[dict] = []
 
+        published_calls: list[dict] = []
+        
         for tc in tool_calls:
             if a.abort_requested():
                 a.mark_aborted()
+                for pub_tc in published_calls:
+                    cancel_result = "Action cancelled: user abort."
+                    a.publish_tool_result_event(pub_tc["id"], pub_tc["fn"], cancel_result, "cancelled")
+                    a.append_tool_message(pub_tc["id"], cancel_result, pub_tc["fn"])
                 break
 
             if tc.get("type") != "function":
@@ -322,6 +329,7 @@ class AgentLoop:
                 inp = {}
 
             a.publish_tool_call_event(tc["id"], fn_name, inp)
+            published_calls.append({"id": tc["id"], "fn": fn_name})
 
             perm = check_permission(fn_name, inp, a.permission_mode, a.plan_file_path)
 
@@ -366,6 +374,17 @@ class AgentLoop:
         for batch in oai_batches:
             if oai_context_break or a.abort_requested():
                 a.mark_aborted()
+                for ct in batch["items"]:
+                    if ct["allowed"]:
+                        cancel_result = "Action cancelled: user abort."
+                        a.publish_tool_result_event(ct["tc"]["id"], ct["fn"], cancel_result, "cancelled")
+                        a.append_tool_message(ct["tc"]["id"], cancel_result, ct["fn"])
+                for remaining_batch in oai_batches[oai_batches.index(batch) + 1:]:
+                    for ct in remaining_batch["items"]:
+                        if ct["allowed"]:
+                            cancel_result = "Action cancelled: user abort."
+                            a.publish_tool_result_event(ct["tc"]["id"], ct["fn"], cancel_result, "cancelled")
+                            a.append_tool_message(ct["tc"]["id"], cancel_result, ct["fn"])
                 break
 
             if batch["concurrent"]:
@@ -392,7 +411,7 @@ class AgentLoop:
             repeat_warning = a.check_repeat_guard(ct_item["fn"], ct_item["inp"])
             if repeat_warning:
                 res = res + "\n\n" + repeat_warning
-            a.append_tool_message(ct_item["tc"]["id"], res)
+            a.append_tool_message(ct_item["tc"]["id"], res, ct_item["fn"])
 
     async def _execute_sequential_batch(self, items: list[dict]) -> bool:
         """顺序执行工具批次。返回是否触发上下文清理。"""
@@ -403,7 +422,7 @@ class AgentLoop:
 
         for ct in items:
             if not ct["allowed"]:
-                a.append_tool_message(ct["tc"]["id"], ct["result"])
+                a.append_tool_message(ct["tc"]["id"], ct["result"], ct["fn"])
                 continue
 
             raw = await a.execute_tool_call(ct["fn"], ct["inp"])
@@ -422,14 +441,14 @@ class AgentLoop:
             if repeat_warning:
                 res = res + "\n\n" + repeat_warning
 
-            a.append_tool_message(ct["tc"]["id"], res)
+            a.append_tool_message(ct["tc"]["id"], res, ct["fn"])
 
         return context_break
 
     async def call_model_stream(self) -> dict:
         """流式模型调用。"""
         from agents.observability.trace import trace_event, trace_span
-        from agents.agent import _with_retry
+        from agents.agent import _with_retry, ContentLevelError
 
         a = self._agent
         _model_t0 = time.time()
@@ -484,7 +503,16 @@ class AgentLoop:
                 finish_reason = ""
                 usage = None
 
-                async for chunk in stream:
+                stream_idle_timeout = int(os.environ.get("MYCODE_STREAM_IDLE_TIMEOUT", "60"))
+                chunk_iter = stream.__aiter__()
+                while True:
+                    try:
+                        chunk = await asyncio.wait_for(chunk_iter.__anext__(), timeout=stream_idle_timeout)
+                    except asyncio.TimeoutError:
+                        raise ContentLevelError(f"stream_idle_timeout after {stream_idle_timeout}s")
+                    except StopAsyncIteration:
+                        break
+
                     if a.abort_requested():
                         a.mark_aborted()
                         break
@@ -539,8 +567,14 @@ class AgentLoop:
                         {"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": tc["arguments"]}}
                         for _, tc in sorted(tool_calls.items())
                     ]
+                    assembled = [tc for tc in assembled if tc["id"] and tc["function"]["name"]]
 
                 thinking_content = a.get_thinking_content()
+
+                if not content and not assembled and not finish_reason:
+                    raise ContentLevelError("empty_response")
+                if not content and not assembled and finish_reason == "length":
+                    raise ContentLevelError("truncated_response")
                 
                 # Debug: log content for title agent
                 if a.is_sub_agent and a._custom_system_prompt and "标题" in a._custom_system_prompt:
