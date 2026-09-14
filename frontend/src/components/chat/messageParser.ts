@@ -175,6 +175,14 @@ export function simplifyToolResult(toolName: string, rawResult: string): string 
     return `**✅ 工具结果:** \`${toolName}\` — 文件内容 ${lineInfo}\n\n<details><summary>点击查看完整内容</summary>\n\n\`\`\`\n${rawResult}\n\`\`\`\n\n</details>`;
   }
   
+  if (toolName === 'outline_file') {
+    const entries = rawResult.split('\n').filter(l => /^L\d+-\d+/.test(l));
+    if (entries.length === 0) {
+      return `**✅ 工具结果:** \`${toolName}\`\n\n\`\`\`\n${rawResult}\n\`\`\``;
+    }
+    return `**✅ 工具结果:** \`${toolName}\` — ${entries.length} 个结构元素\n\n\`\`\`\n${rawResult}\n\`\`\``;
+  }
+
   if (toolName === 'grep_search') {
     const lines = rawResult.split('\n').filter(l => l.trim());
     if (rawResult === 'No matches found.') {
@@ -206,6 +214,11 @@ export function simplifyToolCall(toolName: string, input: Record<string, unknown
     const name = p.split('/').pop() || p;
     const offset = input.offset ? ` [${input.offset}+]` : '';
     return `📄 Read [${name}](${p})${offset}`;
+  }
+  if (toolName === 'outline_file') {
+    const p = String(input.file_path || '');
+    const name = p.split('/').pop() || p;
+    return `🗂 Outline [${name}](${p})`;
   }
   if (toolName === 'write_file') {
     const p = String(input.file_path || '');

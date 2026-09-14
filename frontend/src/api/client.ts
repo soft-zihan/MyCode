@@ -135,17 +135,6 @@ export async function deleteProject(cwd: string): Promise<void> {
   if (!res.ok) throw new Error('Failed to delete project');
 }
 
-export async function generateSessionName(message: string): Promise<string> {
-  const res = await fetch(`${API_BASE}/sessions/generate-name`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message })
-  });
-  if (!res.ok) throw new Error('Failed to generate session name');
-  const data = await res.json();
-  return data.name;
-}
-
 export async function updateSessionName(id: string, name: string): Promise<void> {
   console.log('[API] updateSessionName:', { id, name });
   const res = await fetch(`${API_BASE}/sessions/${id}`, {
@@ -337,8 +326,11 @@ export async function moveWorkspaceFile(sourcePath: string, targetPath: string, 
   return res.json();
 }
 
-export async function fetchWorkspaceFile(path: string): Promise<{ path: string; content: string; size: number }> {
-  const res = await fetch(`${API_BASE}/workspace/file?path=${encodeURIComponent(path)}`);
+export async function fetchWorkspaceFile(path: string, cwd?: string): Promise<{ path: string; content: string; size: number }> {
+  const url = cwd
+    ? `${API_BASE}/workspace/file?path=${encodeURIComponent(path)}&cwd=${encodeURIComponent(cwd)}`
+    : `${API_BASE}/workspace/file?path=${encodeURIComponent(path)}`;
+  const res = await fetch(url);
   if (!res.ok) throw new Error('Failed to fetch file');
   return res.json();
 }

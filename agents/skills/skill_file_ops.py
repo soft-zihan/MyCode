@@ -9,6 +9,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+from agents.core.workspace import get_workspace
 from agents.memory.frontmatter import format_frontmatter, parse_frontmatter
 from agents._utils import safe_skill_slug as _safe_skill_slug, utc_now as _utc_now, read_json as _read_json, write_json as _write_json
 
@@ -21,7 +22,7 @@ HISTORY_DIR = "history"
 
 
 def get_evolution_dir() -> Path:
-    return Path.cwd() / ".mycode" / "skill-evolution"
+    return get_workspace() / ".mycode" / "skill-evolution"
 
 
 def _today() -> str:
@@ -204,7 +205,7 @@ def resolve_skill_file(skill_name: str, *, target: str = "active", active_dir: s
             return skill_file
 
     if target in ("project", "active"):
-        found = _find_skill_file_by_name(Path.cwd() / ".mycode" / "skills", skill_name)
+        found = _find_skill_file_by_name(get_workspace() / ".mycode" / "skills", skill_name)
         if found:
             return found
 
@@ -220,7 +221,7 @@ def _skills_root(target: str) -> Path:
     target = (target or "project").strip().lower()
     if target == "user":
         return Path.home() / ".mycode" / "skills"
-    return Path.cwd() / ".mycode" / "skills"
+    return get_workspace() / ".mycode" / "skills"
 
 
 def _normalize_context(context: str | None) -> str:

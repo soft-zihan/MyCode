@@ -17,11 +17,21 @@ class JsonlSessionBackend:
     """
     
     def __init__(self, session_dir: Path | None = None):
-        if session_dir is None:
+        # session_dir=None → 每次访问动态解析 session_dir()。
+        # MYCODE_SESSION_DIR 的运行时重定向契约必须对整个进程生命周期有效：
+        # 全局单例（get_session_backend）不能在构造时固化第一个调用方的目录。
+        self._session_dir_override = session_dir
+        self.session_dir  # 触发一次解析 + mkdir
+
+    @property
+    def session_dir(self) -> Path:
+        if self._session_dir_override is not None:
+            d = Path(self._session_dir_override)
+        else:
             from .session import session_dir as get_session_dir
-            session_dir = get_session_dir()
-        self.session_dir = session_dir
-        self.session_dir.mkdir(parents=True, exist_ok=True)
+            d = get_session_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        return d
     
     def _events_path(self, session_id: str) -> Path:
         return self.session_dir / f"{session_id}.events.jsonl"

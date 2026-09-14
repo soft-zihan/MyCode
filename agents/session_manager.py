@@ -6,7 +6,6 @@ SessionManager: 管理多 session 生命周期，创建/恢复/删除 session。
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import Any
 
 from agents.core.session import Session, session_dir
@@ -51,25 +50,23 @@ class SessionManager:
         config = load_config()
         api_key, api_base, model_name = self._resolve_model(config, model)
         
-        original_cwd = os.getcwd()
-        try:
-            if cwd:
-                os.chdir(cwd)
-            session = Session()
-            print(f"[DEBUG] session_manager.create: session.id = {session.id}")
-            agent = Agent(
-                model=model_name,
-                api_key=api_key,
-                api_base=api_base,
-                permission_mode=permission_mode or "bypassPermissions",
-                session_id=session.id,
-            )
-            print(f"[DEBUG] session_manager.create: agent.session_id = {agent.session_id}, agent.session.id = {agent.session.id}")
-            agent.session = session
-            agent.session_id = session.id  # 确保 session_id 一致
-            print(f"[DEBUG] session_manager.create: AFTER assignment - agent.session_id = {agent.session_id}, agent.session.id = {agent.session.id}, id(agent.session) = {id(agent.session)}")
-        finally:
-            os.chdir(original_cwd)
+        session = Session()
+        print(f"[DEBUG] session_manager.create: session.id = {session.id}")
+        if cwd:
+            # 工作区走事件流（单一数据源）：session/created → cwd 投影 → 快照/列表/重建
+            session.append("session/created", {"cwd": cwd})
+        agent = Agent(
+            model=model_name,
+            api_key=api_key,
+            api_base=api_base,
+            permission_mode=permission_mode or "bypassPermissions",
+            session_id=session.id,
+            workspace=cwd,
+        )
+        print(f"[DEBUG] session_manager.create: agent.session_id = {agent.session_id}, agent.session.id = {agent.session.id}")
+        agent.session = session
+        agent.session_id = session.id  # 确保 session_id 一致
+        print(f"[DEBUG] session_manager.create: AFTER assignment - agent.session_id = {agent.session_id}, agent.session.id = {agent.session.id}, id(agent.session) = {id(agent.session)}")
         
         print(f"[DEBUG] session_manager.create: RETURNING session.id = {session.id}")
         self._sessions[session.id] = session
@@ -96,7 +93,7 @@ class SessionManager:
             return existing_agent, existing_session
         
         # 2. 尝试从 JSONL 加载
-        session = Session.load_from_jsonl(session_id)
+        session = Session.load_from_events(session_id)
         
         # 3. 如果 JSONL 不存在，尝试从旧 JSON 文件恢复
         if not session:
@@ -110,19 +107,14 @@ class SessionManager:
         config = load_config()
         api_key, api_base, model_name = self._resolve_model(config, None)
         
-        original_cwd = os.getcwd()
-        try:
-            if cwd:
-                os.chdir(cwd)
-            agent = Agent(
-                model=model_name,
-                api_key=api_key,
-                api_base=api_base,
-                session_id=session.id,
-            )
-            agent.session = session
-        finally:
-            os.chdir(original_cwd)
+        agent = Agent(
+            model=model_name,
+            api_key=api_key,
+            api_base=api_base,
+            session_id=session.id,
+            workspace=cwd or session.projections.get("cwd"),
+        )
+        agent.session = session
         
         agent._current_turn = max(
             (e.get("turn", 0) for e in session._log if e["type"] == "turn/start"),

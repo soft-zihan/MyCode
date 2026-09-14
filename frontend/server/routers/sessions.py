@@ -44,14 +44,6 @@ def api_frontend_log(data: FrontendLogRequest) -> dict[str, Any]:
     return {"success": True}
 
 
-class SessionNameRequest(BaseModel):
-    message: str
-
-
-class SessionUpdateRequest(BaseModel):
-    name: Optional[str] = None
-
-
 class SteerRequest(BaseModel):
     message: str
 
@@ -131,7 +123,7 @@ def api_get_session(session_id: str) -> dict[str, Any]:
     projections = {}
     try:
         from agents.core.session import Session
-        session = Session.load_from_jsonl(session_id)
+        session = Session.load_from_events(session_id)
         if session:
             projections = session.projections
     except Exception:
@@ -146,32 +138,22 @@ def api_get_session(session_id: str) -> dict[str, Any]:
 
 @router.put("/api/sessions/{session_id}")
 def api_update_session(session_id: str, request: dict[str, Any]) -> dict[str, Any]:
-    """更新 session 的 metadata（如 name）。"""
-    print(f"[PUT] session_id={session_id}, request={request}")
+    """重命名 session：追加 session/title 事件（单一数据源=事件日志，自动持久化+投影+WS广播）。"""
+    if "name" not in request:
+        raise HTTPException(status_code=400, detail="Only 'name' updates are supported")
     
-    # 尝试更新磁盘上的 session
-    from agents.core.session import save_session_meta
-    success = save_session_meta(session_id, request)
+    from agents.session_manager import get_session_manager
+    from agents.core.session import Session
     
-    if not success:
-        # 如果磁盘上没有，尝试更新内存中的 session
-        try:
-            from agents.session_manager import get_session_manager
-            manager = get_session_manager()
-            session = manager.get(session_id)
-            if session:
-                # 更新 session 的 title
-                if "name" in request:
-                    session.title = request["name"]
-                print(f"[PUT] Updated in-memory session {session_id}")
-                return {"success": True, "message": "Session updated in memory"}
-        except Exception as e:
-            print(f"[PUT] Error updating in-memory session: {e}")
-        
+    session = get_session_manager().get(session_id)
+    if session is None:
+        session = Session.load_from_events(session_id)
+    if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    print(f"[PUT] Updated session {session_id}")
-    return {"success": True, "message": "Session updated"}
+    session.append("session/title", {"title": request["name"]})
+    print(f"[PUT] Renamed session {session_id} -> {request['name']}")
+    return {"success": True, "message": "Session renamed"}
 
 
 @router.get("/api/sessions/{session_id}/projections")
@@ -179,7 +161,7 @@ def api_get_session_projections(session_id: str) -> dict[str, Any]:
     """快速获取 session 投影值（title, updatedAt, cwd, running）。"""
     try:
         from agents.core.session import Session
-        session = Session.load_from_jsonl(session_id)
+        session = Session.load_from_events(session_id)
         if session:
             return session.projections
     except Exception:
@@ -265,26 +247,6 @@ async def generate_session_title(message: str) -> str:
         print(f"[TITLE] Outer exception: {e}")
         print(f"[TITLE] Traceback: {traceback.format_exc()}")
         return fallback_name
-
-
-@router.post("/api/sessions/generate-name")
-async def api_generate_session_name(data: SessionNameRequest) -> dict[str, str]:
-    name = await generate_session_title(data.message)
-    return {"name": name}
-
-
-@router.put("/api/sessions/{session_id}")
-def api_update_session(session_id: str, data: SessionUpdateRequest) -> dict[str, Any]:
-    print(f"[UPDATE] session_id={session_id}, name={data.name}")
-    session_data = load_session(session_id)
-    if session_data is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    if data.name is not None:
-        session_data["metadata"]["name"] = data.name
-    
-    save_session(session_id, session_data)
-    return {"success": True}
 
 
 @router.post("/api/sessions/{session_id}/abort")
@@ -592,9 +554,17 @@ async def api_fork_session(session_id: str, data: Optional[ForkRequest] = None) 
     if session_data is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    original_name = session_data.get("metadata", {}).get("name", "")
+    # 标题单一数据源：事件流投影（内存 session 优先，其次从事件日志重建）
+    original_title = None
+    if session is not None:
+        original_title = session.projections.get("title")
+    if not original_title:
+        from agents.core.session import Session
+        loaded = Session.load_from_events(session_id)
+        if loaded is not None:
+            original_title = loaded.projections.get("title")
     events = session_data.get("events", [])
-    print(f"[FORK] original: name={original_name}, events={len(events)}")
+    print(f"[FORK] original: title={original_title}, events={len(events)}")
     
     new_session_id = uuid.uuid4().hex[:8]
     new_session_data = copy.deepcopy(session_data)
@@ -603,10 +573,8 @@ async def api_fork_session(session_id: str, data: Optional[ForkRequest] = None) 
     new_session_data["metadata"]["id"] = new_session_id
     new_session_data["metadata"]["startTime"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
     
-    # 如果没有 name，用 session_id 作为 base_name
-    base_name = original_name
-    if not base_name:
-        base_name = session_id
+    # 无标题时用 session_id 作为 base_name
+    base_name = original_title or session_id
     
     if "(fork " in base_name:
         base_name = base_name.rsplit("(fork ", 1)[0]
@@ -622,7 +590,6 @@ async def api_fork_session(session_id: str, data: Optional[ForkRequest] = None) 
         fork_num += 1
     
     print(f"[FORK] new: id={new_session_id}, name={fork_name}")
-    new_session_data["metadata"]["name"] = fork_name
     
     # 原子切割：根据 at_seq 或 keep_user_messages
     if data and data.at_seq is not None:
@@ -649,6 +616,16 @@ async def api_fork_session(session_id: str, data: Optional[ForkRequest] = None) 
                     break
         print(f"[FORK] truncating events to keep {data.keep_user_messages} user messages, truncate_at={truncate_at}")
         new_session_data["events"] = events[:truncate_at]
+    
+    # 标题走事件流：fork 名写入新会话事件日志（单一数据源，随事件重建）
+    fork_events = new_session_data.setdefault("events", [])
+    fork_events.append({
+        "type": "session/title",
+        "time": int(time.time() * 1000),
+        "session_id": new_session_id,
+        "title": fork_name,
+        "seq": len(fork_events),
+    })
     
     # 同步更新 openaiMessages（向后兼容）
     if "openaiMessages" in new_session_data:
@@ -682,6 +659,24 @@ async def api_fork_session(session_id: str, data: Optional[ForkRequest] = None) 
             print(f"[FORK] copied events: {source_events} -> {target_events} ({len(truncated_events)} events)")
     except Exception as e:
         print(f"[FORK] failed to copy events: {e}")
+    
+    # 为新会话构建投影 checkpoint（list_sessions 侧栏立即可见 fork 标题）
+    try:
+        from agents.core.session_projection_cache import (
+            ProjectionCheckpoint,
+            get_projection_cache,
+            restore_projections,
+        )
+        fork_events = new_session_data.get("events", [])
+        projections = restore_projections(new_session_id, fork_events)
+        get_projection_cache().save_checkpoint(ProjectionCheckpoint(
+            session_id=new_session_id,
+            seq=len(fork_events) - 1 if fork_events else 0,
+            projections=projections,
+        ))
+        print(f"[FORK] projcache built for {new_session_id}: title={projections.get('title')}")
+    except Exception as e:
+        print(f"[FORK] failed to build projcache: {e}")
     
     # 复制 trace 文件
     try:
@@ -755,7 +750,6 @@ def api_compression_stats(session_id: str) -> dict[str, Any]:
         svc = session_info["svc"]
         agent = svc.agent
         compressor = agent._compressor
-        context_store = agent._context_store
         token_count = agent.last_input_token_count
         effective_window = compressor.effective_window
         utilization = token_count / effective_window if effective_window else 0
@@ -791,25 +785,27 @@ def api_compression_stats(session_id: str) -> dict[str, Any]:
 
 @router.get("/api/sessions/{session_id}/context-store")
 def api_context_store(session_id: str) -> dict[str, Any]:
+    """返回被隐藏的事件信息（in_message = False）。"""
     from agents.session_manager import get_session_manager
     sm = get_session_manager()
     session_info = _active_sessions.get(session_id)
     if session_info and session_info.get("svc"):
         svc = session_info["svc"]
-        context_store = svc.agent._context_store
+        session = svc.agent.session
         entries = []
-        for key, entry in context_store._entries.items():
-            entries.append({
-                "key": key,
-                "raw_size": len(entry.get("raw", "")),
-                "abstract": (entry.get("abstract", "") or "")[:200],
-                "dropped": entry.get("dropped", False),
-            })
+        for event in session._log:
+            if not event.get("in_message", True):
+                entries.append({
+                    "seq": event.get("seq"),
+                    "type": event.get("type"),
+                    "call_id": event.get("call_id", ""),
+                    "content_size": len(event.get("content", "")),
+                })
         return {
             "entries": entries,
             "total_entries": len(entries),
-            "total_raw_size": sum(e["raw_size"] for e in entries),
-            "active_entries": len([e for e in entries if not e["dropped"]]),
+            "total_raw_size": sum(e["content_size"] for e in entries),
+            "active_entries": len([e for e in entries if e.get("type") == "tool_result_msg"]),
         }
     session_data = load_session(session_id)
     if session_data:
@@ -849,7 +845,7 @@ def api_get_session_events(
     """
     from agents.core.session import Session
     
-    session = Session.load_from_jsonl(session_id)
+    session = Session.load_from_events(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
     

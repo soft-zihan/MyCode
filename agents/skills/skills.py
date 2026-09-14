@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from agents.core.workspace import get_workspace
 from agents.memory.frontmatter import parse_frontmatter
 from .skill_file_ops import (
     create_skill_file,
@@ -43,8 +44,9 @@ class SkillDefinition:
     hook_mode: str = "inject"  # "inject" | "inline" | "fork"
 
 
-# skills 只在首次读取时扫描磁盘，后续复用缓存；修改 skill 后需要重启或 reset。
-_cached_skills: list[SkillDefinition] | None = None
+# skills 按工作区缓存：首次读取时扫描磁盘，后续复用；修改 skill 后需要 reset。
+# 服务器多会话并发时各会话工作区不同，必须按 workspace 键控，否则项目级 skills 串台。
+_skills_cache: dict[Path, list[SkillDefinition]] = {}
 
 
 def execute_skill(skill_name:str, args:object)-> dict | None:
@@ -88,9 +90,10 @@ def get_skill_by_name(skill_name:str)->SkillDefinition | None:
     return None
 
 def discover_skills() -> list[SkillDefinition]:
-    global _cached_skills
-    if _cached_skills is not None:
-        return _cached_skills
+    workspace = get_workspace().resolve()
+    cached = _skills_cache.get(workspace)
+    if cached is not None:
+        return cached
 
     skills: dict[str,SkillDefinition] = {}
     # 用户级 skills 优先级最高：~/.mycode/skills/<name>/SKILL.md
@@ -99,16 +102,17 @@ def discover_skills() -> list[SkillDefinition]:
     # 用户级 skills（agents 目录）：~/.agents/skills/<name>/SKILL.md
     agents_dir = Path.home() / ".agents" / "skills"
     _load_skills_from_dir(agents_dir, "user", skills, overwrite=False)
-    # 项目级 skills 优先级较低：<cwd>/.mycode/skills/<name>/SKILL.md
-    project_dir = Path.cwd() / ".mycode" / "skills"
+    # 项目级 skills 优先级较低：<workspace>/.mycode/skills/<name>/SKILL.md
+    project_dir = workspace / ".mycode" / "skills"
     _load_skills_from_dir(project_dir, "project", skills, overwrite=False)
 
-    _cached_skills = list(skills.values())
+    result = list(skills.values())
 
     # 加载可执行 skills
-    _load_executable_skills(_cached_skills)
+    _load_executable_skills(result)
 
-    return _cached_skills
+    _skills_cache[workspace] = result
+    return result
 
 
 def _load_executable_skills(skills: list[SkillDefinition]) -> None:
@@ -404,8 +408,7 @@ def format_retrieved_skill_context(query: str, *, limit: int = 3) -> tuple[str, 
 
 def reset_skill_cache() -> None:
     # 测试或运行中刷新 skills 时使用；普通用户通常重启程序即可。
-    global _cached_skills
-    _cached_skills = None
+    _skills_cache.clear()
 
 
 def evolve_skill(

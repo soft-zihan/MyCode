@@ -28,6 +28,7 @@ from .refinement import (
     load_harness_state,
     save_harness_state,
 )
+from agents.core.workspace import get_workspace
 from agents.observability.trace import trace_event
 
 
@@ -254,7 +255,7 @@ def rollback_skill(
 
 def _resolve_skill_path(skill_name: str) -> Optional[Path]:
     """解析 skill 文件路径。"""
-    cwd = Path.cwd()
+    cwd = get_workspace()
 
     # 项目级 skill
     project_path = cwd / ".mycode" / "skills" / skill_name / "SKILL.md"

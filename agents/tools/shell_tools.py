@@ -72,12 +72,14 @@ def _watch_background(job_id: str) -> None:
 
 def _start_background_shell(command: str) -> str:
     try:
+        from agents.core.workspace import get_workspace
         proc = subprocess.Popen(
             command,
             shell=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            cwd=str(get_workspace()),
         )
     except Exception as e:
         return f"Error starting background command: {e}"

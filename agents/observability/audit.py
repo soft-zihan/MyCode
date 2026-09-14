@@ -1,6 +1,7 @@
 """操作审计 — 通过 OTel Span 记录权限决策、危险操作、文件修改
 
-Phoenix 无原生 Audit 支持，通过自定义 Span 实现。
+以 Langfuse guardrail observation 类型上报（langfuse.observation.type=guardrail），
+可在 Langfuse UI 按类型过滤审计事件。
 """
 
 from __future__ import annotations
@@ -12,9 +13,10 @@ class AuditLogger:
 
     def log_permission_decision(self, tool: str, decision: str, risk_level: str = "low", reason: str = ""):
         with tracer.span(f"audit.{tool}", {
+            "langfuse.observation.type": "guardrail",
             "mycode.audit.decision": decision,
             "mycode.audit.risk_level": risk_level,
-            "openinference.span.kind": "GUARDRAIL",
+            "langfuse.observation.metadata.audit_reason": reason[:500],
         }) as span:
             if span:
                 span.set_attribute("mycode.audit.reason", reason)

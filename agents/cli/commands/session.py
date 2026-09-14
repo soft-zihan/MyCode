@@ -239,11 +239,8 @@ async def cmd_rename(agent: "Agent", args: str) -> None:
     if not name:
         print_error("Usage: /rename <name>")
         return
-    from ...core.session import save_session_meta
-    if save_session_meta(agent.session_id, {"title": name}):
-        print_info(f"Session renamed to: {name}")
-    else:
-        print_error("Failed to rename session")
+    agent.session.append("session/title", {"title": name})
+    print_info(f"Session renamed to: {name}")
 
 
 @command(

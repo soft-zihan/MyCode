@@ -1,9 +1,9 @@
-"""OTel Span 导出器 — 将 MyCode 事件转为 OTel Spans 发送到 Phoenix
+"""OTel Span 导出器 — 将 MyCode 事件转为 OTel Spans 发送到 Langfuse（OTLP/HTTP）
 
-启用条件：MYCODE_OTEL=1
-默认端点：http://localhost:4317（Phoenix OTLP gRPC）
+启用条件：MYCODE_OTEL=1 + LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY（.env）
+默认端点：{LANGFUSE_BASE_URL}/api/public/otel/v1/traces
 
-依赖：pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-grpc
+依赖：pip install opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
 """
 
 from __future__ import annotations
@@ -16,6 +16,8 @@ from typing import Any
 # 导入新的 Tracer 模块
 from .tracer import (
     init_tracer,
+    shutdown_tracer,
+    set_current_session_id,
     tracer_enabled,
     tracer,
     turn_span,
@@ -28,7 +30,7 @@ from .tracer import (
 
 
 def init_otel() -> None:
-    """初始化 OTel TracerProvider，连接到 Phoenix"""
+    """初始化 OTel TracerProvider，连接到 Langfuse"""
     init_tracer()
 
 

@@ -32,6 +32,8 @@ class GitRepositoryManager:
 
     async def _configure_repository(self) -> None:
         configs = [
+            # 影子仓库模式：git dir 在 snapshot_dir，工作树指向用户项目
+            ["core.worktree", str(self.project_root)],
             ["core.autocrlf", "false"],
             ["core.longpaths", "true"],
             ["core.symlinks", "true"],

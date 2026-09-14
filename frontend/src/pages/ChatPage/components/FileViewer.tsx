@@ -5,20 +5,21 @@ import { fetchWorkspaceFile } from '../../../api/client';
 
 interface FileViewerProps {
   filePath: string;
+  cwd?: string;
   onClose: () => void;
 }
 
-export function FileViewer({ filePath, onClose }: FileViewerProps) {
+export function FileViewer({ filePath, cwd, onClose }: FileViewerProps) {
   const [content, setContent] = useState<string>('');
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     setLoading(true);
-    fetchWorkspaceFile(filePath)
+    fetchWorkspaceFile(filePath, cwd)
       .then(data => setContent(data.content))
       .catch(err => setContent(`Error: ${err.message}`))
       .finally(() => setLoading(false));
-  }, [filePath]);
+  }, [filePath, cwd]);
 
   const getLanguage = (path: string) => {
     const ext = path.split('.').pop()?.toLowerCase();

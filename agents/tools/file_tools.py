@@ -12,14 +12,15 @@ from typing import Any
 
 
 def _resolve_tool_path(raw_path: str, *, must_exist: bool = True) -> Path:
+    from agents.core.workspace import get_workspace
     path = Path(raw_path)
     if path.exists() or not path.is_absolute():
         return path
 
     parts = path.parts
-    cwd = Path.cwd()
+    workspace = get_workspace()
     for i in range(1, len(parts)):
-        candidate = cwd.joinpath(*parts[i:])
+        candidate = workspace.joinpath(*parts[i:])
         if must_exist and candidate.exists():
             return candidate
         if not must_exist and candidate.parent.exists():

@@ -49,11 +49,18 @@ start_backend() {
     log "启动后端 (FastAPI @ port $BACKEND_PORT) ..."
     cd "$PROJECT_ROOT"
     source .venv/bin/activate
+    # 加载 .env（Langfuse 密钥等，已 gitignore）
+    if [ -f "$PROJECT_ROOT/.env" ]; then
+        set -a
+        source "$PROJECT_ROOT/.env"
+        set +a
+    fi
     export MYCODE_OTEL="${MYCODE_OTEL:-1}"
-    export MYCODE_OTEL_ENDPOINT="${MYCODE_OTEL_ENDPOINT:-http://localhost:4317}"
+    export MYCODE_OTEL_ENDPOINT="${MYCODE_OTEL_ENDPOINT:-${LANGFUSE_BASE_URL:-https://us.cloud.langfuse.com}/api/public/otel/v1/traces}"
+    export MYCODE_SESSION_BACKEND="${MYCODE_SESSION_BACKEND:-jsonl}"
     nohup python frontend/server/main.py > "$PROJECT_ROOT/logs/.backend.log" 2>&1 &
     echo $! > "$PIDFILE_BACKEND"
-    log "后端已启动 (pid=$!, log=.backend.log) [OTEL=$MYCODE_OTEL]"
+    log "后端已启动 (pid=$!, log=.backend.log) [OTEL=$MYCODE_OTEL, SESSION=$MYCODE_SESSION_BACKEND]"
 }
 
 start_frontend() {

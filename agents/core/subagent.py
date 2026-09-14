@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from agents.core.workspace import get_workspace
 from agents.memory.frontmatter import parse_frontmatter
 from agents.tools import tool_definitions, ToolDef
 
@@ -22,7 +23,7 @@ def get_agent_model_ref_env(agent_type: str) -> str:
 # ─── Read-only tools (for explore and plan agents) ──────────
 
 # explore 子代理只能拿到这几个只读工具，避免它们修改项目文件或系统状态。
-READ_ONLY_TOOLS = {"read_file", "list_files", "grep_search"}
+READ_ONLY_TOOLS = {"read_file", "outline_file", "list_files", "grep_search"}
 
 # ─── Prompt loading from files ──────────────────────────────
 
@@ -37,23 +38,25 @@ def _load_subagent_prompt(name: str) -> str:
 
 # ─── Custom agent discovery ─────────────────────────────────
 
-# 自定义代理发现结果的进程内缓存；读取 .mycode/agents/*.md 后会复用，避免每次调用 agent 工具都扫目录。
-_cached_custom_agents: dict[str, dict] | None = None
+# 自定义代理发现结果按工作区缓存；读取 .mycode/agents/*.md 后会复用，避免每次调用 agent 工具都扫目录。
+# 服务器多会话并发时各会话工作区不同，必须按 workspace 键控，否则项目级 agents 串台。
+_custom_agents_cache: dict[Path, dict[str, dict]] = {}
 
 
 def _discover_custom_agents() -> dict[str, dict]:
     """发现用户级和项目级自定义代理，并按代理名称返回配置。"""
-    global _cached_custom_agents
-    if _cached_custom_agents is not None:
-        return _cached_custom_agents
+    workspace = get_workspace().resolve()
+    cached = _custom_agents_cache.get(workspace)
+    if cached is not None:
+        return cached
 
     agents: dict[str, dict] = {}
     # User-level (lower priority)
     _load_agents_from_dir(Path.home() / ".mycode" / "agents", agents)
     # Project-level (higher priority, overwrites)
-    _load_agents_from_dir(Path.cwd() / ".mycode" / "agents", agents)
+    _load_agents_from_dir(workspace / ".mycode" / "agents", agents)
 
-    _cached_custom_agents = agents
+    _custom_agents_cache[workspace] = agents
     return agents
 
 
@@ -151,5 +154,4 @@ def build_agent_descriptions() -> str:
 
 def reset_agent_cache() -> None:
     """清空自定义代理缓存；测试或运行中刷新 .mycode/agents 配置时使用。"""
-    global _cached_custom_agents
-    _cached_custom_agents = None
+    _custom_agents_cache.clear()

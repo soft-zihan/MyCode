@@ -124,25 +124,15 @@ class RevertService:
             raise ValueError("Plan expired, please stage again")
         restored_files = []
         files_to_restore = []
-        files_to_delete = []
         for change in plan.changes:
-            if change.status in ("added", "modified"):
+            # added（快照后新建）→ restore 时发现不在目标树中会自动删除
+            # modified → checkout 快照版本
+            # deleted（快照后删除）→ checkout 恢复
+            if change.status in ("added", "modified", "deleted"):
                 files_to_restore.append(change.path)
-            elif change.status == "deleted":
-                files_to_delete.append(change.path)
         if files_to_restore:
             await self._snapshot_service.restore(plan.snapshot_id, files_to_restore)
             restored_files.extend(files_to_restore)
-        if files_to_delete:
-            for file_path in files_to_delete:
-                full_path = self.project_root / file_path
-                if full_path.exists():
-                    if full_path.is_dir():
-                        import shutil
-                        shutil.rmtree(full_path)
-                    else:
-                        full_path.unlink()
-            restored_files.extend(files_to_delete)
         del self._plans[plan_id]
         return RevertResult(
             plan_id=plan_id,

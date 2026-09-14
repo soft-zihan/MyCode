@@ -121,7 +121,7 @@ async def api_session_messages(session_id: str):
     sm = get_session_manager()
     session = sm.get(session_id)
     if not session:
-        session = Session.load_from_jsonl(session_id)
+        session = Session.load_from_events(session_id)
     if not session:
         from fastapi import HTTPException
         raise HTTPException(404, "Session not found")

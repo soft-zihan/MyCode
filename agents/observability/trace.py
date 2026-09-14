@@ -1,7 +1,8 @@
 """轻量 trace 事件日志 — 用于监控运行状态与定位问题。
 
 设计：
-- OTel 导出：通过 OpenTelemetry 导出到 Phoenix 等后端
+- OTel 导出：通过 OpenTelemetry 导出到 Langfuse（OTLP/HTTP）
+- JSONL 兜底：trace_event() 写入 ~/.mycode/trace/，与 Span 双轨（Span 看链路，JSONL 看离散事件）
 - session_id 来源：MYCODE_TRACE_SESSION 环境变量 / set_trace_session() 设置
 - 开启方式：启动参数 --trace / 环境变量 MYCODE_TRACE=1 / REPL 内 /trace on
 - 关闭时零开销：trace_event 立即返回，不做任何 IO
@@ -94,9 +95,25 @@ def set_trace_enabled(value: bool) -> None:
 
 
 def trace_event(kind: str, **fields: Any) -> None:
-    """记录 trace 事件（通过 OTel 导出）。"""
+    """记录 trace 事件（JSONL 兜底日志，与 OTel Span 双轨）。
+
+    OTel/Langfuse 看执行链路与耗时，JSONL 看离散事件细节（审计、调试）。
+    写入 ~/.mycode/trace/{ts}_{session}.jsonl，失败静默（观测不影响主流程）。
+    """
     if not trace_enabled():
         return
+    try:
+        record = {
+            "ts": datetime.now().astimezone().isoformat(timespec="milliseconds"),
+            "kind": kind,
+            **fields,
+        }
+        path = trace_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        pass
 
 
 def _preview(value: Any, limit: int = 300) -> str:
@@ -176,22 +193,49 @@ class TraceSpan:
     """Trace span 上下文管理器 — 只写入 OTel。
     
     业务代码只调用这个 API，不需要知道 OTel 的存在。
+    kind 自动映射为 Langfuse observation type（generation/tool/agent/guardrail/chain）。
     """
-    
+
+    # kind → Langfuse observation type（langfuse.observation.type）
+    _KIND_TYPE_MAP = {
+        "model_call": "generation",
+        "llm": "generation",
+        "tool_call": "tool",
+        "tool": "tool",
+        "turn": "chain",
+        "compact": "chain",
+        "context.compaction": "chain",
+        "sub_agent": "agent",
+        "audit": "guardrail",
+    }
+
     def __init__(self, kind: str, **attributes: Any):
         self._kind = kind
         self._attributes = attributes
         self._otel_cm = None  # OTel 上下文管理器
         self._otel_span = None
         self._start_time: float | None = None
-    
+
+    def _langfuse_attrs(self) -> dict[str, Any]:
+        """将业务 kind 映射为 Langfuse 规范属性。"""
+        attrs = dict(self._attributes)
+        prefix = self._kind.split(".")[0]
+        obs_type = self._KIND_TYPE_MAP.get(self._kind) or self._KIND_TYPE_MAP.get(prefix)
+        if obs_type:
+            attrs.setdefault("langfuse.observation.type", obs_type)
+        if obs_type == "generation":
+            model = attrs.get("model")
+            if model:
+                attrs.setdefault("langfuse.observation.model.name", str(model))
+        return attrs
+
     def __enter__(self) -> "TraceSpan":
         self._start_time = time.time()
         # 创建 OTel span（如果启用）
         if otel_enabled():
             try:
                 from agents.observability.tracer import tracer
-                self._otel_cm = tracer.span(self._kind, self._attributes)
+                self._otel_cm = tracer.span(self._kind, self._langfuse_attrs())
                 self._otel_span = self._otel_cm.__enter__()
             except Exception:
                 pass  # OTel 初始化失败不影响主流程
@@ -240,20 +284,33 @@ def trace_span(kind: str, **attributes: Any) -> TraceSpan:
 
 
 # ============================================================
-# 查询 API（从 Phoenix 读取）
+# 查询 API（从 JSONL 兜底日志读取；Span 级查询走 Langfuse API/UI）
 # ============================================================
 
 
 def recent_events(n: int = 20) -> list[dict]:
-    """从 Phoenix 读取最近的 trace 事件。"""
-    # TODO: 实现从 Phoenix API 读取
-    return []
+    """读取最近的 trace 事件（JSONL 兜底日志）。"""
+    path = trace_path()
+    if not path.exists():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    events = []
+    for line in lines[-n:]:
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return events
 
 
 def format_recent_events(n: int = 20) -> str:
     """格式化最近的 trace 事件。"""
     events = recent_events(n)
-    header = f"Trace source: Phoenix ({'ON' if otel_enabled() else 'OFF'})"
+    otel_state = "ON→Langfuse" if otel_enabled() else "OFF"
+    header = f"Trace: JSONL({'ON' if trace_enabled() else 'OFF'}) OTel({otel_state})"
     if not events:
         return header + "\n(no events yet)"
     lines = []

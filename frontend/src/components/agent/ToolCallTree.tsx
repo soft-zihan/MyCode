@@ -10,6 +10,7 @@ interface ToolCallTreeProps {
 const getToolIcon = (name: string) => {
   const iconMap: Record<string, React.FC<{className?: string}>> = {
     read_file: Eye,
+    outline_file: FileText,
     write_file: Edit3,
     edit_file: Edit3,
     list_files: FolderOpen,
@@ -38,7 +39,7 @@ const getStatusStyle = (status?: string) => {
 };
 
 const formatInput = (name: string, input: Record<string, unknown>): string => {
-  if (name === 'read_file' || name === 'write_file' || name === 'edit_file') {
+  if (name === 'read_file' || name === 'write_file' || name === 'edit_file' || name === 'outline_file') {
     return (input.file_path as string) || '';
   }
   if (name === 'run_shell') {

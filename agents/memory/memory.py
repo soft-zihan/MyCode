@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .frontmatter import parse_frontmatter, format_frontmatter
+from agents.core.workspace import get_workspace
 from agents.logging import print_warning
 from typing import Callable
 # side query 是一个异步函数：输入 system prompt 和 user prompt，返回模型文本。
@@ -50,8 +51,8 @@ class MemoryEntry:
 
 
 def _project_hash() -> str:
-    """用当前工作目录生成稳定 hash，让不同项目的记忆互相隔离。"""
-    return hashlib.sha256(str(Path.cwd()).encode()).hexdigest()[:16]
+    """用当前工作区生成稳定 hash，让不同项目的记忆互相隔离。"""
+    return hashlib.sha256(str(get_workspace()).encode()).hexdigest()[:16]
 
 
 def get_memory_dir() -> Path:

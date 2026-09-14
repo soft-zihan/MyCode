@@ -48,6 +48,9 @@ class AgentOptions:
     is_sub_agent: bool = False
     parent_abort_event: asyncio.Event | None = None
     
+    # 工作区（会话工作目录；None 时回退进程 CWD，仅 CLI 场景）
+    workspace: Any | None = None
+    
     # Checkpoint 存储
     checkpoint_store: Any | None = None
     
@@ -70,6 +73,7 @@ class AgentOptions:
             "custom_tools": self.custom_tools,
             "is_sub_agent": self.is_sub_agent,
             "parent_abort_event": self.parent_abort_event,
+            "workspace": self.workspace,
             "checkpoint_store": self.checkpoint_store,
             "extra": self.extra,
         }

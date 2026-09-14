@@ -25,7 +25,6 @@ from routers import (
     events_router,
     projects_router,
     websocket_router,
-    snapshots_router,
 )
 
 # Import global MCP manager from dedicated module
@@ -53,16 +52,23 @@ app.include_router(mcp_router)
 app.include_router(events_router)
 app.include_router(projects_router)
 app.include_router(websocket_router)
-app.include_router(snapshots_router)
 
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize MCP connections at startup, respecting disabled servers."""
+    """Initialize observability + MCP connections at startup."""
     import asyncio
     import json
     from pathlib import Path
-    
+
+    # 可观测性初始化（OTel → Langfuse，失败不阻塞主流程）
+    try:
+        from agents.observability import init_tracing
+        init_tracing()
+        print("[STARTUP] Observability initialized")
+    except Exception as e:
+        print(f"[STARTUP] Observability init failed (non-fatal): {e}")
+
     # Load disabled servers from config
     disabled_servers = set()
     config_path = Path.home() / ".mycode" / "config" / "disabled_mcp_servers.json"
@@ -82,7 +88,13 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Cleanup MCP connections at shutdown."""
+    """Flush traces and cleanup MCP connections at shutdown."""
+    try:
+        from agents.observability import shutdown_tracing
+        shutdown_tracing()
+        print("[SHUTDOWN] Traces flushed")
+    except Exception as e:
+        print(f"[SHUTDOWN] Trace flush failed: {e}")
     await global_mcp_manager.disconnect_all()
     print("[SHUTDOWN] MCP connections closed")
 

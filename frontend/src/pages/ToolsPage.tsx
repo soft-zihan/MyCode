@@ -52,6 +52,12 @@ const toolDetails: Record<string, {
     errorHandling: '文件不存在返回错误信息；权限不足返回错误信息。',
     executionMode: 'parallel',
   },
+  outline_file: {
+    idempotent: true,
+    returns: '文件结构大纲：Python 类/函数、Markdown 标题、TS/JS 声明，均带行号范围。',
+    errorHandling: '文件不存在或不支持的扩展名返回错误信息。',
+    executionMode: 'parallel',
+  },
   write_file: {
     idempotent: false,
     returns: '写入成功的确认信息。',
@@ -199,30 +205,6 @@ export default function ToolsPage() {
     loadNativeTools();
     loadMcpData();
   }, []);
-
-  const allTools: ToolItem[] = [
-    ...nativeTools.map(t => ({
-      name: t.name,
-      fullName: t.name,
-      description: t.description,
-      deferred: t.deferred || false,
-      inputSchema: t.input_schema,
-      source: 'native' as const,
-    })),
-    ...serverTools.flatMap(st =>
-      st.tools.map(t => ({
-        name: t.name,
-        fullName: t.full_name,
-        description: t.description,
-        deferred: false,
-        inputSchema: t.input_schema,
-        source: 'mcp' as const,
-        serverName: st.server,
-      }))
-    ),
-  ];
-
-  const deferredCount = allTools.filter(t => t.deferred).length;
 
   const toggleServerExpanded = (serverName: string) => {
     const newExpanded = new Set(expandedServers);

@@ -42,30 +42,42 @@ class LocalRuntime:
     """本地运行时 - 直接操作文件系统"""
     
     def read_file(self, path: str) -> str:
-        return Path(path).read_text(errors="replace")
+        p = Path(path)
+        if not p.is_absolute():
+            from agents.core.workspace import get_workspace
+            p = get_workspace() / p
+        return p.read_text(errors="replace")
     
     def write_file(self, path: str, content: str) -> None:
         p = Path(path)
+        if not p.is_absolute():
+            from agents.core.workspace import get_workspace
+            p = get_workspace() / p
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content)
     
     def run_command(self, command: str, timeout_s: float = 30) -> tuple[int, str, str]:
+        from agents.core.workspace import get_workspace
         result = subprocess.run(
             command,
             shell=True,
             capture_output=True,
             text=True,
             timeout=timeout_s,
+            cwd=str(get_workspace()),
         )
         return result.returncode, result.stdout, result.stderr
     
     def list_files(self, base: str, pattern: str) -> list[str]:
         import os
-        base_path = Path(base) if base != "." else Path(".")
+        from agents.core.workspace import get_workspace
+        base_path = Path(base)
+        if not base_path.is_absolute():
+            base_path = get_workspace() / base_path
         files = []
         for p in base_path.glob(pattern):
             if p.is_file():
-                rel = str(p.relative_to(base_path) if base_path != Path(".") else p)
+                rel = str(p.relative_to(base_path))
                 if "node_modules" in rel or ".git" in rel.split(os.sep):
                     continue
                 files.append(rel)
@@ -74,6 +86,10 @@ class LocalRuntime:
         return files
     
     def grep_search(self, pattern: str, path: str, include: str | None = None) -> str:
+        from agents.core.workspace import get_workspace
+        p = Path(path)
+        if not p.is_absolute():
+            path = str(get_workspace() / p)
         args = ["grep", "--line-number", "--color=never", "-r", "-E"]
         if include:
             args.append(f"--include={include}")

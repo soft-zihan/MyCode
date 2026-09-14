@@ -41,6 +41,7 @@ from typing import Any
 
 import httpx
 
+from agents.core.workspace import get_workspace
 from agents.logging import print_error, print_info
 
 
@@ -514,11 +515,11 @@ class McpManager:
         self._merge_config_file(global_path, merged)
 
         # 2. 当前项目配置：<cwd>/.mycode/settings.json
-        project_path = Path.cwd() / ".mycode" / "settings.json"
+        project_path = get_workspace() / ".mycode" / "settings.json"
         self._merge_config_file(project_path, merged)
 
         # 3. Claude Code 约定配置：<cwd>/.mcp.json
-        mcp_json_path = Path.cwd() / ".mcp.json"
+        mcp_json_path = get_workspace() / ".mcp.json"
         self._merge_config_file(mcp_json_path, merged)
 
         return merged

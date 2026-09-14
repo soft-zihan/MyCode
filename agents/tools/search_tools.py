@@ -10,6 +10,8 @@ import os
 import re
 from pathlib import Path
 
+from agents.tools.paths import resolve_tool_path, workspace_guard_error
+
 
 def grep_search(inp: dict) -> str:
     from agents.tools.runtime import get_runtime, DockerRuntime
@@ -19,7 +21,11 @@ def grep_search(inp: dict) -> str:
     if isinstance(rt, DockerRuntime):
         path = inp.get("path") or "."
     else:
-        path = str(_resolve_tool_path(inp.get("path") or "."))
+        resolved = resolve_tool_path(inp.get("path") or ".")
+        guard_error = workspace_guard_error(resolved)
+        if guard_error:
+            return guard_error
+        path = str(resolved)
 
     include = inp.get("include")
 
@@ -31,23 +37,6 @@ def grep_search(inp: dict) -> str:
     if len(lines) > 100:
         output += f"\n... and {len(lines) - 100} more matches"
     return output
-
-
-def _resolve_tool_path(raw_path: str, *, must_exist: bool = True) -> Path:
-    path = Path(raw_path)
-    if path.exists() or not path.is_absolute():
-        return path
-
-    parts = path.parts
-    cwd = Path.cwd()
-    for i in range(1, len(parts)):
-        candidate = cwd.joinpath(*parts[i:])
-        if must_exist and candidate.exists():
-            return candidate
-        if not must_exist and candidate.parent.exists():
-            return candidate
-
-    return path
 
 
 def grep_python(pattern: str, directory: str, include: str | None) -> str:

@@ -201,8 +201,10 @@ def api_workspace_move(data: MoveRequest) -> dict[str, Any]:
 
 
 @router.get("/api/workspace/file")
-def api_workspace_file(path: str) -> dict[str, Any]:
-    file_path = Path.cwd() / path
+def api_workspace_file(path: str, cwd: Optional[str] = None) -> dict[str, Any]:
+    file_path = Path(path)
+    if not file_path.is_absolute():
+        file_path = (Path(cwd) if cwd else Path.cwd()) / path
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
     if not file_path.is_file():

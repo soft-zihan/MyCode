@@ -13,7 +13,8 @@ import re
 from pathlib import Path
 from typing import Any
 
-from agents.tools.file_tools import _resolve_tool_path
+from agents.core.workspace import get_workspace
+from agents.tools.paths import resolve_tool_path
 from agents.tools.registry import READ_TOOLS, EDIT_TOOLS
 
 
@@ -69,7 +70,7 @@ def load_permission_rules() -> dict:
     deny: list[dict] = []
 
     user_settings = _load_settings(Path.home() / ".mycode" / "settings.json")
-    project_settings = _load_settings(Path.cwd() / ".mycode" / "settings.json")
+    project_settings = _load_settings(get_workspace() / ".mycode" / "settings.json")
 
     for settings in [user_settings, project_settings]:
         if not settings or "permissions" not in settings:
@@ -160,10 +161,10 @@ def check_permission(
     if tool_name == "run_shell" and is_dangerous(inp.get("command", "")):
         needs_confirm = True
         confirm_message = inp.get("command", "")
-    elif tool_name == "write_file" and not _resolve_tool_path(inp.get("file_path", ""), must_exist=False).exists():
+    elif tool_name == "write_file" and not resolve_tool_path(inp.get("file_path", ""), must_exist=False).exists():
         needs_confirm = True
         confirm_message = f"write new file: {inp.get('file_path', '')}"
-    elif tool_name == "edit_file" and not _resolve_tool_path(inp.get("file_path", "")).exists():
+    elif tool_name == "edit_file" and not resolve_tool_path(inp.get("file_path", "")).exists():
         needs_confirm = True
         confirm_message = f"edit non-existent file: {inp.get('file_path', '')}"
     elif tool_name == "skill_evolve":

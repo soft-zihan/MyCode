@@ -19,6 +19,7 @@ from enum import Enum
 from pathlib import Path
 
 from agents._utils import utc_now as _utc_now
+from agents.core.workspace import get_workspace
 from typing import Any, Optional
 
 
@@ -234,7 +235,7 @@ class HarnessState:
 
 def get_harness_state_dir() -> Path:
     """获取 harness state 存储目录。"""
-    return Path.cwd() / ".mycode" / "harness-state"
+    return get_workspace() / ".mycode" / "harness-state"
 
 
 def get_harness_state_path() -> Path:
@@ -286,7 +287,7 @@ def generate_entry_id(kind: RefinementKind, title: str) -> str:
 
 def resolve_component_path(kind: RefinementKind, name: str) -> Path:
     """根据组件类型和名称解析文件路径。"""
-    cwd = Path.cwd()
+    cwd = get_workspace()
     if kind == RefinementKind.PROMPT:
         return cwd / ".mycode" / "prompts" / f"{name}.md"
     elif kind == RefinementKind.MEMORY:
@@ -302,7 +303,7 @@ def resolve_component_path(kind: RefinementKind, name: str) -> Path:
 
 def list_component_files(kind: RefinementKind) -> list[Path]:
     """列出某类型组件的所有文件。"""
-    cwd = Path.cwd()
+    cwd = get_workspace()
     if kind == RefinementKind.PROMPT:
         base = cwd / ".mycode" / "prompts"
         return list(base.glob("*.md")) if base.is_dir() else []

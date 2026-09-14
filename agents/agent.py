@@ -16,13 +16,15 @@ import openai
 from agents.tools.mcp import McpManager
 from agents.agent_loop import AgentLoop
 from agents.tools.executor import persist_large_result, detect_failure
-from agents.core.context_store import (
-    ContextStore,
-    cleared_placeholder,
-    is_compressed_placeholder,
-    snipped_placeholder,
-)
 from agents.memory.memory import MemoryPrefetch, start_memory_prefetch, format_memories_for_injection
+from agents.wiki.wiki_manager import (
+    select_relevant_wiki_entries,
+    format_wiki_for_injection,
+    build_wiki_prompt_section,
+    list_pending_confirm_entries,
+    init_wiki_git,
+    WikiEntry,
+)
 from agents.core.model_registry import ModelEndpoint, resolve_agent_endpoint, resolve_side_endpoint
 from agents.core.prompt import build_system_prompt
 from agents.core.session_memory import (
@@ -98,7 +100,7 @@ async def _with_retry(fn, max_retries: int = 3):
 #多层级压缩常数
 SNIP_THRESHOLD = 0.60
 SNIP_PLACEHOLDER = "[Content snipped - re-read if needed]"
-SNIPPABLE_TOOLS = {"read_file", "grep_search", "list_files", "run_shell"}
+SNIPPABLE_TOOLS = {"read_file", "outline_file", "grep_search", "list_files", "run_shell"}
 MICROCOMPACT_IDLE_S = 5 * 60  # 5 minutes
 
 KEEP_RECENT_RESULTS = 3
@@ -145,6 +147,7 @@ class Agent:
                  custom_tools: list[ToolDef] | None=None,
                  is_sub_agent: bool=False,
                  parent_abort_event: asyncio.Event | None=None,
+                 workspace: Any = None,
                    session_id: str | None=None,
                    options: Any | None=None,):
         # 如果提供了 options，则从中提取参数
@@ -163,6 +166,7 @@ class Agent:
                 custom_tools = options.custom_tools
                 is_sub_agent = options.is_sub_agent
                 parent_abort_event = options.parent_abort_event
+                workspace = options.workspace
                 session_id = getattr(options, 'session_id', None)
         
         self.permission_mode = permission_mode
@@ -174,6 +178,8 @@ class Agent:
         self.max_turns = max_turns
         self.confirm_fn = confirm_fn
         self._custom_system_prompt = custom_system_prompt
+        # 会话工作区（显式单一来源；未指定时回退进程 CWD，仅 CLI 场景）
+        self.workspace: Path = Path(workspace).resolve() if workspace else Path.cwd()
         # 保存连接信息，供模型注册表构造主端点、派生子 Agent 端点使用。
         self._api_base = api_base
         self._api_key = api_key
@@ -209,8 +215,6 @@ class Agent:
 
         # /goal 模式：最近一轮助手回复文本，供 verifier 作为证据。
         self._last_assistant_text = ""
-        # ACE 可逆上下文：snip/clear 前原文无损存入，可用 context_restore 取回。
-        self._context_store = ContextStore()
 
         # 提取的子模块
         from .core.context_compressor import ContextCompressor
@@ -218,11 +222,10 @@ class Agent:
         from .core.session_lifecycle import SessionLifecycle
         from .skills.skill_orchestrator import SkillOrchestrator
         self._compressor = ContextCompressor(
-            self._context_store,
             effective_window=self.effective_window,
         )
         self._permission_gate = PermissionGate()
-        self._session_lifecycle = SessionLifecycle(self._context_store)
+        self._session_lifecycle = SessionLifecycle()
         self._skill_orchestrator = SkillOrchestrator(
             side_query_fn=self._build_side_query,
             permission_mode=self.permission_mode,
@@ -274,6 +277,11 @@ class Agent:
         #当前会话占用的字节数
         self._session_memory_bytes = 0
 
+        # Wiki 召回状态
+        self._wiki_surfaced_at: dict[str, int] = {}
+        self._wiki_prefetch: asyncio.Task | None = None
+        self._wiki_prefetch_consumed = False
+
         #区分message的历史消息（现在从事件日志派生）
         self._folded_session_memories: list[dict[str, Any]] = []
         self._fold_last_time: float = 0.0
@@ -284,19 +292,24 @@ class Agent:
         self._repeat_chain_key: str = ""
         self._repeat_chain_count: int = 0
 
-        #构建系统提示词
-        self._base_system_prompt = custom_system_prompt or build_system_prompt()
+        #构建系统提示词（workspace 作用域内：项目级技能/配置按本会话工作区解析）
+        from .core.workspace import set_workspace, reset_workspace
+        _ws_token = set_workspace(self.workspace)
+        try:
+            self._base_system_prompt = custom_system_prompt or build_system_prompt()
 
-        if self.permission_mode == "plan":
-            self._plan_file_path = self._generate_plan_file_path()
-            self._system_prompt = self._base_system_prompt + self._build_plan_mode_prompt()
-        else:
-            self._system_prompt = self._base_system_prompt
+            if self.permission_mode == "plan":
+                self._plan_file_path = self._generate_plan_file_path()
+                self._system_prompt = self._base_system_prompt + self._build_plan_mode_prompt()
+            else:
+                self._system_prompt = self._base_system_prompt
 
-        #初始化大模型客户端
-        self._openai_client = openai.AsyncOpenAI(base_url=api_base, api_key=api_key)
-        
-        self._refresh_runtime_system_prompt()
+            #初始化大模型客户端
+            self._openai_client = openai.AsyncOpenAI(base_url=api_base, api_key=api_key)
+            
+            self._refresh_runtime_system_prompt()
+        finally:
+            reset_workspace(_ws_token)
         self._loop = AgentLoop(self)
 
     #判断返回模型的思考模式
@@ -338,7 +351,7 @@ class Agent:
     Write your plan incrementally to this file using write_file or edit_file. This is the ONLY file you are allowed to edit.
 
     ## Workflow
-    1. **Explore**: Read code to understand the task. Use read_file, list_files, grep_search.
+    1. **Explore**: Read code to understand the task. Use outline_file, read_file, list_files, grep_search.
     2. **Design**: Design your implementation approach. Use the agent tool with type="plan" if the task is complex.
     3. **Write Plan**: Write a structured plan to the plan file including:
        - **Context**: Why this change is needed
@@ -446,6 +459,7 @@ class Agent:
             is_sub_agent=True,
             permission_mode="plan" if self.permission_mode == "plan" else "bypassPermissions",
             parent_abort_event=self._abort_event,
+            workspace=self.workspace,
         )
 
     def set_confirm_fn(self, fn:Callable[[str], Awaitable[bool]]) -> None:
@@ -507,7 +521,7 @@ class Agent:
         # 找到对应的事件序号并截断
         msg_count = 0
         for i, event in enumerate(self.session._log):
-            if event["type"] in ("user_message", "assistant_message", "tool_result_msg"):
+            if event["type"] in ("user_message", "assistant_message", "tool_result_msg", "memory_injection"):
                 if msg_count >= index:
                     self.session._log = self.session._log[:i]
                     return
@@ -535,6 +549,15 @@ class Agent:
     #主入口
 
     async def  chat(self, user_message:str)->None:
+        # 回合级 workspace 作用域：工具/技能/快照等深层消费方经 get_workspace() 读取
+        from .core.workspace import set_workspace, reset_workspace
+        _ws_token = set_workspace(self.workspace)
+        try:
+            await self._chat_inner(user_message)
+        finally:
+            reset_workspace(_ws_token)
+
+    async def _chat_inner(self, user_message:str)->None:
         print(f"[DEBUG] agent.chat: STARTED - self.session_id = {self.session_id}, is_sub_agent = {self.is_sub_agent}")
         #懒加载MCP服务在第一次chat的时候
         if not self._mcp_initialized and not self.is_sub_agent:
@@ -581,6 +604,17 @@ class Agent:
                 self._system_prompt += memory_context
                 self.session.system_prompt = self._system_prompt
 
+        if not self.is_sub_agent and self._turn_number == 0:
+            try:
+                pending = list_pending_confirm_entries()
+                if pending:
+                    names = ", ".join(e.name for e in pending[:5])
+                    confirm_msg = f"\n<system-reminder>\n有 {len(pending)} 条待确认的调试经验：{names}。输入 /wiki-confirm 确认或 /wiki-reject 拒绝。\n</system-reminder>"
+                    self._system_prompt += confirm_msg
+                    self.session.system_prompt = self._system_prompt
+            except Exception:
+                pass
+
         original_user_message = _safe_utf8_text(user_message)
         ready_skill_extraction_window: dict[str, Any] | None = None
         self._skill_orchestrator.last_retrieved_skill_reference = None
@@ -607,7 +641,7 @@ class Agent:
         self.session.append("turn/start", {"turn": self._current_turn})
         # user_message 由 agent_loop._prepare_turn() 写入，这里不重复写入
         
-        from .observability.trace import trace_event
+        from .observability.trace import trace_event, trace_span
         trace_kwargs: dict[str, Any] = {
             "turn": self._turn_number,
             "sub_agent": self.is_sub_agent,
@@ -615,52 +649,78 @@ class Agent:
         }
         if not self.is_sub_agent:
             trace_kwargs["session"] = self.session_id
-        trace_event("turn.start", **trace_kwargs)
+            # 绑定 Langfuse session（子智能体经 contextvars 自动继承，不覆盖）
+            from .observability.tracer import set_current_session_id
+            set_current_session_id(self.session_id)
+
         _turn_t0 = time.time()
-        coro = self._chat_openai(user_message)
-        self._current_task = asyncio.create_task(coro)
-        try:
-            await self._current_task
-        except asyncio.CancelledError:
-            self._aborted = True
-            from .observability.trace import trace_error
-            trace_error("cancelled", "Turn cancelled", operation="chat")
-            self.session.append("turn/end", {"turn": self._current_turn, "reason": "aborted", "sub_agent_id": self._current_sub_agent_id})
-            raise
-        except Exception as e:
-            from .observability.trace import trace_error, trace_event
-            trace_error(type(e).__name__, str(e), operation="chat")
-            print_error(f"[ERROR] {type(e).__name__}: {e}")
+        _turn_start_input_tokens = self.total_input_tokens
+        _turn_start_output_tokens = self.total_output_tokens
+        with trace_span(
+            "turn",
+            **{
+                "langfuse.trace.name": "agent-turn",
+                "langfuse.observation.input": user_message[:500],
+                "mycode.turn.id": f"{self.session_id}:{self._current_turn}",
+                "mycode.turn.number": self._current_turn,
+                "mycode.event_range.start_seq": self.session.seq,
+                "mycode.sub_agent": self.is_sub_agent,
+            },
+        ) as turn_span:
+            trace_event("turn.start", **trace_kwargs)
+            coro = self._chat_openai(user_message)
+            self._current_task = asyncio.create_task(coro)
+            try:
+                await self._current_task
+            except asyncio.CancelledError:
+                self._aborted = True
+                from .observability.trace import trace_error
+                trace_error("cancelled", "Turn cancelled", operation="chat")
+                turn_span.set_attribute("mycode.aborted", True)
+                turn_span.set_attribute("mycode.event_range.end_seq", self.session.seq)
+                self.session.append("turn/end", {"turn": self._current_turn, "reason": "aborted", "sub_agent_id": self._current_sub_agent_id})
+                raise
+            except Exception as e:
+                from .observability.trace import trace_error
+                trace_error(type(e).__name__, str(e), operation="chat")
+                print_error(f"[ERROR] {type(e).__name__}: {e}")
+                trace_event(
+                    "turn.end",
+                    turn=self._turn_number,
+                    aborted=True,
+                    error=type(e).__name__,
+                    duration_s=round(time.time() - _turn_t0, 2),
+                )
+                turn_span.record_error(e)
+                turn_span.set_attribute("mycode.event_range.end_seq", self.session.seq)
+                # Send error event to frontend
+                self.session.append("error", {"message": str(e), "error_type": type(e).__name__, "sub_agent_id": self._current_sub_agent_id})
+                self.session.append("turn/end", {"turn": self._current_turn, "reason": "error", "error": str(e), "sub_agent_id": self._current_sub_agent_id})
+                return
+            finally:
+                self._current_task = None
+            assistant_text = "".join(self._turn_output_buffer or []).strip()
+            thinking_text = "".join(self._turn_thinking_buffer or []).strip()
+            self._turn_output_buffer = None
+            self._turn_thinking_buffer = None
+            self._turn_event_buffer = None
+
+            self.session.append("turn/end", {"turn": self._current_turn, "reason": "completed", "sub_agent_id": self._current_sub_agent_id})
+            # Aggregated trace event for the turn (includes thinking and text content)
             trace_event(
                 "turn.end",
                 turn=self._turn_number,
-                aborted=True,
-                error=type(e).__name__,
+                aborted=self._aborted,
                 duration_s=round(time.time() - _turn_t0, 2),
+                assistant_preview=assistant_text[:500],
+                thinking_preview=thinking_text[:500] if thinking_text else None,
+                sub_agent_id=self._current_sub_agent_id,
             )
-            # Send error event to frontend
-            self.session.append("error", {"message": str(e), "error_type": type(e).__name__, "sub_agent_id": self._current_sub_agent_id})
-            self.session.append("turn/end", {"turn": self._current_turn, "reason": "error", "error": str(e), "sub_agent_id": self._current_sub_agent_id})
-            return
-        finally:
-            self._current_task = None
-        assistant_text = "".join(self._turn_output_buffer or []).strip()
-        thinking_text = "".join(self._turn_thinking_buffer or []).strip()
-        self._turn_output_buffer = None
-        self._turn_thinking_buffer = None
-        self._turn_event_buffer = None
-        
-        self.session.append("turn/end", {"turn": self._current_turn, "reason": "completed", "sub_agent_id": self._current_sub_agent_id})
-        # Aggregated trace event for the turn (includes thinking and text content)
-        trace_event(
-            "turn.end",
-            turn=self._turn_number,
-            aborted=self._aborted,
-            duration_s=round(time.time() - _turn_t0, 2),
-            assistant_preview=assistant_text[:500],
-            thinking_preview=thinking_text[:500] if thinking_text else None,
-            sub_agent_id=self._current_sub_agent_id,
-        )
+            turn_span.set_attribute("mycode.event_range.end_seq", self.session.seq)
+            turn_span.set_attribute("mycode.aborted", self._aborted)
+            turn_span.set_attribute("mycode.tokens.input_delta", self.total_input_tokens - _turn_start_input_tokens)
+            turn_span.set_attribute("mycode.tokens.output_delta", self.total_output_tokens - _turn_start_output_tokens)
+            turn_span.set_attribute("langfuse.observation.output", assistant_text[:500])
         # /goal 模式的 verifier 需要最近一轮的助手报告作为证据。
         self._last_assistant_text = assistant_text
         if not self.is_sub_agent and not self._aborted:
@@ -744,13 +804,18 @@ class Agent:
             # 使用自定义system prompt时，仍然需要设置session.system_prompt
             self.session.system_prompt = self._custom_system_prompt
             return
-        self._base_system_prompt = build_system_prompt()
-        if self.permission_mode == "plan":
-            self._system_prompt = self._base_system_prompt + self._build_plan_mode_prompt()
-        else:
-            self._system_prompt = self._base_system_prompt
-        self._system_prompt += self._build_fold_guidance_section()
-        self.session.system_prompt = self._system_prompt
+        from .core.workspace import set_workspace, reset_workspace
+        _ws_token = set_workspace(self.workspace)
+        try:
+            self._base_system_prompt = build_system_prompt()
+            if self.permission_mode == "plan":
+                self._system_prompt = self._base_system_prompt + self._build_plan_mode_prompt()
+            else:
+                self._system_prompt = self._base_system_prompt
+            self._system_prompt += self._build_fold_guidance_section()
+            self.session.system_prompt = self._system_prompt
+        finally:
+            reset_workspace(_ws_token)
 
     def _record_tool_outcome(self, tool_name: str, success: bool) -> None:
         if tool_name == self._last_tool_name:
@@ -877,6 +942,15 @@ class Agent:
             data["snapshot_id"] = snapshot_id
         self.session.append("user_message", data)
 
+    def append_memory_injection(self, content: str) -> None:
+        """追加记忆/Wiki 注入到事件日志（独立事件类型）。
+
+        注入内容（<system-reminder> 包装）是内部提示机制，不是用户消息：
+        - LLM 上下文照常包含（get_messages_for_llm 映射为 user role）
+        - 前端不渲染为用户气泡，不产生伪 fork/回退点
+        """
+        self.session.append("memory_injection", {"content": content})
+
     def append_tool_message(self, tool_call_id: str, content: str) -> None:
         """追加工具结果消息到事件日志。"""
         self.session.append("tool_result_msg", {"call_id": tool_call_id, "content": content})
@@ -893,6 +967,18 @@ class Agent:
         self._memory_prefetch = start_memory_prefetch(
             user_message, side_query,
             self._cooled_memory_paths(), self._session_memory_bytes,
+        )
+
+    def start_wiki_prefetch(self, user_message: str, side_query) -> None:
+        if self.is_sub_agent or self._wiki_prefetch is not None:
+            return
+        cooled_wiki_paths = {
+            path for path, turn in self._wiki_surfaced_at.items()
+            if self._turn_number - turn < self.MEMORY_RECALL_COOLDOWN_TURNS
+        }
+        self._wiki_prefetch_consumed = False
+        self._wiki_prefetch = asyncio.create_task(
+            select_relevant_wiki_entries(user_message, side_query, cooled_wiki_paths)
         )
 
     def record_memory_surface(self, path: str, content_bytes: int) -> None:
@@ -1042,14 +1128,13 @@ class Agent:
         state = SessionState(
             session_id=self.session_id,
             model=self.model,
-            context_store=self._context_store,
         )
         self._session_lifecycle.restore(state, data, self.session)
         print_info(f"Session restored ({self._get_message_count()} messages).")
 
-    #/rewind：回退对话 N 轮，同时把被修改的文件恢复到对应轮次开始时的状态。
+    #/rewind：回退对话 N 轮（纯事件回退；文件恢复走 RevertService 的 stage/commit 流程）。
     def rewind(self, n: int = 1) -> str:
-        return self._session_lifecycle.rewind(self.session, self._read_file_state, n)
+        return self._session_lifecycle.rewind(self.session, n)
 
     # ── 三阶段恢复 ──
     
@@ -1071,8 +1156,8 @@ class Agent:
         state = SessionState(
             session_id=self.session_id,
             model=self.model,
-            context_store=self._context_store,
             start_time=self.session_start_time,
+            cwd=str(self.workspace),
         )
         result, new_session = self._session_lifecycle.fork(state, self.session)
         self.session = new_session
@@ -1113,12 +1198,13 @@ class Agent:
             state = SessionState(
                 session_id=self.session_id,
                 model=self.model,
-                context_store=self._context_store,
                 start_time=self.session_start_time,
+                cwd=str(self.workspace),
             )
             await asyncio.to_thread(self._session_lifecycle._save_state, state, self.session)
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"[SAVE] auto-save failed for {self.session_id}: {e}")
 
     #自动压缩
     async def _check_and_compact(self)->None:
@@ -1170,6 +1256,13 @@ class Agent:
         }
         self._folded_session_memories.append(record)
 
+        if not self.is_sub_agent:
+            try:
+                from agents.wiki.wiki_capture import capture_session_to_session
+                capture_session_to_session(self.session_id, memory)
+            except Exception:
+                pass
+
     #大结果持久化
     #如果工具返回的结果太大（超过 30KB），不要硬塞进上下文里，而是把它存成一个临时文件。
     # 然后在对话里只留一个‘文件路径’和‘内容预览’。如果模型后面还需要看完整内容，它可以再次调用工具去读取这个文件
@@ -1185,14 +1278,22 @@ class Agent:
             return 300
         if name in ("agent", "skill"):
             return 300
-        if name in ("read_file", "grep_search", "list_files"):
+        if name in ("read_file", "outline_file", "grep_search", "list_files"):
             return 30
         return 60
 
     async def _execute_tool_call(self, name: str, inp: dict) -> str:
         from .observability.trace import trace_span
         _tool_t0 = time.time()
-        trace_attrs = {"tool": name}
+        try:
+            _inp_preview = json.dumps(inp, ensure_ascii=False, default=str)[:1000]
+        except (TypeError, ValueError):
+            _inp_preview = str(inp)[:1000]
+        trace_attrs = {
+            "tool": name,
+            "tool.name": name,
+            "langfuse.observation.input": _inp_preview,
+        }
         if self._current_sub_agent_id:
             trace_attrs["sub_agent_id"] = self._current_sub_agent_id
         timeout = self._tool_timeout(name)
@@ -1204,6 +1305,7 @@ class Agent:
                 )
                 span.set_attribute("success", True)
                 span.set_attribute("duration_s", round(time.time() - _tool_t0, 2))
+                span.set_attribute("langfuse.observation.output", str(result)[:500])
             except asyncio.TimeoutError:
                 span.record_error(TimeoutError(f"Tool '{name}' timed out after {timeout}s"))
                 print_error(f"[ERROR] Tool '{name}' timed out after {timeout}s")
@@ -1223,17 +1325,21 @@ class Agent:
             return await self._execute_compact_context_tool(inp)
         if name == "context_restore":
             return self._execute_context_restore_tool(inp)
+        if name == "search_history":
+            return self._execute_search_history_tool(inp)
+        if name == "list_task_notes":
+            return self._execute_list_task_notes_tool(inp)
+        if name == "read_task_notes":
+            return self._execute_read_task_notes_tool(inp)
         if name in ("enter_plan_mode", "exit_plan_mode"):
             return await self._execute_plan_mode_tool(name)
         if name == "agent":
             return await self._execute_agent_tool(inp)
-        if name == "skill":
-            return await self._execute_skill_tool(inp)
             # Route MCP tool calls to the MCP manager
         if self._mcp_manager.is_mcp_tool(name):
             return await self._mcp_manager.call_tool(name, inp)
         result = await execute_tool(name, inp, self._read_file_state)
-        if name in {"skill_create", "skill_evolve"}:
+        if name == "skill_create":
             try:
                 parsed = json.loads(result)
                 if isinstance(parsed, dict) and parsed.get("ok"):
@@ -1258,16 +1364,177 @@ class Agent:
         )
 
     def _execute_context_restore_tool(self, inp: dict) -> str:
-        """ACE 可逆恢复：按 key 从 ContextStore 取回被 snip/clear 的原文。"""
+        """可逆恢复：按 call_id 从事件日志中找到被隐藏的工具结果，返回其原始内容。"""
         key = str(inp.get("key") or "").strip()
         if not key:
-            return "Error: 'key' is required. Find it inside the snipped/cleared placeholder text."
-        raw = self._context_store.get_raw(key)
-        if raw is None:
-            available = self._context_store.available_keys()
-            hint = f" Available keys: {', '.join(available[:20])}" if available else " No restorable content is stored."
-            return f"Error: no restorable content for key '{key}'.{hint}"
-        return raw
+            return "Error: 'key' is required. Use the call_id from the tool_folded placeholder."
+        
+        call_id = key.removeprefix("snip:")
+        
+        # 收集所有隐藏的 seq
+        hidden_seqs = set()
+        for event in self.session._log:
+            if event.get("type") == "events_hidden":
+                hidden_seqs.update(event.get("hidden_seqs", []))
+        
+        # 找到对应的工具结果事件
+        for event in self.session._log:
+            if event.get("type") == "tool_result_msg" and event.get("call_id") == call_id:
+                if event.get("seq") in hidden_seqs:
+                    return event.get("content", "")
+        
+        # 列出可用的 key
+        available = []
+        for event in self.session._log:
+            if event.get("type") == "tool_result_msg" and event.get("seq") in hidden_seqs:
+                available.append(f"snip:{event.get('call_id')}")
+        
+        hint = f" Available keys: {', '.join(available[:20])}" if available else " No restorable content found."
+        return f"Error: no restorable content for key '{key}'.{hint}"
+
+    def _execute_search_history_tool(self, inp: dict) -> str:
+        """搜索历史对话（包括被隐藏的）。"""
+        query = str(inp.get("query") or "").strip().lower()
+        if not query:
+            return "Error: 'query' is required."
+        
+        limit = int(inp.get("limit") or 20)
+        
+        # 收集所有隐藏的 seq
+        hidden_seqs = set()
+        for event in self.session._log:
+            if event.get("type") == "events_hidden":
+                hidden_seqs.update(event.get("hidden_seqs", []))
+        
+        # 搜索所有消息（包括隐藏的）
+        results = []
+        for event in self.session._log:
+            t = event.get("type")
+            if t not in ("user_message", "assistant_message", "tool_result_msg"):
+                continue
+            
+            content = event.get("content", "")
+            if isinstance(content, list):
+                content = " ".join(str(c) for c in content)
+            content_str = str(content).lower()
+            
+            if query in content_str:
+                seq = event.get("seq", 0)
+                call_id = event.get("call_id", "")
+                is_hidden = seq in hidden_seqs
+                
+                # 预览内容
+                preview = str(content)[:200] if isinstance(content, str) else str(content[0])[:200]
+                
+                results.append({
+                    "seq": seq,
+                    "type": t,
+                    "content_preview": preview,
+                    "call_id": call_id,
+                    "hidden": is_hidden,
+                })
+        
+        if not results:
+            return f"No results found for '{query}'."
+        
+        # 格式化结果
+        result_lines = [f"Found {len(results)} results for '{query}':"]
+        for r in results[:limit]:
+            hidden_marker = " [HIDDEN]" if r["hidden"] else ""
+            result_lines.append(f"  [seq={r['seq']}] {r['type']}{hidden_marker}: {r['content_preview']}")
+        
+        # 如果有被隐藏的工具结果，提示可恢复
+        restorable = [r for r in results if r.get("call_id") and r["hidden"]]
+        if restorable:
+            result_lines.append("\n--- Restorable tool results ---")
+            for r in restorable[:10]:
+                result_lines.append(f"  call_id={r['call_id']}: {r['content_preview'][:100]}...")
+                result_lines.append(f"  → Use context_restore(key='snip:{r['call_id']}') to restore")
+        
+        return "\n".join(result_lines)
+
+    def _execute_list_task_notes_tool(self, inp: dict) -> str:
+        """列出所有任务笔记，附带最新笔记内容。"""
+        limit = int(inp.get("limit") or 10)
+        
+        # 从 wiki 中读取任务笔记
+        from agents.wiki.wiki_manager import get_wiki_dir
+        wiki_dir = get_wiki_dir() / "task_notes"
+        
+        if not wiki_dir.exists():
+            return "No task notes found."
+        
+        # 列出所有任务笔记文件
+        notes = []
+        for f in wiki_dir.glob("*.md"):
+            try:
+                content = f.read_text()
+                # 解析 frontmatter
+                from agents.memory.frontmatter import parse_frontmatter
+                meta, body = parse_frontmatter(content)
+                
+                # 提取 session_id 从文件名
+                session_id = f.stem.replace("session_", "")
+                
+                notes.append({
+                    "session_id": session_id,
+                    "title": meta.get("name", session_id),
+                    "time": meta.get("modified", ""),
+                    "content": body,
+                })
+            except Exception:
+                pass
+        
+        if not notes:
+            return "No task notes found."
+        
+        # 按时间排序，取最新的
+        notes.sort(key=lambda x: x["time"], reverse=True)
+        notes = notes[:limit]
+        
+        # 格式化结果
+        result_lines = [f"Found {len(notes)} task notes:"]
+        for note in notes:
+            result_lines.append(f"  [{note['session_id']}] {note['title']} ({note['time']})")
+        
+        # 附带最新笔记的完整内容
+        if notes:
+            latest = notes[0]
+            result_lines.append(f"\n--- Latest note ({latest['session_id']}) ---")
+            result_lines.append(latest['content'])
+        
+        return "\n".join(result_lines)
+
+    def _execute_read_task_notes_tool(self, inp: dict) -> str:
+        """读取指定 session 的任务笔记。"""
+        session_id = str(inp.get("session_id") or "").strip()
+        
+        from agents.wiki.wiki_manager import get_wiki_dir
+        wiki_dir = get_wiki_dir() / "task_notes"
+        
+        if not wiki_dir.exists():
+            return "No task notes found."
+        
+        # 如果指定了 session_id，读取对应的笔记
+        if session_id:
+            filepath = wiki_dir / f"session_{session_id}.md"
+            if not filepath.exists():
+                return f"Error: task note for session '{session_id}' not found."
+            
+            content = filepath.read_text()
+            from agents.memory.frontmatter import parse_frontmatter
+            meta, body = parse_frontmatter(content)
+            return body
+        
+        # 否则读取当前 session 的笔记
+        filepath = wiki_dir / f"session_{self.session_id}.md"
+        if not filepath.exists():
+            return f"No task notes found for current session '{self.session_id}'."
+        
+        content = filepath.read_text()
+        from agents.memory.frontmatter import parse_frontmatter
+        meta, body = parse_frontmatter(content)
+        return body
 
 
     async def _execute_skill_tool(self, inp: dict) -> str:

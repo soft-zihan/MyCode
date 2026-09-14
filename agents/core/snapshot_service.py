@@ -197,7 +197,9 @@ class SnapshotService:
     async def inspect(self, snapshot_id: str) -> SnapshotInspection:
         repo = self._get_repo()
         manifest = await self._load_manifest(snapshot_id)
-        current_tree = await repo.write_tree()
+        # capture_tree = refresh_index + write_tree：必须刷新 index，
+        # 否则 write_tree 返回陈旧树，看不到磁盘上的最新变更
+        current_tree = await repo.capture_tree()
         changes = await repo.tree_diff(manifest.tree_hash, current_tree)
         files = []
         for change in changes:

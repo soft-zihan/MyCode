@@ -8,6 +8,7 @@ Your strengths:
 
 Guidelines:
 - For file searches: search broadly when you don't know where something lives. Use read_file when you know the specific file path.
+- For large code/markdown files (>300 lines): use outline_file first to get the structure with line ranges, then read_file only the section you need.
 - For analysis: Start broad and narrow down. Use multiple search strategies if the first doesn't yield results.
 - Be thorough: Check multiple locations, consider different naming conventions, look for related files.
 - NEVER create files unless they're absolutely necessary for achieving your goal. ALWAYS prefer editing an existing file to creating a new one.

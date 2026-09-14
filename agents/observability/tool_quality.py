@@ -1,7 +1,7 @@
-"""工具调用质量追踪 — 实时规则检测 + Phoenix 离线分析
+"""工具调用质量追踪 — 实时规则检测 + Langfuse 离线分析
 
 实时检测：重复调用、危险操作、参数错误
-离线分析：通过 Phoenix Dataset + Experiment 评估工具选择正确性
+离线分析：Langfuse Code evaluators（Tool Use 断言）+ Dataset 回归
 """
 
 from __future__ import annotations

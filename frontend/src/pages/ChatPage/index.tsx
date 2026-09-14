@@ -35,6 +35,7 @@ export default function ChatPage() {
     isCompacting,
     fileSnapshots,
     fileTreeRefreshTrigger,
+    sessionRefreshTrigger,
     permissionMode,
     contextUsed,
     contextTotal,
@@ -78,7 +79,7 @@ export default function ChatPage() {
       onSessionSelect={handleSessionSelect}
       onNewSession={handleNewSession}
       currentSessionId={currentSessionId}
-      refreshTrigger={fileTreeRefreshTrigger}
+      refreshTrigger={sessionRefreshTrigger}
     />
   );
 
@@ -498,6 +499,7 @@ export default function ChatPage() {
             <div className="w-1/2 border-l border-gray-200">
               <FileViewer
                 filePath={selectedFile}
+                cwd={currentCwd || undefined}
                 onClose={() => setSelectedFile(null)}
               />
             </div>

@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   fetchConfig, AppConfig,
-  updateSessionName,
   compactSession, updatePermissionMode,
   forkSession, respondToPermission, truncateSession
 } from '../../../api/client';
@@ -93,10 +92,8 @@ export function useChat() {
         const titleSessionId = event.session_id;
         const title = event.title;
         if (titleSessionId && title) {
+          // 后端已通过事件流持久化标题（单一数据源），前端只更新本地投影
           sessionStore.updateProjections(titleSessionId, { title });
-          updateSessionName(titleSessionId, title).catch(err => {
-            console.error('Failed to update session name:', err);
-          });
           setSessionRefreshTrigger(prev => prev + 1);
         }
         return;
@@ -213,18 +210,11 @@ export function useChat() {
       
       if (eventType === 'turn/end') {
         const doneSessionId = eventSessionId;
-        const turnName = event.name as string | undefined;
-        logger.info('[WS] turn/end:', { sessionId: doneSessionId, subAgentId: event.sub_agent_id, name: turnName });
+        logger.info('[WS] turn/end:', { sessionId: doneSessionId, subAgentId: event.sub_agent_id });
         sessionStore.updateProjections(doneSessionId, {
           running: false,
           updatedAt: Date.now(),
         });
-        if (turnName) {
-          sessionStore.updateProjections(doneSessionId, { title: turnName });
-          updateSessionName(doneSessionId, turnName).catch(err => {
-            console.error('Failed to update session name:', err);
-          });
-        }
         if (isCurrentSession) {
           currentSessionIdRef.current = doneSessionId;
           setCurrentSessionId(doneSessionId);
@@ -318,10 +308,11 @@ export function useChat() {
       if (sessionResponse.ok) {
         const data = await sessionResponse.json();
         const metadata = data.metadata || {};
+        const projections = data.projections || {};
         
-        // Update projections
+        // Update projections（标题单一数据源：后端事件流投影）
         sessionStore.updateProjections(sessionId, {
-          title: metadata.name,
+          title: projections.title,
           cwd: metadata.cwd,
           updatedAt: Date.now(),
         });
@@ -716,7 +707,7 @@ export function useChat() {
       const res = await fetch('/api/revert', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ file_path: filePath, old_content: snap.old_content }),
+        body: JSON.stringify({ session_id: currentSessionId, file_path: filePath, old_content: snap.old_content }),
       });
       if (res.ok) {
         const snaps = sessionStore.getFileSnapshots(currentSessionId).filter(s => s.file_path !== filePath);

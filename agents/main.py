@@ -111,13 +111,14 @@ _AT_REF_MAX_BYTES = 32 * 1024
 
 
 def _expand_at_references(text: str) -> tuple[str, list[str]]:
+    from agents.core.workspace import get_workspace
     notes: list[str] = []
 
     def _sub(m: re.Match) -> str:
         raw = m.group(1)
         path = Path(os.path.expanduser(raw))
         if not path.is_absolute():
-            path = Path.cwd() / path
+            path = get_workspace() / path
         try:
             if path.is_file():
                 size = path.stat().st_size
@@ -497,8 +498,15 @@ Options:
         except Exception as e:
             print_error(str(e))
             sys.exit(1)
+        finally:
+            from .observability import shutdown_tracing
+            shutdown_tracing()
     else:
-        asyncio.run(run_repl(agent))
+        try:
+            asyncio.run(run_repl(agent))
+        finally:
+            from .observability import shutdown_tracing
+            shutdown_tracing()
 
 
 if __name__ == "__main__":

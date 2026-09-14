@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from agents.core.subagent import get_sub_agent_config, _discover_custom_agents, get_available_agent_types, get_agent_model_ref_env, reset_agent_cache
+from agents.core.workspace import get_workspace
 from agents.core.agent_mode import BUILTIN_HIDDEN_AGENTS
 from agents.tools.registry import tool_definitions
 
@@ -392,7 +393,7 @@ def api_update_custom_agent(agent_name: str, data: CustomAgentUpdate) -> dict[st
     
     # Find the agent file
     agent_file = None
-    for base_dir in [Path.home() / ".mycode" / "agents", Path.cwd() / ".mycode" / "agents"]:
+    for base_dir in [Path.home() / ".mycode" / "agents", get_workspace() / ".mycode" / "agents"]:
         path = base_dir / f"{agent_name}.md"
         if path.exists():
             agent_file = path
@@ -447,7 +448,7 @@ def api_delete_custom_agent(agent_name: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"Custom agent '{agent_name}' not found.")
     
     # Find and delete the agent file
-    for base_dir in [Path.home() / ".mycode" / "agents", Path.cwd() / ".mycode" / "agents"]:
+    for base_dir in [Path.home() / ".mycode" / "agents", get_workspace() / ".mycode" / "agents"]:
         agent_file = base_dir / f"{agent_name}.md"
         if agent_file.exists():
             try:

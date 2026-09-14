@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -122,10 +121,6 @@ async def api_chat_stream(data: ChatMessage) -> dict[str, Any]:
     logger.info(f"[DEBUG] /api/chat/stream received session_id: {data.session_id}")
     
     try:
-        original_cwd = os.getcwd()
-        if data.cwd:
-            os.chdir(data.cwd)
-        
         sm = get_session_manager()
         
         agent, session = None, None
@@ -149,10 +144,6 @@ async def api_chat_stream(data: ChatMessage) -> dict[str, Any]:
             )
             is_new_session = True
             logger.info(f"[DEBUG] New session created: {session.id}")
-            
-            # 保存 cwd 到 session 的 projections
-            if data.cwd:
-                session._projections["cwd"] = data.cwd
             
             # Register project
             if data.cwd:
@@ -188,16 +179,10 @@ async def api_chat_stream(data: ChatMessage) -> dict[str, Any]:
         if context:
             full_message = f"{data.message}\n\nContext files:{context}"
         
-        # Send session/created event via WebSocket if new session
+        # session/created 事件已由 session_manager.create 追加到事件流
+        # （持久化 + cwd 投影 + WS 全体广播，单一数据源）
+        
         if is_new_session:
-            from routers.websocket import broadcast_event
-            broadcast_event({
-                "type": "session/created",
-                "session_id": session.id,
-                "cwd": data.cwd,
-                "time": int(asyncio.get_event_loop().time() * 1000),
-            })
-            
             # Start title generation in background
             async def generate_title():
                 logger.info(f"[TITLE] Starting title generation for session {session.id}")
@@ -205,15 +190,9 @@ async def api_chat_stream(data: ChatMessage) -> dict[str, Any]:
                     from frontend.server.routers.sessions import generate_session_title
                     title_name = await generate_session_title(data.message)
                     logger.info(f"[TITLE] Generated name: {title_name}")
-                    # Broadcast title via WebSocket
-                    from routers.websocket import broadcast_event
-                    broadcast_event({
-                        "type": "session/title",
-                        "session_id": session.id,
-                        "title": title_name,
-                        "time": int(asyncio.get_event_loop().time() * 1000),
-                    })
-                    logger.info(f"[TITLE] Title broadcasted for session {session.id}")
+                    # 标题走事件流（单一数据源）：持久化 + 投影更新 + WS 广播
+                    session.append("session/title", {"title": title_name})
+                    logger.info(f"[TITLE] Title appended to event log for session {session.id}")
                 except Exception as e:
                     import traceback
                     logger.error(f"[TITLE] Title generation failed: {e}")
@@ -236,8 +215,6 @@ async def api_chat_stream(data: ChatMessage) -> dict[str, Any]:
                 session.append("error", {"message": str(e)})
             finally:
                 await agent.save()
-                if data.cwd:
-                    os.chdir(original_cwd)
         
         chat_task = asyncio.create_task(run_chat())
         print(f"[DEBUG] chat_task created: {chat_task}")
@@ -265,18 +242,35 @@ async def api_chat_stream(data: ChatMessage) -> dict[str, Any]:
 
 
 class RevertRequest(BaseModel):
+    session_id: str
     file_path: str
     old_content: str
 
 
+def _resolve_session_workspace(session_id: str) -> Path | None:
+    """解析会话工作区：活会话投影优先，否则读磁盘状态文件 metadata.cwd。"""
+    from agents.session_manager import get_session_manager
+    session = get_session_manager().get(session_id)
+    cwd = session.projections.get("cwd") if session is not None else None
+    if not cwd:
+        data = load_session(session_id)
+        if data:
+            cwd = (data.get("metadata") or {}).get("cwd")
+    return Path(cwd).resolve() if cwd else None
+
+
 @router.post("/api/revert")
 def api_revert_file(data: RevertRequest) -> dict[str, Any]:
+    from agents.tools import _resolve_tool_path
+    from agents.core.workspace import workspace_scope
+    workspace = _resolve_session_workspace(data.session_id)
+    if workspace is None:
+        raise HTTPException(status_code=404, detail=f"Session '{data.session_id}' has no recorded workspace")
     try:
-        from agents.tools import _resolve_tool_path
-        target = _resolve_tool_path(data.file_path, must_exist=False)
+        with workspace_scope(workspace):
+            target = _resolve_tool_path(data.file_path, must_exist=False)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(data.old_content)
-        return {"success": True, "file_path": data.file_path}
+        return {"success": True, "file_path": str(target)}
     except Exception as e:
-        from fastapi import HTTPException
         raise HTTPException(status_code=500, detail=str(e))

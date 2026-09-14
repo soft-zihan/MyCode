@@ -7,6 +7,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from agents.core.workspace import get_workspace
+
 
 MAX_TRANSCRIPT_CHARS = 80_000
 MAX_BLOCK_CHARS = 12_000
@@ -316,7 +318,7 @@ def format_folded_memory(memory: dict[str, Any]) -> str:
 
 def get_project_folded_memories_dir() -> Path:
     """获取当前项目的折叠记忆目录"""
-    d = Path.cwd() / ".mycode" / "sessions"
+    d = get_workspace() / ".mycode" / "sessions"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

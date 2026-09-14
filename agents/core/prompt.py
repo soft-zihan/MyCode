@@ -8,7 +8,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from agents.core.workspace import get_workspace
 from agents.memory.memory import build_memory_prompt_section
+from agents.wiki.wiki_manager import build_wiki_prompt_section, init_wiki_git
 from agents.skills.skills import build_skill_descriptions
 from .subagent import build_agent_descriptions
 from agents.tools import get_deferred_tool_names
@@ -93,9 +95,9 @@ def _load_rules_dir(directory: Path) -> str:
 
 
 def load_claude_md() -> str:
-    """Walk up from cwd collecting all CLAUDE.md files, resolving @includes."""
+    """Walk up from the workspace collecting all CLAUDE.md files, resolving @includes."""
     parts: list[str] = []
-    d = Path.cwd().resolve()
+    d = get_workspace().resolve()
     while True:
         f = d / "CLAUDE.md"
         if f.is_file():
@@ -109,11 +111,11 @@ def load_claude_md() -> str:
         if parent == d:
             break
         d = parent
-    rules = _load_rules_dir(Path.cwd())
+    rules = _load_rules_dir(get_workspace())
     claude_md = ""
     if parts:
         claude_md = "\n\n# Project Instructions (CLAUDE.md)\n" + "\n\n---\n\n".join(parts)
-    rules_md = _load_rules_md(Path.cwd())
+    rules_md = _load_rules_md(get_workspace())
     return claude_md + rules + rules_md
 
 
@@ -130,23 +132,6 @@ def _load_rules_md(directory: Path) -> str:
         return ""
 
 
-def get_git_context() -> str:
-    """Get git branch, recent commits, and status."""
-    try:
-        opts = {"encoding": "utf-8", "timeout": 3, "capture_output": True}
-        branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], **opts).stdout.strip()
-        log = subprocess.run(["git", "log", "--oneline", "-5"], **opts).stdout.strip()
-        status = subprocess.run(["git", "status", "--short"], **opts).stdout.strip()
-        result = f"\nGit branch: {branch}"
-        if log:
-            result += f"\nRecent commits:\n{log}"
-        if status:
-            result += f"\nGit status:\n{status}"
-        return result
-    except Exception:
-        return ""
-
-
 def build_workspace_structure() -> str:
     """列出工作区第一层文件结构，作为环境信息发给模型。
 
@@ -156,7 +141,7 @@ def build_workspace_structure() -> str:
     _SKIP = {"node_modules", "__pycache__", ".git", ".venv", "venv", "dist", "build", ".idea", ".DS_Store"}
     try:
         entries = []
-        for p in sorted(Path.cwd().iterdir()):
+        for p in sorted(get_workspace().iterdir()):
             if p.name.startswith(".") or p.name in _SKIP:
                 continue
             entries.append(p.name + "/" if p.is_dir() else p.name)
@@ -171,16 +156,36 @@ def build_workspace_structure() -> str:
 
 def build_system_prompt() -> str:
     """Build the full system prompt from template file + dynamic context."""
+    import time
     from datetime import date
+    _t0 = time.perf_counter()
     today = date.today().isoformat()
     plat = f"{platform.system()} {platform.machine()}"
     shell = (os.environ.get("ComSpec") or "cmd.exe") if sys.platform == "win32" else os.environ.get("SHELL", "/bin/sh")
-    git_context = get_git_context()
+
+    _t2 = time.perf_counter()
     claude_md = load_claude_md()
+    _claude_md_ms = (time.perf_counter() - _t2) * 1000
+
+    _t3 = time.perf_counter()
     memory_section = build_memory_prompt_section()
+    _memory_ms = (time.perf_counter() - _t3) * 1000
+
+    _t4 = time.perf_counter()
+    wiki_section = build_wiki_prompt_section()
+    _wiki_ms = (time.perf_counter() - _t4) * 1000
+
+    _t5 = time.perf_counter()
     skills_section = build_skill_descriptions()
+    _skills_ms = (time.perf_counter() - _t5) * 1000
+
+    _t6 = time.perf_counter()
     agent_section = build_agent_descriptions()
+    _agents_ms = (time.perf_counter() - _t6) * 1000
+
     workspace_structure = build_workspace_structure()
+
+    init_wiki_git()
 
     deferred_names = get_deferred_tool_names()
     deferred_section = (
@@ -189,14 +194,14 @@ def build_system_prompt() -> str:
     )
 
     replacements = {
-        "{{cwd}}": str(Path.cwd()),
+        "{{cwd}}": str(get_workspace()),
         "{{date}}": today,
         "{{platform}}": plat,
         "{{shell}}": shell,
         "{{workspace_structure}}": workspace_structure,
-        "{{git_context}}": git_context,
         "{{claude_md}}": claude_md,
         "{{memory}}": memory_section,
+        "{{wiki}}": wiki_section,
         "{{skills}}": skills_section,
         "{{agents}}": agent_section,
         "{{deferred_tools}}": deferred_section,
@@ -204,4 +209,15 @@ def build_system_prompt() -> str:
     result = _load_system_prompt_template()
     for key, value in replacements.items():
         result = result.replace(key, value)
+
+    _total_ms = (time.perf_counter() - _t0) * 1000
+    if _total_ms > 50:
+        print(
+            f"[perf] build_system_prompt: {_total_ms:.1f}ms "
+            f"(claude_md={_claude_md_ms:.1f} "
+            f"memory={_memory_ms:.1f} wiki={_wiki_ms:.1f} "
+            f"skills={_skills_ms:.1f} agents={_agents_ms:.1f})",
+            file=sys.stderr,
+        )
+
     return result

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from agents._utils import utc_now as _utc_now
+from agents.core.workspace import get_workspace
 
 
 RULES_FILE_NAME = "RULES.md"
@@ -16,11 +17,11 @@ RULES_PROVENANCE_LOG = "rules_provenance.jsonl"
 
 
 def get_rules_file() -> Path:
-    return Path.cwd() / ".mycode" / RULES_FILE_NAME
+    return get_workspace() / ".mycode" / RULES_FILE_NAME
 
 
 def get_rules_evolution_dir() -> Path:
-    return Path.cwd() / ".mycode" / "rule-evolution"
+    return get_workspace() / ".mycode" / "rule-evolution"
 
 
 def _today() -> str:

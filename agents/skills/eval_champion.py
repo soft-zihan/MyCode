@@ -11,6 +11,7 @@ from agents._utils import (
     write_jsonl as _write_jsonl,
     stable_hash as _stable_hash,
 )
+from agents.core.workspace import get_workspace
 from .skill_file_ops import get_evolution_dir
 
 ONLINE_EVAL_DIR = "online-eval"
@@ -167,7 +168,7 @@ def _activate_champion(skill_name: str, snapshot: dict[str, Any], lineage_id: st
 
 def _find_active_skill_path(skill_name: str) -> Path | None:
     """查找 active skill 文件路径。"""
-    project_path = Path.cwd() / ".mycode" / "skills" / skill_name / "SKILL.md"
+    project_path = get_workspace() / ".mycode" / "skills" / skill_name / "SKILL.md"
     if project_path.is_file():
         return project_path
 

@@ -10,6 +10,8 @@ import json
 import os
 import time
 
+from agents.core.workspace import get_workspace
+
 from .session_backend import SessionBackend
 from .session_backend_jsonl import JsonlSessionBackend
 
@@ -136,12 +138,19 @@ class Session:
         self.entries: dict[str, SessionEntry] = {}
         self.children: dict[str | None, list[str]] = {}  # parent_id -> [entry_ids]
         self.current_branch: list[str] = []  # 当前分支的 entry_id 列表
-        self.title: str | None = None
         self.summary: str | None = None
         self.system_prompt: str | None = None  # 系统提示词（单独存储）
         
         self._log: list[dict[str, Any]] = []
         self._subscribers: set[Callable[[dict], None]] = set()
+        
+        # Surface 索引机制
+        self._visible_seqs: list[int] = []  # 可见事件的索引
+        self._surface_generation: int = 0  # Surface 变化计数
+        
+        # 消息缓存
+        self._cached_messages: list[dict[str, Any]] | None = None
+        self._cache_generation: int = -1  # 缓存时的 generation
         
         # Initialize projections with default values from registry
         try:
@@ -162,6 +171,11 @@ class Session:
     def projections(self) -> dict[str, Any]:
         """获取投影缓存（title, updatedAt, cwd, running）。"""
         return self._projections
+    
+    @property
+    def title(self) -> str | None:
+        """Session 标题（单一数据源：事件流投影，由 session/title 事件驱动）。"""
+        return self._projections.get("title")
     
     def append(self, type: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
         """唯一写入入口。自动区分持久化和只推送。
@@ -194,6 +208,11 @@ class Session:
             event["seq"] = len(self._log)
             self._log.append(event)
             
+            # 新事件默认可见（events_hidden 本身不加入索引）
+            if type != "events_hidden":
+                self._visible_seqs.append(event["seq"])
+            self._surface_generation += 1
+            
             # Persist to backend (skip for sub-agents)
             if self.origin != "sub_agent":
                 try:
@@ -208,22 +227,24 @@ class Session:
                 registry = get_projection_registry()
                 self._projections = registry.apply_event(self._projections, event)
                 
-                # Check if we should write checkpoint
-                cache = get_projection_cache()
-                cache.record_event(self.id)
-                
-                # Force write on turn/end
-                if type == "turn/end":
-                    cache.force_write(self.id)
-                
-                if cache.should_write(self.id):
-                    from .session_projection_cache import ProjectionCheckpoint
-                    checkpoint = ProjectionCheckpoint(
-                        session_id=self.id,
-                        seq=event["seq"],
-                        projections=self._projections,
-                    )
-                    cache.save_checkpoint(checkpoint)
+                # 子智能体事件不持久化，其投影 checkpoint 是纯垃圾——跳过磁盘写入
+                if self.origin != "sub_agent":
+                    # Check if we should write checkpoint
+                    cache = get_projection_cache()
+                    cache.record_event(self.id)
+                    
+                    # Force write on turn/end / session/title（标题变更必须立即落盘，侧栏依赖 projcache）
+                    if type in ("turn/end", "session/title"):
+                        cache.force_write(self.id)
+                    
+                    if cache.should_write(self.id):
+                        from .session_projection_cache import ProjectionCheckpoint
+                        checkpoint = ProjectionCheckpoint(
+                            session_id=self.id,
+                            seq=event["seq"],
+                            projections=self._projections,
+                        )
+                        cache.save_checkpoint(checkpoint)
             except Exception:
                 pass  # Projection cache is optional
             
@@ -259,57 +280,47 @@ class Session:
                 yield event
     
     def get_messages_for_llm(self) -> list[dict[str, Any]]:
-        """从事件日志构建 LLM 消息历史。
+        """从事件日志构建 LLM 消息历史（带缓存）。
         
-        使用统一标记方案：
-        1. 收集所有 deleted_seqs（从 context/events_deleted 事件）
-        2. 收集所有 snipped（从 context/tool_snipped 事件）
-        3. 遍历事件，跳过 deleted_seqs 中的 seq
-        4. 遇到 tool_result_msg 时，检查是否被 snipped，如果是则用占位符替换
-        5. 遇到 context/session_folded 时，插入摘要消息
+        缓存一致性检查：比较 _surface_generation。
+        缓存未命中时只遍历 _visible_seqs（O(m)，m 是可见事件数量）。
         """
+        _t0 = time.perf_counter()
+        
+        # 缓存一致性检查
+        if (self._cached_messages is not None and 
+            self._cache_generation == self._surface_generation):
+            _hit_ms = (time.perf_counter() - _t0) * 1000
+            if _hit_ms > 5:
+                import sys
+                print(f"[perf] get_messages_for_llm: cache hit in {_hit_ms:.2f}ms ({len(self._cached_messages)} msgs)", file=sys.stderr)
+            return self._cached_messages
+        
+        # 只遍历可见事件（不需要过滤）
         messages = []
         
-        # 1. 收集所有标记事件
-        deleted_seqs = set()
-        snipped_map = {}  # seq -> key
-        fold_summaries = []  # [(seq, summary), ...]
-        
-        for event in self._log:
-            t = event.get("type")
-            if t == "context/events_deleted":
-                deleted_seqs.update(event.get("deleted_seqs", []))
-            elif t == "context/tool_snipped":
-                for item in event.get("snipped", []):
-                    snipped_map[item["seq"]] = item["key"]
-            elif t == "context/session_folded":
-                fold_summaries.append((event.get("seq"), event.get("summary", "")))
-        
-        # 2. 添加系统提示词
         if self.system_prompt:
             messages.append({"role": "system", "content": self.system_prompt})
         
-        # 3. 插入最早的折叠摘要（如果有）
-        if fold_summaries:
-            earliest_summary = fold_summaries[0][1]
-            messages.append({"role": "assistant", "content": earliest_summary})
-        
-        # 4. 遍历事件，构建消息
-        for event in self._log:
-            seq = event.get("seq")
+        for seq in self._visible_seqs:
+            event = self._log[seq]
             t = event.get("type")
             
-            # 跳过被删除的事件
-            if seq in deleted_seqs:
-                continue
-            
-            # 跳过标记事件本身
-            if t in ("context/events_deleted", "context/tool_snipped", "context/session_folded"):
-                continue
-            
-            # 处理消息事件
-            if t == "user_message":
+            if t == "tool_folded":
+                for abstract in event.get("abstracts", []):
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": abstract["call_id"],
+                        "content": abstract["abstract"],
+                    })
+            elif t == "session_folded":
+                messages.append({"role": "assistant", "content": event.get("summary", "")})
+            elif t == "user_message":
                 messages.append({"role": "user", "content": event["content"]})
+            elif t == "memory_injection":
+                # 记忆/Wiki 注入：LLM 上下文照常包含（user role），
+                # 但前端不渲染为用户消息（独立事件类型）
+                messages.append({"role": "user", "content": event.get("content", "")})
             elif t == "assistant_message":
                 msg: dict[str, Any] = {"role": "assistant", "content": event.get("content", "")}
                 if event.get("thinking"):
@@ -318,71 +329,41 @@ class Session:
                     msg["tool_calls"] = event["tool_calls"]
                 messages.append(msg)
             elif t == "tool_result_msg":
-                # 检查是否被 snipped
-                if seq in snipped_map:
-                    from .context_store import snipped_placeholder
-                    key = snipped_map[seq]
-                    # 尝试从 ContextStore 获取 abstract
-                    abstract = ""
-                    try:
-                        from agents.agent import _current_agent
-                        if _current_agent and hasattr(_current_agent, '_context_store'):
-                            abstract = _current_agent._context_store.get_abstract(key)
-                    except Exception:
-                        pass
-                    content = snipped_placeholder(key, abstract)
-                else:
-                    content = event["content"]
-                
                 messages.append({
                     "role": "tool",
                     "tool_call_id": event["call_id"],
-                    "content": content,
+                    "content": event["content"],
                 })
+        
+        # 更新缓存
+        self._cached_messages = messages
+        self._cache_generation = self._surface_generation
+        
+        _miss_ms = (time.perf_counter() - _t0) * 1000
+        _chars = sum(len(str(m.get("content", ""))) for m in messages)
+        if _miss_ms > 10 or len(messages) > 20:
+            import sys
+            print(f"[perf] get_messages_for_llm: cache miss in {_miss_ms:.2f}ms ({len(messages)} msgs, {_chars} chars)", file=sys.stderr)
         
         return messages
     
-    def mark_deleted(self, seqs: list[int], trigger: str = "manual") -> None:
-        """标记指定 seq 的事件为已删除。
+    def hide_events(self, seqs: list[int]) -> None:
+        """隐藏指定 seq 的事件。
         
-        Args:
-            seqs: 要删除的事件 seq 列表
-            trigger: 触发方式 "manual" | "auto"
-        
-        行为：
-        1. 写入 "context/events_deleted" 标记事件（append-only）
-        2. 广播删除通知给前端
-        
-        原子性保证：
-        - 只追加新事件，不修改已有事件
-        - 标记事件持久化后，重启时从标记事件恢复 deleted_seqs 状态
+        追加 events_hidden 事件，同时从 _visible_seqs 移除。
+        这样保持 append-only 的纯洁性，同时支持 Surface 索引机制。
         """
         if not seqs:
             return
         
-        self.append("context/events_deleted", {
-            "deleted_seqs": seqs,
-            "trigger": trigger,
+        # 追加 events_hidden 事件（会更新 _surface_generation）
+        self.append("events_hidden", {
+            "hidden_seqs": list(seqs),
         })
-    
-    def mark_tool_snipped(self, snipped: list[dict], trigger: str = "auto") -> None:
-        """标记工具结果被替换为占位符。
         
-        Args:
-            snipped: [{"seq": 3, "key": "snip:call_001"}, ...]
-            trigger: 触发方式
-        
-        行为：
-        1. 写入 "context/tool_snipped" 标记事件（append-only）
-        2. 广播通知给前端
-        """
-        if not snipped:
-            return
-        
-        self.append("context/tool_snipped", {
-            "snipped": snipped,
-            "trigger": trigger,
-        })
+        # 从索引中移除
+        seq_set = set(seqs)
+        self._visible_seqs = [s for s in self._visible_seqs if s not in seq_set]
     
     # ── 三阶段恢复 ──
     
@@ -396,29 +377,30 @@ class Session:
     def _capture_current_file_states(self) -> list[dict]:
         """捕获当前文件状态（路径 + hash）。"""
         import hashlib
-        from pathlib import Path
-        
+
+        cwd = get_workspace()
         files = []
+        ignore_dirs = {".git", ".venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache"}
         try:
-            cwd = Path.cwd()
-            ignore_dirs = {".git", ".venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache"}
-            
             for file_path in cwd.rglob("*"):
-                if not file_path.is_file():
-                    continue
-                if any(part.startswith(".") or part in ignore_dirs for part in file_path.parts):
-                    continue
                 try:
+                    if not file_path.is_file():
+                        continue
+                    # 隐藏/忽略目录判断基于相对工作区的路径（工作区本身可能位于隐藏路径下）
+                    rel = file_path.relative_to(cwd)
+                    if any(part.startswith(".") or part in ignore_dirs for part in rel.parts):
+                        continue
                     content = file_path.read_bytes()
                     files.append({
-                        "path": str(file_path.relative_to(cwd)),
+                        "path": str(rel),
                         "hash": hashlib.md5(content).hexdigest()[:8],
                         "size": len(content),
                     })
-                except (OSError, PermissionError):
-                    pass
-        except Exception:
-            pass
+                except OSError:
+                    continue
+        except OSError as e:
+            from agents.observability.trace import trace_event
+            trace_event("snapshot.capture_failed", error=str(e), workspace=str(cwd))
         return files
     
     def stage_revert(self, target_seq: int) -> dict:
@@ -520,8 +502,12 @@ class Session:
         for file_info in target_files:
             restored_files.append(file_info["path"])
         
-        # 3. 截断事件日志
+        # 3. 截断事件列表
         self._log = self._log[:target_seq]
+        
+        # 同步更新 _visible_seqs
+        self._visible_seqs = [s for s in self._visible_seqs if s < target_seq]
+        self._surface_generation += 1
         
         # 4. 记录恢复事件
         self.append("revert/commit", {
@@ -535,8 +521,11 @@ class Session:
         }
     
     @classmethod
-    def load_from_jsonl(cls, session_id: str) -> Session | None:
-        """从后端加载事件日志，验证 seq 连续性，应用崩溃恢复和投影缓存。"""
+    def load_from_events(cls, session_id: str) -> Session | None:
+        """从后端加载事件日志，验证 seq 连续性，应用崩溃恢复和投影缓存。
+        
+        支持 JSONL 和 SQLite 两种后端，通过 MYCODE_SESSION_BACKEND 环境变量切换。
+        """
         # 尝试从 JSON 文件读取元数据
         json_path = session_dir() / f"{session_id}.json"
         metadata = {}
@@ -585,6 +574,18 @@ class Session:
                 break
             session._log.append(event)
             expected_seq += 1
+        
+        # 重建 _visible_seqs
+        hidden_seqs = set()
+        for event in session._log:
+            if event.get("type") == "events_hidden":
+                hidden_seqs.update(event.get("hidden_seqs", []))
+        
+        session._visible_seqs = [
+            e["seq"] for e in session._log
+            if e.get("seq") not in hidden_seqs and e.get("type") != "events_hidden"
+        ]
+        session._surface_generation = len(session._log)  # 初始 generation
         
         # Build projections from events (with checkpoint optimization)
         try:
@@ -637,6 +638,11 @@ class Session:
             new_session.entries[new_entry.id] = new_entry
             new_session.children.setdefault(new_entry.parent_id, []).append(new_entry.id)
             new_session.current_branch.append(new_entry.id)
+        
+        # 复制 Surface 索引
+        new_session._visible_seqs = self._visible_seqs.copy()
+        new_session._surface_generation = self._surface_generation
+        
         return new_session
     
     def get_messages(self) -> list[dict[str, Any]]:
@@ -711,7 +717,6 @@ class Session:
             "parent_session": self.parent_session,
             "origin": self.origin,
             "agent_type": self.agent_type,
-            "title": self.title,
             "summary": self.summary,
             "entries": [e.to_dict() for e in self.entries.values()],
             "current_branch": self.current_branch,
@@ -739,7 +744,6 @@ class Session:
             origin=data.get("origin"),
             agent_type=data.get("agent_type"),
         )
-        session.title = data.get("title")
         session.summary = data.get("summary")
         
         for entry_data in data.get("entries", []):
@@ -797,7 +801,7 @@ def _ensure_dir() -> None:
 
 
 def get_project_session_dir() -> Path:
-    d = Path.cwd() / ".mycode" / "sessions"
+    d = get_workspace() / ".mycode" / "sessions"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -823,21 +827,6 @@ def load_session(session_id: str) -> dict[str, Any] | None:
         return json.loads(path.read_text())
     except Exception:
         return None
-
-
-def save_session_meta(session_id: str, meta: dict[str, Any]) -> bool:
-    path = session_dir() / f"{session_id}.json"
-    if not path.exists():
-        return False
-    try:
-        data = json.loads(path.read_text())
-        if "metadata" not in data:
-            data["metadata"] = {"id": session_id}
-        data["metadata"].update(meta)
-        atomic_write_json(path, data)
-        return True
-    except Exception:
-        return False
 
 
 def list_sessions() -> list[dict[str, Any]]:
@@ -877,16 +866,20 @@ def list_sessions() -> list[dict[str, Any]]:
                 metadata = data["metadata"]
                 session_id = metadata.get("id")
                 if session_id and session_id not in seen_ids:
-                    # 从 projcache 文件读取 updated_at
+                    # 从 projcache 读取投影（title/updated_at 单一数据源：事件流投影）
+                    title = None
                     projcache_path = session_dir() / f"{session_id}.projcache.json"
                     if projcache_path.exists():
                         try:
                             projcache = json.loads(projcache_path.read_text())
-                            updated_at = projcache.get("projections", {}).get("updated_at", 0)
+                            projections = projcache.get("projections", {})
+                            updated_at = projections.get("updated_at", 0)
                             if updated_at:
                                 metadata["startTime"] = updated_at
+                            title = projections.get("title")
                         except Exception:
                             pass
+                    metadata["name"] = title or session_id
                     results.append(metadata)
                     seen_ids.add(session_id)
         except Exception:
@@ -927,15 +920,25 @@ def list_child_sessions(parent_session_id: str) -> list[dict[str, Any]]:
 
 
 def delete_session(session_id: str) -> bool:
-    """删除指定会话文件。返回是否真的删除了。"""
-    path = session_dir() / f"{session_id}.json"
-    try:
-        path.unlink()
-        return True
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return False
+    """删除指定会话的全部文件（快照/事件日志/投影缓存/折叠记忆）。返回是否真的删除了。"""
+    d = session_dir()
+    patterns = (
+        f"{session_id}.json",
+        f"{session_id}.events.jsonl",
+        f"{session_id}.projcache.json",
+        f"{session_id}.folded-memory.jsonl",
+        f"{session_id}.folded-memory.latest.json",
+    )
+    deleted = False
+    for name in patterns:
+        try:
+            (d / name).unlink()
+            deleted = True
+        except FileNotFoundError:
+            continue
+        except OSError:
+            continue
+    return deleted
 
 
 def clean_sessions(keep_latest: int = 20, only_tmp: bool = False) -> int:
