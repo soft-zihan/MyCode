@@ -1,9 +1,9 @@
 """Session projection cache - persistent checkpoint for fast cold reads.
 
 DeepSeek 对齐：
-- 投影单元注册（title, updatedAt, cwd 等）
-- 持久化 checkpoint 到存储
-- 冷读时从 checkpoint + tail 重建，避免全量 replay
+- 投影单元注册（title, updatedAt, cwd 等）+ stateVersion
+- 持久化 checkpoint 到存储（per-session, per-key rows）
+- 冷读时从 checkpoint + tail 重建，版本/身份不匹配则丢弃
 - 写入节流：turn/end 时强制写入，其他时候按 count/interval 节流
 """
 
@@ -18,113 +18,206 @@ from typing import Any, Callable
 from .session import session_dir
 
 
+FORMAT_VERSION = 1
+
+
+@dataclass(frozen=True)
+class SessionHeader:
+    """Session 生命周期身份。
+
+    checkpoint 绑定此身份，防止错误的 checkpoint 用于错误的 session。
+    """
+    id: str
+    version: int
+    created_at: int
+    cwd: str | None
+    is_seeded: bool = False
+    inherited_event_count: int = 0
+
+
+@dataclass
+class CheckpointRow:
+    """单个投影单元的 checkpoint 行。"""
+    ver: int
+    seq: int
+    val: Any
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"ver": self.ver, "seq": self.seq, "val": self.val}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CheckpointRow:
+        return cls(ver=data["ver"], seq=data["seq"], val=data["val"])
+
+
 @dataclass
 class ProjectionCheckpoint:
     """投影缓存 checkpoint。
-    
-    Attributes:
-        session_id: Session ID
-        seq: Checkpoint 时的最后一个事件 seq
-        projections: 投影值字典
-        created_at: 创建时间
+
+    包含身份字段和按 key 存储的行，版本不匹配时安全丢弃。
     """
     session_id: str
     seq: int
-    projections: dict[str, Any]
-    created_at: float = field(default_factory=time.time)
-    
+    rows: dict[str, CheckpointRow]
+    format_version: int
+    created_at: int
+    cwd: str | None
+    is_seeded: bool = False
+    inherited_event_count: int = 0
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
             "seq": self.seq,
-            "projections": self.projections,
+            "format_version": self.format_version,
             "created_at": self.created_at,
+            "cwd": self.cwd,
+            "is_seeded": self.is_seeded,
+            "inherited_event_count": self.inherited_event_count,
+            "rows": {k: v.to_dict() for k, v in self.rows.items()},
         }
-    
+
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> ProjectionCheckpoint:
+    def from_dict(cls, data: dict[str, Any]) -> ProjectionCheckpoint | None:
+        """从字典解析。旧格式（无 format_version）返回 None。"""
+        if "format_version" not in data:
+            return None
+        rows = {}
+        for k, v in data.get("rows", {}).items():
+            try:
+                rows[k] = CheckpointRow.from_dict(v)
+            except (KeyError, TypeError):
+                return None
         return cls(
             session_id=data["session_id"],
-            seq=data["seq"],
-            projections=data.get("projections", {}),
-            created_at=data.get("created_at", time.time()),
+            seq=data.get("seq", 0),
+            rows=rows,
+            format_version=data["format_version"],
+            created_at=data.get("created_at", 0),
+            cwd=data.get("cwd"),
+            is_seeded=data.get("is_seeded", False),
+            inherited_event_count=data.get("inherited_event_count", 0),
+        )
+
+    @classmethod
+    def from_session(cls, session: Any, rows: dict[str, CheckpointRow]) -> ProjectionCheckpoint:
+        """从 Session 实例创建 checkpoint。"""
+        return cls(
+            session_id=session.id,
+            seq=max(session.seq - 1, 0),
+            rows=rows,
+            format_version=FORMAT_VERSION,
+            created_at=session.created_at,
+            cwd=session.cwd,
+            is_seeded=session.is_seeded,
+            inherited_event_count=session.inherited_event_count,
         )
 
 
-# 投影单元定义
-# 每个投影单元是一个 fold：init() + apply(state, event) -> state
-ProjectionUnit = dict[str, Any]  # {key, init, apply}
+def identity_matches(checkpoint: ProjectionCheckpoint, header: SessionHeader) -> bool:
+    """检查 checkpoint 身份是否匹配当前 session 生命周期。"""
+    return (
+        checkpoint.format_version == header.version
+        and checkpoint.created_at == header.created_at
+        and checkpoint.cwd == header.cwd
+        and checkpoint.is_seeded == header.is_seeded
+        and checkpoint.inherited_event_count == header.inherited_event_count
+    )
+
+
+@dataclass
+class _ProjectionUnit:
+    """注册的投影单元定义。"""
+    key: str
+    state_version: int
+    init: Callable[[], Any]
+    apply: Callable[[Any, dict[str, Any]], Any]
 
 
 class ProjectionRegistry:
     """投影单元注册表。
-    
-    管理所有注册的投影单元，每个单元是一个纯同步 fold。
+
+    管理所有注册的投影单元，每个单元是一个纯同步 fold，带有 state_version。
     """
-    
+
     def __init__(self):
-        self._units: dict[str, Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]] = {}
+        self._units: dict[str, _ProjectionUnit] = {}
         self._init_values: dict[str, Any] = {}
-    
+
     def register(
         self,
         key: str,
         init: Callable[[], Any],
         apply: Callable[[Any, dict[str, Any]], Any],
+        state_version: int = 1,
     ) -> None:
-        """注册投影单元。
-        
-        Args:
-            key: 投影键名
-            init: 初始化函数，返回初始值
-            apply: 折叠函数，接收 (state, event) 返回新 state
-        """
-        self._units[key] = apply
+        if not isinstance(state_version, int) or state_version < 0:
+            raise ValueError(f"state_version must be a non-negative integer, got {state_version}")
+        self._units[key] = _ProjectionUnit(
+            key=key,
+            state_version=state_version,
+            init=init,
+            apply=apply,
+        )
         self._init_values[key] = init()
-    
+
+    @property
+    def units(self) -> dict[str, _ProjectionUnit]:
+        return self._units
+
     def init_state(self) -> dict[str, Any]:
-        """返回初始投影状态。"""
-        return {k: v for k, v in self._init_values.items()}
-    
+        return {k: v.init() for k, v in self._units.items()}
+
     def apply_event(self, state: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
-        """应用事件到投影状态。
-        
-        Args:
-            state: 当前投影状态
-            event: 事件
-        
-        Returns:
-            新的投影状态
-        """
         new_state = dict(state)
-        for key, apply_fn in self._units.items():
+        for key, unit in self._units.items():
             try:
-                new_state[key] = apply_fn(state.get(key), event)
+                new_state[key] = unit.apply(state.get(key), event)
             except Exception:
-                pass  # 投影失败不影响主流程
+                pass
         return new_state
-    
-    def restore(
-        self,
-        checkpoint: ProjectionCheckpoint,
-        tail_events: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        """从 checkpoint + tail 重建投影状态。
-        
-        Args:
-            checkpoint: Checkpoint
-            tail_events: Checkpoint 之后的事件
-        
-        Returns:
-            重建的投影状态
-        """
-        state = dict(checkpoint.projections)
-        for event in tail_events:
+
+    def fold_events(self, init_val: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:
+        state = dict(init_val)
+        for event in events:
             state = self.apply_event(state, event)
         return state
 
+    def checkpoint(self, state: dict[str, Any], seq: int) -> dict[str, CheckpointRow]:
+        rows = {}
+        for key, unit in self._units.items():
+            rows[key] = CheckpointRow(
+                ver=unit.state_version,
+                seq=seq,
+                val=state.get(key),
+            )
+        return rows
 
-# 全局注册表
+    def restore(
+        self,
+        checkpoint: ProjectionCheckpoint,
+        all_events: list[dict[str, Any]],
+        header: SessionHeader,
+    ) -> dict[str, Any]:
+        """按 key 独立恢复：版本匹配的行从 checkpoint 继续 forward-apply，
+        版本不匹配的行从 init 全量折叠。"""
+        state: dict[str, Any] = {}
+        for key, unit in self._units.items():
+            row = checkpoint.rows.get(key)
+            if row is not None and row.ver == unit.state_version:
+                tail = [e for e in all_events if e.get("seq", 0) > row.seq]
+                val = row.val
+                for event in tail:
+                    val = unit.apply(val, event)
+                state[key] = val
+            else:
+                val = unit.init()
+                for event in all_events:
+                    val = unit.apply(val, event)
+                state[key] = val
+        return state
+
+
 _projection_registry = ProjectionRegistry()
 
 
@@ -132,17 +225,15 @@ def register_projection(
     key: str,
     init: Callable[[], Any],
     apply: Callable[[Any, dict[str, Any]], Any],
+    state_version: int = 1,
 ) -> None:
-    """注册投影单元。"""
-    _projection_registry.register(key, init, apply)
+    _projection_registry.register(key, init, apply, state_version)
 
 
 def get_projection_registry() -> ProjectionRegistry:
-    """获取全局投影注册表。"""
     return _projection_registry
 
 
-# 注册默认投影单元
 def _init_title() -> str | None:
     return None
 
@@ -161,9 +252,7 @@ def _init_updated_at() -> int:
 
 def _apply_updated_at(state: int, event: dict[str, Any]) -> int:
     event_time = event.get("time", 0)
-    if event_time > state:
-        return event_time
-    return state
+    return event_time if event_time > state else state
 
 
 def _init_cwd() -> str | None:
@@ -181,10 +270,10 @@ def _init_running() -> bool:
 
 
 def _apply_running(state: bool, event: dict[str, Any]) -> bool:
-    event_type = event.get("type")
-    if event_type == "turn/start":
+    t = event.get("type")
+    if t == "turn/start":
         return True
-    if event_type == "turn/end":
+    if t == "turn/end":
         return False
     return state
 
@@ -194,10 +283,10 @@ def _init_context_used() -> int:
 
 
 def _apply_context_used(state: int, event: dict[str, Any]) -> int:
-    event_type = event.get("type")
-    if event_type == "stats":
+    t = event.get("type")
+    if t == "stats":
         return event.get("last_input_token_count", state)
-    if event_type in ("context/compacted", "tool_folded", "session_folded"):
+    if t in ("context/compacted", "tool_folded", "session_folded"):
         return event.get("last_input_token_count", state)
     return state
 
@@ -207,50 +296,41 @@ def _init_context_total() -> int:
 
 
 def _apply_context_total(state: int, event: dict[str, Any]) -> int:
-    event_type = event.get("type")
-    if event_type == "stats":
+    t = event.get("type")
+    if t == "stats":
         return event.get("context_window", state)
-    if event_type in ("context/compacted", "tool_folded", "session_folded"):
+    if t in ("context/compacted", "tool_folded", "session_folded"):
         return event.get("context_window", state)
     return state
 
 
-# 注册默认投影
-register_projection("title", _init_title, _apply_title)
-register_projection("updated_at", _init_updated_at, _apply_updated_at)
-register_projection("cwd", _init_cwd, _apply_cwd)
-register_projection("running", _init_running, _apply_running)
-register_projection("context_used", _init_context_used, _apply_context_used)
-register_projection("context_total", _init_context_total, _apply_context_total)
+register_projection("title", _init_title, _apply_title, state_version=1)
+register_projection("updated_at", _init_updated_at, _apply_updated_at, state_version=1)
+register_projection("cwd", _init_cwd, _apply_cwd, state_version=1)
+register_projection("running", _init_running, _apply_running, state_version=1)
+register_projection("context_used", _init_context_used, _apply_context_used, state_version=1)
+register_projection("context_total", _init_context_total, _apply_context_total, state_version=1)
 
 
 class ProjectionCache:
-    """投影缓存管理器。
-    
-    持久化 checkpoint 到 JSON 文件，支持：
-    - 写入节流：turn/end 时强制写入，其他时候按 count/interval 节流
-    - 冷读优化：从 checkpoint + tail 重建，避免全量 replay
-    """
-    
+    """投影缓存管理器。"""
+
     def __init__(self, cache_dir: Path | None = None):
         if cache_dir is None:
             cache_dir = session_dir()
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        
-        # 写入节流状态
-        self._pending_writes: dict[str, int] = {}  # session_id -> event count since last write
-        self._last_write_time: dict[str, float] = {}  # session_id -> last write timestamp
-        
-        # 节流配置
-        self.write_count_threshold = 10  # 每 10 个事件写入一次
-        self.write_interval_threshold = 5.0  # 每 5 秒写入一次
-    
+
+        self._pending_writes: dict[str, int] = {}
+        self._last_write_time: dict[str, float] = {}
+
+        self.write_count_threshold = 10
+        self.write_interval_threshold = 5.0
+
     def _cache_path(self, session_id: str) -> Path:
         return self.cache_dir / f"{session_id}.projcache.json"
-    
+
     def load_checkpoint(self, session_id: str) -> ProjectionCheckpoint | None:
-        """加载 checkpoint。"""
         path = self._cache_path(session_id)
         if not path.exists():
             return None
@@ -259,39 +339,32 @@ class ProjectionCache:
             return ProjectionCheckpoint.from_dict(data)
         except Exception:
             return None
-    
+
     def save_checkpoint(self, checkpoint: ProjectionCheckpoint) -> None:
-        """保存 checkpoint。"""
-        path = self._cache_path(session_id := checkpoint.session_id)
+        path = self._cache_path(checkpoint.session_id)
         try:
             path.write_text(json.dumps(checkpoint.to_dict(), indent=2, default=str))
-            self._last_write_time[session_id] = time.time()
-            self._pending_writes[session_id] = 0
+            self._last_write_time[checkpoint.session_id] = time.time()
+            self._pending_writes[checkpoint.session_id] = 0
         except Exception:
-            pass  # 写入失败不影响主流程
-    
+            pass
+
     def should_write(self, session_id: str) -> bool:
-        """检查是否应该写入 checkpoint（节流判断）。"""
         count = self._pending_writes.get(session_id, 0)
         if count >= self.write_count_threshold:
             return True
-        
         last_time = self._last_write_time.get(session_id, 0)
         if time.time() - last_time >= self.write_interval_threshold:
             return True
-        
         return False
-    
+
     def record_event(self, session_id: str) -> None:
-        """记录一个事件（用于节流计数）。"""
         self._pending_writes[session_id] = self._pending_writes.get(session_id, 0) + 1
-    
+
     def force_write(self, session_id: str) -> None:
-        """强制写入（turn/end 时调用）。"""
         self._pending_writes[session_id] = self.write_count_threshold
-    
+
     def delete_checkpoint(self, session_id: str) -> None:
-        """删除 checkpoint。"""
         path = self._cache_path(session_id)
         if path.exists():
             path.unlink()
@@ -299,84 +372,75 @@ class ProjectionCache:
         self._last_write_time.pop(session_id, None)
 
 
-# 全局缓存实例
 _projection_cache: ProjectionCache | None = None
 
 
 def get_projection_cache() -> ProjectionCache:
-    """获取全局投影缓存实例。"""
     global _projection_cache
     if _projection_cache is None:
         _projection_cache = ProjectionCache()
     return _projection_cache
 
 
-def build_projections_from_events(
-    events: list[dict[str, Any]],
-) -> dict[str, Any]:
-    """从事件列表构建投影状态。
-    
-    Args:
-        events: 事件列表
-    
-    Returns:
-        投影状态字典
-    """
+def build_projections_from_events(events: list[dict[str, Any]]) -> dict[str, Any]:
     registry = get_projection_registry()
     state = registry.init_state()
-    for event in events:
-        state = registry.apply_event(state, event)
-    return state
+    return registry.fold_events(state, events)
 
 
 def restore_projections(
     session_id: str,
     all_events: list[dict[str, Any]],
+    header: SessionHeader,
 ) -> dict[str, Any]:
-    """恢复投影状态（从 checkpoint + tail 或全量 replay）。
-    
-    Args:
-        session_id: Session ID
-        all_events: 所有事件
-    
-    Returns:
-        投影状态字典
+    """恢复投影状态。
+
+    身份不匹配时丢弃旧 checkpoint，全量重建。
+    版本不匹配的 key 独立重建。
     """
     cache = get_projection_cache()
     registry = get_projection_registry()
-    
-    # 尝试从 checkpoint 恢复
+
     checkpoint = cache.load_checkpoint(session_id)
+
+    if checkpoint is not None and not identity_matches(checkpoint, header):
+        checkpoint = None
+
     if checkpoint is not None:
-        # 找到 checkpoint 之后的事件
-        tail_events = [e for e in all_events if e.get("seq", 0) > checkpoint.seq]
-        
-        # 从 checkpoint + tail 重建
-        state = registry.restore(checkpoint, tail_events)
-        
-        # 更新 checkpoint（如果有新事件）
-        if tail_events:
-            last_event = tail_events[-1]
+        state = registry.restore(checkpoint, all_events, header)
+
+        last_seq = all_events[-1].get("seq", 0) if all_events else 0
+        if last_seq > checkpoint.seq:
+            rows = registry.checkpoint(state, last_seq)
             new_checkpoint = ProjectionCheckpoint(
                 session_id=session_id,
-                seq=last_event.get("seq", 0),
-                projections=state,
+                seq=last_seq,
+                rows=rows,
+                format_version=FORMAT_VERSION,
+                created_at=header.created_at,
+                cwd=header.cwd,
+                is_seeded=header.is_seeded,
+                inherited_event_count=header.inherited_event_count,
             )
             cache.save_checkpoint(new_checkpoint)
-        
+
         return state
-    
-    # 没有 checkpoint，全量 replay
+
     state = build_projections_from_events(all_events)
-    
-    # 保存 checkpoint
+
     if all_events:
-        last_event = all_events[-1]
+        last_seq = all_events[-1].get("seq", 0)
+        rows = registry.checkpoint(state, last_seq)
         checkpoint = ProjectionCheckpoint(
             session_id=session_id,
-            seq=last_event.get("seq", 0),
-            projections=state,
+            seq=last_seq,
+            rows=rows,
+            format_version=FORMAT_VERSION,
+            created_at=header.created_at,
+            cwd=header.cwd,
+            is_seeded=header.is_seeded,
+            inherited_event_count=header.inherited_event_count,
         )
         cache.save_checkpoint(checkpoint)
-    
+
     return state

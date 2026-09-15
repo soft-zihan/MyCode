@@ -67,7 +67,7 @@ class EventListener:
         self._task: asyncio.Task | None = None
 
     async def start(self) -> None:
-        self._ws = await websockets.connect(self.ws_url, ping_interval=None, max_size=16 * 1024 * 1024, proxy=None)
+        self._ws = await websockets.connect(self.ws_url, ping_interval=None, max_size=16 * 1024 * 1024)
         self._task = asyncio.create_task(self._recv_loop())
 
     async def _recv_loop(self) -> None:
@@ -433,14 +433,46 @@ async def run_task(listener: EventListener, task: dict, base_url: str, skip_lang
                         record["failures"].append(f"阶段{phase_idx} 第 {i} 轮等待 turn/end 超时（{timeout_s}s）")
                         break
                 
+                # 提取回答内容（取最后一个 assistant_message）
+                events = listener.session_events(session_id)
+                last_turn_start = max(
+                    (idx for idx, e in enumerate(events) if e.get("type") == "turn/start"),
+                    default=0,
+                )
+                turn_events = events[last_turn_start:]
+                answer = ""
+                for e in reversed(turn_events):
+                    if e.get("type") == "assistant_message":
+                        answer = e.get("content", "")
+                        if answer:
+                            break
+                
+                if "responses" not in record:
+                    record["responses"] = []
+                
+                # 提取 expected_keywords 用于评测
+                expected_keywords = []
+                response_contains = phase_expect.get("response_contains", [])
+                if response_contains:
+                    # response_contains 格式: [["keyword1", "keyword2"], ...]
+                    # 展平为单个列表
+                    for group in response_contains:
+                        if isinstance(group, list):
+                            expected_keywords.extend(group)
+                        else:
+                            expected_keywords.append(group)
+                
+                record["responses"].append({
+                    "phase": phase_idx,
+                    "question": phase_messages[-1] if phase_messages else "",
+                    "answer": answer,
+                    "expected_keywords": expected_keywords,
+                    "wiki_recalled": phase_expect.get("wiki_recalled", False),
+                })
+                
                 # 阶段断言
                 if not record["failures"]:
-                    events = listener.session_events(session_id)
-                    last_turn_start = max(
-                        (idx for idx, e in enumerate(events) if e.get("type") == "turn/start"),
-                        default=0,
-                    )
-                    failures = check_assertions_for_phase(phase, workspace, events, events[last_turn_start:], listener.events[window_start:])
+                    failures = check_assertions_for_phase(phase, workspace, events, turn_events, listener.events[window_start:])
                     record["failures"].extend(failures)
         else:
             # 单阶段测试（原有逻辑）
@@ -478,6 +510,29 @@ async def run_task(listener: EventListener, task: dict, base_url: str, skip_lang
         except Exception as e:
             record["langfuse"] = {"ok": False, "checks": [f"查询异常: {e}"]}
             record["failures"].append(f"langfuse 查询异常: {e}")
+        
+        # 评测结果上报 Langfuse（多阶段任务且有 responses 时）
+        if phases and len(phases) >= 2 and "responses" in record:
+            try:
+                from eval.langfuse.wiki_memory_evaluators import upload_eval_to_langfuse
+                from agents.observability.evals import LangfuseClient, load_langfuse_env
+                
+                load_langfuse_env(PROJECT_ROOT)
+                client = LangfuseClient()
+                
+                trace_ids = record.get("langfuse", {}).get("trace_ids", [])
+                eval_result = await asyncio.to_thread(
+                    upload_eval_to_langfuse,
+                    client,
+                    task.get("name", task["id"]),
+                    task["id"],
+                    record["responses"],
+                    session_id,
+                    trace_ids,
+                )
+                record["eval_upload"] = eval_result
+            except Exception as e:
+                record["eval_upload"] = {"error": str(e)}
 
     record["passed"] = not record["failures"]
     # 等待异步 wiki 写入完成

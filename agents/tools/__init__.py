@@ -73,10 +73,15 @@ _grep_search = grep_search
 _grep_python = grep_python
 
 from agents.tools.wiki_tools import write_workflow_pattern as _write_workflow_pattern_tool
+from agents.tools.wiki_tools import write_wiki_entry as _write_wiki_entry_tool
 
 
 def _handle_write_workflow_pattern(inp: dict) -> str:
     return _write_workflow_pattern_tool(inp)
+
+
+def _handle_write_wiki_entry(inp: dict) -> str:
+    return _write_wiki_entry_tool(inp)
 
 from agents.tools.permissions import (
     check_permission,
@@ -174,6 +179,7 @@ async def execute_tool(
         "run_shell": run_shell,
         "shell_status": shell_status,
         "write_workflow_pattern": _handle_write_workflow_pattern,
+        "write_wiki_entry": _handle_write_wiki_entry,
     }
     handler = handlers.get(name)
 

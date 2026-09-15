@@ -148,16 +148,23 @@ class Session:
         self._visible_seqs: list[int] = []  # 可见事件的索引
         self._surface_generation: int = 0  # Surface 变化计数
         
-        # 消息缓存
-        self._cached_messages: list[dict[str, Any]] | None = None
-        self._cache_generation: int = -1  # 缓存时的 generation
+        # 增量派生状态（对齐 DeepSeek deriveMessages）
+        self._derived_messages: list[dict[str, Any]] = []
+        self._derived_node_count: int = 0
+        self._derived_generation: int = -1
+        
+        # 身份属性（对齐 DeepSeek SessionHeader）
+        self.created_at: int = int(time.time() * 1000)
+        self.cwd: str | None = None
+        self.is_seeded: bool = False
+        self.inherited_event_count: int = 0
         
         # Initialize projections with default values from registry
         try:
             from .session_projection_cache import get_projection_registry
             self._projections: dict[str, Any] = get_projection_registry().init_state()
         except Exception:
-            self._projections: dict[str, Any] = {}  # Fallback if registry not available
+            self._projections: dict[str, Any] = {}
     
     @property
     def seq(self) -> int:
@@ -223,30 +230,23 @@ class Session:
             
             # Update projections
             try:
-                from .session_projection_cache import get_projection_registry, get_projection_cache
+                from .session_projection_cache import get_projection_registry, get_projection_cache, ProjectionCheckpoint, CheckpointRow
                 registry = get_projection_registry()
                 self._projections = registry.apply_event(self._projections, event)
                 
-                # 子智能体事件不持久化，其投影 checkpoint 是纯垃圾——跳过磁盘写入
                 if self.origin != "sub_agent":
-                    # Check if we should write checkpoint
                     cache = get_projection_cache()
                     cache.record_event(self.id)
                     
-                    # Force write on turn/end / session/title（标题变更必须立即落盘，侧栏依赖 projcache）
                     if type in ("turn/end", "session/title"):
                         cache.force_write(self.id)
                     
                     if cache.should_write(self.id):
-                        from .session_projection_cache import ProjectionCheckpoint
-                        checkpoint = ProjectionCheckpoint(
-                            session_id=self.id,
-                            seq=event["seq"],
-                            projections=self._projections,
-                        )
+                        rows = registry.checkpoint(self._projections, event["seq"])
+                        checkpoint = ProjectionCheckpoint.from_session(self, rows)
                         cache.save_checkpoint(checkpoint)
             except Exception:
-                pass  # Projection cache is optional
+                pass
             
             for sub in list(self._subscribers):
                 try:
@@ -280,72 +280,80 @@ class Session:
                 yield event
     
     def get_messages_for_llm(self) -> list[dict[str, Any]]:
-        """从事件日志构建 LLM 消息历史（带缓存）。
+        """从事件日志构建 LLM 消息历史（增量派生）。
         
-        缓存一致性检查：比较 _surface_generation。
-        缓存未命中时只遍历 _visible_seqs（O(m)，m 是可见事件数量）。
+        对齐 DeepSeek 的 deriveMessages()：
+        - generation 变化时重置（surface 结构变化）
+        - 只处理新增的可见事件（增量）
         """
         _t0 = time.perf_counter()
         
-        # 缓存一致性检查
-        if (self._cached_messages is not None and 
-            self._cache_generation == self._surface_generation):
-            _hit_ms = (time.perf_counter() - _t0) * 1000
-            if _hit_ms > 5:
-                import sys
-                print(f"[perf] get_messages_for_llm: cache hit in {_hit_ms:.2f}ms ({len(self._cached_messages)} msgs)", file=sys.stderr)
-            return self._cached_messages
-        
-        # 只遍历可见事件（不需要过滤）
-        messages = []
-        
-        if self.system_prompt:
-            messages.append({"role": "system", "content": self.system_prompt})
-        
-        for seq in self._visible_seqs:
-            event = self._log[seq]
-            t = event.get("type")
+        if self._derived_generation != self._surface_generation:
+            self._derived_messages = []
+            self._derived_node_count = 0
+            self._derived_generation = self._surface_generation
             
-            if t == "tool_folded":
-                for abstract in event.get("abstracts", []):
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": abstract["call_id"],
-                        "content": abstract["abstract"],
-                    })
-            elif t == "session_folded":
-                messages.append({"role": "assistant", "content": event.get("summary", "")})
-            elif t == "user_message":
-                messages.append({"role": "user", "content": event["content"]})
-            elif t == "memory_injection":
-                # 记忆/Wiki 注入：LLM 上下文照常包含（user role），
-                # 但前端不渲染为用户消息（独立事件类型）
-                messages.append({"role": "user", "content": event.get("content", "")})
-            elif t == "assistant_message":
-                msg: dict[str, Any] = {"role": "assistant", "content": event.get("content", "")}
-                if event.get("thinking"):
-                    msg["thinking"] = event["thinking"]
-                if event.get("tool_calls"):
-                    msg["tool_calls"] = event["tool_calls"]
-                messages.append(msg)
-            elif t == "tool_result_msg":
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": event["call_id"],
-                    "content": event["content"],
+            if self.system_prompt:
+                self._derived_messages.append({
+                    "role": "system",
+                    "content": self.system_prompt,
                 })
         
-        # 更新缓存
-        self._cached_messages = messages
-        self._cache_generation = self._surface_generation
+        new_visible = self._visible_seqs[self._derived_node_count:]
+        for seq in new_visible:
+            event = self._log[seq]
+            msgs = self._derive_messages(event)
+            self._derived_messages.extend(msgs)
         
-        _miss_ms = (time.perf_counter() - _t0) * 1000
-        _chars = sum(len(str(m.get("content", ""))) for m in messages)
-        if _miss_ms > 10 or len(messages) > 20:
+        self._derived_node_count = len(self._visible_seqs)
+        
+        _elapsed = (time.perf_counter() - _t0) * 1000
+        if _elapsed > 5 or len(new_visible) > 0:
             import sys
-            print(f"[perf] get_messages_for_llm: cache miss in {_miss_ms:.2f}ms ({len(messages)} msgs, {_chars} chars)", file=sys.stderr)
+            print(
+                f"[perf] get_messages_for_llm: {_elapsed:.2f}ms "
+                f"(processed {len(new_visible)} new, total {len(self._derived_messages)} msgs)",
+                file=sys.stderr,
+            )
         
-        return messages
+        return list(self._derived_messages)
+    
+    def _derive_messages(self, event: dict[str, Any]) -> list[dict[str, Any]]:
+        """从单个事件派生 LLM 消息列表。"""
+        t = event.get("type")
+        
+        if t == "tool_folded":
+            return [
+                {
+                    "role": "tool",
+                    "tool_call_id": abstract["call_id"],
+                    "content": abstract["abstract"],
+                }
+                for abstract in event.get("abstracts", [])
+            ]
+        
+        if t == "session_folded":
+            return [{"role": "assistant", "content": event.get("summary", "")}]
+        
+        if t in ("user_message", "memory_injection"):
+            return [{"role": "user", "content": event.get("content", "")}]
+        
+        if t == "assistant_message":
+            msg: dict[str, Any] = {"role": "assistant", "content": event.get("content", "")}
+            if event.get("thinking"):
+                msg["thinking"] = event["thinking"]
+            if event.get("tool_calls"):
+                msg["tool_calls"] = event["tool_calls"]
+            return [msg]
+        
+        if t == "tool_result_msg":
+            return [{
+                "role": "tool",
+                "tool_call_id": event["call_id"],
+                "content": event["content"],
+            }]
+        
+        return []
     
     def hide_events(self, seqs: list[int]) -> None:
         """隐藏指定 seq 的事件。
@@ -542,6 +550,11 @@ class Session:
             agent_type=metadata.get("agent_type"),
         )
         
+        session.created_at = metadata.get("created_at", session.created_at)
+        session.cwd = metadata.get("cwd")
+        session.is_seeded = metadata.get("is_seeded", False)
+        session.inherited_event_count = metadata.get("inherited_event_count", 0)
+        
         # Load events from backend
         try:
             backend = get_session_backend()
@@ -589,10 +602,18 @@ class Session:
         
         # Build projections from events (with checkpoint optimization)
         try:
-            from .session_projection_cache import restore_projections
-            session._projections = restore_projections(session_id, session._log)
+            from .session_projection_cache import restore_projections, SessionHeader
+            header = SessionHeader(
+                id=session.id,
+                version=1,
+                created_at=session.created_at,
+                cwd=session.cwd,
+                is_seeded=session.is_seeded,
+                inherited_event_count=session.inherited_event_count,
+            )
+            session._projections = restore_projections(session_id, session._log, header)
         except Exception:
-            pass  # Projection cache is optional
+            pass
         
         return session if session._log else None
     
@@ -857,7 +878,6 @@ def list_sessions() -> list[dict[str, Any]]:
     
     # 2. 再从磁盘读取 session（去重）
     for f in session_dir().glob("*.json"):
-        # 跳过 projcache 文件
         if f.name.endswith(".projcache.json"):
             continue
         try:
@@ -866,17 +886,18 @@ def list_sessions() -> list[dict[str, Any]]:
                 metadata = data["metadata"]
                 session_id = metadata.get("id")
                 if session_id and session_id not in seen_ids:
-                    # 从 projcache 读取投影（title/updated_at 单一数据源：事件流投影）
                     title = None
                     projcache_path = session_dir() / f"{session_id}.projcache.json"
                     if projcache_path.exists():
                         try:
                             projcache = json.loads(projcache_path.read_text())
-                            projections = projcache.get("projections", {})
-                            updated_at = projections.get("updated_at", 0)
-                            if updated_at:
-                                metadata["startTime"] = updated_at
-                            title = projections.get("title")
+                            rows = projcache.get("rows", {})
+                            updated_at_row = rows.get("updated_at")
+                            if updated_at_row and updated_at_row.get("val"):
+                                metadata["startTime"] = updated_at_row["val"]
+                            title_row = rows.get("title")
+                            if title_row:
+                                title = title_row.get("val")
                         except Exception:
                             pass
                     metadata["name"] = title or session_id

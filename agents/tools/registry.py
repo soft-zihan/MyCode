@@ -15,7 +15,7 @@ ToolDef = dict
 PermissionMode = str
 
 READ_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "compact_context", "shell_status", "search_history", "list_task_notes"}
-EDIT_TOOLS = {"write_file", "edit_file", "skill_create", "write_workflow_pattern"}
+EDIT_TOOLS = {"write_file", "edit_file", "skill_create", "write_workflow_pattern", "write_wiki_entry"}
 
 CONCURRENCY_SAFE_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "shell_status"}
 
@@ -84,6 +84,7 @@ TOOL_EXECUTION_MODES: dict[str, str] = {
     "run_shell": "sequential",
     "skill_create": "sequential",
     "write_workflow_pattern": "sequential",
+    "write_wiki_entry": "sequential",
     "compact_context": "sequential",
     "context_restore": "sequential",
     "enter_plan_mode": "sequential",
@@ -328,6 +329,20 @@ tool_definitions: list[ToolDef] = [
                 "description": {"type": "string", "description": "Optional short description"},
             },
             "required": ["name", "symptom", "root_cause", "workaround"],
+        },
+    },
+    {
+        "name": "write_wiki_entry",
+        "description": "Create a wiki entry for persistent memory. Use this to record important information that should be remembered across sessions. Types: knowledge (project info), self_improvement (lessons learned), user (user preferences), reference (external docs), workflow_pattern (troubleshooting workflows), plan (task plans).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "wiki_type": {"type": "string", "description": "Entry type: knowledge, self_improvement, user, reference, workflow_pattern, plan"},
+                "name": {"type": "string", "description": "Entry name/title"},
+                "content": {"type": "string", "description": "Entry content (markdown supported)"},
+                "description": {"type": "string", "description": "Optional short description"},
+            },
+            "required": ["wiki_type", "name", "content"],
         },
     },
 ]

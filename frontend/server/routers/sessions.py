@@ -664,16 +664,24 @@ async def api_fork_session(session_id: str, data: Optional[ForkRequest] = None) 
     try:
         from agents.core.session_projection_cache import (
             ProjectionCheckpoint,
+            CheckpointRow,
             get_projection_cache,
+            get_projection_registry,
             restore_projections,
+            SessionHeader,
+            FORMAT_VERSION,
         )
         fork_events = new_session_data.get("events", [])
-        projections = restore_projections(new_session_id, fork_events)
-        get_projection_cache().save_checkpoint(ProjectionCheckpoint(
-            session_id=new_session_id,
-            seq=len(fork_events) - 1 if fork_events else 0,
-            projections=projections,
-        ))
+        new_metadata = new_session_data.get("metadata", {})
+        header = SessionHeader(
+            id=new_session_id,
+            version=FORMAT_VERSION,
+            created_at=new_metadata.get("created_at", int(time.time() * 1000)),
+            cwd=new_metadata.get("cwd"),
+            is_seeded=new_metadata.get("is_seeded", False),
+            inherited_event_count=new_metadata.get("inherited_event_count", 0),
+        )
+        projections = restore_projections(new_session_id, fork_events, header)
         print(f"[FORK] projcache built for {new_session_id}: title={projections.get('title')}")
     except Exception as e:
         print(f"[FORK] failed to build projcache: {e}")
