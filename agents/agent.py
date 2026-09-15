@@ -311,6 +311,10 @@ class Agent:
             else:
                 self._system_prompt = self._base_system_prompt
 
+            # 初始化 Rewind（如果启用）
+            from agents.observability.rewind import init_rewind
+            init_rewind()
+            
             #初始化大模型客户端
             self._openai_client = openai.AsyncOpenAI(base_url=api_base, api_key=api_key)
             

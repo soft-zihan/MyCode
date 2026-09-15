@@ -535,6 +535,20 @@ async def run_task(listener: EventListener, task: dict, base_url: str, skip_lang
                 record["eval_upload"] = {"error": str(e)}
 
     record["passed"] = not record["failures"]
+    
+    # 失败用例自动导出 Rewind session（如果启用）
+    if not record["passed"] and record.get("session_id"):
+        try:
+            from agents.observability.rewind import is_enabled, export_session
+            if is_enabled():
+                export_dir = Path(__file__).parent.parent / "cassettes" / task["id"]
+                export_dir.mkdir(parents=True, exist_ok=True)
+                if export_session(output_dir=str(export_dir)):
+                    record["rewind_export"] = str(export_dir)
+                    print(f"[smoke] 失败用例 {task['id']} 已导出 Rewind session: {export_dir}")
+        except Exception as e:
+            record["rewind_export"] = {"error": str(e)}
+    
     # 等待异步 wiki 写入完成
     await asyncio.sleep(2)
     if not keep:
