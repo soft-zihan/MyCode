@@ -77,8 +77,12 @@ def get_session_id() -> str | None:
         return None
     
     try:
-        import rewind_agent
-        return rewind_agent.get_session_id()
+        from rewind_agent.store import Store
+        store = Store()
+        latest_session = store.get_latest_session()
+        if latest_session:
+            return latest_session.get("id")
+        return None
     except Exception:
         return None
 

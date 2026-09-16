@@ -58,9 +58,10 @@ start_backend() {
     export MYCODE_OTEL="${MYCODE_OTEL:-1}"
     export MYCODE_OTEL_ENDPOINT="${MYCODE_OTEL_ENDPOINT:-${LANGFUSE_BASE_URL:-https://us.cloud.langfuse.com}/api/public/otel/v1/traces}"
     export MYCODE_SESSION_BACKEND="${MYCODE_SESSION_BACKEND:-jsonl}"
-    nohup python frontend/server/main.py > "$PROJECT_ROOT/logs/.backend.log" 2>&1 &
+    export MYCODE_REWIND="${MYCODE_REWIND:-0}"
+    nohup env -i PATH="$PATH" HOME="$HOME" MYCODE_OTEL="$MYCODE_OTEL" MYCODE_OTEL_ENDPOINT="$MYCODE_OTEL_ENDPOINT" MYCODE_SESSION_BACKEND="$MYCODE_SESSION_BACKEND" MYCODE_REWIND="$MYCODE_REWIND" LANGFUSE_PUBLIC_KEY="$LANGFUSE_PUBLIC_KEY" LANGFUSE_SECRET_KEY="$LANGFUSE_SECRET_KEY" LANGFUSE_BASE_URL="$LANGFUSE_BASE_URL" python frontend/server/main.py > "$PROJECT_ROOT/logs/.backend.log" 2>&1 &
     echo $! > "$PIDFILE_BACKEND"
-    log "后端已启动 (pid=$!, log=.backend.log) [OTEL=$MYCODE_OTEL, SESSION=$MYCODE_SESSION_BACKEND]"
+    log "后端已启动 (pid=$!, log=.backend.log) [OTEL=$MYCODE_OTEL, SESSION=$MYCODE_SESSION_BACKEND, REWIND=$MYCODE_REWIND]"
 }
 
 start_frontend() {

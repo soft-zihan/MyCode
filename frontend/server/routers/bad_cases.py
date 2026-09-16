@@ -205,13 +205,16 @@ async def api_verify_bad_case(bad_case_id: str) -> VerifyResponse:
         raise HTTPException(status_code=404, detail="Bad case not found")
     
     # 检查 Rewind 是否启用
-    from agents.observability.rewind import is_enabled, get_session_id, diagnose_failure
+    from agents.observability.rewind import is_enabled, get_session_id, diagnose_failure, init_rewind
     if not is_enabled():
         return VerifyResponse(
             reproducible=False,
             severity="unknown",
             message="Rewind 未启用，无法验证可复现性",
         )
+    
+    # 初始化 Rewind（如果尚未初始化）
+    init_rewind()
     
     # 获取当前 Rewind session
     rewind_session_id = get_session_id()

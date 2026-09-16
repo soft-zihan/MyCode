@@ -69,6 +69,51 @@ class AgentLoop:
         self._agent = agent
         self._tool_tracker = ToolCallTracker()
 
+    def _auto_mark_bad_case(self, signal_type: str, diagnosis: dict) -> None:
+        """自动标记 bad case（走歪路或 trace 信号异常）。"""
+        try:
+            from agents.observability.bad_cases import BadCaseDB, BadCaseSource, Severity
+            db = BadCaseDB()
+            session_id = self._agent.session.session_id or "unknown"
+            db.create(
+                session_id=session_id,
+                source=BadCaseSource.AUTO_DETECT,
+                status="pending",
+                severity=Severity.MEDIUM,
+                turn_number=self._agent._current_turn,
+                step_number=self._agent._current_step,
+                signal_type=signal_type,
+                diagnosis=diagnosis,
+            )
+        except Exception:
+            pass  # 静默失败，不影响主流程
+
+    def _check_trace_signals(self) -> None:
+        """Turn 结束时检测 trace 信号异常，自动创建 bad case。"""
+        try:
+            from agents.observability.trace_signals import detect_span_errors, detect_high_tool_failure_rate
+            trace_id = getattr(self._agent.session, "langfuse_trace_id", None)
+            if not trace_id:
+                return
+            
+            # 检测 span 错误
+            errors = detect_span_errors(trace_id)
+            if errors:
+                self._auto_mark_bad_case(
+                    signal_type="span_error",
+                    diagnosis={"errors": errors[:3], "count": len(errors)}
+                )
+            
+            # 检测工具失败率过高
+            failure_info = detect_high_tool_failure_rate(trace_id)
+            if failure_info.get("is_high"):
+                self._auto_mark_bad_case(
+                    signal_type="高工具失败率",
+                    diagnosis=failure_info
+                )
+        except Exception:
+            pass  # 静默失败，不影响主流程
+
     async def run(self, user_message: str) -> None:
         """主推理循环入口。"""
         await self._prepare_turn(user_message)
@@ -132,6 +177,8 @@ class AgentLoop:
                     "files": end_snapshot,
                 })
                 await self._finalize_text_response()
+                # Turn 结束，检测 trace 信号异常
+                self._check_trace_signals()
                 break
 
             self._agent.increment_turns()
@@ -148,6 +195,8 @@ class AgentLoop:
                     "files": error_snapshot,
                     "error": "budget_exceeded",
                 })
+                # Turn 结束，检测 trace 信号异常
+                self._check_trace_signals()
                 break
 
             await self._handle_tool_calls(tool_calls)
@@ -415,9 +464,33 @@ class AgentLoop:
             a.record_tool_outcome(ct_item["fn"], not a.looks_like_tool_failure(ct_item["fn"], "", res))
             
             # 检查工具调用警告
-            warnings = check_tool_warnings(self._tool_tracker, ct_item["fn"], ct_item["inp"])
-            if warnings:
-                res = res + "\n\n" + "\n".join(warnings)
+            warning_result = check_tool_warnings(self._tool_tracker, ct_item["fn"], ct_item["inp"])
+            if warning_result["warnings"]:
+                res = res + "\n\n" + "\n".join(warning_result["warnings"])
+            
+            # 走歪路检测：警告后仍重复调用，自动创建 bad case
+            if warning_result["going_off_track"]:
+                self._auto_mark_bad_case(
+                    signal_type="tool_repeat",
+                    diagnosis={"tool": ct_item["fn"], "args": ct_item["inp"], "reason": "警告后仍重复调用"}
+                )
+            
+            # 循环 bad case 检测：警告后仍循环，自动创建 bad case
+            if warning_result["cycle_bad_case"]:
+                self._auto_mark_bad_case(
+                    signal_type="tool_cycle",
+                    diagnosis={"tool": ct_item["fn"], "args": ct_item["inp"], "reason": "警告后仍循环"}
+                )
+            
+            # 硬兜底：达到10次强行停止
+            if warning_result["force_stop"]:
+                stop_info = warning_result["force_stop_info"]
+                force_stop_msg = f"\n\n⚠️ 硬兜底：工具 {stop_info['tool']} 已调用 {stop_info['count']} 次，强行停止。请检查任务是否合理，或提供更多上下文。"
+                res = res + force_stop_msg
+                self._auto_mark_bad_case(
+                    signal_type="force_stop",
+                    diagnosis={"tool": stop_info["tool"], "count": stop_info["count"], "args": stop_info["args"]}
+                )
             
             repeat_warning = a.check_repeat_guard(ct_item["fn"], ct_item["inp"])
             if repeat_warning:
@@ -449,9 +522,33 @@ class AgentLoop:
                 break
 
             # 检查工具调用警告
-            warnings = check_tool_warnings(self._tool_tracker, ct["fn"], ct["inp"])
-            if warnings:
-                res = res + "\n\n" + "\n".join(warnings)
+            warning_result = check_tool_warnings(self._tool_tracker, ct["fn"], ct["inp"])
+            if warning_result["warnings"]:
+                res = res + "\n\n" + "\n".join(warning_result["warnings"])
+
+            # 走歪路检测：警告后仍重复调用，自动创建 bad case
+            if warning_result["going_off_track"]:
+                self._auto_mark_bad_case(
+                    signal_type="tool_repeat",
+                    diagnosis={"tool": ct["fn"], "args": ct["inp"], "reason": "警告后仍重复调用"}
+                )
+
+            # 循环 bad case 检测：警告后仍循环，自动创建 bad case
+            if warning_result["cycle_bad_case"]:
+                self._auto_mark_bad_case(
+                    signal_type="tool_cycle",
+                    diagnosis={"tool": ct["fn"], "args": ct["inp"], "reason": "警告后仍循环"}
+                )
+
+            # 硬兜底：达到10次强行停止
+            if warning_result["force_stop"]:
+                stop_info = warning_result["force_stop_info"]
+                force_stop_msg = f"\n\n⚠️ 硬兜底：工具 {stop_info['tool']} 已调用 {stop_info['count']} 次，强行停止。请检查任务是否合理，或提供更多上下文。"
+                res = res + force_stop_msg
+                self._auto_mark_bad_case(
+                    signal_type="force_stop",
+                    diagnosis={"tool": stop_info["tool"], "count": stop_info["count"], "args": stop_info["args"]}
+                )
 
             repeat_warning = a.check_repeat_guard(ct["fn"], ct["inp"])
             if repeat_warning:
