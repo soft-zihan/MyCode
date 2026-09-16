@@ -3,9 +3,11 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Brain, ChevronDown, ChevronRight, Copy, Check } from 'lucide-react';
 import type { AssistantNode } from './types';
+import { ThumbsDownButton, type ThumbsDownFeedback } from '../ThumbsDownDialog';
 
 interface AssistantNodeViewProps {
   node: AssistantNode;
+  sessionId?: string;
   onFileClick?: (path: string) => void;
 }
 
@@ -28,7 +30,7 @@ const fileLinkRenderer = (onFileClick?: (path: string) => void) => (props: React
   return <a {...props} />;
 };
 
-export const AssistantNodeView = memo(function AssistantNodeView({ node, onFileClick }: AssistantNodeViewProps) {
+export const AssistantNodeView = memo(function AssistantNodeView({ node, sessionId, onFileClick }: AssistantNodeViewProps) {
   const [showThinking, setShowThinking] = useState(node.streaming && !!node.thinking && !node.content);
   const [copied, setCopied] = useState(false);
   const prevStreamingRef = useRef(node.streaming);
@@ -59,6 +61,27 @@ export const AssistantNodeView = memo(function AssistantNodeView({ node, onFileC
       await navigator.clipboard.writeText(node.content);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  const handleThumbsDown = async (feedback: ThumbsDownFeedback) => {
+    if (!sessionId || !node.turn) return;
+    
+    try {
+      await fetch('/api/bad-cases/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sessionId,
+          turn_number: node.turn,
+          step_number: node.step,
+          reason: feedback.reason,
+          expected_tool: feedback.expectedTool,
+          comment: feedback.comment,
+        }),
+      });
+    } catch (error) {
+      console.error('Failed to submit feedback:', error);
     }
   };
 
@@ -112,23 +135,31 @@ export const AssistantNodeView = memo(function AssistantNodeView({ node, onFileC
           <div className="text-xs mt-1 flex items-center justify-between text-gray-400">
             <span>{new Date(node.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
             {node.content && !node.streaming && (
-              <button
-                onClick={handleCopy}
-                className="flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-gray-200 hover:text-gray-600 transition-colors"
-                title="Copy message"
-              >
-                {copied ? (
-                  <>
-                    <Check className="w-3 h-3" />
-                    <span>Copied</span>
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-3 h-3" />
-                    <span>Copy</span>
-                  </>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={handleCopy}
+                  className="flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-gray-200 hover:text-gray-600 transition-colors"
+                  title="Copy message"
+                >
+                  {copied ? (
+                    <>
+                      <Check className="w-3 h-3" />
+                      <span>Copied</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3 h-3" />
+                      <span>Copy</span>
+                    </>
+                  )}
+                </button>
+                {sessionId && node.turn && (
+                  <ThumbsDownButton
+                    hasToolCalls={node.hasToolCalls || false}
+                    onSubmit={handleThumbsDown}
+                  />
                 )}
-              </button>
+              </div>
             )}
           </div>
         </div>

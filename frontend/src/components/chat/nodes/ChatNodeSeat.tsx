@@ -21,7 +21,7 @@ export const ChatNodeSeat = memo(function ChatNodeSeat({ node, sessionId, onEdit
     case 'user':
       return <UserNodeView node={node} sessionId={sessionId} onEdit={onEditMessage} />;
     case 'assistant':
-      return <AssistantNodeView node={node} onFileClick={onFileClick} />;
+      return <AssistantNodeView node={node} sessionId={sessionId} onFileClick={onFileClick} />;
     case 'thinking':
       return <ThinkingNodeView node={node} />;
     case 'tool-call':

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agents.tools.registry import CONCURRENCY_SAFE_TOOLS, get_active_tool_definitions
+from agents.observability.tool_tracker import ToolCallTracker, check_tool_warnings
 
 if TYPE_CHECKING:
     from agents.agent import Agent
@@ -66,6 +67,7 @@ class AgentLoop:
 
     def __init__(self, agent: Agent):
         self._agent = agent
+        self._tool_tracker = ToolCallTracker()
 
     async def run(self, user_message: str) -> None:
         """主推理循环入口。"""
@@ -203,6 +205,9 @@ class AgentLoop:
         a = self._agent
         user_message = _safe_utf8_text(user_message)
         clean_message = re.sub(r"\n*<retrieved_skills>.*?</retrieved_skills>\s*", "", user_message, flags=re.DOTALL).strip()
+        
+        # 重置工具调用跟踪器
+        self._tool_tracker.reset()
         
         snapshot_id = None
         if not a.is_sub_agent:
@@ -408,6 +413,12 @@ class AgentLoop:
         results = await asyncio.gather(*[_run_oai_safe(ct) for ct in items])
         for ct_item, res in results:
             a.record_tool_outcome(ct_item["fn"], not a.looks_like_tool_failure(ct_item["fn"], "", res))
+            
+            # 检查工具调用警告
+            warnings = check_tool_warnings(self._tool_tracker, ct_item["fn"], ct_item["inp"])
+            if warnings:
+                res = res + "\n\n" + "\n".join(warnings)
+            
             repeat_warning = a.check_repeat_guard(ct_item["fn"], ct_item["inp"])
             if repeat_warning:
                 res = res + "\n\n" + repeat_warning
@@ -436,6 +447,11 @@ class AgentLoop:
                 a.append_user_message(res)
                 context_break = True
                 break
+
+            # 检查工具调用警告
+            warnings = check_tool_warnings(self._tool_tracker, ct["fn"], ct["inp"])
+            if warnings:
+                res = res + "\n\n" + "\n".join(warnings)
 
             repeat_warning = a.check_repeat_guard(ct["fn"], ct["inp"])
             if repeat_warning:

@@ -23,6 +23,9 @@ export interface AssistantNode extends BaseNode {
   thinking?: string;
   streaming: boolean;
   timestamp: string;
+  turn?: number;
+  step?: number;
+  hasToolCalls?: boolean;
 }
 
 export interface ThinkingNode extends BaseNode {

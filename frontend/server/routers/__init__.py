@@ -10,6 +10,7 @@ from .mcp import router as mcp_router
 from .events import router as events_router
 from .projects import router as projects_router
 from .websocket import router as websocket_router
+from .bad_cases import router as bad_cases_router
 
 __all__ = [
     "sessions_router",
@@ -24,4 +25,5 @@ __all__ = [
     "events_router",
     "projects_router",
     "websocket_router",
+    "bad_cases_router",
 ]

@@ -246,6 +246,19 @@ def check_assertions(task: dict, workspace: Path, events: list[dict], turn_event
             if needle not in assistant_text:
                 failures.append(f"response 缺少 {needle!r}（实际: {assistant_text[:120]!r}）")
 
+    # response_format: 检查回复格式
+    response_format = expect.get("response_format")
+    if response_format == "plain_text":
+        # 检查是否包含 markdown code block
+        if "```" in assistant_text:
+            failures.append(f"response_format: 期望纯文本，实际返回 markdown code block（实际: {assistant_text[:120]!r}）")
+        # 检查是否包含 markdown 标题
+        if assistant_text.strip().startswith("#"):
+            failures.append(f"response_format: 期望纯文本，实际返回 markdown 标题（实际: {assistant_text[:120]!r}）")
+        # 检查是否包含 markdown 列表
+        if any(line.strip().startswith(("- ", "* ", "+ ")) for line in assistant_text.split("\n")):
+            failures.append(f"response_format: 期望纯文本，实际返回 markdown 列表（实际: {assistant_text[:120]!r}）")
+
     tools_used = {e.get("name") for e in events if e.get("type") == "tool_call"}
     
     # tools_used: 必须全部调用
@@ -548,6 +561,35 @@ async def run_task(listener: EventListener, task: dict, base_url: str, skip_lang
                     print(f"[smoke] 失败用例 {task['id']} 已导出 Rewind session: {export_dir}")
         except Exception as e:
             record["rewind_export"] = {"error": str(e)}
+        
+        # 自动标记为 bad case
+        try:
+            import uuid
+            from agents.observability.bad_cases import (
+                BadCase,
+                BadCaseSource,
+                BadCaseStatus,
+                BadCaseSeverity,
+                create_bad_case,
+            )
+            
+            bad_case = BadCase(
+                id=uuid.uuid4().hex[:8],
+                session_id=record["session_id"],
+                source=BadCaseSource.EVAL,
+                status=BadCaseStatus.PENDING,
+                severity=BadCaseSeverity.HIGH,
+                signal_type="eval_failure",
+                reason="; ".join(record["failures"][:3]),  # 只记录前 3 个失败原因
+                comment=f"Task: {task['id']}",
+                created_at=time.time(),
+                updated_at=time.time(),
+            )
+            created = create_bad_case(bad_case)
+            record["bad_case_id"] = created.id
+            print(f"[smoke] 失败用例 {task['id']} 已标记为 bad case: {created.id}")
+        except Exception as e:
+            record["bad_case_error"] = str(e)
     
     # 等待异步 wiki 写入完成
     await asyncio.sleep(2)

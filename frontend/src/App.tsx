@@ -5,6 +5,7 @@ import SkillsPage from './pages/SkillsPage';
 import TracePage from './pages/TracePage';
 import ToolsPage from './pages/ToolsPage';
 import AgentsPage from './pages/AgentsPage';
+import BadCasesPage from './pages/BadCasesPage';
 
 function App() {
   return (
@@ -17,6 +18,7 @@ function App() {
           <Route path="/memory" element={<MemoryPage />} />
           <Route path="/skills" element={<SkillsPage />} />
           <Route path="/trace" element={<TracePage />} />
+          <Route path="/bad-cases" element={<BadCasesPage />} />
         </Routes>
       </div>
     </BrowserRouter>

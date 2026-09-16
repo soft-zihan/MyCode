@@ -115,6 +115,8 @@ export function useChatNodes(): UseChatNodesReturn {
                 thinking: content,
                 streaming: true,
                 timestamp: new Date().toISOString(),
+                turn: data.turn as number | undefined,
+                step: data.step as number | undefined,
               });
               return { order: [...prev.order, key], nodes: newNodes };
             });
@@ -180,6 +182,8 @@ export function useChatNodes(): UseChatNodesReturn {
                 content,
                 streaming: true,
                 timestamp: new Date().toISOString(),
+                turn: data.turn as number | undefined,
+                step: data.step as number | undefined,
               });
               return { order: [...prev.order, key], nodes: newNodes };
             });
@@ -612,6 +616,9 @@ export function useChatNodes(): UseChatNodesReturn {
             thinking: thinking || undefined,
             streaming: false,
             timestamp: new Date(event.time as number).toISOString(),
+            turn: event.turn as number | undefined,
+            step: event.step as number | undefined,
+            hasToolCalls: toolCalls && toolCalls.length > 0,
           });
           
           if (toolCalls && toolCalls.length > 0) {
