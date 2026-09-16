@@ -75,6 +75,26 @@ _grep_python = grep_python
 from agents.tools.wiki_tools import write_workflow_pattern as _write_workflow_pattern_tool
 from agents.tools.wiki_tools import write_wiki_entry as _write_wiki_entry_tool
 
+from agents.tools.plan_tools import (
+    plan_propose as _plan_propose_tool,
+    plan_status as _plan_status_tool,
+    plan_list as _plan_list_tool,
+    plan_update as _plan_update_tool,
+    plan_task_done as _plan_task_done_tool,
+    plan_task_failed as _plan_task_failed_tool,
+    plan_add_artifact as _plan_add_artifact_tool,
+    plan_read_artifact as _plan_read_artifact_tool,
+    plan_archive as _plan_archive_tool,
+    plan_explore as _plan_explore_tool,
+    plan_save_explore as _plan_save_explore_tool,
+    plan_continue as _plan_continue_tool,
+    plan_retry as _plan_retry_tool,
+    plan_recall as _plan_recall_tool,
+    plan_abandon as _plan_abandon_tool,
+    plan_reopen as _plan_reopen_tool,
+    plan_check_expired as _plan_check_expired_tool,
+)
+
 
 def _handle_write_workflow_pattern(inp: dict) -> str:
     return _write_workflow_pattern_tool(inp)
@@ -180,14 +200,33 @@ async def execute_tool(
         "shell_status": shell_status,
         "write_workflow_pattern": _handle_write_workflow_pattern,
         "write_wiki_entry": _handle_write_wiki_entry,
+        "plan_propose": _plan_propose_tool,
+        "plan_status": _plan_status_tool,
+        "plan_list": _plan_list_tool,
+        "plan_update": _plan_update_tool,
+        "plan_task_done": _plan_task_done_tool,
+        "plan_task_failed": _plan_task_failed_tool,
+        "plan_add_artifact": _plan_add_artifact_tool,
+        "plan_read_artifact": _plan_read_artifact_tool,
+        "plan_archive": _plan_archive_tool,
+        "plan_explore": _plan_explore_tool,
+        "plan_save_explore": _plan_save_explore_tool,
+        "plan_continue": _plan_continue_tool,
+        "plan_retry": _plan_retry_tool,
+        "plan_abandon": _plan_abandon_tool,
+        "plan_reopen": _plan_reopen_tool,
+        "plan_check_expired": _plan_check_expired_tool,
     }
     handler = handlers.get(name)
 
     if not handler:
         return f"Unknown tool: {name}"
 
-    # Run blocking handlers in thread pool to avoid blocking event loop
-    result = await asyncio.to_thread(handler, inp)
+    import inspect
+    if inspect.iscoroutinefunction(handler):
+        result = await handler(inp)
+    else:
+        result = await asyncio.to_thread(handler, inp)
     result = _truncate_result(result)
 
     if name in ("write_file", "edit_file") and read_file_state is not None and not result.startswith("Error"):

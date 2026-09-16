@@ -22,7 +22,6 @@ VALID_WIKI_TYPES = {
     "user",
     "reference",
     "workflow_pattern",
-    "plan",
     "task_notes",
 }
 
@@ -350,7 +349,7 @@ def update_wiki_index() -> None:
     lines = ["# Wiki Index", ""]
     section_order = [
         "Knowledge", "Self Improvement", "User", "Reference",
-        "Workflow Pattern", "Plan",
+        "Workflow Pattern",
     ]
     for section in section_order:
         if section in sections:
@@ -583,7 +582,6 @@ You have a persistent, file-based wiki system at `{wiki_dir}`.
 - **user**: User's role, preferences, working habits
 - **reference**: External docs, API links, tool locations
 - **workflow_pattern**: Reusable workflow patterns (Symptom → Root cause → Workaround, compiled to Skill when high-frequency)
-- **plan**: Task plans, progress tracking (user-initiated, not auto-extracted)
 
 ## Wiki Recall
 Wiki entries are automatically recalled based on your current task. You don't need to manually search.

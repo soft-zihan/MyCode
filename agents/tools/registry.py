@@ -14,8 +14,8 @@ from typing import Any, Callable, Awaitable
 ToolDef = dict
 PermissionMode = str
 
-READ_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "compact_context", "shell_status", "search_history", "list_task_notes"}
-EDIT_TOOLS = {"write_file", "edit_file", "skill_create", "write_workflow_pattern", "write_wiki_entry"}
+READ_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "compact_context", "shell_status", "search_history", "list_task_notes", "plan_status", "plan_list", "plan_read_artifact", "plan_explore", "plan_continue", "plan_retry", "plan_recall", "plan_check_expired"}
+EDIT_TOOLS = {"write_file", "edit_file", "skill_create", "write_workflow_pattern", "write_wiki_entry", "plan_propose", "plan_update", "plan_task_done", "plan_task_failed", "plan_add_artifact", "plan_archive", "plan_save_explore", "plan_abandon", "plan_reopen"}
 
 CONCURRENCY_SAFE_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "shell_status"}
 
@@ -79,6 +79,14 @@ TOOL_EXECUTION_MODES: dict[str, str] = {
     "shell_status": "parallel",
     "search_history": "parallel",
     "list_task_notes": "parallel",
+    "plan_status": "parallel",
+    "plan_list": "parallel",
+    "plan_read_artifact": "parallel",
+    "plan_explore": "parallel",
+    "plan_continue": "parallel",
+    "plan_retry": "parallel",
+    "plan_recall": "parallel",
+    "plan_check_expired": "parallel",
     "write_file": "sequential",
     "edit_file": "sequential",
     "run_shell": "sequential",
@@ -91,6 +99,15 @@ TOOL_EXECUTION_MODES: dict[str, str] = {
     "exit_plan_mode": "sequential",
     "agent": "sequential",
     "tool_search": "sequential",
+    "plan_propose": "sequential",
+    "plan_update": "sequential",
+    "plan_task_done": "sequential",
+    "plan_task_failed": "sequential",
+    "plan_add_artifact": "sequential",
+    "plan_archive": "sequential",
+    "plan_save_explore": "sequential",
+    "plan_abandon": "sequential",
+    "plan_reopen": "sequential",
 }
 
 
@@ -333,16 +350,214 @@ tool_definitions: list[ToolDef] = [
     },
     {
         "name": "write_wiki_entry",
-        "description": "Create a wiki entry for persistent memory. Use this to record important information that should be remembered across sessions. Types: knowledge (project info), self_improvement (lessons learned), user (user preferences), reference (external docs), workflow_pattern (troubleshooting workflows), plan (task plans).",
+        "description": "Create a wiki entry for persistent memory. Use this to record important information that should be remembered across sessions. Types: knowledge (project info), self_improvement (lessons learned), user (user preferences), reference (external docs), workflow_pattern (troubleshooting workflows).",
         "input_schema": {
             "type": "object",
             "properties": {
-                "wiki_type": {"type": "string", "description": "Entry type: knowledge, self_improvement, user, reference, workflow_pattern, plan"},
+                "wiki_type": {"type": "string", "description": "Entry type: knowledge, self_improvement, user, reference, workflow_pattern"},
                 "name": {"type": "string", "description": "Entry name/title"},
                 "content": {"type": "string", "description": "Entry content (markdown supported)"},
                 "description": {"type": "string", "description": "Optional short description"},
             },
             "required": ["wiki_type", "name", "content"],
+        },
+    },
+    {
+        "name": "plan_propose",
+        "description": "Create a new plan for structured task execution. Plans have a slug, priority, tags, and granularity (minimal/standard/full).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "URL-safe plan identifier (e.g., 'add-dark-mode')"},
+                "priority": {"type": "string", "description": "Priority level (P0-P4, default: P2)"},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags for categorization"},
+                "granularity": {"type": "string", "enum": ["minimal", "standard", "full"], "description": "Plan granularity (default: minimal)"},
+            },
+            "required": ["slug"],
+        },
+    },
+    {
+        "name": "plan_status",
+        "description": "Get the status and task list of a plan.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Plan slug"},
+            },
+            "required": ["slug"],
+        },
+    },
+    {
+        "name": "plan_list",
+        "description": "List all active plans (or all plans including archived).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "include_archived": {"type": "boolean", "description": "Include archived plans (default: false)"},
+            },
+        },
+    },
+    {
+        "name": "plan_update",
+        "description": "Update plan status or tags.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Plan slug"},
+                "status": {"type": "string", "enum": ["proposed", "in-progress", "completed", "archived", "abandoned"], "description": "New status"},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "New tags"},
+            },
+            "required": ["slug"],
+        },
+    },
+    {
+        "name": "plan_task_done",
+        "description": "Mark a task as done in a plan.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Plan slug"},
+                "task_id": {"type": "integer", "description": "Task ID (1-indexed)"},
+            },
+            "required": ["slug", "task_id"],
+        },
+    },
+    {
+        "name": "plan_task_failed",
+        "description": "Mark a task as failed with error information.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Plan slug"},
+                "task_id": {"type": "integer", "description": "Task ID (1-indexed)"},
+                "error": {"type": "string", "description": "Error message"},
+            },
+            "required": ["slug", "task_id"],
+        },
+    },
+    {
+        "name": "plan_add_artifact",
+        "description": "Add an artifact file to a plan (proposal.md, design.md, specs/*.md, etc.).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Plan slug"},
+                "filename": {"type": "string", "description": "Artifact filename (e.g., 'proposal.md', 'specs/auth-flow.md')"},
+                "content": {"type": "string", "description": "Artifact content"},
+            },
+            "required": ["slug", "filename", "content"],
+        },
+    },
+    {
+        "name": "plan_read_artifact",
+        "description": "Read an artifact file from a plan.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Plan slug"},
+                "filename": {"type": "string", "description": "Artifact filename"},
+            },
+            "required": ["slug", "filename"],
+        },
+    },
+    {
+        "name": "plan_archive",
+        "description": "Archive a completed plan.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Plan slug"},
+            },
+            "required": ["slug"],
+        },
+    },
+    {
+        "name": "plan_explore",
+        "description": "Get an explore prompt for researching a topic before creating a plan.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string", "description": "Topic to explore"},
+            },
+            "required": ["topic"],
+        },
+    },
+    {
+        "name": "plan_save_explore",
+        "description": "Save explore results for future reference.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string", "description": "Topic that was explored"},
+                "content": {"type": "string", "description": "Explore results content"},
+            },
+            "required": ["topic", "content"],
+        },
+    },
+    {
+        "name": "plan_continue",
+        "description": "Continue executing the next task in a plan. Returns a prompt for the sub-agent.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Plan slug"},
+            },
+            "required": ["slug"],
+        },
+    },
+    {
+        "name": "plan_retry",
+        "description": "Retry a failed task in a plan. Returns a prompt for the sub-agent with error context.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Plan slug"},
+                "task_id": {"type": "integer", "description": "Task ID to retry"},
+            },
+            "required": ["slug", "task_id"],
+        },
+    },
+    {
+        "name": "plan_recall",
+        "description": "Search for relevant plans using semantic matching, tags, and status filtering.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "Filter by tags"},
+                "include_archived": {"type": "boolean", "description": "Include archived plans (default: false)"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "plan_abandon",
+        "description": "Abandon a proposed or in-progress plan.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Plan slug"},
+            },
+            "required": ["slug"],
+        },
+    },
+    {
+        "name": "plan_reopen",
+        "description": "Reopen a completed or abandoned plan.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Plan slug"},
+            },
+            "required": ["slug"],
+        },
+    },
+    {
+        "name": "plan_check_expired",
+        "description": "Check for plans that have been inactive for too long.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
         },
     },
 ]
