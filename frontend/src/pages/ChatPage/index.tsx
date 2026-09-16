@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useMemo } from 'react';
 import { 
   MessageSquare, PanelRight, Send, Square, Zap, File, X, Database
 } from 'lucide-react';
@@ -11,11 +11,14 @@ import { SessionsPanel } from './components/SessionsPanel';
 import ContextPanel from '../../components/agent/ContextPanel';
 import { PageLayout } from '../../components/PageLayout';
 import { useChat } from './hooks/useChat';
+import { useMention, MentionMenu } from '../../components/chat/MentionInput';
+import { fetchWorkspaceTree, WorkspaceNode } from '../../api/client';
 
 export default function ChatPage() {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [rightSidebarOpen, setRightSidebarOpen] = useState(true);
   const [rightTab, setRightTab] = useState<'files' | 'context'>('files');
+  const [fileList, setFileList] = useState<string[]>([]);
 
   const {
     inputValue,
@@ -63,11 +66,46 @@ export default function ChatPage() {
     handleCancelGoal,
   } = useChat();
 
+  // Fetch file list for @ mentions
+  useEffect(() => {
+    const fetchFiles = async () => {
+      try {
+        const tree = await fetchWorkspaceTree(currentCwd || '', 2);
+        const files: string[] = [];
+        const flatten = (node: WorkspaceNode, path: string) => {
+          if (node.type === 'file') {
+            files.push(path);
+          } else if (node.type === 'directory' && node.children) {
+            for (const child of node.children) {
+              flatten(child, path ? `${path}/${child.name}` : child.name);
+            }
+          }
+        };
+        flatten(tree, '');
+        setFileList(files);
+      } catch (e) {
+        // Ignore errors
+      }
+    };
+    if (currentCwd) {
+      fetchFiles();
+    }
+  }, [currentCwd, fileTreeRefreshTrigger]);
+
+  const mention = useMention({
+    files: fileList,
+    onInsert: (text) => setInputValue(text),
+  });
+
   const handleOpenFile = useCallback((filePath: string) => {
     setSelectedFile(filePath);
   }, []);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (mention.isOpen) {
+      mention.handleKeyDown(e);
+      return;
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSendMessage();
@@ -339,15 +377,27 @@ export default function ChatPage() {
                 ))}
               </div>
             )}
-            <div className="flex items-end gap-3">
-              <textarea
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="Type a message... (Shift+Enter for newline)"
-                className="flex-1 resize-none border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                rows={2}
-              />
+            <div className="flex items-end gap-3 relative">
+              <div className="flex-1 relative">
+                <textarea
+                  ref={mention.textareaRef}
+                  value={inputValue}
+                  onChange={(e) => {
+                    setInputValue(e.target.value);
+                    mention.handleChange(e);
+                  }}
+                  onKeyDown={handleKeyDown}
+                  placeholder="Type a message... (@ to mention files, Shift+Enter for newline)"
+                  className="w-full resize-none border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  rows={2}
+                />
+                <MentionMenu
+                  items={mention.items}
+                  selectedIndex={mention.selectedIndex}
+                  onSelect={mention.handleSelect}
+                  position={mention.position}
+                />
+              </div>
               {isStreaming ? (
                 <button
                   onClick={handleStopStreaming}
