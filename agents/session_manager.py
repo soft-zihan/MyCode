@@ -50,8 +50,12 @@ class SessionManager:
         config = load_config()
         api_key, api_base, model_name = self._resolve_model(config, model)
         
+        # agent_type="plan" 时强制使用 plan permission mode
+        if agent_type == "plan":
+            permission_mode = "plan"
+        
         session = Session()
-        print(f"[DEBUG] session_manager.create: session.id = {session.id}")
+        print(f"[DEBUG] session_manager.create: session.id = {session.id}, agent_type={agent_type}, permission_mode={permission_mode}")
         if cwd:
             # 工作区走事件流（单一数据源）：session/created → cwd 投影 → 快照/列表/重建
             session.append("session/created", {"cwd": cwd})
