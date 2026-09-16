@@ -176,11 +176,31 @@ def check_assertions_for_phase(phase: dict, workspace: Path, events: list[dict],
             failures.append("未观测到子智能体事件（sub_agent_id）")
 
     for f in expect.get("files", []):
-        p = workspace / f["path"]
-        if not p.exists():
-            failures.append(f"文件未创建: {f['path']}")
-        elif "contains" in f and f["contains"] not in p.read_text(encoding="utf-8", errors="replace"):
-            failures.append(f"文件 {f['path']} 内容缺少 {f['contains']!r}")
+        path_pattern = f["path"]
+        contains = f.get("contains")
+        
+        # Support glob patterns (e.g., "**/main.py")
+        if "*" in path_pattern or "?" in path_pattern:
+            matches = list(workspace.glob(path_pattern))
+            if not matches:
+                failures.append(f"文件未创建（匹配模式 {path_pattern}）")
+            elif contains:
+                found = False
+                for p in matches:
+                    try:
+                        if contains in p.read_text(encoding="utf-8", errors="replace"):
+                            found = True
+                            break
+                    except Exception:
+                        continue
+                if not found:
+                    failures.append(f"匹配 {path_pattern} 的文件内容缺少 {contains!r}")
+        else:
+            p = workspace / path_pattern
+            if not p.exists():
+                failures.append(f"文件未创建: {path_pattern}")
+            elif contains and contains not in p.read_text(encoding="utf-8", errors="replace"):
+                failures.append(f"文件 {path_pattern} 内容缺少 {contains!r}")
 
     errors = [e for e in turn_events if e.get("type") == "error"]
     if errors:
@@ -276,11 +296,31 @@ def check_assertions(task: dict, workspace: Path, events: list[dict], turn_event
             failures.append("未观测到子智能体事件（sub_agent_id）")
 
     for f in expect.get("files", []):
-        p = workspace / f["path"]
-        if not p.exists():
-            failures.append(f"文件未创建: {f['path']}")
-        elif "contains" in f and f["contains"] not in p.read_text(encoding="utf-8", errors="replace"):
-            failures.append(f"文件 {f['path']} 内容缺少 {f['contains']!r}")
+        path_pattern = f["path"]
+        contains = f.get("contains")
+        
+        # Support glob patterns (e.g., "**/main.py")
+        if "*" in path_pattern or "?" in path_pattern:
+            matches = list(workspace.glob(path_pattern))
+            if not matches:
+                failures.append(f"文件未创建（匹配模式 {path_pattern}）")
+            elif contains:
+                found = False
+                for p in matches:
+                    try:
+                        if contains in p.read_text(encoding="utf-8", errors="replace"):
+                            found = True
+                            break
+                    except Exception:
+                        continue
+                if not found:
+                    failures.append(f"匹配 {path_pattern} 的文件内容缺少 {contains!r}")
+        else:
+            p = workspace / path_pattern
+            if not p.exists():
+                failures.append(f"文件未创建: {path_pattern}")
+            elif contains and contains not in p.read_text(encoding="utf-8", errors="replace"):
+                failures.append(f"文件 {path_pattern} 内容缺少 {contains!r}")
 
     errors = [e for e in turn_events if e.get("type") == "error"]
     if errors:
