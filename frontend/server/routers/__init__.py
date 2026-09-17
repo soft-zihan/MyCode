@@ -11,6 +11,7 @@ from .events import router as events_router
 from .projects import router as projects_router
 from .websocket import router as websocket_router
 from .bad_cases import router as bad_cases_router
+from .hello import router as hello_router
 from .version import router as version_router
 
 __all__ = [
@@ -27,5 +28,6 @@ __all__ = [
     "projects_router",
     "websocket_router",
     "bad_cases_router",
+    "hello_router",
     "version_router",
 ]

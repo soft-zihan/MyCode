@@ -26,6 +26,7 @@ from routers import (
     projects_router,
     websocket_router,
     bad_cases_router,
+    hello_router,
     version_router,
 )
 
@@ -55,6 +56,7 @@ app.include_router(events_router)
 app.include_router(projects_router)
 app.include_router(websocket_router)
 app.include_router(bad_cases_router)
+app.include_router(hello_router)
 app.include_router(version_router)
 
 
