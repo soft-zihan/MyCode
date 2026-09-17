@@ -528,40 +528,46 @@ class Agent:
         self._plan_approval_fn = fn
 
 
-    #计划模式开关（“状态切换与现场保护”机制）
-    def toggle_plan_mode(self) -> str:
-        """
-               1. 退出计划模式（从 plan 切回原模式）
-               当当前模式已经是 plan 时，执行 if 分支：
-               恢复之前的状态：self.permission_mode = self._pre_plan_mode or "default"。
-                   在进入计划模式时，程序会把原本的模式保存在 _pre_plan_mode 里。退出时，就把它重新拿出来赋值回去，恢复到切换前的状态。
-               清理计划模式的痕迹：把 _pre_plan_mode 和 _plan_file_path（计划文件路径）清空，并将系统提示词 _system_prompt 恢复为最基础的 _base_system_prompt。
-               同步 OpenAI 消息：如果底层使用的是 OpenAI 接口，它还会同步更新消息列表里的第一条系统提示词，确保 AI 的上下文也跟着切换回来。
-               反馈返回：打印退出提示，并返回恢复后的模式名称。
-
-               2. 进入计划模式（从其他模式切入 plan）
-       当当前模式不是 plan 时，执行 else 分支：
-       保护当前现场：self._pre_plan_mode = self.permission_mode。先把当前正在使用的模式（比如正常模式或自动接受模式）暂存起来，方便以后能原路返回。
-       切换并初始化：将当前模式设为 "plan"，生成一个专属的计划文件路径，并扩展系统提示词。通过拼接 _build_plan_mode_prompt()，给 AI 注入“只动脑不动手、输出结构化计划”的专属指令。
-       同步 OpenAI 消息：同样地，如果使用 OpenAI，也会实时更新上下文里的系统提示词。
-       反馈与返回：打印进入提示（包含计划文件的路径），并返回 "plan"。
-        """
+    def _enter_plan_mode_internal(self) -> None:
+        """内部方法：进入 plan 模式的统一入口。"""
+        from .observability.trace import trace_span
+        
         if self.permission_mode == "plan":
-            self.permission_mode = self._pre_plan_mode or "default"
-            self._pre_plan_mode = None
-            self._plan_file_path = None
-            self._system_prompt = self._base_system_prompt
-            self.session.system_prompt = self._system_prompt
-            print_info(f"Exited plan mode -> {self.permission_mode} mode")
-            return self.permission_mode
+            return
+        
+        self._pre_plan_mode = self.permission_mode
+        self.permission_mode = "plan"
+        self._plan_file_path = self._generate_plan_file_path()
+        self._system_prompt = self._base_system_prompt + self._build_plan_mode_prompt()
+        self.session.system_prompt = self._system_prompt
+        print_info("Entered plan mode (read-only). Plan file: " + self._plan_file_path)
+        
+        with trace_span("plan_mode.enter", 
+            langfuse_observation_type="chain",
+            plan_file_path=self._plan_file_path or "",
+            previous_mode=self._pre_plan_mode or "",
+        ):
+            pass
+
+    def _exit_plan_mode_internal(self) -> None:
+        """内部方法：退出 plan 模式的统一入口。"""
+        if self.permission_mode != "plan":
+            return
+        
+        self.permission_mode = self._pre_plan_mode or "default"
+        self._pre_plan_mode = None
+        self._plan_file_path = None
+        self._system_prompt = self._base_system_prompt
+        self.session.system_prompt = self._system_prompt
+        print_info(f"Exited plan mode -> {self.permission_mode} mode")
+
+    def toggle_plan_mode(self) -> str:
+        """切换 plan 模式。"""
+        if self.permission_mode == "plan":
+            self._exit_plan_mode_internal()
         else:
-            self._pre_plan_mode = self.permission_mode
-            self.permission_mode = "plan"
-            self._plan_file_path = self._generate_plan_file_path()
-            self._system_prompt = self._base_system_prompt + self._build_plan_mode_prompt()
-            self.session.system_prompt = self._system_prompt
-            print_info(f"Entered plan mode. Plan file: {self._plan_file_path}")
-            return "plan"
+            self._enter_plan_mode_internal()
+        return self.permission_mode
 
     def get_token_usage(self) -> dict:
         return {"input":self.total_input_tokens, "output":self.total_output_tokens}
@@ -1659,21 +1665,7 @@ class Agent:
         if name == "enter_plan_mode":
             if self.permission_mode == "plan":
                 return "Already in plan mode."
-            self._pre_plan_mode = self.permission_mode
-            self.permission_mode = "plan"
-            self._plan_file_path =  self._generate_plan_file_path()
-            self._system_prompt = self._base_system_prompt + self._build_plan_mode_prompt()
-            self.session.system_prompt = self._system_prompt
-            print_info("Entered plan mode (read-only). Plan file: " + self._plan_file_path)
-            
-            # 记录 enter_plan_mode 到 Langfuse trace
-            with trace_span("plan_mode.enter", 
-                langfuse_observation_type="chain",
-                plan_file_path=self._plan_file_path or "",
-                previous_mode=self._pre_plan_mode or "",
-            ):
-                pass
-            
+            self._enter_plan_mode_internal()
             return f"Entered plan mode. You are now in read-only mode.\n\nYour plan file: {self._plan_file_path}\nWrite your plan to this file. This is the only file you can edit.\n\nWhen your plan is complete, call exit_plan_mode."
         
         if name == "exit_plan_mode":
@@ -1727,9 +1719,9 @@ class Agent:
                     target_mode = self._pre_plan_mode or "default"
                     plan_result = None
 
+                saved_plan_path = self._plan_file_path
                 self.permission_mode = target_mode
                 self._pre_plan_mode = None
-                saved_plan_path = self._plan_file_path
                 self._plan_file_path = None
                 self._system_prompt = self._base_system_prompt
                 self.session.system_prompt = self._system_prompt
