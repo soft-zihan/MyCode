@@ -15,7 +15,7 @@ ToolDef = dict
 PermissionMode = str
 
 READ_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "compact_context", "shell_status", "search_history", "list_task_notes", "plan_status", "plan_list", "plan_read_artifact", "plan_explore", "plan_continue", "plan_retry", "plan_recall", "plan_check_expired"}
-EDIT_TOOLS = {"write_file", "edit_file", "skill_create", "write_workflow_pattern", "write_wiki_entry", "plan_propose", "plan_update", "plan_task_done", "plan_task_failed", "plan_add_artifact", "plan_archive", "plan_save_explore", "plan_abandon", "plan_reopen"}
+EDIT_TOOLS = {"write_file", "edit_file", "skill_create", "write_workflow_pattern", "write_wiki_entry", "plan_propose", "plan_update", "plan_task_done", "plan_task_failed", "plan_add_artifact", "plan_archive", "plan_save_explore", "plan_abandon", "plan_reopen", "plan_pause", "plan_resume", "plan_skip", "plan_redo", "plan_rollback", "ask_user", "todolist"}
 
 CONCURRENCY_SAFE_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "shell_status"}
 
@@ -108,6 +108,13 @@ TOOL_EXECUTION_MODES: dict[str, str] = {
     "plan_save_explore": "sequential",
     "plan_abandon": "sequential",
     "plan_reopen": "sequential",
+    "plan_pause": "sequential",
+    "plan_resume": "sequential",
+    "plan_skip": "sequential",
+    "plan_redo": "sequential",
+    "plan_rollback": "sequential",
+    "ask_user": "sequential",
+    "todolist": "sequential",
 }
 
 
@@ -308,6 +315,62 @@ tool_definitions: list[ToolDef] = [
         "description": "Exit plan mode after you have finished writing your plan to the plan file.",
         "input_schema": {"type": "object", "properties": {}},
         "deferred": True,
+    },
+    {
+        "name": "ask_user",
+        "description": "向用户提问并等待回答。用于澄清需求、确认决策、或获取批准。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "要问的问题",
+                },
+                "options": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "可选的选项列表。提供选项时优先使用。",
+                },
+                "context": {
+                    "type": "string",
+                    "description": "问题的背景信息",
+                },
+            },
+            "required": ["question"],
+        },
+    },
+    {
+        "name": "todolist",
+        "description": "管理任务清单。用于追踪多步任务的进度。Plan 模式下禁用。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": ["add", "update", "remove", "list"],
+                    "description": "操作类型",
+                },
+                "id": {
+                    "type": "integer",
+                    "description": "任务 ID（update/remove 时必需）",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "任务内容（add 时必需，update 时可选）",
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["pending", "in_progress", "completed", "cancelled"],
+                    "description": "任务状态（update 时可选）",
+                },
+                "priority": {
+                    "type": "string",
+                    "enum": ["high", "medium", "low"],
+                    "description": "任务优先级（add 时可选，默认 medium）",
+                },
+            },
+            "required": ["operation"],
+        },
     },
     {
         "name": "agent",
@@ -558,6 +621,64 @@ tool_definitions: list[ToolDef] = [
         "input_schema": {
             "type": "object",
             "properties": {},
+        },
+    },
+    {
+        "name": "plan_pause",
+        "description": "Pause an in-progress plan.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Plan slug"},
+            },
+            "required": ["slug"],
+        },
+    },
+    {
+        "name": "plan_resume",
+        "description": "Resume a paused plan.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Plan slug"},
+            },
+            "required": ["slug"],
+        },
+    },
+    {
+        "name": "plan_skip",
+        "description": "Skip a task in a plan.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Plan slug"},
+                "task_id": {"type": "integer", "description": "Task ID to skip"},
+            },
+            "required": ["slug", "task_id"],
+        },
+    },
+    {
+        "name": "plan_redo",
+        "description": "Redo a completed task (reset to pending).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Plan slug"},
+                "task_id": {"type": "integer", "description": "Task ID to redo"},
+            },
+            "required": ["slug", "task_id"],
+        },
+    },
+    {
+        "name": "plan_rollback",
+        "description": "Rollback plan to a specific task's state.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Plan slug"},
+                "to_task": {"type": "integer", "description": "Task ID to rollback to"},
+            },
+            "required": ["slug", "to_task"],
         },
     },
 ]

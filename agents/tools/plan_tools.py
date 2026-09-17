@@ -22,6 +22,11 @@ from agents.plan.plan_manager import (
     abandon_plan,
     reopen_plan,
     check_expired_plans,
+    pause_plan,
+    resume_plan,
+    skip_task,
+    redo_task,
+    rollback_plan,
 )
 from agents.plan.plan_models import PlanStatus, PlanGranularity
 from agents.plan.plan_explore import save_explore_result, build_explore_prompt
@@ -325,3 +330,61 @@ def plan_check_expired(inp: dict) -> str:
     if not expired:
         return "No expired plans found."
     return json.dumps(expired, ensure_ascii=False, indent=2)
+
+
+def plan_pause(inp: dict) -> str:
+    slug = inp.get("slug", "").strip()
+    if not slug:
+        return "Error: slug is required"
+    
+    if pause_plan(slug):
+        return json.dumps({"status": "paused", "slug": slug})
+    return f"Error: cannot pause plan '{slug}' (must be in-progress)"
+
+
+def plan_resume(inp: dict) -> str:
+    slug = inp.get("slug", "").strip()
+    if not slug:
+        return "Error: slug is required"
+    
+    if resume_plan(slug):
+        return json.dumps({"status": "resumed", "slug": slug})
+    return f"Error: cannot resume plan '{slug}' (must be paused)"
+
+
+def plan_skip(inp: dict) -> str:
+    slug = inp.get("slug", "").strip()
+    task_id = inp.get("task_id")
+    if not slug:
+        return "Error: slug is required"
+    if task_id is None:
+        return "Error: task_id is required"
+    
+    if skip_task(slug, int(task_id)):
+        return json.dumps({"status": "skipped", "slug": slug, "task_id": int(task_id)})
+    return f"Error: cannot skip task {task_id} in plan '{slug}'"
+
+
+def plan_redo(inp: dict) -> str:
+    slug = inp.get("slug", "").strip()
+    task_id = inp.get("task_id")
+    if not slug:
+        return "Error: slug is required"
+    if task_id is None:
+        return "Error: task_id is required"
+    
+    if redo_task(slug, int(task_id)):
+        return json.dumps({"status": "redone", "slug": slug, "task_id": int(task_id)})
+    return f"Error: cannot redo task {task_id} in plan '{slug}'"
+
+
+def plan_rollback(inp: dict) -> str:
+    slug = inp.get("slug", "").strip()
+    to_task = inp.get("to_task")
+    if not slug:
+        return "Error: slug is required"
+    if to_task is None:
+        return "Error: to_task is required"
+    
+    result = rollback_plan(slug, int(to_task))
+    return json.dumps(result, ensure_ascii=False, indent=2)

@@ -25,6 +25,11 @@ import os
 from contextlib import contextmanager
 from typing import Any, Iterator
 
+try:
+    from opentelemetry.trace import StatusCode
+except ImportError:
+    StatusCode = None
+
 _provider = None
 _tracer = None
 
@@ -101,6 +106,21 @@ def tracer_enabled() -> bool:
     return _tracer is not None
 
 
+class _SpanWrapper:
+    """OTel Span 包装器，添加 record_error 别名以兼容业务代码。"""
+
+    def __init__(self, span: Any) -> None:
+        self._span = span
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._span, name)
+
+    def record_error(self, error: Exception) -> None:
+        self._span.record_exception(error)
+        if StatusCode is not None:
+            self._span.set_status(StatusCode.ERROR, str(error)[:300])
+
+
 class Tracer:
     """OTel Tracer 封装类（动态读取全局 _tracer，init 顺序无关）。"""
 
@@ -121,11 +141,11 @@ class Tracer:
 
         attrs = {**_session_attrs(), **(attributes or {})}
         with _tracer.start_as_current_span(name, attributes=attrs) as span:
+            wrapped = _SpanWrapper(span)
             try:
-                yield span
+                yield wrapped
             except Exception as e:
-                span.set_status(status_code=2, description=str(e))  # ERROR = 2
-                span.record_exception(e)
+                wrapped.record_error(e)
                 raise
 
     def start_span(self, name: str, attributes: dict[str, Any] | None = None) -> Any:
@@ -134,7 +154,7 @@ class Tracer:
             return None
 
         attrs = {**_session_attrs(), **(attributes or {})}
-        return _tracer.start_span(name, attributes=attrs)
+        return _SpanWrapper(_tracer.start_span(name, attributes=attrs))
 
 
 # 全局 Tracer 实例

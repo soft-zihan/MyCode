@@ -205,6 +205,7 @@ class Agent:
         self.session = Session(self.session_id, origin="sub_agent" if is_sub_agent else None)
         self._current_turn: int = 0
         self._current_step: int = 0
+        self._user_message_written_this_turn: bool = False
         self._permission_waiters: dict[str, asyncio.Future] = {}
         
         if not is_sub_agent:
@@ -308,6 +309,8 @@ class Agent:
             if self.permission_mode == "plan":
                 self._plan_file_path = self._generate_plan_file_path()
                 self._system_prompt = self._base_system_prompt + self._build_plan_mode_prompt()
+                print(f"[DEBUG] Agent.__init__: Entered plan mode. Plan file: {self._plan_file_path}")
+                print(f"[DEBUG] Agent.__init__: System prompt contains 'Plan Mode': {'Plan Mode' in self._system_prompt}")
             else:
                 self._system_prompt = self._base_system_prompt
 
@@ -362,13 +365,58 @@ class Agent:
     Write your plan incrementally to this file using write_file or edit_file. This is the ONLY file you are allowed to edit.
 
     ## Workflow
-    1. **Explore**: Read code to understand the task. Use outline_file, read_file, list_files, grep_search.
-    2. **Design**: Design your implementation approach. Use the agent tool with type="plan" if the task is complex.
-    3. **Write Plan**: Write a structured plan to the plan file including:
-       - **Context**: Why this change is needed
-       - **Steps**: Implementation steps with critical file paths
-       - **Verification**: How to test the changes
-    4. **Exit**: Call exit_plan_mode when your plan is ready for user review.
+    1. **Assess**: 理解用户需求，必要时用 ask_user 确认。调研现有代码，明确需求边界。
+    2. **Write Plan**: 按以下三区域格式写入 plan 文件：
+
+    ```markdown
+    <!-- SPEC START -->
+    # Spec: {{feature_name}}
+
+    ## 动机
+    为什么需要这个功能？
+
+    ## 需求
+    - 需求 1
+    - 需求 2
+
+    ## 约束
+    - 约束 1
+
+    ## 验收标准
+    - [ ] 标准 1
+    - [ ] 标准 2
+
+    ## 非目标
+    - 不做什么
+    <!-- SPEC END -->
+
+    <!-- PLAN START -->
+    # Plan: {{feature_name}}
+
+    ## 技术方案
+    实现方案概述。
+
+    ## 实施步骤
+    1. 步骤 1
+    2. 步骤 2
+    <!-- PLAN END -->
+
+    <!-- TASKS START -->
+    ## Tasks
+
+    ### Task 1: 任务标题
+    - **文件**: `path/to/file.py`
+    - **函数**: `function_name()`
+    - **接口**: `def function_name(param: str) -> bool`
+    - **验收**: `pytest tests/test_file.py -v`
+    - **状态**: [ ] pending
+    <!-- TASKS END -->
+    ```
+
+    3. **Exit**: Call exit_plan_mode when your plan is ready for user review.
+
+    ## 追加模式
+    如果 plan 文件已存在，先 read_file 读取现有内容。保留 SPEC 和 PLAN 区域不变，在 TASKS 区域末尾追加新的 tasks。
 
     IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask the user to approve — exit_plan_mode handles that."""
 
@@ -648,6 +696,7 @@ class Agent:
         self._turn_output_buffer = []
         self._turn_thinking_buffer = []
         self._turn_event_buffer = []
+        self._user_message_written_this_turn = False
         
         self._current_turn += 1
         print(f"[DEBUG] agent.chat: before turn/start - self.session_id = {self.session_id}, self.session.id = {self.session.id}, is_sub_agent = {self.is_sub_agent}")
@@ -686,6 +735,10 @@ class Agent:
                 await self._current_task
             except asyncio.CancelledError:
                 self._aborted = True
+                # 确保 user_message 被写入（可能在 _prepare_turn 之前就被 cancel）
+                if not self._user_message_written_this_turn:
+                    self.session.append("user_message", {"content": original_user_message})
+                    self._user_message_written_this_turn = True
                 from .observability.trace import trace_error
                 trace_error("cancelled", "Turn cancelled", operation="chat")
                 turn_span.set_attribute("mycode.aborted", True)
@@ -953,6 +1006,7 @@ class Agent:
         if snapshot_id:
             data["snapshot_id"] = snapshot_id
         self.session.append("user_message", data)
+        self._user_message_written_this_turn = True
 
     def append_memory_injection(self, content: str) -> None:
         """追加记忆/Wiki 注入到事件日志（独立事件类型）。
@@ -1303,6 +1357,7 @@ class Agent:
         except (TypeError, ValueError):
             _inp_preview = str(inp)[:1000]
         trace_attrs = {
+            "langfuse.observation.type": "tool",
             "tool": name,
             "tool.name": name,
             "langfuse.observation.input": _inp_preview,
@@ -1318,7 +1373,7 @@ class Agent:
                 )
                 span.set_attribute("success", True)
                 span.set_attribute("duration_s", round(time.time() - _tool_t0, 2))
-                span.set_attribute("langfuse.observation.output", str(result)[:500])
+                span.set_attribute("langfuse.observation.output", str(result)[:2000])
             except asyncio.TimeoutError:
                 span.record_error(TimeoutError(f"Tool '{name}' timed out after {timeout}s"))
                 print_error(f"[ERROR] Tool '{name}' timed out after {timeout}s")
@@ -1348,6 +1403,16 @@ class Agent:
             return await self._execute_plan_mode_tool(name)
         if name == "agent":
             return await self._execute_agent_tool(inp)
+        if name == "ask_user":
+            from agents.tools.question_tools import handle_ask_user
+            return await handle_ask_user(self.session, inp, abort_fn=lambda: self._abort_requested)
+        if name == "todolist":
+            if self.permission_mode == "plan":
+                return "Error: todolist is disabled in plan mode. Use the plan system's tasks.md instead."
+            from agents.tools.todo_tools import handle_todolist
+            result = handle_todolist(self.session.id, inp)
+            self.session.append("todo/updated", {"session_id": self.session.id})
+            return result
             # Route MCP tool calls to the MCP manager
         if self._mcp_manager.is_mcp_tool(name):
             return await self._mcp_manager.call_tool(name, inp)
@@ -1589,6 +1654,8 @@ class Agent:
         return f'[Skill "{inp.get("skill_name", "")}" activated]\n\n{result["prompt"]}'
 
     async def _execute_plan_mode_tool(self, name):
+        from .observability.trace import trace_span
+        
         if name == "enter_plan_mode":
             if self.permission_mode == "plan":
                 return "Already in plan mode."
@@ -1598,32 +1665,67 @@ class Agent:
             self._system_prompt = self._base_system_prompt + self._build_plan_mode_prompt()
             self.session.system_prompt = self._system_prompt
             print_info("Entered plan mode (read-only). Plan file: " + self._plan_file_path)
+            
+            # 记录 enter_plan_mode 到 Langfuse trace
+            with trace_span("plan_mode.enter", 
+                langfuse_observation_type="chain",
+                plan_file_path=self._plan_file_path or "",
+                previous_mode=self._pre_plan_mode or "",
+            ):
+                pass
+            
             return f"Entered plan mode. You are now in read-only mode.\n\nYour plan file: {self._plan_file_path}\nWrite your plan to this file. This is the only file you can edit.\n\nWhen your plan is complete, call exit_plan_mode."
+        
         if name == "exit_plan_mode":
             if self.permission_mode != "plan":
                 return "Not in plan mode."
             plan_content = "(No plan file found)"
             if self._plan_file_path and Path(self._plan_file_path).exists():
-                plan_content = self._plan_file_path
-            # 交互式审批流程（如果有审批函数）
+                try:
+                    plan_content = Path(self._plan_file_path).read_text()
+                except Exception as e:
+                    plan_content = f"(Failed to read plan file: {e})"
+            
+            # 解析三区域（v2.0）
+            spec_content = self._extract_plan_section(plan_content, "SPEC")
+            plan_section = self._extract_plan_section(plan_content, "PLAN")
+            tasks_content = self._extract_plan_section(plan_content, "TASKS")
+            
+            # 如果没有三区域标记，整体作为 plan 展示（向后兼容）
+            if not spec_content and not plan_section and not tasks_content:
+                plan_section = plan_content
+            
+            # 交互式审批流程（如果有审批函数，如 CLI 模式）
             if self._plan_approval_fn:
                 result = self._plan_approval_fn(plan_content)
                 choice = result.get("choice", "manual-execute")
 
-                if choice =="keep-planning":
+                if choice == "keep-planning":
                     feedback = result.get("feedback") or "Please revise the plan."
+                    
+                    # 记录 plan_rejected 到 Langfuse trace
+                    with trace_span("plan_mode.rejected",
+                        langfuse_observation_type="chain",
+                        feedback=feedback[:500] if feedback else "",
+                    ):
+                        pass
+                    
                     return (
                         f"User rejected the plan and wants to keep planning.\n\n"
                         f"User feedback: {feedback}\n\n"
                         f"Please revise your plan based on this feedback. When done, call exit_plan_mode again."
                     )
 
-                if choice == "clear-and-execute":
-                    target_mode = "acceptEdits"
-                elif choice == "execute":
+                if choice in ("clear-and-execute", "execute"):
+                    # 自动创建或追加 Plan 系统条目（v2.0）
+                    plan_result = self._handle_plan_system_integration(
+                        spec_content, plan_section, tasks_content
+                    )
+                    
                     target_mode = "acceptEdits"
                 else:  # manual-execute
                     target_mode = self._pre_plan_mode or "default"
+                    plan_result = None
 
                 self.permission_mode = target_mode
                 self._pre_plan_mode = None
@@ -1632,33 +1734,163 @@ class Agent:
                 self._system_prompt = self._base_system_prompt
                 self.session.system_prompt = self._system_prompt
 
+                # 记录 plan_approved 到 Langfuse trace
+                with trace_span("plan_mode.approved",
+                    langfuse_observation_type="chain",
+                    target_mode=target_mode,
+                    context_cleared=str(choice == "clear-and-execute"),
+                    plan_slug=plan_result.get("slug", "") if plan_result else "",
+                ):
+                    pass
+
                 if choice == "clear-and-execute":
                     self._clear_history_keep_system()
                     self._context_cleared = True
                     print_info(f"Plan approved. Context cleared, executing in {target_mode} mode.")
-                    return (
-                        f"User approved the plan. Context was cleared. Permission mode: {target_mode}\n\n"
-                        f"Plan file: {saved_plan_path}\n\n"
-                        f"## Approved Plan:\n{plan_content}\n\n"
-                        f"Proceed with implementation."
-                    )
+                    
+                    result_msg = f"User approved the plan. Context was cleared. Permission mode: {target_mode}\n\n"
+                    if plan_result:
+                        result_msg += f"Plan system entry created: {plan_result.get('slug', '')}\n\n"
+                    result_msg += f"Plan file: {saved_plan_path}\n\n"
+                    result_msg += f"## Approved Plan:\n{plan_content}\n\n"
+                    result_msg += f"Proceed with implementation."
+                    return result_msg
+                
                 print_info(f"Plan approved. Executing in {target_mode} mode.")
                 return (
                     f"User approved the plan. Permission mode: {target_mode}\n\n"
                     f"## Approved Plan:\n{plan_content}\n\n"
                     f"Proceed with implementation."
                 )
-            # 没有审批函数时的回退（例如子代理）
-            self.permission_mode = self._pre_plan_mode or "default"
+            
+            # Web 模式：通过 permission gate 让用户审批计划
+            # 将计划内容作为确认消息发送给用户
+            confirmed = await self._confirm_dangerous(
+                f"Plan completed. Exit plan mode?\n\n## Plan:\n{plan_content}"
+            )
+            
+            if not confirmed:
+                # 记录 plan_rejected 到 Langfuse trace
+                with trace_span("plan_mode.rejected",
+                    langfuse_observation_type="chain",
+                    feedback="User rejected the plan.",
+                ):
+                    pass
+                
+                return (
+                    "User rejected the plan and wants to keep planning.\n\n"
+                    "Please revise your plan based on user feedback. When done, call exit_plan_mode again."
+                )
+            
+            # 用户批准，自动创建或追加 Plan 系统条目（v2.0）
+            plan_result = self._handle_plan_system_integration(
+                spec_content, plan_section, tasks_content
+            )
+            
+            # 退出 plan 模式
+            target_mode = self._pre_plan_mode or "default"
+            self.permission_mode = target_mode
             self._pre_plan_mode = None
+            saved_plan_path = self._plan_file_path
             self._plan_file_path = None
             self._system_prompt = self._base_system_prompt
             self.session.system_prompt = self._system_prompt
 
-            print_info("Exited plan mode. Restored to " + self.permission_mode + " mode.")
-            return f"Exited plan mode. Permission mode restored to: {self.permission_mode}\n\n## Your Plan:\n{plan_content}"
+            # 记录 plan_approved 到 Langfuse trace
+            with trace_span("plan_mode.approved",
+                langfuse_observation_type="chain",
+                target_mode=target_mode,
+                plan_slug=plan_result.get("slug", "") if plan_result else "",
+            ):
+                pass
+
+            print_info(f"Plan approved. Executing in {target_mode} mode.")
+            
+            result_msg = f"User approved the plan. Permission mode: {target_mode}\n\n"
+            if plan_result:
+                result_msg += f"Plan system entry created: {plan_result.get('slug', '')}\n\n"
+            result_msg += f"## Approved Plan:\n{plan_content}\n\n"
+            result_msg += f"Proceed with implementation."
+            return result_msg
 
         return f"Unknown plan mode tool: {name}"
+
+    def _extract_plan_section(self, content: str, section: str) -> str:
+        """从 plan 文件中提取指定区域的内容。"""
+        import re
+        pattern = rf"<!-- {section} START -->(.*?)<!-- {section} END -->"
+        match = re.search(pattern, content, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        return ""
+
+    def _handle_plan_system_integration(
+        self,
+        spec_content: str,
+        plan_content: str,
+        tasks_content: str,
+    ) -> dict | None:
+        """自动创建或追加 Plan 系统条目（v2.0）。"""
+        import re
+        from agents.plan.plan_manager import (
+            create_plan,
+            get_plan,
+            append_tasks_to_plan,
+            add_artifact,
+        )
+        from agents.plan.plan_models import PlanGranularity
+        
+        # 如果没有 tasks，不能创建 plan
+        if not tasks_content:
+            return None
+        
+        # 从 spec 提取 slug
+        slug = ""
+        if spec_content:
+            title_match = re.search(r"# Spec:\s*(.+)", spec_content)
+            if title_match:
+                slug = re.sub(r"[^a-z0-9]+", "-", title_match.group(1).strip().lower()).strip("-")[:40]
+        
+        if not slug:
+            slug = f"plan-{self.session_id}"
+        
+        # 检查 session 是否已关联 plan
+        if self.session.plan_slug:
+            # 追加模式
+            existing_plan = get_plan(self.session.plan_slug)
+            if existing_plan and existing_plan.status.value not in ("archived", "abandoned"):
+                try:
+                    append_tasks_to_plan(self.session.plan_slug, tasks_content)
+                    return {"slug": self.session.plan_slug, "action": "appended"}
+                except Exception as e:
+                    print_error(f"Failed to append tasks to plan: {e}")
+                    return None
+        
+        # 创建新 plan
+        try:
+            plan_dir = create_plan(
+                slug=slug,
+                granularity=PlanGranularity.STANDARD,
+            )
+            
+            # 写入 spec.md
+            if spec_content:
+                add_artifact(slug, "spec.md", spec_content)
+            
+            # 写入 design.md
+            if plan_content:
+                add_artifact(slug, "design.md", plan_content)
+            
+            # 写入 tasks.md
+            add_artifact(slug, "tasks.md", tasks_content)
+            
+            # 关联 session
+            self.session.plan_slug = slug
+            
+            return {"slug": slug, "action": "created", "plan_dir": str(plan_dir)}
+        except Exception as e:
+            print_error(f"Failed to create plan: {e}")
+            return None
 
     def _clear_history_keep_system(self) -> None:
         """清空历史信息，但是保留系统prompt."""

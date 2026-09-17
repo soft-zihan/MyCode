@@ -10,6 +10,22 @@ export interface PermissionRequest {
   sub_agent_id?: string;
 }
 
+export interface QuestionRequest {
+  request_id: string;
+  question: string;
+  options?: string[];
+  context?: string;
+}
+
+export interface TodoItem {
+  id: number;
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'cancelled';
+  priority: 'high' | 'medium' | 'low';
+  created_at: string;
+  updated_at: string;
+}
+
 export interface GoalState {
   active: boolean;
   goal: string;
@@ -45,6 +61,8 @@ export interface SessionState {
   baseSeq: number;
   lastSeq: number;
   pendingPermission?: PermissionRequest;
+  pendingQuestion?: QuestionRequest;
+  todos?: TodoItem[];
   goalState?: GoalState;
   fileSnapshots: FileSnapshot[];
   contextUsed: number;
@@ -70,6 +88,7 @@ export function createEmptySessionState(sessionId: string | null = null): Sessio
 
 const emptySnapshot: ChatSnapshot = { order: [], nodes: new Map() };
 const EMPTY_ARRAY: FileSnapshot[] = [];
+const EMPTY_TODO_ARRAY: TodoItem[] = [];
 
 class SessionStore {
   private sessions = new Map<string, SessionState>();
@@ -225,6 +244,26 @@ class SessionStore {
   setPendingPermission(sessionId: string, perm: PermissionRequest | undefined): void {
     const state = this.getOrCreate(sessionId);
     state.pendingPermission = perm;
+    this.notify();
+  }
+
+  getPendingQuestion(sessionId: string): QuestionRequest | undefined {
+    return this.sessions.get(sessionId)?.pendingQuestion;
+  }
+
+  setPendingQuestion(sessionId: string, question: QuestionRequest | undefined): void {
+    const state = this.getOrCreate(sessionId);
+    state.pendingQuestion = question;
+    this.notify();
+  }
+
+  getTodos(sessionId: string): TodoItem[] {
+    return this.sessions.get(sessionId)?.todos ?? EMPTY_TODO_ARRAY;
+  }
+
+  setTodos(sessionId: string, todos: TodoItem[]): void {
+    const state = this.getOrCreate(sessionId);
+    state.todos = todos;
     this.notify();
   }
 

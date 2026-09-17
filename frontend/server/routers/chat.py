@@ -149,6 +149,14 @@ async def api_chat_stream(data: ChatMessage) -> dict[str, Any]:
             if data.cwd:
                 from agents.core.project import register_project
                 register_project(data.cwd)
+        else:
+            # Session restored - check if agent type changed
+            if data.agent == "plan" and agent.permission_mode != "plan":
+                logger.info(f"[DEBUG] Switching to plan mode for existing session {session.id}")
+                agent.toggle_plan_mode()
+            elif data.agent != "plan" and agent.permission_mode == "plan":
+                logger.info(f"[DEBUG] Switching out of plan mode for existing session {session.id}")
+                agent.toggle_plan_mode()
         
         # Build context
         context = ""

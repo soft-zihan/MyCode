@@ -163,6 +163,8 @@ def _check_permission_inner(
         return {"action": "allow"}
 
     if mode == "plan":
+        if tool_name == "todolist":
+            return {"action": "deny", "message": "todolist is disabled in plan mode. Use the plan system's tasks.md instead."}
         if tool_name in EDIT_TOOLS:
             file_path = inp.get("file_path") or inp.get("path")
             if plan_file_path and file_path == plan_file_path:
@@ -171,8 +173,11 @@ def _check_permission_inner(
         if tool_name == "run_shell":
             return {"action": "deny", "message": "Shell commands blocked in plan mode"}
 
-    if tool_name in ("enter_plan_mode", "exit_plan_mode"):
+    if tool_name == "enter_plan_mode":
         return {"action": "allow"}
+    
+    if tool_name == "exit_plan_mode":
+        return {"action": "confirm", "message": "Exit plan mode and proceed to implementation"}
 
     if mode == "acceptEdits" and tool_name in EDIT_TOOLS:
         return {"action": "allow"}

@@ -22,6 +22,8 @@ _STREAM_TYPES = frozenset({
     "thinking", "text", "tool_call", "tool_result",
     "sub_agent/start", "sub_agent/end",
     "permission/request", "permission/resolved",
+    "question/request", "question/resolved",
+    "todo/updated",
     "stats", "info", "error",
 })
 
@@ -99,6 +101,12 @@ class PermissionResponseData(BaseModel):
     session_id: str
 
 
+class QuestionResponseData(BaseModel):
+    request_id: str
+    answer: str
+    session_id: str
+
+
 @router.post("/api/events/respond")
 async def api_respond_permission(data: PermissionResponseData):
     """响应权限请求。"""
@@ -109,7 +117,32 @@ async def api_respond_permission(data: PermissionResponseData):
     if not agent:
         return {"success": False, "message": "Session not active"}
     
-    return {"success": agent.respond_permission(data.rpc_id, data.allowed)}
+    # Use set_permission_response to work with the permission gate
+    agent.set_permission_response(data.rpc_id, data.allowed)
+    return {"success": True}
+
+
+@router.post("/api/events/question-respond")
+async def api_respond_question(data: QuestionResponseData):
+    """响应用户提问。"""
+    from agents.session_manager import get_session_manager
+    
+    sm = get_session_manager()
+    agent = sm.get_agent(data.session_id)
+    if not agent:
+        return {"success": False, "message": "Session not active"}
+    
+    agent.session.question_responses[data.request_id] = {"answer": data.answer}
+    return {"success": True}
+
+
+@router.get("/api/todos/{session_id}")
+async def api_get_todos(session_id: str):
+    """获取 session 的任务清单。"""
+    from agents.tools.todo_store import list_todos
+    
+    items = list_todos(session_id)
+    return {"todos": [item.to_dict() for item in items]}
 
 
 @router.get("/api/sessions/{session_id}/messages")

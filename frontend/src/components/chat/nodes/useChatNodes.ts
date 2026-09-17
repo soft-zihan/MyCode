@@ -411,16 +411,20 @@ export function useChatNodes(): UseChatNodesReturn {
       }
 
       case 'turn/end': {
-        const assistantKey = getAssistantKey();
-        if (assistantKey) {
-          updateSnap(prev => {
-            const node = prev.nodes.get(assistantKey);
-            if (!node || node.kind !== 'assistant') return prev;
-            const newNodes = new Map(prev.nodes);
-            newNodes.set(assistantKey, { ...node, streaming: false });
-            return { order: prev.order, nodes: newNodes };
-          });
-        }
+        updateSnap(prev => {
+          const newNodes = new Map(prev.nodes);
+          
+          for (const [key, node] of newNodes) {
+            if (node.kind === 'tool-call' && node.status === 'pending') {
+              newNodes.set(key, { ...node, status: 'success' });
+            }
+            if (node.kind === 'assistant' && node.streaming) {
+              newNodes.set(key, { ...node, streaming: false });
+            }
+          }
+          
+          return { order: prev.order, nodes: newNodes };
+        });
         break;
       }
     }
@@ -552,6 +556,11 @@ export function useChatNodes(): UseChatNodesReturn {
           break;
         }
         
+        case 'permission/request': {
+          // Don't restore permission requests from history - they're only valid for active sessions
+          break;
+        }
+        
         default:
           break;
       }
@@ -607,19 +616,25 @@ export function useChatNodes(): UseChatNodesReturn {
           const content = event.content as string;
           const toolCalls = event.tool_calls as Array<Record<string, unknown>>;
           
+          // Directly create assistant node (like prependSessionEvents does)
           const assistantKey = nextKey('assistant');
-          newNodes.push({
-            key: assistantKey,
-            kind: 'assistant',
-            seq: nextSeq(),
-            content: content || '',
-            thinking: thinking || undefined,
-            streaming: false,
-            timestamp: new Date(event.time as number).toISOString(),
-            turn: event.turn as number | undefined,
-            step: event.step as number | undefined,
-            hasToolCalls: toolCalls && toolCalls.length > 0,
+          sessionStore.updateSnapshot(sessionId, prev => {
+            const newNodes = new Map(prev.nodes);
+            newNodes.set(assistantKey, {
+              key: assistantKey,
+              kind: 'assistant',
+              seq: nextSeq(),
+              content: content || '',
+              thinking: thinking || undefined,
+              streaming: false,
+              timestamp: new Date(event.time as number).toISOString(),
+              turn: event.turn as number | undefined,
+              step: event.step as number | undefined,
+              hasToolCalls: toolCalls && toolCalls.length > 0,
+            });
+            return { order: [...prev.order, assistantKey], nodes: newNodes };
           });
+          sessionStore.setCurrentAssistantKey(sessionId, assistantKey);
           
           if (toolCalls && toolCalls.length > 0) {
             for (const tc of toolCalls) {

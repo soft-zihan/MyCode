@@ -93,6 +93,11 @@ from agents.tools.plan_tools import (
     plan_abandon as _plan_abandon_tool,
     plan_reopen as _plan_reopen_tool,
     plan_check_expired as _plan_check_expired_tool,
+    plan_pause as _plan_pause_tool,
+    plan_resume as _plan_resume_tool,
+    plan_skip as _plan_skip_tool,
+    plan_redo as _plan_redo_tool,
+    plan_rollback as _plan_rollback_tool,
 )
 
 
@@ -216,6 +221,11 @@ async def execute_tool(
         "plan_abandon": _plan_abandon_tool,
         "plan_reopen": _plan_reopen_tool,
         "plan_check_expired": _plan_check_expired_tool,
+        "plan_pause": _plan_pause_tool,
+        "plan_resume": _plan_resume_tool,
+        "plan_skip": _plan_skip_tool,
+        "plan_redo": _plan_redo_tool,
+        "plan_rollback": _plan_rollback_tool,
     }
     handler = handlers.get(name)
 

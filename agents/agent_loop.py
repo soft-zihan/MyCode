@@ -162,6 +162,19 @@ class AgentLoop:
                 "tool_calls": tool_calls,
             })
             
+            # 记录 assistant_message 到 Langfuse trace（不含 thinking）
+            from agents.observability.trace import trace_span
+            assistant_attrs = {
+                "langfuse.observation.type": "generation",
+                "langfuse.observation.output": content[:2000] if content else "",
+            }
+            if tool_calls:
+                tool_names = [tc.get("function", {}).get("name", "") for tc in tool_calls if tc.get("type") == "function"]
+                assistant_attrs["tool_calls"] = ",".join(tool_names)
+                assistant_attrs["langfuse.observation.metadata.tool_calls"] = ",".join(tool_names)
+            with trace_span("assistant_message", **assistant_attrs):
+                pass
+            
             self._agent.session.append("step/end", {
                 "turn": self._agent._current_turn,
                 "step": self._agent._current_step,

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { 
   MessageSquare, PanelRight, Send, Square, Zap, File, X, Database
 } from 'lucide-react';
@@ -9,6 +9,8 @@ import { FileTree } from './components/FileTree';
 import { FileViewer } from './components/FileViewer';
 import { SessionsPanel } from './components/SessionsPanel';
 import ContextPanel from '../../components/agent/ContextPanel';
+import { QuestionDialog } from '../../components/agent/QuestionDialog';
+import { TodoListPanel } from '../../components/chat/TodoListPanel';
 import { PageLayout } from '../../components/PageLayout';
 import { useChat } from './hooks/useChat';
 import { useMention, MentionMenu } from '../../components/chat/MentionInput';
@@ -43,6 +45,8 @@ export default function ChatPage() {
     contextUsed,
     contextTotal,
     pendingPermission,
+    pendingQuestion,
+    todos,
     chatSnapshot,
     pendingSteerMessages,
     setPendingSteerMessages,
@@ -59,6 +63,7 @@ export default function ChatPage() {
     handleEditMessage,
     handlePermissionApprove,
     handlePermissionDeny,
+    handleQuestionRespond,
     handleAcceptFile,
     handleRejectFile,
     handleAcceptAll,
@@ -70,7 +75,7 @@ export default function ChatPage() {
   useEffect(() => {
     const fetchFiles = async () => {
       try {
-        const tree = await fetchWorkspaceTree(currentCwd || '', 2);
+        const tree = await fetchWorkspaceTree(currentCwd || undefined);
         const files: string[] = [];
         const flatten = (node: WorkspaceNode, path: string) => {
           if (node.type === 'file') {
@@ -101,7 +106,7 @@ export default function ChatPage() {
     setSelectedFile(filePath);
   }, []);
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (mention.isOpen) {
       mention.handleKeyDown(e);
       return;
@@ -210,35 +215,72 @@ export default function ChatPage() {
 
           {/* Permission Request Dialog */}
           {pendingPermission && (
-            <div className="border-t border-yellow-300 bg-yellow-50 px-4 py-3">
+            <div className={`border-t px-4 py-3 ${
+              pendingPermission.tool_name === 'exit_plan_mode'
+                ? 'border-blue-300 bg-blue-50'
+                : 'border-yellow-300 bg-yellow-50'
+            }`}>
               <div className="flex items-start gap-3">
                 <div className="flex-1">
                   <div className="flex items-center gap-2 mb-1">
-                    <span className="text-sm font-medium text-yellow-800">⚠️ 需要授权</span>
-                    <span className="text-xs px-1.5 py-0.5 bg-yellow-200 text-yellow-800 rounded">
+                    <span className={`text-sm font-medium ${
+                      pendingPermission.tool_name === 'exit_plan_mode'
+                        ? 'text-blue-800'
+                        : 'text-yellow-800'
+                    }`}>
+                      {pendingPermission.tool_name === 'exit_plan_mode' ? '📋 计划审批' : '⚠️ 需要授权'}
+                    </span>
+                    <span className={`text-xs px-1.5 py-0.5 rounded ${
+                      pendingPermission.tool_name === 'exit_plan_mode'
+                        ? 'bg-blue-200 text-blue-800'
+                        : 'bg-yellow-200 text-yellow-800'
+                    }`}>
                       {pendingPermission.tool_name}
                     </span>
                   </div>
-                  <pre className="text-xs text-gray-700 bg-white border border-yellow-200 rounded p-2 overflow-x-auto max-h-32 overflow-y-auto whitespace-pre-wrap font-mono">
+                  <pre className={`text-xs text-gray-700 bg-white border rounded p-2 overflow-x-auto overflow-y-auto whitespace-pre-wrap font-mono ${
+                    pendingPermission.tool_name === 'exit_plan_mode'
+                      ? 'border-blue-200 max-h-96'
+                      : 'border-yellow-200 max-h-32'
+                  }`}>
                     {pendingPermission.command}
                   </pre>
                 </div>
                 <div className="flex gap-2 flex-shrink-0">
                   <button
                     onClick={handlePermissionDeny}
-                    className="px-3 py-1.5 text-sm font-medium text-red-700 bg-white border border-red-300 rounded hover:bg-red-50 transition-colors"
-                  >
-                    拒绝
+                    className={`px-3 py-1.5 text-sm font-medium border rounded hover:bg-opacity-80 transition-colors ${
+                      pendingPermission.tool_name === 'exit_plan_mode'
+                        ? 'text-blue-700 bg-white border-blue-300 hover:bg-blue-50'
+                        : 'text-red-700 bg-white border-red-300 hover:bg-red-50'
+                    }`}>
+                    {pendingPermission.tool_name === 'exit_plan_mode' ? '继续修改' : '拒绝'}
                   </button>
                   <button
                     onClick={handlePermissionApprove}
-                    className="px-3 py-1.5 text-sm font-medium text-white bg-green-600 border border-green-700 rounded hover:bg-green-700 transition-colors"
-                  >
-                    批准
+                    className={`px-3 py-1.5 text-sm font-medium border rounded transition-colors ${
+                      pendingPermission.tool_name === 'exit_plan_mode'
+                        ? 'text-white bg-blue-600 border-blue-700 hover:bg-blue-700'
+                        : 'text-white bg-green-600 border-green-700 hover:bg-green-700'
+                    }`}>
+                    {pendingPermission.tool_name === 'exit_plan_mode' ? '批准计划' : '批准'}
                   </button>
                 </div>
               </div>
             </div>
+          )}
+
+          {/* Question Dialog */}
+          {pendingQuestion && (
+            <QuestionDialog
+              request={pendingQuestion}
+              onRespond={handleQuestionRespond}
+            />
+          )}
+
+          {/* TodoList Panel */}
+          {todos && todos.length > 0 && (
+            <TodoListPanel todos={todos} />
           )}
 
           {/* Goal Mode UI */}

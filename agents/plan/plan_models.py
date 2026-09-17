@@ -10,9 +10,12 @@ from typing import Literal
 class PlanStatus(str, Enum):
     PROPOSED = "proposed"
     IN_PROGRESS = "in-progress"
+    PAUSED = "paused"
     COMPLETED = "completed"
+    READY_TO_ARCHIVE = "ready_to_archive"
     ARCHIVED = "archived"
     ABANDONED = "abandoned"
+    CONVERGE_EXHAUSTED = "converge_exhausted"
 
 
 class PlanGranularity(str, Enum):
@@ -44,10 +47,15 @@ class Plan:
 class Task:
     id: int
     description: str
-    status: Literal["pending", "done", "failed"]
+    status: Literal["pending", "in-progress", "done", "failed", "skipped"]
     error: str = ""
     session_id: str = ""
     retry_count: int = 0
+    file: str = ""
+    function: str = ""
+    interface: str = ""
+    acceptance: str = ""
+    duration_s: int = 0
 
 
 @dataclass

@@ -165,6 +165,12 @@ class Session:
             self._projections: dict[str, Any] = get_projection_registry().init_state()
         except Exception:
             self._projections: dict[str, Any] = {}
+        
+        # ask_user 工具响应存储
+        self.question_responses: dict[str, dict[str, Any]] = {}
+        
+        # Plan 系统关联
+        self.plan_slug: str | None = None
     
     @property
     def seq(self) -> int:
@@ -534,12 +540,21 @@ class Session:
         
         支持 JSONL 和 SQLite 两种后端，通过 MYCODE_SESSION_BACKEND 环境变量切换。
         """
-        # 尝试从 JSON 文件读取元数据
-        json_path = session_dir() / f"{session_id}.json"
+        # 从 projcache 读取元数据
+        projcache_path = session_dir() / f"{session_id}.projcache.json"
         metadata = {}
-        if json_path.exists():
+        if projcache_path.exists():
             try:
-                metadata = json.loads(json_path.read_text())
+                projcache = json.loads(projcache_path.read_text())
+                rows = projcache.get("rows", {})
+                if rows.get("cwd") and rows["cwd"].get("val"):
+                    metadata["cwd"] = rows["cwd"]["val"]
+                if rows.get("parent_session") and rows["parent_session"].get("val"):
+                    metadata["parent_session"] = rows["parent_session"]["val"]
+                if rows.get("origin") and rows["origin"].get("val"):
+                    metadata["origin"] = rows["origin"]["val"]
+                if rows.get("agent_type") and rows["agent_type"].get("val"):
+                    metadata["agent_type"] = rows["agent_type"]["val"]
             except Exception:
                 pass
         
@@ -550,10 +565,7 @@ class Session:
             agent_type=metadata.get("agent_type"),
         )
         
-        session.created_at = metadata.get("created_at", session.created_at)
         session.cwd = metadata.get("cwd")
-        session.is_seeded = metadata.get("is_seeded", False)
-        session.inherited_event_count = metadata.get("inherited_event_count", 0)
         
         # Load events from backend
         try:
@@ -828,8 +840,8 @@ def get_project_session_dir() -> Path:
 
 
 def save_session(session_id: str, data: dict[str, Any]) -> None:
-    _ensure_dir()
-    atomic_write_json(session_dir() / f"{session_id}.json", data)
+    """已废弃：session 现在通过事件日志存储，不需要单独保存 JSON 文件"""
+    pass
 
 
 def save_folded_session_memory(session_id: str, record: dict[str, Any]) -> None:
@@ -841,17 +853,14 @@ def save_folded_session_memory(session_id: str, record: dict[str, Any]) -> None:
 
 
 def load_session(session_id: str) -> dict[str, Any] | None:
-    path = session_dir() / f"{session_id}.json"
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text())
-    except Exception:
-        return None
+    """已废弃：session 现在通过事件日志存储，不需要单独加载 JSON 文件"""
+    return None
 
 
 def list_sessions() -> list[dict[str, Any]]:
-    """列出所有 session，包括磁盘上的和内存中的。"""
+    """列出所有 session，包括磁盘上的和内存中的。直接从 projcache 读取投影数据。"""
+    import time as _time
+    _t0 = _time.time()
     _ensure_dir()
     results = []
     seen_ids = set()
@@ -874,77 +883,82 @@ def list_sessions() -> list[dict[str, Any]]:
             results.append(metadata)
             seen_ids.add(session.id)
     except Exception:
-        pass  # session_manager 可能不可用
+        pass
     
-    # 2. 再从磁盘读取 session（去重）
-    for f in session_dir().glob("*.json"):
-        if f.name.endswith(".projcache.json"):
-            continue
+    # 2. 直接从 projcache 文件读取投影数据（不需要读 session 文件）
+    import concurrent.futures
+    
+    def read_projcache(f):
         try:
-            data = json.loads(f.read_text())
-            if "metadata" in data:
-                metadata = data["metadata"]
-                session_id = metadata.get("id")
-                if session_id and session_id not in seen_ids:
-                    title = None
-                    projcache_path = session_dir() / f"{session_id}.projcache.json"
-                    if projcache_path.exists():
-                        try:
-                            projcache = json.loads(projcache_path.read_text())
-                            rows = projcache.get("rows", {})
-                            updated_at_row = rows.get("updated_at")
-                            if updated_at_row and updated_at_row.get("val"):
-                                metadata["startTime"] = updated_at_row["val"]
-                            title_row = rows.get("title")
-                            if title_row:
-                                title = title_row.get("val")
-                        except Exception:
-                            pass
-                    metadata["name"] = title or session_id
-                    results.append(metadata)
-                    seen_ids.add(session_id)
+            session_id = f.name.replace(".projcache.json", "")
+            if session_id in seen_ids:
+                return None
+            projcache = json.loads(f.read_text())
+            rows = projcache.get("rows", {})
+            
+            metadata = {
+                "id": session_id,
+                "name": session_id,
+                "cwd": "",
+                "startTime": "",
+                "model": "",
+                "parent_session": "",
+                "origin": "",
+                "agent_type": "",
+            }
+            
+            if rows.get("cwd") and rows["cwd"].get("val"):
+                metadata["cwd"] = rows["cwd"]["val"]
+            if rows.get("updated_at") and rows["updated_at"].get("val"):
+                metadata["startTime"] = rows["updated_at"]["val"]
+            if rows.get("title") and rows["title"].get("val"):
+                metadata["name"] = rows["title"]["val"]
+            
+            return metadata
         except Exception:
-            pass
+            return None
     
+    projcache_files = list(session_dir().glob("*.projcache.json"))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(read_projcache, f): f for f in projcache_files}
+        for future in concurrent.futures.as_completed(futures):
+            result = future.result()
+            if result:
+                results.append(result)
+                seen_ids.add(result.get("id"))
+    
+    _elapsed = _time.time() - _t0
+    if _elapsed > 0.5:
+        print(f"[PERF] list_sessions: {_elapsed:.2f}s for {len(results)} sessions")
     return results
 
 
 def list_child_sessions(parent_session_id: str) -> list[dict[str, Any]]:
-    """列出指定父 session 的所有子 session。
-    
-    Args:
-        parent_session_id: 父 session ID
-    
-    Returns:
-        list[dict]: 子 session 元数据列表
-    """
+    """列出指定父 session 的所有子 session。从 projcache 读取。"""
     _ensure_dir()
     results = []
-    for f in session_dir().glob("*.json"):
+    for f in session_dir().glob("*.projcache.json"):
         try:
-            data = json.loads(f.read_text())
-            # parent_session 在顶层，不在 metadata 中
-            if data.get("parent_session") == parent_session_id:
-                # 返回 metadata（如果存在）或基本信息
-                if "metadata" in data:
-                    results.append(data["metadata"])
-                else:
-                    results.append({
-                        "id": data.get("id", f.stem),
-                        "parent_session": data.get("parent_session"),
-                        "origin": data.get("origin"),
-                        "agent_type": data.get("agent_type"),
-                    })
+            projcache = json.loads(f.read_text())
+            rows = projcache.get("rows", {})
+            if rows.get("parent_session") and rows["parent_session"].get("val") == parent_session_id:
+                session_id = f.name.replace(".projcache.json", "")
+                metadata = {
+                    "id": session_id,
+                    "parent_session": parent_session_id,
+                }
+                if rows.get("title") and rows["title"].get("val"):
+                    metadata["name"] = rows["title"]["val"]
+                results.append(metadata)
         except Exception:
             pass
     return results
 
 
 def delete_session(session_id: str) -> bool:
-    """删除指定会话的全部文件（快照/事件日志/投影缓存/折叠记忆）。返回是否真的删除了。"""
+    """删除指定会话的全部文件（事件日志/投影缓存/折叠记忆）。返回是否真的删除了。"""
     d = session_dir()
     patterns = (
-        f"{session_id}.json",
         f"{session_id}.events.jsonl",
         f"{session_id}.projcache.json",
         f"{session_id}.folded-memory.jsonl",

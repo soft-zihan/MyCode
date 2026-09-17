@@ -113,26 +113,23 @@ def api_list_child_sessions(session_id: str) -> list[dict[str, Any]]:
 @router.get("/api/sessions/{session_id}")
 def api_get_session(session_id: str) -> dict[str, Any]:
     print(f"[GET] session_id={session_id}")
-    data = load_session(session_id)
-    if data is None:
+    from agents.core.session import Session
+    session = Session.load_from_events(session_id)
+    if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    metadata = data.get("metadata", {})
-    events = data.get("events", [])
     
-    # Load projections from Session object
-    projections = {}
-    try:
-        from agents.core.session import Session
-        session = Session.load_from_events(session_id)
-        if session:
-            projections = session.projections
-    except Exception:
-        pass
+    events = session.events
+    metadata = {
+        "id": session.id,
+        "name": session.title or session.id,
+        "cwd": session.projections.get("cwd", ""),
+    }
     
-    print(f"[GET] result: name={metadata.get('name')}, events={len(events)}, projections={projections}")
+    print(f"[GET] result: name={metadata.get('name')}, events={len(events)}, projections={session.projections}")
     return {
-        **data,
-        "projections": projections,
+        "metadata": metadata,
+        "events": events,
+        "projections": session.projections,
     }
 
 

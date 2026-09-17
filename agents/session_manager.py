@@ -32,21 +32,6 @@ class SessionManager:
         import logging
         logger = logging.getLogger(__name__)
         
-        # Abort all existing agents and cancel their chat tasks before creating new session
-        for session_id, old_agent in list(self._agents.items()):
-            try:
-                print(f"[DEBUG] session_manager.create: Aborting old agent {session_id}")
-                old_agent.abort()
-            except Exception as e:
-                logger.warning(f"Failed to abort old agent {session_id}: {e}")
-        
-        # Cancel all existing chat tasks
-        for session_id, task in list(self._chat_tasks.items()):
-            if not task.done():
-                print(f"[DEBUG] session_manager.create: Cancelling old chat task {session_id}")
-                task.cancel()
-        self._chat_tasks.clear()
-        
         config = load_config()
         api_key, api_base, model_name = self._resolve_model(config, model)
         
@@ -70,6 +55,7 @@ class SessionManager:
         print(f"[DEBUG] session_manager.create: agent.session_id = {agent.session_id}, agent.session.id = {agent.session.id}")
         agent.session = session
         agent.session_id = session.id  # 确保 session_id 一致
+        session.system_prompt = agent._system_prompt  # 确保 session 的系统提示词被设置
         print(f"[DEBUG] session_manager.create: AFTER assignment - agent.session_id = {agent.session_id}, agent.session.id = {agent.session.id}, id(agent.session) = {id(agent.session)}")
         
         print(f"[DEBUG] session_manager.create: RETURNING session.id = {session.id}")

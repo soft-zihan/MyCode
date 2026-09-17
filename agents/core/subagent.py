@@ -25,6 +25,15 @@ def get_agent_model_ref_env(agent_type: str) -> str:
 # explore 子代理只能拿到这几个只读工具，避免它们修改项目文件或系统状态。
 READ_ONLY_TOOLS = {"read_file", "outline_file", "list_files", "grep_search"}
 
+# reviewer 子 Agent 工具白名单（只读 + run_shell 执行验收命令）
+REVIEWER_TOOLS = {
+    "read_file",
+    "outline_file",
+    "list_files",
+    "grep_search",
+    "run_shell",  # 仅用于执行 task 定义中的验收命令
+}
+
 # ─── Prompt loading from files ──────────────────────────────
 
 _PROMPTS_DIR = Path(__file__).parent.parent / "prompts" / "subagent"
@@ -121,6 +130,9 @@ def get_sub_agent_config(agent_type: str) -> dict:
     if agent_type == "explore":
         read_only = [t for t in tool_definitions if t["name"] in READ_ONLY_TOOLS]
         return {"system_prompt": _load_subagent_prompt("explore"), "tools": read_only, "model_ref": model_ref}
+    elif agent_type == "reviewer":
+        reviewer_tools = [t for t in tool_definitions if t["name"] in REVIEWER_TOOLS]
+        return {"system_prompt": _load_subagent_prompt("reviewer"), "tools": reviewer_tools, "model_ref": model_ref}
     else:  # general
         return {"system_prompt": _load_subagent_prompt("general"), "tools": [t for t in tool_definitions if t["name"] not in _sub_agent_excluded], "model_ref": model_ref}
 
@@ -132,6 +144,7 @@ def get_available_agent_types() -> list[dict[str, str]]:
     """返回系统提示词中可展示的全部代理类型说明，包括内置代理和自定义代理。"""
     types = [
         {"name": "explore", "description": "Fast, read-only codebase search and exploration"},
+        {"name": "reviewer", "description": "Code review with verification commands"},
         {"name": "general", "description": "Full tools for independent tasks"},
     ]
     for name, defn in _discover_custom_agents().items():

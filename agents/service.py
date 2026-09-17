@@ -98,6 +98,9 @@ class AgentService:
     def respond_permission(self, request_id: str, allowed: bool) -> None:
         self._agent.set_permission_response(request_id, allowed)
 
+    def respond_question(self, request_id: str, answer: str) -> None:
+        self._agent.session.question_responses[request_id] = {"answer": answer}
+
     def set_confirm_fn(self, fn) -> None:
         self._agent.set_confirm_fn(fn)
 

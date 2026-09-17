@@ -2,15 +2,16 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   fetchConfig, AppConfig,
   compactSession, updatePermissionMode,
-  forkSession, respondToPermission, truncateSession
+  forkSession, respondToPermission, respondToQuestion, truncateSession
 } from '../../../api/client';
 import { useChatNodes } from '../../../components/chat/nodes';
 import type { UserNode } from '../../../components/chat/nodes/types';
 import { sessionStore, wsManager, eventRouter, useSessionStore } from '../../../store';
-import type { PermissionRequest, FileSnapshot } from '../../../store/SessionStore';
+import type { PermissionRequest, QuestionRequest, TodoItem, FileSnapshot } from '../../../store/SessionStore';
 import { logger } from '../../../utils/logger';
 
 const EMPTY_FILE_SNAPSHOTS: FileSnapshot[] = [];
+const EMPTY_TODOS: TodoItem[] = [];
 
 export function useChat() {
   const [inputValue, setInputValue] = useState('');
@@ -37,6 +38,8 @@ export function useChat() {
   const sessionId = currentSessionId ?? sessionStore.getCurrentId();
   const isStreaming = useSessionStore(() => sessionStore.get(sessionId ?? '')?.projections?.running ?? false);
   const pendingPermission = useSessionStore(() => sessionId ? sessionStore.getPendingPermission(sessionId) : undefined);
+  const pendingQuestion = useSessionStore(() => sessionId ? sessionStore.getPendingQuestion(sessionId) : undefined);
+  const todos = useSessionStore(() => sessionId ? sessionStore.getTodos(sessionId) : EMPTY_TODOS);
   const goalState = useSessionStore(() => sessionId ? sessionStore.getGoalState(sessionId) : undefined);
   const fileSnapshots = useSessionStore(() => sessionId ? sessionStore.getFileSnapshots(sessionId) : EMPTY_FILE_SNAPSHOTS);
   const contextUsed = useSessionStore(() => sessionId ? sessionStore.getContextUsed(sessionId) : 0);
@@ -44,6 +47,13 @@ export function useChat() {
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
   }, [currentSessionId]);
+  
+  // Sync selectedAgent with permissionMode
+  useEffect(() => {
+    if (selectedAgent === 'plan') {
+      setPermissionMode('default');
+    }
+  }, [selectedAgent]);
   
   const { snapshot: chatSnapshot, handleSSEEvent: handleNodeEvent, addUserMessage, resetNodes, loadSessionEvents, prependSessionEvents } = useChatNodes();
   
@@ -159,6 +169,24 @@ export function useChat() {
           sub_agent_id: event.sub_agent_id,
         };
         sessionStore.setPendingPermission(eventSessionId, permReq);
+      }
+      
+      if (eventType === 'question/request') {
+        const questionReq: QuestionRequest = {
+          request_id: event.request_id,
+          question: event.question,
+          options: event.options,
+          context: event.context,
+        };
+        sessionStore.setPendingQuestion(eventSessionId, questionReq);
+      }
+      
+      if (eventType === 'question/resolved') {
+        sessionStore.setPendingQuestion(eventSessionId, undefined);
+      }
+      
+      if (eventType === 'todo/updated') {
+        fetchTodos(eventSessionId);
       }
       
       if (eventType === 'goal/criteria') {
@@ -315,6 +343,7 @@ export function useChat() {
           title: projections.title,
           cwd: metadata.cwd,
           updatedAt: Date.now(),
+          running: projections.running ?? false,
         });
         
         if (metadata.cwd) {
@@ -687,11 +716,46 @@ export function useChat() {
     if (!pendingPermission || !currentSessionId) return;
     try {
       await respondToPermission(currentSessionId, pendingPermission.request_id, false);
-      sessionStore.setPendingPermission(currentSessionId, undefined);
     } catch (err) {
       console.error('Failed to deny permission:', err);
+    } finally {
+      // Always clear pending permission and mark tool call as denied
+      sessionStore.setPendingPermission(currentSessionId, undefined);
+      sessionStore.updateSnapshot(currentSessionId, prev => {
+        const newNodes = new Map(prev.nodes);
+        for (const [key, node] of newNodes) {
+          if (node.kind === 'tool-call' && node.status === 'pending') {
+            newNodes.set(key, { ...node, status: 'denied' });
+          }
+        }
+        return { order: prev.order, nodes: newNodes };
+      });
     }
   }, [pendingPermission, currentSessionId]);
+
+  const fetchTodos = useCallback(async (sessionId: string) => {
+    try {
+      const apiBase = (window as any).__MYCODE_API_BASE__ || '/api';
+      const res = await fetch(`${apiBase}/todos/${sessionId}`);
+      if (res.ok) {
+        const data = await res.json();
+        sessionStore.setTodos(sessionId, data.todos || []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch todos:', err);
+    }
+  }, []);
+
+  const handleQuestionRespond = useCallback(async (answer: string) => {
+    if (!pendingQuestion || !currentSessionId) return;
+    try {
+      await respondToQuestion(currentSessionId, pendingQuestion.request_id, answer);
+    } catch (err) {
+      console.error('Failed to respond to question:', err);
+    } finally {
+      sessionStore.setPendingQuestion(currentSessionId, undefined);
+    }
+  }, [pendingQuestion, currentSessionId]);
 
   const handleAcceptFile = useCallback((filePath: string) => {
     if (!currentSessionId) return;
@@ -762,6 +826,8 @@ export function useChat() {
     contextUsed,
     contextTotal,
     pendingPermission,
+    pendingQuestion,
+    todos,
     sessionRefreshTrigger,
     chatSnapshot,
     pendingSteerMessages,
@@ -782,6 +848,7 @@ export function useChat() {
     handleEditMessage,
     handlePermissionApprove,
     handlePermissionDeny,
+    handleQuestionRespond,
     handleAcceptFile,
     handleRejectFile,
     handleAcceptAll,

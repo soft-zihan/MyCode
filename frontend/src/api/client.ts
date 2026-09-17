@@ -595,6 +595,15 @@ export async function respondToPermission(sessionId: string, requestId: string, 
   if (!res.ok) throw new Error('Failed to respond to permission');
 }
 
+export async function respondToQuestion(sessionId: string, requestId: string, answer: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/events/question-respond`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ request_id: requestId, answer, session_id: sessionId }),
+  });
+  if (!res.ok) throw new Error('Failed to respond to question');
+}
+
 export async function truncateSession(sessionId: string, keepUserMessages: number): Promise<void> {
   console.log('[API] truncateSession:', { sessionId, keepUserMessages });
   const res = await fetch(`${API_BASE}/sessions/${sessionId}/truncate`, {
