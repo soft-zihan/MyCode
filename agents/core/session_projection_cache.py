@@ -304,12 +304,23 @@ def _apply_context_total(state: int, event: dict[str, Any]) -> int:
     return state
 
 
+def _init_plan_slug() -> str | None:
+    return None
+
+
+def _apply_plan_slug(state: str | None, event: dict[str, Any]) -> str | None:
+    if event.get("type") == "session/plan_linked" and event.get("plan_slug"):
+        return event.get("plan_slug")
+    return state
+
+
 register_projection("title", _init_title, _apply_title, state_version=1)
 register_projection("updated_at", _init_updated_at, _apply_updated_at, state_version=1)
 register_projection("cwd", _init_cwd, _apply_cwd, state_version=1)
 register_projection("running", _init_running, _apply_running, state_version=1)
 register_projection("context_used", _init_context_used, _apply_context_used, state_version=1)
 register_projection("context_total", _init_context_total, _apply_context_total, state_version=1)
+register_projection("plan_slug", _init_plan_slug, _apply_plan_slug, state_version=1)
 
 
 class ProjectionCache:

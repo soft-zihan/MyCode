@@ -555,6 +555,8 @@ class Session:
                     metadata["origin"] = rows["origin"]["val"]
                 if rows.get("agent_type") and rows["agent_type"].get("val"):
                     metadata["agent_type"] = rows["agent_type"]["val"]
+                if rows.get("plan_slug") and rows["plan_slug"].get("val"):
+                    metadata["plan_slug"] = rows["plan_slug"]["val"]
             except Exception:
                 pass
         
@@ -566,6 +568,7 @@ class Session:
         )
         
         session.cwd = metadata.get("cwd")
+        session.plan_slug = metadata.get("plan_slug")
         
         # Load events from backend
         try:

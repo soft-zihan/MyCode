@@ -54,6 +54,10 @@ class SessionLifecycle:
         if isinstance(data.get("events"), list):
             session._log.clear()
             session._log.extend(_sanitize_for_utf8(data["events"]))
+        
+        # 恢复 plan_slug
+        if data.get("plan_slug"):
+            session.plan_slug = data["plan_slug"]
 
     # ── Rewind ──
 
@@ -182,5 +186,6 @@ class SessionLifecycle:
             "parent_session": session.parent_session,
             "origin": session.origin,
             "agent_type": session.agent_type,
+            "plan_slug": session.plan_slug,
             "events": _sanitize_for_utf8(session._log),
         })

@@ -1351,6 +1351,8 @@ class Agent:
             return 300
         if name in ("agent", "skill"):
             return 300
+        if name == "exit_plan_mode":
+            return 600
         if name in ("read_file", "outline_file", "grep_search", "list_files"):
             return 30
         return 60
@@ -1878,6 +1880,7 @@ class Agent:
             
             # 关联 session
             self.session.plan_slug = slug
+            self.session.append("session/plan_linked", {"plan_slug": slug})
             
             return {"slug": slug, "action": "created", "plan_dir": str(plan_dir)}
         except Exception as e:
