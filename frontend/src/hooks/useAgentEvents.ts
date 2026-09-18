@@ -11,6 +11,7 @@ export interface SessionEvent {
 export interface AgentStats {
   input_tokens: number;
   output_tokens: number;
+  cached_tokens?: number;
   context_window: number;
   last_input_token_count?: number;
 }
@@ -223,6 +224,7 @@ export function useAgentEvents(sessionId: string | null): UseAgentEventsReturn {
           next.stats = {
             input_tokens: event.input_tokens as number,
             output_tokens: event.output_tokens as number,
+            cached_tokens: event.cached_tokens as number | undefined,
             context_window: event.context_window as number,
             last_input_token_count: event.last_input_token_count as number | undefined,
           };

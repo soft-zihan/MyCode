@@ -1,5 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { Clock, Zap, Bot, Wrench, MessageSquare, ChevronDown, ChevronRight, AlertCircle, Shield, DollarSign, Layers, Radio, BarChart3 } from 'lucide-react';
+import { OverviewBar } from '../trace/OverviewBar';
+import './TrajectoryTimeline.css';
 
 interface TrajectoryEvent {
   id: string;
@@ -441,6 +443,9 @@ export const TrajectoryTimeline: React.FC<TrajectoryTimelineProps> = ({ events, 
           className="w-full px-2 py-1 text-xs border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
         />
       </div>
+
+      {/* Overview Bar */}
+      <OverviewBar events={events} onSeek={() => {}} />
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-3">

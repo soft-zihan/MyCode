@@ -43,6 +43,10 @@ export function useChat() {
   const goalState = useSessionStore(() => sessionId ? sessionStore.getGoalState(sessionId) : undefined);
   const fileSnapshots = useSessionStore(() => sessionId ? sessionStore.getFileSnapshots(sessionId) : EMPTY_FILE_SNAPSHOTS);
   const contextUsed = useSessionStore(() => sessionId ? sessionStore.getContextUsed(sessionId) : 0);
+  const statsInputTokens = useSessionStore(() => sessionId ? sessionStore.getDetailedStats(sessionId).inputTokens : 0);
+  const statsOutputTokens = useSessionStore(() => sessionId ? sessionStore.getDetailedStats(sessionId).outputTokens : 0);
+  const statsCachedTokens = useSessionStore(() => sessionId ? sessionStore.getDetailedStats(sessionId).cachedTokens : 0);
+  const sessionStats = { inputTokens: statsInputTokens, outputTokens: statsOutputTokens, cachedTokens: statsCachedTokens };
   
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
@@ -127,6 +131,12 @@ export function useChat() {
       
       if (eventType === 'stats') {
         sessionStore.setContextStats(targetSessionId, event.last_input_token_count || 0, event.context_window || 128000);
+        sessionStore.setDetailedStats(
+          targetSessionId,
+          event.input_tokens || 0,
+          event.output_tokens || 0,
+          event.cached_tokens || 0
+        );
       }
       
       if (eventType === 'context/compacted') {
@@ -146,6 +156,13 @@ export function useChat() {
       if (eventType === 'tool_result' && event.snapshot) {
         const snap = event.snapshot;
         if (snap.old_content !== undefined && snap.new_content !== undefined) {
+          const acceptedKey = `acceptedChanges:${eventSessionId}`;
+          const accepted: string[] = JSON.parse(localStorage.getItem(acceptedKey) || '[]');
+          const wasAccepted = accepted.includes(snap.file_path);
+          if (wasAccepted) {
+            accepted.splice(accepted.indexOf(snap.file_path), 1);
+            localStorage.setItem(acceptedKey, JSON.stringify(accepted));
+          }
           sessionStore.addFileSnapshot(eventSessionId, {
             file_path: snap.file_path,
             is_new: snap.is_new,
@@ -167,6 +184,7 @@ export function useChat() {
           tool_name: event.tool_name,
           message: event.message || '',
           sub_agent_id: event.sub_agent_id,
+          plan_file_path: event.plan_file_path,
         };
         sessionStore.setPendingPermission(eventSessionId, permReq);
       }
@@ -372,19 +390,60 @@ export function useChat() {
           baseSeq: base_seq,
         });
         
-        // Restore context stats from events
-        for (let i = events.length - 1; i >= 0; i--) {
-          const e = events[i];
-          if (e.type === 'stats' && e.last_input_token_count) {
-            sessionStore.setContextStats(sessionId, e.last_input_token_count, e.context_window || 128000);
-            break;
+        // Fetch stats from API
+        let statsRestored = false;
+        try {
+          const statsResponse = await fetch(`/api/sessions/${sessionId}/stats`);
+          if (statsResponse.ok) {
+            const stats = await statsResponse.json();
+            if (stats.last_input_token_count) {
+              sessionStore.setContextStats(sessionId, stats.last_input_token_count, stats.context_window || 128000);
+            }
+            if (stats.input_tokens || stats.output_tokens) {
+              sessionStore.setDetailedStats(sessionId, stats.input_tokens || 0, stats.output_tokens || 0, stats.cached_tokens || 0);
+              statsRestored = true;
+            }
           }
+        } catch (err) {
+          logger.debug('[SESSION] failed to fetch stats:', err);
         }
         
+        // Fallback: restore context stats and detailed stats from events if API didn't return valid stats
+        if (!statsRestored) {
+          for (let i = events.length - 1; i >= 0; i--) {
+            const e = events[i];
+            if (e.type === 'stats') {
+              if (e.last_input_token_count) {
+                sessionStore.setContextStats(sessionId, e.last_input_token_count, e.context_window || 128000);
+              }
+              if (e.input_tokens || e.output_tokens) {
+                sessionStore.setDetailedStats(sessionId, e.input_tokens || 0, e.output_tokens || 0, e.cached_tokens || 0);
+              }
+              break;
+            }
+          }
+        }
+
+        // Load file changes for Changes panel from git-based snapshots
+        try {
+          const changesResponse = await fetch(`/api/sessions/${sessionId}/file-changes`);
+          if (changesResponse.ok) {
+            const { files } = await changesResponse.json();
+            if (files && files.length > 0) {
+              const acceptedKey = `acceptedChanges:${sessionId}`;
+              const accepted: string[] = JSON.parse(localStorage.getItem(acceptedKey) || '[]');
+              const filtered = files.filter((f: any) => !accepted.includes(f.file_path));
+              sessionStore.setFileSnapshots(sessionId, filtered);
+            }
+          }
+        } catch (err) {
+          logger.debug('[SESSION] failed to fetch file changes:', err);
+        }
+
         // Update pagination state
         const lastSeq = events.length > 0 ? Math.max(...events.map((e: any) => e.seq ?? 0)) : -1;
         sessionStore.setPagination(sessionId, has_more, base_seq, lastSeq);
-        
+
         // Load events into nodes
         loadSessionEvents(sessionId, events);
       }
@@ -588,12 +647,14 @@ export function useChat() {
   }, [isStreaming, pendingSteerMessages]);
   
   // Check for auto-send when input value changes
+  const handleSendMessageRef = useRef(handleSendMessage);
+  handleSendMessageRef.current = handleSendMessage;
+  
   useEffect(() => {
     if (autoSendRef.current && inputValue && !isStreaming) {
       autoSendRef.current = false;
-      // Use setTimeout to ensure state is updated
       setTimeout(() => {
-        handleSendMessage();
+        handleSendMessageRef.current();
       }, 0);
     }
   }, [inputValue, isStreaming]);
@@ -632,6 +693,17 @@ export function useChat() {
       }
     }
   }, [currentSessionId, permissionMode]);
+
+  const handleSetPermissionMode = useCallback(async (mode: 'default' | 'acceptEdits' | 'bypassPermissions') => {
+    setPermissionMode(mode);
+    if (currentSessionId) {
+      try {
+        await updatePermissionMode(currentSessionId, mode);
+      } catch (err) {
+        console.error('Failed to update permission mode:', err);
+      }
+    }
+  }, [currentSessionId]);
 
   const handleForkSession = useCallback(async () => {
     if (!currentSessionId) return;
@@ -757,11 +829,21 @@ export function useChat() {
     }
   }, [pendingQuestion, currentSessionId]);
 
+  const markFileAccepted = useCallback((sessionId: string, filePath: string) => {
+    const key = `acceptedChanges:${sessionId}`;
+    const accepted: string[] = JSON.parse(localStorage.getItem(key) || '[]');
+    if (!accepted.includes(filePath)) {
+      accepted.push(filePath);
+      localStorage.setItem(key, JSON.stringify(accepted));
+    }
+  }, []);
+
   const handleAcceptFile = useCallback((filePath: string) => {
     if (!currentSessionId) return;
+    markFileAccepted(currentSessionId, filePath);
     const snaps = sessionStore.getFileSnapshots(currentSessionId).filter(s => s.file_path !== filePath);
     sessionStore.setFileSnapshots(currentSessionId, snaps);
-  }, [currentSessionId]);
+  }, [currentSessionId, markFileAccepted]);
 
   const handleRejectFile = useCallback(async (filePath: string) => {
     if (!currentSessionId) return;
@@ -774,6 +856,7 @@ export function useChat() {
         body: JSON.stringify({ session_id: currentSessionId, file_path: filePath, old_content: snap.old_content }),
       });
       if (res.ok) {
+        markFileAccepted(currentSessionId, filePath);
         const snaps = sessionStore.getFileSnapshots(currentSessionId).filter(s => s.file_path !== filePath);
         sessionStore.setFileSnapshots(currentSessionId, snaps);
         setFileTreeRefreshTrigger(prev => prev + 1);
@@ -781,10 +864,17 @@ export function useChat() {
     } catch (err) {
       console.error('Failed to revert file:', err);
     }
-  }, [fileSnapshots, currentSessionId]);
+  }, [fileSnapshots, currentSessionId, markFileAccepted]);
 
   const handleAcceptAll = useCallback(() => {
     if (!currentSessionId) return;
+    const currentSnaps = sessionStore.getFileSnapshots(currentSessionId);
+    const key = `acceptedChanges:${currentSessionId}`;
+    const accepted: string[] = JSON.parse(localStorage.getItem(key) || '[]');
+    for (const snap of currentSnaps) {
+      if (!accepted.includes(snap.file_path)) accepted.push(snap.file_path);
+    }
+    localStorage.setItem(key, JSON.stringify(accepted));
     sessionStore.setFileSnapshots(currentSessionId, []);
   }, [currentSessionId]);
 
@@ -825,6 +915,7 @@ export function useChat() {
     permissionMode,
     contextUsed,
     contextTotal,
+    sessionStats,
     pendingPermission,
     pendingQuestion,
     todos,
@@ -843,6 +934,7 @@ export function useChat() {
     handleStopStreaming,
     handleCompactSession,
     handleCyclePermissionMode,
+    handleSetPermissionMode,
     handleForkSession,
     handleForkAtPoint,
     handleEditMessage,

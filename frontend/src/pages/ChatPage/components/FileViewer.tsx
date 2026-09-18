@@ -7,9 +7,10 @@ interface FileViewerProps {
   filePath: string;
   cwd?: string;
   onClose: () => void;
+  readOnly?: boolean;
 }
 
-export function FileViewer({ filePath, cwd, onClose }: FileViewerProps) {
+export function FileViewer({ filePath, cwd, onClose, readOnly = true }: FileViewerProps) {
   const [content, setContent] = useState<string>('');
   const [loading, setLoading] = useState(true);
 
@@ -62,7 +63,7 @@ export function FileViewer({ filePath, cwd, onClose }: FileViewerProps) {
             value={content}
             theme="vs-light"
             options={{
-              readOnly: true,
+              readOnly,
               minimap: { enabled: false },
               fontSize: 13,
               lineNumbers: 'on',

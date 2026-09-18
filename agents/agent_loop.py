@@ -371,7 +371,9 @@ class AgentLoop:
         """处理工具调用：权限检查、执行、结果收集。"""
         from agents.tools.permissions import check_permission
         from agents.observability.trace import trace_event
+        from agents.logging import print_info
 
+        print_info(f"[DEBUG] _handle_tool_calls: start, {len(tool_calls)} tools")
         a = self._agent
         oai_checked: list[dict] = []
 
@@ -421,12 +423,17 @@ class AgentLoop:
 
             oai_checked.append({"tc": tc, "fn": fn_name, "inp": inp, "allowed": True})
 
+        from agents.logging import print_info
+        print_info(f"[DEBUG] _handle_tool_calls: calling _execute_tool_batches with {len(oai_checked)} tools")
         await self._execute_tool_batches(oai_checked)
+        print_info(f"[DEBUG] _handle_tool_calls: done")
 
     async def _execute_tool_batches(self, oai_checked: list[dict]) -> None:
         """执行工具批次：并发安全工具并行执行，其他顺序执行。"""
         from agents.observability.trace import trace_event
+        from agents.logging import print_info
 
+        print_info(f"[DEBUG] _execute_tool_batches: start, {len(oai_checked)} tools")
         a = self._agent
         oai_batches: list[dict] = []
         
@@ -437,8 +444,10 @@ class AgentLoop:
             else:
                 oai_batches.append({"concurrent": safe, "items": [ct]})
 
+        print_info(f"[DEBUG] _execute_tool_batches: {len(oai_batches)} batches")
         oai_context_break = False
-        for batch in oai_batches:
+        for i, batch in enumerate(oai_batches):
+            print_info(f"[DEBUG] _execute_tool_batches: batch {i}, concurrent={batch['concurrent']}, items={len(batch['items'])}")
             if oai_context_break or a.abort_requested():
                 a.mark_aborted()
                 for ct in batch["items"]:
@@ -513,20 +522,29 @@ class AgentLoop:
     async def _execute_sequential_batch(self, items: list[dict]) -> bool:
         """顺序执行工具批次。返回是否触发上下文清理。"""
         from agents.observability.trace import trace_event
+        from agents.logging import print_info
+        import time
 
+        print_info(f"[DEBUG] _execute_sequential_batch: start, {len(items)} tools")
         a = self._agent
         context_break = False
 
-        for ct in items:
+        for i, ct in enumerate(items):
+            fn_name = ct["fn"]
+            print_info(f"[DEBUG] _execute_sequential_batch: tool {i+1}/{len(items)}: {fn_name}")
             if not ct["allowed"]:
                 a.append_tool_message(ct["tc"]["id"], ct["result"], ct["fn"])
                 continue
 
+            t0 = time.time()
+            print_info(f"[DEBUG] _execute_sequential_batch: calling execute_tool_call for {fn_name}")
             raw = await a.execute_tool_call(ct["fn"], ct["inp"])
+            print_info(f"[DEBUG] _execute_sequential_batch: execute_tool_call done for {fn_name}, took {time.time()-t0:.2f}s")
             raw = _safe_utf8_text(raw)
             res = a.persist_large_result(ct["fn"], raw)
             a.publish_tool_result_event(ct["tc"]["id"], ct["fn"], res, "ok")
             a.record_tool_outcome(ct["fn"], not a.looks_like_tool_failure(ct["fn"], raw, res))
+            print_info(f"[DEBUG] _execute_sequential_batch: tool {fn_name} completed")
 
             if a.context_cleared:
                 a.clear_context_flag()

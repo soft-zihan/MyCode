@@ -1,0 +1,138 @@
+.composer-container {
+  position: relative;
+  width: 100%;
+}
+
+.composer-editor {
+  width: 100%;
+  min-height: 40px;
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 8px 12px;
+  font-size: 14px;
+  line-height: 1.5;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  background: white;
+}
+
+.composer-editor:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+.composer-editor p {
+  margin: 0;
+}
+
+.composer-editor p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  color: #9ca3af;
+  pointer-events: none;
+  height: 0;
+}
+
+.composer-mention {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 6px;
+  margin: 0 1px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 4px;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: nowrap;
+  cursor: default;
+  user-select: all;
+}
+
+.composer-mention::before {
+  content: '@';
+  color: #60a5fa;
+}
+
+.composer-command {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 6px;
+  margin: 0 1px;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: 4px;
+  color: #15803d;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: nowrap;
+  cursor: default;
+  user-select: all;
+}
+
+.composer-command::before {
+  content: '/';
+  color: #4ade80;
+}
+
+.composer-suggestion-container {
+  z-index: 50;
+}
+
+.composer-suggestion-popup {
+  position: absolute;
+  z-index: 50;
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  max-height: 240px;
+  overflow-y: auto;
+  min-width: 220px;
+  padding: 4px;
+}
+
+.composer-suggestion-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  text-align: left;
+  border-radius: 4px;
+  transition: background 0.1s;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+}
+
+.composer-suggestion-item:hover {
+  background: #f9fafb;
+}
+
+.composer-suggestion-item.selected {
+  background: #eff6ff;
+}
+
+.composer-suggestion-content {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.composer-suggestion-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-suggestion-desc {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

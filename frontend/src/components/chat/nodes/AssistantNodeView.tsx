@@ -5,6 +5,44 @@ import { Brain, ChevronDown, ChevronRight, Copy, Check } from 'lucide-react';
 import type { AssistantNode } from './types';
 import { ThumbsDownButton, type ThumbsDownFeedback } from '../ThumbsDownDialog';
 
+const FILE_EXTENSIONS = [
+  'py', 'ts', 'tsx', 'js', 'jsx', 'json', 'md', 'txt', 'html', 'css', 'scss', 'sass', 'less',
+  'yaml', 'yml', 'toml', 'xml', 'sh', 'bash', 'zsh', 'go', 'rs', 'java', 'c', 'cpp', 'h', 'hpp',
+  'rb', 'php', 'swift', 'kt', 'scala', 'r', 'sql', 'graphql', 'proto', 'dockerfile', 'env',
+  'gitignore', 'lock', 'cfg', 'ini', 'conf', 'log', 'csv', 'xlsx', 'pdf', 'doc', 'docx'
+];
+
+const BACKTICK_FILE_REGEX = new RegExp(
+  '`([^`]+\\.(' + FILE_EXTENSIONS.join('|') + '))`',
+  'gi'
+);
+
+const STANDALONE_FILE_REGEX = new RegExp(
+  '(?<![`\\[\\/\\w])' +
+  '([\\w.-]+(?:\\/[\\w.-]+)*\\.(' + FILE_EXTENSIONS.join('|') + '))' +
+  '(?![`\\]\\w])',
+  'gi'
+);
+
+function linkifyFilePaths(text: string): string {
+  if (!text) return text;
+  
+  let result = text.replace(BACKTICK_FILE_REGEX, (match, path) => {
+    if (match.includes('](')) return match;
+    return `[${path}](${path})`;
+  });
+  
+  result = result.replace(STANDALONE_FILE_REGEX, (match, path) => {
+    const beforeMatch = result.substring(0, result.indexOf(match));
+    if (beforeMatch.endsWith('](') || beforeMatch.endsWith('[')) {
+      return match;
+    }
+    return `[${path}](${path})`;
+  });
+  
+  return result;
+}
+
 interface AssistantNodeViewProps {
   node: AssistantNode;
   sessionId?: string;
@@ -35,6 +73,7 @@ export const AssistantNodeView = memo(function AssistantNodeView({ node, session
   const [copied, setCopied] = useState(false);
   const prevStreamingRef = useRef(node.streaming);
   const prevHasContentRef = useRef(!!node.content);
+  const thinkingRef = useRef<HTMLPreElement>(null);
   
   // 当 streaming 开始时，如果有 thinking 且没有 content，自动展开
   // 当开始输出 content 时，自动折叠 thinking
@@ -53,6 +92,13 @@ export const AssistantNodeView = memo(function AssistantNodeView({ node, session
     prevStreamingRef.current = node.streaming;
     prevHasContentRef.current = !!node.content;
   }, [node.streaming, node.thinking, node.content]);
+  
+  // thinking 内容更新时自动滚动到底部
+  useEffect(() => {
+    if (showThinking && thinkingRef.current && node.streaming && !node.content) {
+      thinkingRef.current.scrollTop = thinkingRef.current.scrollHeight;
+    }
+  }, [node.thinking, showThinking, node.streaming, node.content]);
   
   if (!node.content && !node.thinking && !node.streaming) return null;
 
@@ -101,7 +147,7 @@ export const AssistantNodeView = memo(function AssistantNodeView({ node, session
                 {showThinking ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
               </button>
               {showThinking && (
-                <pre className="mt-1 text-xs text-gray-600 bg-purple-50/50 rounded p-2 overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap font-mono">
+                <pre ref={thinkingRef} className="mt-1 text-xs text-gray-600 bg-purple-50/50 rounded p-2 overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap font-mono">
                   {node.thinking}
                 </pre>
               )}
@@ -115,7 +161,7 @@ export const AssistantNodeView = memo(function AssistantNodeView({ node, session
                 remarkPlugins={[remarkGfm]}
                 components={{ a: fileLinkRenderer(onFileClick) }}
               >
-                {node.content}
+                {linkifyFilePaths(node.content)}
               </ReactMarkdown>
             </div>
           )}

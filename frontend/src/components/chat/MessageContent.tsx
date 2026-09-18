@@ -5,6 +5,58 @@ import { ThinkingBlock } from './ThinkingBlock';
 import { ToolCollapsible } from './ToolCollapsible';
 import { parseContentSections, splitToolSections } from './messageParser';
 
+// 常见代码文件扩展名
+const FILE_EXTENSIONS = [
+  'py', 'ts', 'tsx', 'js', 'jsx', 'json', 'md', 'txt', 'html', 'css', 'scss', 'sass', 'less',
+  'yaml', 'yml', 'toml', 'xml', 'sh', 'bash', 'zsh', 'go', 'rs', 'java', 'c', 'cpp', 'h', 'hpp',
+  'rb', 'php', 'swift', 'kt', 'scala', 'r', 'sql', 'graphql', 'proto', 'dockerfile', 'env',
+  'gitignore', 'lock', 'cfg', 'ini', 'conf', 'log', 'csv', 'xlsx', 'pdf', 'doc', 'docx'
+];
+
+// 匹配文件路径的正则表达式
+// 匹配反引号中的文件路径：`hello.py` 或 `src/components/Button.tsx`
+const BACKTICK_FILE_REGEX = new RegExp(
+  '`([^`]+\\.(' + FILE_EXTENSIONS.join('|') + '))`',
+  'gi'
+);
+
+// 匹配独立的文件路径（不在反引号、链接或代码块中）
+// 例如：hello.py 或 src/components/Button.tsx
+const STANDALONE_FILE_REGEX = new RegExp(
+  '(?<![`\\[\\/\\w])' + // 不在反引号、链接、URL、单词字符后
+  '([\\w.-]+(?:\\/[\\w.-]+)*\\.(' + FILE_EXTENSIONS.join('|') + '))' +
+  '(?![`\\]\\w])', // 不在反引号、链接、单词字符前
+  'gi'
+);
+
+/**
+ * 将文本中的文件路径转换为 markdown 链接
+ */
+function linkifyFilePaths(text: string): string {
+  if (!text) return text;
+  
+  // 先处理反引号中的文件路径
+  // `hello.py` -> [`hello.py`](hello.py)
+  let result = text.replace(BACKTICK_FILE_REGEX, (match, path) => {
+    // 检查是否已经是链接格式
+    if (match.includes('](')) return match;
+    return `[\`${path}\`](${path})`;
+  });
+  
+  // 处理独立的文件路径（不在反引号中）
+  // hello.py -> [hello.py](hello.py)
+  result = result.replace(STANDALONE_FILE_REGEX, (match, path) => {
+    // 检查是否已经在链接中
+    const beforeMatch = result.substring(0, result.indexOf(match));
+    if (beforeMatch.endsWith('](') || beforeMatch.endsWith('[')) {
+      return match;
+    }
+    return `[${path}](${path})`;
+  });
+  
+  return result;
+}
+
 interface MessageContentProps {
   content: string;
   isStreaming?: boolean;
@@ -69,20 +121,24 @@ export function MessageContent({
           <div key={`text-${sIdx}`} className="prose prose-sm max-w-none">
             {textSections.map((ts, tIdx) => {
               if (ts.type === 'normal') {
+                // 将文件路径转换为链接
+                const linkedText = linkifyFilePaths(ts.text);
                 return (
                   <ReactMarkdown key={tIdx} remarkPlugins={[remarkGfm]} components={{ a: fileLinkRenderer }}>
-                    {ts.text}
+                    {linkedText}
                   </ReactMarkdown>
                 );
               }
               const isLastTool = tIdx === lastToolIdx;
               const defaultOpen = isStreaming && isLastMessage && isLastTool;
+              // 将文件路径转换为链接
+              const linkedText = linkifyFilePaths(ts.text);
               return (
                 <ToolCollapsible key={tIdx} label={ts.label || 'Tool'} icon={ts.icon || '🔧'} defaultOpen={defaultOpen}>
-                  {ts.text ? (
+                  {linkedText ? (
                     <div className="prose prose-xs max-w-none">
                       <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: fileLinkRenderer }}>
-                        {ts.text}
+                        {linkedText}
                       </ReactMarkdown>
                     </div>
                   ) : null}

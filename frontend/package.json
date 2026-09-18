@@ -10,11 +10,18 @@
   },
   "dependencies": {
     "@monaco-editor/react": "^4.6.0",
+    "@tiptap/extension-mention": "^3.31.3",
+    "@tiptap/extension-placeholder": "^3.31.3",
+    "@tiptap/pm": "^3.31.3",
+    "@tiptap/react": "^3.31.3",
+    "@tiptap/starter-kit": "^3.31.3",
+    "@tiptap/suggestion": "^3.31.3",
     "lucide-react": "^0.344.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
     "react-router-dom": "^6.22.0",
+    "recharts": "^3.10.1",
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {

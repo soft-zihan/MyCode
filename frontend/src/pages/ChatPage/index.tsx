@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import { 
-  MessageSquare, PanelRight, Send, Square, Zap, File, X, Database
+  MessageSquare, PanelRight, Send, Square, Zap, File, X, BarChart3, Package, Cpu
 } from 'lucide-react';
 import { ReviewPanel } from '../../components/ReviewPanel';
 import { DiffViewer } from '../../components/DiffViewer';
@@ -8,18 +8,28 @@ import { ChatView } from '../../components/chat/nodes';
 import { FileTree } from './components/FileTree';
 import { FileViewer } from './components/FileViewer';
 import { SessionsPanel } from './components/SessionsPanel';
-import ContextPanel from '../../components/agent/ContextPanel';
+import { TokenBreakdownPanel } from '../../components/agent/TokenBreakdownPanel';
+import { DeliverablesPanel } from '../../components/agent/DeliverablesPanel';
 import { QuestionDialog } from '../../components/agent/QuestionDialog';
+import { PlanApprovalDialog } from '../../components/agent/PlanApprovalDialog';
 import { TodoListPanel } from '../../components/chat/TodoListPanel';
 import { PageLayout } from '../../components/PageLayout';
 import { useChat } from './hooks/useChat';
-import { useMention, MentionMenu } from '../../components/chat/MentionInput';
+import { Composer } from '../../components/chat/Composer';
+import { PermissionSelect } from '../../components/chat/PermissionSelect';
 import { fetchWorkspaceTree, WorkspaceNode } from '../../api/client';
+
+const formatTokens = (tokens: number): string => {
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
+  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}K`;
+  return `${tokens}`;
+};
 
 export default function ChatPage() {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [changesSelectedFile, setChangesSelectedFile] = useState<string | null>(null);
   const [rightSidebarOpen, setRightSidebarOpen] = useState(true);
-  const [rightTab, setRightTab] = useState<'files' | 'context'>('files');
+  const [rightTab, setRightTab] = useState<'files' | 'changes' | 'tokens'>('files');
   const [fileList, setFileList] = useState<string[]>([]);
 
   const {
@@ -44,6 +54,7 @@ export default function ChatPage() {
     permissionMode,
     contextUsed,
     contextTotal,
+    sessionStats,
     pendingPermission,
     pendingQuestion,
     todos,
@@ -58,7 +69,7 @@ export default function ChatPage() {
     handleSendMessage,
     handleStopStreaming,
     handleCompactSession,
-    handleCyclePermissionMode,
+    handleSetPermissionMode,
     handleForkAtPoint,
     handleEditMessage,
     handlePermissionApprove,
@@ -97,25 +108,9 @@ export default function ChatPage() {
     }
   }, [currentCwd, fileTreeRefreshTrigger]);
 
-  const mention = useMention({
-    files: fileList,
-    onInsert: (text) => setInputValue(text),
-  });
-
   const handleOpenFile = useCallback((filePath: string) => {
     setSelectedFile(filePath);
   }, []);
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (mention.isOpen) {
-      mention.handleKeyDown(e);
-      return;
-    }
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSendMessage();
-    }
-  };
 
   const sidebarContent = (
     <SessionsPanel
@@ -149,34 +144,54 @@ export default function ChatPage() {
             </div>
             
             {/* Session Controls */}
-            <div className="flex items-center gap-2 mr-2">
-              <div className="flex items-center gap-2">
-                <div className="w-32 h-2 bg-gray-200 rounded-full overflow-hidden">
-                  <div 
-                    className={`h-full transition-all ${
-                      (contextUsed / contextTotal) >= 0.9 ? 'bg-red-500' :
-                      (contextUsed / contextTotal) >= 0.7 ? 'bg-yellow-500' :
-                      'bg-green-500'
-                    }`}
-                    style={{ width: `${Math.min((contextUsed / contextTotal) * 100, 100)}%` }}
-                  />
+            <div className="flex items-center gap-4 mr-2">
+              {/* Token Stats - only show when there's actual data */}
+              {sessionStats.inputTokens > 0 && (
+                <div className="flex items-center gap-1.5 text-xs text-gray-500">
+                  <Cpu className="w-3.5 h-3.5" />
+                  <span>{formatTokens(sessionStats.inputTokens)} in</span>
+                  <span className="text-gray-300">/</span>
+                  <span>{formatTokens(sessionStats.outputTokens || 0)} out</span>
+                  {sessionStats.cachedTokens && sessionStats.cachedTokens > 0 && (
+                    <>
+                      <span className="text-gray-300">|</span>
+                      <span className="text-green-600">
+                        {Math.round((sessionStats.cachedTokens / sessionStats.inputTokens) * 100)}% cache
+                      </span>
+                    </>
+                  )}
                 </div>
-                <span className="text-xs text-gray-500">
-                  {Math.round(contextUsed / 1000)}k / {Math.round(contextTotal / 1000)}k
-                </span>
-                <button
-                  onClick={handleCompactSession}
-                  disabled={!currentSessionId || isStreaming || isCompacting}
-                  className={`p-1 rounded transition-colors ${
-                    !currentSessionId || isStreaming || isCompacting
-                      ? 'text-gray-300 cursor-not-allowed'
-                      : 'text-gray-600 hover:text-blue-600 hover:bg-blue-50'
-                  }`}
-                  title={!currentSessionId ? 'Start a session first' : isStreaming ? 'Wait for response to complete' : isCompacting ? 'Compressing...' : '压缩上下文'}
-                >
-                  <Zap className={`w-3.5 h-3.5 ${isCompacting ? 'animate-pulse' : ''}`} />
-                </button>
-              </div>
+              )}
+              {/* Context Progress - only show when there's a session */}
+              {currentSessionId && contextTotal > 0 && (
+                <div className="flex items-center gap-2">
+                  <div className="w-24 h-2 bg-gray-200 rounded-full overflow-hidden">
+                    <div 
+                      className={`h-full transition-all ${
+                        (contextUsed / contextTotal) >= 0.9 ? 'bg-red-500' :
+                        (contextUsed / contextTotal) >= 0.7 ? 'bg-yellow-500' :
+                        'bg-green-500'
+                      }`}
+                      style={{ width: `${Math.min((contextUsed / contextTotal) * 100, 100)}%` }}
+                    />
+                  </div>
+                  <span className="text-xs text-gray-500">
+                    {Math.round(contextUsed / 1000)}k / {Math.round(contextTotal / 1000)}k
+                  </span>
+                  <button
+                    onClick={handleCompactSession}
+                    disabled={!currentSessionId || isStreaming || isCompacting}
+                    className={`p-1 rounded transition-colors ${
+                      !currentSessionId || isStreaming || isCompacting
+                        ? 'text-gray-300 cursor-not-allowed'
+                        : 'text-gray-600 hover:text-blue-600 hover:bg-blue-50'
+                    }`}
+                    title={!currentSessionId ? 'Start a session first' : isStreaming ? 'Wait for response to complete' : isCompacting ? 'Compressing...' : '压缩上下文'}
+                  >
+                    <Zap className={`w-3.5 h-3.5 ${isCompacting ? 'animate-pulse' : ''}`} />
+                  </button>
+                </div>
+              )}
             </div>
             
             <button
@@ -189,6 +204,16 @@ export default function ChatPage() {
               <PanelRight className="w-5 h-5" />
             </button>
           </div>
+
+          {/* Plan Mode Guidance */}
+          {selectedAgent === 'plan' && (
+            <div className="px-4 py-2 bg-blue-50 border-b border-blue-200">
+              <p className="text-xs text-blue-700">
+                <span className="font-medium">📋 计划模式：</span>
+                AI 将只读取文件并制定计划。计划完成后，您可以预览、编辑或提出修改意见，批准后才会执行。
+              </p>
+            </div>
+          )}
 
           {/* Messages */}
           <ChatView
@@ -214,56 +239,44 @@ export default function ChatPage() {
           />
 
           {/* Permission Request Dialog */}
-          {pendingPermission && (
-            <div className={`border-t px-4 py-3 ${
-              pendingPermission.tool_name === 'exit_plan_mode'
-                ? 'border-blue-300 bg-blue-50'
-                : 'border-yellow-300 bg-yellow-50'
-            }`}>
+          {pendingPermission && pendingPermission.tool_name === 'exit_plan_mode' && currentSessionId && (
+            <PlanApprovalDialog
+              request={pendingPermission}
+              sessionId={currentSessionId}
+              onApprove={handlePermissionApprove}
+              onDeny={() => {
+                handlePermissionDeny();
+              }}
+            />
+          )}
+
+          {/* Other Permission Request Dialog */}
+          {pendingPermission && pendingPermission.tool_name !== 'exit_plan_mode' && (
+            <div className="border-t px-4 py-3 border-yellow-300 bg-yellow-50">
               <div className="flex items-start gap-3">
                 <div className="flex-1">
                   <div className="flex items-center gap-2 mb-1">
-                    <span className={`text-sm font-medium ${
-                      pendingPermission.tool_name === 'exit_plan_mode'
-                        ? 'text-blue-800'
-                        : 'text-yellow-800'
-                    }`}>
-                      {pendingPermission.tool_name === 'exit_plan_mode' ? '📋 计划审批' : '⚠️ 需要授权'}
+                    <span className="text-sm font-medium text-yellow-800">
+                      ⚠️ 需要授权
                     </span>
-                    <span className={`text-xs px-1.5 py-0.5 rounded ${
-                      pendingPermission.tool_name === 'exit_plan_mode'
-                        ? 'bg-blue-200 text-blue-800'
-                        : 'bg-yellow-200 text-yellow-800'
-                    }`}>
+                    <span className="text-xs px-1.5 py-0.5 rounded bg-yellow-200 text-yellow-800">
                       {pendingPermission.tool_name}
                     </span>
                   </div>
-                  <pre className={`text-xs text-gray-700 bg-white border rounded p-2 overflow-x-auto overflow-y-auto whitespace-pre-wrap font-mono ${
-                    pendingPermission.tool_name === 'exit_plan_mode'
-                      ? 'border-blue-200 max-h-96'
-                      : 'border-yellow-200 max-h-32'
-                  }`}>
+                  <pre className="text-xs text-gray-700 bg-white border border-yellow-200 rounded p-2 overflow-x-auto overflow-y-auto whitespace-pre-wrap font-mono max-h-32">
                     {pendingPermission.command}
                   </pre>
                 </div>
                 <div className="flex gap-2 flex-shrink-0">
                   <button
                     onClick={handlePermissionDeny}
-                    className={`px-3 py-1.5 text-sm font-medium border rounded hover:bg-opacity-80 transition-colors ${
-                      pendingPermission.tool_name === 'exit_plan_mode'
-                        ? 'text-blue-700 bg-white border-blue-300 hover:bg-blue-50'
-                        : 'text-red-700 bg-white border-red-300 hover:bg-red-50'
-                    }`}>
-                    {pendingPermission.tool_name === 'exit_plan_mode' ? '继续修改' : '拒绝'}
+                    className="px-3 py-1.5 text-sm font-medium text-red-700 bg-white border border-red-300 rounded hover:bg-red-50 transition-colors">
+                    拒绝
                   </button>
                   <button
                     onClick={handlePermissionApprove}
-                    className={`px-3 py-1.5 text-sm font-medium border rounded transition-colors ${
-                      pendingPermission.tool_name === 'exit_plan_mode'
-                        ? 'text-white bg-blue-600 border-blue-700 hover:bg-blue-700'
-                        : 'text-white bg-green-600 border-green-700 hover:bg-green-700'
-                    }`}>
-                    {pendingPermission.tool_name === 'exit_plan_mode' ? '批准计划' : '批准'}
+                    className="px-3 py-1.5 text-sm font-medium text-white bg-green-600 border border-green-700 rounded hover:bg-green-700 transition-colors">
+                    批准
                   </button>
                 </div>
               </div>
@@ -376,14 +389,23 @@ export default function ChatPage() {
                     </div>
                     <div className="space-y-1">
                       {pendingSteerMessages.map((msg, i) => (
-                        <div key={i} className="text-sm text-gray-700 bg-white/60 px-2 py-1 rounded border border-amber-100 truncate">
-                          {msg.content}
-                          {msg.contextFiles && msg.contextFiles.length > 0 && (
-                            <div className="flex items-center gap-1 mt-1">
-                              <File className="w-3 h-3 text-blue-500" />
-                              <span className="text-xs text-blue-600">{msg.contextFiles.length} files</span>
-                            </div>
-                          )}
+                        <div key={i} className="flex items-center gap-1 text-sm text-gray-700 bg-white/60 px-2 py-1 rounded border border-amber-100 group">
+                          <div className="flex-1 min-w-0 truncate">
+                            {msg.content}
+                            {msg.contextFiles && msg.contextFiles.length > 0 && (
+                              <span className="ml-2 inline-flex items-center gap-0.5">
+                                <File className="w-3 h-3 text-blue-500" />
+                                <span className="text-xs text-blue-600">{msg.contextFiles.length}</span>
+                              </span>
+                            )}
+                          </div>
+                          <button
+                            onClick={() => setPendingSteerMessages(prev => prev.filter((_, idx) => idx !== i))}
+                            className="flex-shrink-0 p-0.5 text-amber-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                            title="Remove this message"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
                         </div>
                       ))}
                     </div>
@@ -420,24 +442,12 @@ export default function ChatPage() {
               </div>
             )}
             <div className="flex items-end gap-3 relative">
-              <div className="flex-1 relative">
-                <textarea
-                  ref={mention.textareaRef}
+              <div className="flex-1">
+                <Composer
                   value={inputValue}
-                  onChange={(e) => {
-                    setInputValue(e.target.value);
-                    mention.handleChange(e);
-                  }}
-                  onKeyDown={handleKeyDown}
-                  placeholder="Type a message... (@ to mention files, Shift+Enter for newline)"
-                  className="w-full resize-none border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  rows={2}
-                />
-                <MentionMenu
-                  items={mention.items}
-                  selectedIndex={mention.selectedIndex}
-                  onSelect={mention.handleSelect}
-                  position={mention.position}
+                  onChange={setInputValue}
+                  onSubmit={handleSendMessage}
+                  files={fileList}
                 />
               </div>
               {isStreaming ? (
@@ -463,12 +473,23 @@ export default function ChatPage() {
               <select
                 value={selectedAgent}
                 onChange={(e) => setSelectedAgent(e.target.value)}
-                className="px-2 py-1 border border-gray-300 rounded text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 max-w-[120px] truncate"
-                title={selectedAgent}
+                className={`px-2 py-1 border rounded text-xs focus:outline-none focus:ring-1 max-w-[120px] truncate ${
+                  selectedAgent === 'plan'
+                    ? 'border-blue-400 bg-blue-50 text-blue-700 focus:ring-blue-500'
+                    : 'border-gray-300 focus:ring-blue-500'
+                }`}
+                title={selectedAgent === 'plan'
+                  ? 'Plan 模式：AI 只读，制定计划后由你审批'
+                  : 'Build 模式：AI 可以直接执行操作'}
               >
                 <option value="build">build</option>
                 <option value="plan">plan</option>
               </select>
+              {selectedAgent === 'plan' && (
+                <span className="text-xs text-blue-600 bg-blue-100 px-2 py-0.5 rounded">
+                  📋 计划模式
+                </span>
+              )}
               <select
                 value={selectedModel}
                 onChange={(e) => setSelectedModel(e.target.value)}
@@ -486,55 +507,55 @@ export default function ChatPage() {
                 })}
               </select>
               {/* Permission Mode Toggle */}
-              <button
-                onClick={handleCyclePermissionMode}
-                className={`px-3 py-1 text-xs font-medium rounded transition-colors ${
-                  permissionMode === 'bypassPermissions'
-                    ? 'text-green-600 bg-green-50 border border-green-200 hover:bg-green-100'
-                    : permissionMode === 'acceptEdits'
-                    ? 'text-yellow-600 bg-yellow-50 border border-yellow-200 hover:bg-yellow-100'
-                    : 'text-gray-600 bg-white border border-gray-200 hover:bg-gray-50'
-                }`}
-                title={
-                  permissionMode === 'bypassPermissions' 
-                    ? 'YOLO模式：自动允许所有操作' 
-                    : permissionMode === 'acceptEdits'
-                    ? '编辑模式：编辑工具免确认，危险命令需确认'
-                    : '默认模式：写操作需确认'
-                }
-              >
-                {permissionMode === 'bypassPermissions' ? 'YOLO' : permissionMode === 'acceptEdits' ? 'Edits' : 'Default'}
-              </button>
+              <PermissionSelect
+                mode={permissionMode as 'default' | 'acceptEdits' | 'bypassPermissions'}
+                onChange={handleSetPermissionMode}
+              />
             </div>
           </div>
         </div>
 
-        {/* Right Sidebar - Files / Context */}
+        {/* Right Sidebar - Files / Context / Tokens / Changes */}
         {rightSidebarOpen && (
           <div className="w-72 border-l border-gray-200 bg-white flex flex-col">
             <div className="flex border-b border-gray-200">
               <button
                 onClick={() => setRightTab('files')}
-                className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
+                className={`flex-1 px-1.5 py-1.5 text-[10px] font-medium transition-colors ${
                   rightTab === 'files' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'
                 }`}
               >
-                <File className="w-3 h-3 inline mr-1" />
+                <File className="w-3 h-3 inline mr-0.5" />
                 Files
               </button>
               <button
-                onClick={() => setRightTab('context')}
-                className={`flex-1 px-3 py-1.5 text-xs font-medium transition-colors ${
-                  rightTab === 'context' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'
+                onClick={() => setRightTab('changes')}
+                className={`flex-1 px-1.5 py-1.5 text-[10px] font-medium transition-colors relative ${
+                  rightTab === 'changes' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'
                 }`}
               >
-                <Database className="w-3 h-3 inline mr-1" />
-                Context
+                <Package className="w-3 h-3 inline mr-0.5" />
+                Changes
+                {fileSnapshots.length > 0 && (
+                  <span className="absolute -top-0.5 -right-0.5 w-4 h-4 bg-blue-500 text-white text-[9px] rounded-full flex items-center justify-center">
+                    {fileSnapshots.length}
+                  </span>
+                )}
+              </button>
+              <button
+                onClick={() => setRightTab('tokens')}
+                className={`flex-1 px-1.5 py-1.5 text-[10px] font-medium transition-colors ${
+                  rightTab === 'tokens' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <BarChart3 className="w-3 h-3 inline mr-0.5" />
+                Tokens
               </button>
             </div>
             <div className="flex-1 overflow-hidden">
               {rightTab === 'files' ? (
                 <FileTree
+                  key={currentSessionId || 'default'}
                   onFileSelect={setSelectedFile}
                   onAddToChat={handleAddToChat}
                   selectedFile={selectedFile}
@@ -542,10 +563,14 @@ export default function ChatPage() {
                   visible={true}
                   refreshTrigger={fileTreeRefreshTrigger}
                 />
+              ) : rightTab === 'changes' ? (
+                <DeliverablesPanel
+                  snapshots={fileSnapshots}
+                  onOpenFile={setChangesSelectedFile}
+                />
               ) : (
-                <ContextPanel
+                <TokenBreakdownPanel
                   sessionId={currentSessionId}
-                  isStreaming={isStreaming}
                 />
               )}
             </div>
@@ -553,46 +578,57 @@ export default function ChatPage() {
         )}
 
         {/* File Viewer Overlay */}
-        {selectedFile && (() => {
-          const snapshot = fileSnapshots.find(s => s.file_path === selectedFile);
-          if (snapshot) {
-            return (
-              <div className="w-1/2 border-l border-gray-200">
-                <div className="h-full flex flex-col bg-white">
-                  <div className="flex items-center justify-between px-4 py-2 border-b border-gray-200 bg-gray-50">
-                    <div className="flex items-center gap-2">
-                      <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${
-                        snapshot.is_new ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
-                      }`}>
-                        {snapshot.is_new ? 'NEW' : 'EDIT'}
-                      </span>
-                      <span className="text-sm font-medium text-gray-700">{selectedFile.split('/').pop()}</span>
-                      <span className="text-xs text-gray-400">{selectedFile}</span>
+        {(() => {
+          const activeFile = rightTab === 'changes' ? changesSelectedFile : selectedFile;
+          const setActiveFile = rightTab === 'changes' ? setChangesSelectedFile : setSelectedFile;
+          
+          if (!activeFile) return null;
+          
+          // Changes 面板显示 diff
+          if (rightTab === 'changes') {
+            const snapshot = fileSnapshots.find(s => s.file_path === activeFile);
+            if (snapshot) {
+              return (
+                <div className="w-1/2 border-l border-gray-200">
+                  <div className="h-full flex flex-col bg-white">
+                    <div className="flex items-center justify-between px-4 py-2 border-b border-gray-200 bg-gray-50">
+                      <div className="flex items-center gap-2">
+                        <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${
+                          snapshot.is_new ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
+                        }`}>
+                          {snapshot.is_new ? 'NEW' : 'EDIT'}
+                        </span>
+                        <span className="text-sm font-medium text-gray-700">{activeFile.split('/').pop()}</span>
+                        <span className="text-xs text-gray-400">{activeFile}</span>
+                      </div>
+                      <button
+                        onClick={() => setActiveFile(null)}
+                        className="p-1 hover:bg-gray-200 rounded"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
                     </div>
-                    <button
-                      onClick={() => setSelectedFile(null)}
-                      className="p-1 hover:bg-gray-200 rounded"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  </div>
-                  <div className="flex-1 overflow-hidden p-3">
-                    <DiffViewer
-                      oldContent={snapshot.old_content}
-                      newContent={snapshot.new_content}
-                      maxHeight={800}
-                    />
+                    <div className="flex-1 overflow-hidden p-3">
+                      <DiffViewer
+                        oldContent={snapshot.old_content}
+                        newContent={snapshot.new_content}
+                        maxHeight={800}
+                      />
+                    </div>
                   </div>
                 </div>
-              </div>
-            );
+              );
+            }
           }
+          
+          // Files 面板显示文件内容（可编辑）
           return (
             <div className="w-1/2 border-l border-gray-200">
               <FileViewer
-                filePath={selectedFile}
+                filePath={activeFile}
                 cwd={currentCwd || undefined}
-                onClose={() => setSelectedFile(null)}
+                onClose={() => setActiveFile(null)}
+                readOnly={rightTab === 'changes'}
               />
             </div>
           );

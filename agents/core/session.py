@@ -33,14 +33,6 @@ def atomic_write_json(path: Path, data: Any, indent: int = 2) -> None:
     atomic_write_text(path, json.dumps(data, indent=indent, default=str))
 
 
-def session_to_restore_dict(session: dict) -> dict:
-    """Extract the keys needed to restore a session from event log."""
-    return {
-        "events": session.get("events"),
-        "contextStore": session.get("contextStore"),
-    }
-
-
 # Global backend instance
 _backend: SessionBackend | None = None
 
@@ -143,6 +135,7 @@ class Session:
         
         self._log: list[dict[str, Any]] = []
         self._subscribers: set[Callable[[dict], None]] = set()
+        self._next_seq: int = 0  # 下一个事件的 seq（基于已加载的最大 seq + 1）
         
         # Surface 索引机制
         self._visible_seqs: list[int] = []  # 可见事件的索引
@@ -174,7 +167,7 @@ class Session:
     
     @property
     def seq(self) -> int:
-        return len(self._log)
+        return self._next_seq
     
     @property
     def events(self) -> tuple[dict[str, Any], ...]:
@@ -218,7 +211,8 @@ class Session:
                     pass
         else:
             # 聚合事件：持久化 + 推送
-            event["seq"] = len(self._log)
+            event["seq"] = self._next_seq
+            self._next_seq += 1
             self._log.append(event)
             
             # 新事件默认可见（events_hidden 本身不加入索引）
@@ -595,13 +589,22 @@ class Session:
         from .session_crash_recovery import validate_and_repair_events
         events = validate_and_repair_events(events, session_id)
         
-        # Validate seq continuity and load
-        expected_seq = 0
+        # Load all events, handling gaps and duplicates gracefully
+        # Group events by seq, keeping the first occurrence of each seq
+        events_by_seq: dict[int, dict] = {}
         for event in events:
-            if event.get("seq") != expected_seq:
-                break
-            session._log.append(event)
-            expected_seq += 1
+            seq = event.get("seq")
+            if seq is not None and seq not in events_by_seq:
+                events_by_seq[seq] = event
+        
+        # Load events in seq order
+        max_seq = -1
+        for seq in sorted(events_by_seq.keys()):
+            session._log.append(events_by_seq[seq])
+            max_seq = max(max_seq, seq)
+        
+        # Set _next_seq to max_seq + 1 to prevent duplicate seq numbers
+        session._next_seq = max_seq + 1
         
         # 重建 _visible_seqs
         hidden_seqs = set()
@@ -746,54 +749,7 @@ class Session:
             branches.append(self.current_branch.copy())
         return branches
     
-    def save(self) -> None:
-        """持久化到文件。"""
-        data = {
-            "id": self.id,
-            "parent_session": self.parent_session,
-            "origin": self.origin,
-            "agent_type": self.agent_type,
-            "summary": self.summary,
-            "entries": [e.to_dict() for e in self.entries.values()],
-            "current_branch": self.current_branch,
-            "children": {str(k): v for k, v in self.children.items()},
-        }
-        save_session(self.id, data)
-    
-    @classmethod
-    def load(cls, session_id: str) -> Session | None:
-        """从文件加载。
-        
-        Args:
-            session_id: Session ID
-        
-        Returns:
-            Session | None: Session 实例
-        """
-        data = load_session(session_id)
-        if data is None:
-            return None
-        
-        session = cls(
-            session_id=session_id,
-            parent_session=data.get("parent_session"),
-            origin=data.get("origin"),
-            agent_type=data.get("agent_type"),
-        )
-        session.summary = data.get("summary")
-        
-        for entry_data in data.get("entries", []):
-            entry = SessionEntry.from_dict(entry_data)
-            session.entries[entry.id] = entry
-        
-        session.current_branch = data.get("current_branch", [])
-        
-        children_data = data.get("children", {})
-        for parent_id, child_ids in children_data.items():
-            key = None if parent_id == "null" else parent_id
-            session.children[key] = child_ids
-        
-        return session
+
     
     def compact(self, summary: str) -> None:
         """压缩会话，保留摘要。
@@ -842,9 +798,7 @@ def get_project_session_dir() -> Path:
     return d
 
 
-def save_session(session_id: str, data: dict[str, Any]) -> None:
-    """已废弃：session 现在通过事件日志存储，不需要单独保存 JSON 文件"""
-    pass
+
 
 
 def save_folded_session_memory(session_id: str, record: dict[str, Any]) -> None:
@@ -855,9 +809,7 @@ def save_folded_session_memory(session_id: str, record: dict[str, Any]) -> None:
     atomic_write_json(d / f"{session_id}.folded-memory.latest.json", record)
 
 
-def load_session(session_id: str) -> dict[str, Any] | None:
-    """已废弃：session 现在通过事件日志存储，不需要单独加载 JSON 文件"""
-    return None
+
 
 
 def list_sessions() -> list[dict[str, Any]]:
@@ -1010,109 +962,4 @@ def get_latest_session_id() -> str | None:
     return sessions[0].get("id")
 
 
-# ─── Branch Summary (Phase 3.2) ───────────────────────────────────────────────
 
-
-def generate_branch_summary(
-    entries: list[dict[str, Any]],
-    common_ancestor_id: str | None = None,
-) -> dict[str, Any]:
-    """生成分支摘要，保留离开分支时的经验。
-
-    Args:
-        entries: 当前分支的对话条目列表
-        common_ancestor_id: 共同祖先的 entry id（摘要到此为止）
-
-    Returns:
-        branch_summary 条目，包含摘要信息
-    """
-    entries_to_summarize = []
-    for entry in entries:
-        if entry.get("id") == common_ancestor_id:
-            break
-        entries_to_summarize.append(entry)
-
-    # 提取关键信息
-    user_messages = []
-    assistant_messages = []
-    tool_calls = []
-
-    for entry in entries_to_summarize:
-        role = entry.get("role", "")
-        content = entry.get("content", "")
-        if role == "user":
-            user_messages.append(content[:200] if isinstance(content, str) else str(content)[:200])
-        elif role == "assistant":
-            assistant_messages.append(content[:200] if isinstance(content, str) else str(content)[:200])
-
-        # 提取工具调用
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "tool_use":
-                    tool_calls.append({
-                        "name": block.get("name", ""),
-                        "input": str(block.get("input", ""))[:100],
-                    })
-
-    summary = {
-        "type": "branch_summary",
-        "timestamp": time.time(),
-        "from_id": entries[0].get("id") if entries else None,
-        "to_id": common_ancestor_id,
-        "summary": {
-            "user_turns": len(user_messages),
-            "assistant_turns": len(assistant_messages),
-            "tool_calls": len(tool_calls),
-            "key_user_requests": user_messages[:3],  # 前 3 个用户请求
-            "key_actions": assistant_messages[:3],    # 前 3 个助手回复
-            "tools_used": list({tc["name"] for tc in tool_calls})[:10],  # 去重后的工具列表
-        },
-    }
-
-    return summary
-
-
-def save_branch_summary(session_id: str, branch_summary: dict[str, Any]) -> None:
-    """保存分支摘要到会话文件。"""
-    data = load_session(session_id)
-    if data is None:
-        return
-
-    if "branch_summaries" not in data:
-        data["branch_summaries"] = []
-
-    data["branch_summaries"].append(branch_summary)
-    save_session(session_id, data)
-
-
-def load_branch_summaries(session_id: str) -> list[dict[str, Any]]:
-    """加载会话的分支摘要列表。"""
-    data = load_session(session_id)
-    if data is None:
-        return []
-    return data.get("branch_summaries", [])
-
-
-def format_branch_summary_for_injection(summaries: list[dict[str, Any]]) -> str:
-    """格式化分支摘要，用于注入到新分支的上下文。"""
-    if not summaries:
-        return ""
-
-    parts = ["<branch-history>"]
-    parts.append("Previous branch activity (for context):")
-
-    for i, s in enumerate(summaries[-3:]):  # 最近 3 个分支摘要
-        summary = s.get("summary", {})
-        parts.append(f"\n[Branch {i+1}]")
-        parts.append(f"- User requests: {summary.get('user_turns', 0)} turns")
-        parts.append(f"- Actions taken: {summary.get('assistant_turns', 0)} turns")
-        parts.append(f"- Tools used: {', '.join(summary.get('tools_used', [])[:5])}")
-
-        key_requests = summary.get("key_user_requests", [])
-        if key_requests:
-            parts.append(f"- Key requests: {key_requests[0][:100]}...")
-
-    parts.append("\nUse this history to maintain continuity with previous branch work.")
-    parts.append("</branch-history>")
-
-    return "\n".join(parts)

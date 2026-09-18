@@ -56,14 +56,14 @@ class PermissionGate:
     def set_current_tool_name(self, name: str) -> None:
         self._current_tool_name = name
 
-    async def confirm(self, command: str) -> bool:
+    async def confirm(self, command: str, extra_data: dict | None = None) -> bool:
         print_confirmation(command)
 
         if self._confirm_fn:
             return await self._confirm_fn(command)
 
         if self._session is not None:
-            return await self._confirm_via_session(command)
+            return await self._confirm_via_session(command, extra_data=extra_data)
 
         try:
             answer = input("  Allow? (y/n): ")
@@ -71,16 +71,19 @@ class PermissionGate:
         except EOFError:
             return False
 
-    async def _confirm_via_session(self, command: str) -> bool:
+    async def _confirm_via_session(self, command: str, extra_data: dict | None = None) -> bool:
         request_id = str(uuid.uuid4())[:8]
 
-        self._session.append("permission/request", {
+        event_data = {
             "rpc_id": request_id,
             "request_id": request_id,
             "command": command,
             "tool_name": self._current_tool_name,
             "sub_agent_id": self._sub_agent_id,
-        })
+        }
+        if extra_data:
+            event_data.update(extra_data)
+        self._session.append("permission/request", event_data)
 
         for _ in range(3000):
             await asyncio.sleep(0.1)

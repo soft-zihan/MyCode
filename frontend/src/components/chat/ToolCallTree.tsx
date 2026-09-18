@@ -1,5 +1,5 @@
 import type { ToolCallEvent } from '../../hooks';
-import { ToolRow } from './ToolRow';
+import { ToolCardRouter } from './ToolCards';
 import { ContextToolGroup, isContextTool } from './ContextToolGroup';
 
 interface ToolCallTreeProps {
@@ -13,14 +13,12 @@ export const ToolCallTree: React.FC<ToolCallTreeProps> = ({
   maxDisplay = 10,
   isStreaming = false 
 }) => {
-  // Convert to array
   const callsArray = Array.isArray(calls) 
     ? calls
     : Array.from(calls.values());
 
   if (callsArray.length === 0) return null;
 
-  // Group consecutive context tools together
   const groups: Array<{ type: 'context' | 'tool'; items: ToolCallEvent[] }> = [];
   let currentContextGroup: ToolCallEvent[] = [];
 
@@ -28,7 +26,6 @@ export const ToolCallTree: React.FC<ToolCallTreeProps> = ({
     if (isContextTool(call.name)) {
       currentContextGroup.push(call);
     } else {
-      // Flush context group if exists
       if (currentContextGroup.length > 0) {
         groups.push({ type: 'context', items: currentContextGroup });
         currentContextGroup = [];
@@ -37,12 +34,10 @@ export const ToolCallTree: React.FC<ToolCallTreeProps> = ({
     }
   }
 
-  // Flush remaining context group
   if (currentContextGroup.length > 0) {
     groups.push({ type: 'context', items: currentContextGroup });
   }
 
-  // Limit display if needed
   const totalItems = groups.length;
   const displayGroups = maxDisplay && totalItems > maxDisplay 
     ? groups.slice(-maxDisplay) 
@@ -67,7 +62,7 @@ export const ToolCallTree: React.FC<ToolCallTreeProps> = ({
           );
         } else {
           return group.items.map(call => (
-            <ToolRow key={call.call_id} call={call} />
+            <ToolCardRouter key={call.call_id} call={call} />
           ));
         }
       })}

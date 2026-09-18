@@ -15,7 +15,7 @@ from pathlib import Path
 from dotenv import find_dotenv, load_dotenv
 
 from .agent import Agent
-from .core.session import get_latest_session_id, load_session
+from .core.session import get_latest_session_id, Session
 from .tools import set_background_done_callback
 from .logging import print_info, print_error, print_warning
 from .cli import registry as cli_registry, handle_skill_invocation
@@ -477,10 +477,9 @@ Options:
         session_to_resume = get_latest_session_id()
 
     if session_to_resume:
-        session = load_session(session_to_resume)
+        session = Session.load_from_events(session_to_resume)
         if session:
-            from agents.core.session import session_to_restore_dict
-            restore_data = session_to_restore_dict(session)
+            restore_data = {"events": list(session.events)}
             if args.fork:
                 agent.restore_session(restore_data)
                 agent.fork_session()

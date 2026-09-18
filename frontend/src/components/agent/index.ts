@@ -2,6 +2,7 @@ export { ContextMeter } from './ContextMeter';
 export type { ContextInfo } from './ContextMeter';
 export { PermissionDialog } from './PermissionDialog';
 export type { PermissionRequest } from './PermissionDialog';
+export { PlanApprovalDialog } from './PlanApprovalDialog';
 export { StatsBar } from './StatsBar';
 export type { AgentStats } from './StatsBar';
 export { ToolCallTree } from './ToolCallTree';

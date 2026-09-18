@@ -609,70 +609,6 @@ def append_tasks_to_plan(slug: str, tasks_content: str) -> None:
     _git_commit(f"plan({slug}): append tasks")
 
 
-# ── Task Review Loop (v2.0) ──
-
-async def execute_task_with_review(
-    slug: str,
-    task_id: int,
-    task_description: str,
-    task_file: str = "",
-    task_acceptance: str = "",
-    max_rounds: int = 5,
-) -> dict:
-    """执行 task 并审查。代码级编排，不靠 Agent 自觉。"""
-    import asyncio
-    from datetime import datetime, timezone
-    
-    plan_dir = get_plans_dir() / slug
-    
-    for round_num in range(1, max_rounds + 1):
-        # 记录开始时间
-        started = datetime.now(timezone.utc).isoformat()
-        
-        # 1. 记录 BASE commit（当前 HEAD）
-        base_commit = _get_current_commit(plan_dir)
-        
-        # 2. 启动 implementer 子 Agent（type="general"）
-        # 这里简化处理，实际应该调用 subagent 执行
-        impl_result = {
-            "status": "done",
-            "commit": base_commit,  # 实际应该由 implementer 产生新 commit
-        }
-        
-        # 3. Implementer 完成后，自动 commit
-        head_commit = _get_current_commit(plan_dir)
-        if head_commit != base_commit:
-            _auto_commit(plan_dir, f"task({task_id}): {task_description}", round_num)
-            head_commit = _get_current_commit(plan_dir)
-        
-        # 4. 启动 reviewer 子 Agent（type="reviewer"）
-        # 这里简化处理，实际应该调用 subagent 执行
-        review_result = {
-            "passed": True,
-            "fix_list": [],
-            "verification": {"command": task_acceptance, "exit_code": 0, "output_snippet": "OK"},
-            "summary": "Task passed review",
-        }
-        
-        # 5. 记录到 ledger
-        finished = datetime.now(timezone.utc).isoformat()
-        ledger_entry = {
-            "task_id": task_id,
-            "status": "done" if review_result["passed"] else "failed",
-            "started": started,
-            "finished": finished,
-            "commit": head_commit if review_result["passed"] else "",
-            "review_rounds": round_num,
-            "verification": review_result.get("verification", {}),
-        }
-        append_ledger(slug, ledger_entry)
-        
-        if review_result["passed"]:
-            return {"status": "done", "rounds": round_num, "commit": head_commit}
-    
-    # 5 轮失败，返回 failed
-    return {"status": "failed", "rounds": max_rounds}
-
 
 def _get_current_commit(plan_dir: Path) -> str:
     """获取当前 HEAD commit hash。"""
@@ -729,120 +665,112 @@ def _auto_commit(plan_dir: Path, message: str, round_num: int = 1) -> None:
         pass
 
 
-# ── Converge (v2.0) ──
-
-async def converge(slug: str) -> dict:
-    """所有 task 完成后，检查 spec 覆盖度。"""
+def _update_task_status_in_file(slug: str, task_id: int, status: str) -> bool:
+    """更新 tasks.md 中指定 task 的状态。"""
     plan_dir = get_plans_dir() / slug
-    
-    # 1. 加载工件
-    spec_path = plan_dir / "spec.md"
     tasks_path = plan_dir / "tasks.md"
+    if not tasks_path.exists():
+        return False
     
-    spec = spec_path.read_text() if spec_path.exists() else ""
-    tasks = tasks_path.read_text() if tasks_path.exists() else ""
+    content = tasks_path.read_text()
     
-    # 2. 构建意图清单（从 spec 提取验收标准）
-    # 这里简化处理，实际应该解析 spec 中的验收标准
-    intent_inventory = []
+    status_icon = {"pending": "[ ]", "in-progress": "[~]", "done": "[x]", "failed": "[!]"}.get(status, "[ ]")
     
-    # 3. 评估代码（主 Agent 执行 read_file + grep_search）
-    # 这里简化处理，实际应该启动 explore 子 Agent 执行
-    findings = []
+    pattern = rf"(### Task {task_id}:.*?\n(?:.*?\n)*?)\*\*状态\*\*:\s*\[[ x~!]\]\s*\w+"
+    replacement = rf"\1**状态**: {status_icon} {status}"
+    new_content = re.sub(pattern, replacement, content, flags=re.DOTALL)
     
-    # 4. 分类 + 分配严重度
-    classified_findings = []
-    
-    # 5. 输出 Findings 表
-    if classified_findings:
-        # 追加 convergence tasks 到 tasks.md
-        # 这里简化处理
-        return {"status": "tasks_appended", "findings": classified_findings}
-    else:
-        return {"status": "converged", "findings": []}
+    if new_content != content:
+        tasks_path.write_text(new_content)
+        _git_commit(f"plan({slug}): update task {task_id} status to {status}")
+        return True
+    return False
 
 
-# ── Whole-Plan Review (v2.0) ──
+# ── Plan State Management (v2.0) ──
+# 纯状态管理，零 LLM 调用。主 Agent 自己执行 task，调用这些函数更新状态。
 
-async def whole_plan_review(slug: str) -> dict:
-    """所有 task 完成后，整体 review。"""
-    plan_dir = get_plans_dir() / slug
+def start_plan_execution(slug: str) -> dict:
+    """标记 plan 开始执行，返回待执行 task 列表。
     
-    # 1. 从 _meta.md 读取 merge_base
-    meta_path = plan_dir / "_meta.md"
-    merge_base = ""
-    if meta_path.exists():
-        content = meta_path.read_text()
-        for line in content.split("\n"):
-            if line.startswith("merge_base:"):
-                merge_base = line.split(":")[1].strip()
-                break
+    纯状态管理，不包含任何 LLM 调用。
+    主 Agent 调用此函数后，自己逐个执行 task。
+    """
+    update_plan_status(slug, PlanStatus.IN_PROGRESS)
     
-    head = _get_current_commit(plan_dir)
-    
-    # 2. 启动 whole-plan reviewer（type="reviewer"）
-    # 这里简化处理，实际应该调用 subagent 执行
-    review_result = {
-        "has_findings": False,
-        "findings": [],
-        "assessment": "Ready to merge",
-    }
-    
-    return review_result
-
-
-# ── Execute Plan (v2.0) ──
-
-async def execute_plan(slug: str, converge_round: int = 0, max_converge_rounds: int = 3) -> dict:
-    """执行 plan 的完整流程。"""
-    
-    # 阶段 1：逐个执行 task（带 review loop）
     tasks = get_structured_tasks(slug)
-    for task in tasks:
-        if task.status == "pending":
-            result = await execute_task_with_review(
-                slug,
-                task.id,
-                task.title,
-                task.file,
-                task.acceptance,
-            )
-            
-            if result["status"] == "failed":
-                # 5 轮失败，ask_user 后决定是否继续
-                return {"status": "paused", "reason": "task_failed", "task_id": task.id}
+    pending_tasks = [t for t in tasks if t.status == "pending"]
     
-    # 阶段 2：所有 task 完成，自动触发 Converge
-    converge_result = await converge(slug)
-    
-    if converge_result["status"] == "tasks_appended":
-        # 发现 gaps，追加了 convergence tasks
-        converge_round += 1
-        
-        if converge_round >= max_converge_rounds:
-            # 超过最大轮数，标记 converge_exhausted
-            update_plan_status(slug, PlanStatus.CONVERGE_EXHAUSTED)
-            return {
-                "status": "paused",
-                "reason": "converge_exhausted",
-                "message": f"Converge 已执行 {max_converge_rounds} 轮仍有 gaps，请人工检查。"
+    return {
+        "slug": slug,
+        "status": "in-progress",
+        "total_tasks": len(tasks),
+        "pending_tasks": len(pending_tasks),
+        "tasks": [
+            {
+                "id": t.id,
+                "title": t.title,
+                "file": t.file,
+                "acceptance": t.acceptance,
+                "status": t.status,
             }
-        
-        # 自动回到阶段 1，继续执行新追加的 tasks
-        return await execute_plan(slug, converge_round, max_converge_rounds)
+            for t in pending_tasks
+        ],
+    }
+
+
+def mark_task_in_progress(slug: str, task_id: int) -> bool:
+    """标记 task 为执行中。主 Agent 开始执行 task 前调用。"""
+    return _update_task_status_in_file(slug, task_id, "in-progress")
+
+
+def mark_task_done(slug: str, task_id: int, commit: str = "", verification: dict | None = None) -> bool:
+    """标记 task 为完成。主 Agent 执行完 task 后调用。
     
-    # 阶段 3：Converge 通过（converged），触发 Whole-Plan Review
-    review_result = await whole_plan_review(slug)
+    Args:
+        slug: Plan slug
+        task_id: Task ID
+        commit: 完成时的 git commit hash
+        verification: 验证结果 {"command": "...", "exit_code": N, "output_snippet": "..."}
+    """
+    from datetime import datetime, timezone
     
-    if review_result["has_findings"]:
-        # 有 findings，派发 fix subagent 修复
-        # 这里简化处理
-        pass
+    ledger_entry = {
+        "task_id": task_id,
+        "status": "done",
+        "started": "",  # 主 Agent 可以记录实际开始时间
+        "finished": datetime.now(timezone.utc).isoformat(),
+        "commit": commit,
+        "review_rounds": 1,
+        "verification": verification or {},
+    }
+    append_ledger(slug, ledger_entry)
     
-    # 阶段 4：Review 通过，标记为 ready_to_archive
-    update_plan_status(slug, PlanStatus.READY_TO_ARCHIVE)
+    return _update_task_status_in_file(slug, task_id, "done")
+
+
+def mark_task_failed(slug: str, task_id: int, reason: str = "") -> bool:
+    """标记 task 为失败。主 Agent 执行失败时调用。"""
+    from datetime import datetime, timezone
     
-    return {"status": "completed", "ready_to_archive": True}
+    ledger_entry = {
+        "task_id": task_id,
+        "status": "failed",
+        "started": "",
+        "finished": datetime.now(timezone.utc).isoformat(),
+        "commit": "",
+        "review_rounds": 1,
+        "verification": {},
+        "failure_reason": reason,
+    }
+    append_ledger(slug, ledger_entry)
+    
+    return _update_task_status_in_file(slug, task_id, "failed")
+
+
+def complete_plan(slug: str) -> bool:
+    """标记 plan 为完成（ready_to_archive）。主 Agent 所有 task 完成后调用。"""
+    return update_plan_status(slug, PlanStatus.READY_TO_ARCHIVE)
 
 
 # ── Complex Commands (v2.0) ──

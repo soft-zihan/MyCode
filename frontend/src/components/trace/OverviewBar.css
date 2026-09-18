@@ -1,0 +1,109 @@
+.overview-bar-container {
+  position: relative;
+  padding: 8px 16px;
+  background: #fafafa;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.overview-bar {
+  position: relative;
+  height: 24px;
+  background: #f3f4f6;
+  border-radius: 4px;
+  cursor: pointer;
+  overflow: hidden;
+  user-select: none;
+}
+
+.overview-bar-marker {
+  position: absolute;
+  top: 4px;
+  width: 2px;
+  height: 16px;
+  border-radius: 1px;
+  opacity: 0.6;
+  transition: opacity 0.1s, height 0.1s;
+  transform: translateX(-50%);
+}
+
+.overview-bar-marker.hovered {
+  opacity: 1;
+  height: 20px;
+  top: 2px;
+}
+
+.overview-bar-marker.current {
+  opacity: 1;
+  height: 20px;
+  top: 2px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.2);
+}
+
+.overview-bar-playhead {
+  position: absolute;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  background: #3b82f6;
+  transform: translateX(-50%);
+  pointer-events: none;
+  box-shadow: 0 0 4px rgba(59, 130, 246, 0.5);
+}
+
+.overview-bar-hover {
+  position: absolute;
+  top: 0;
+  width: 1px;
+  height: 100%;
+  background: #6b7280;
+  transform: translateX(-50%);
+  pointer-events: none;
+  opacity: 0.5;
+}
+
+.overview-bar-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+  font-size: 10px;
+  color: #6b7280;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.overview-bar-tooltip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: #1f2937;
+  color: white;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 10;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.overview-bar-tooltip::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 4px solid transparent;
+  border-top-color: #1f2937;
+}
+
+.overview-bar-tooltip-type {
+  font-weight: 500;
+  text-transform: capitalize;
+}
+
+.overview-bar-tooltip-time {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: #9ca3af;
+}

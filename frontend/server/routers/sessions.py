@@ -12,7 +12,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from agents.core.session import list_sessions, list_child_sessions, load_session, save_session, delete_session
+from agents.core.session import list_sessions, list_child_sessions, delete_session
 
 router = APIRouter(tags=["sessions"])
 
@@ -282,8 +282,10 @@ async def api_abort_session(session_id: str) -> dict[str, Any]:
 
 @router.post("/api/sessions/{session_id}/compact")
 async def api_compact_session(session_id: str) -> dict[str, Any]:
-    session_data = load_session(session_id)
-    if session_data is None:
+    from agents.core.session import get_session_backend
+    backend = get_session_backend()
+    events = backend.load_all_events(session_id)
+    if not events:
         raise HTTPException(status_code=404, detail="Session not found")
     
     session_info = _active_sessions.get(session_id)
@@ -317,69 +319,37 @@ async def api_compact_session(session_id: str) -> dict[str, Any]:
 async def api_truncate_session(session_id: str, data: TruncateRequest) -> dict[str, Any]:
     """原子 Truncate：保留前 N 条用户消息
     
-    同时更新 events（事件日志）和 openaiMessages（向后兼容）。
+    直接使用 JsonlSessionBackend 操作事件日志。
     """
     print(f"[TRUNCATE] session_id={session_id}, keep_user_messages={data.keep_user_messages}")
     
-    session_data = load_session(session_id)
-    if session_data is None:
+    from agents.core.session_backend_jsonl import JsonlSessionBackend
+    backend = JsonlSessionBackend()
+    
+    events = backend.load_all_events(session_id)
+    if not events:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    # 1. 截断 events（事件日志）
-    events = session_data.get("events", [])
     print(f"[TRUNCATE] before: {len(events)} events")
     
     user_count = 0
-    truncate_at = len(events)
+    truncate_at_seq = None
     
-    for i, event in enumerate(events):
+    for event in events:
         if event.get("type") == "user_message":
             if user_count >= data.keep_user_messages:
-                truncate_at = i
+                truncate_at_seq = event.get("seq")
                 break
             user_count += 1
     
-    print(f"[TRUNCATE] truncate events at={truncate_at}")
-    session_data["events"] = events[:truncate_at]
+    if truncate_at_seq is None:
+        print(f"[TRUNCATE] no truncation needed, keep all {user_count} user messages")
+        return {"success": True, "message": f"Truncated to {data.keep_user_messages} user messages"}
     
-    # 2. 截断 openaiMessages（向后兼容）
-    openai_messages = session_data.get("openaiMessages", [])
-    print(f"[TRUNCATE] before: {len(openai_messages)} openaiMessages")
-    for i, msg in enumerate(openai_messages):
-        if msg.get("role") == "user":
-            content = msg.get("content", "")[:30]
-            print(f"[TRUNCATE]   [{i}] user: {content}...")
+    print(f"[TRUNCATE] truncate at seq={truncate_at_seq}")
+    backend.truncate(session_id, truncate_at_seq)
+    print(f"[TRUNCATE] truncated events.jsonl")
     
-    user_count = 0
-    truncate_at = len(openai_messages)
-    
-    for i, msg in enumerate(openai_messages):
-        if msg.get("role") == "user":
-            if user_count >= data.keep_user_messages:
-                truncate_at = i
-                break
-            user_count += 1
-    
-    print(f"[TRUNCATE] truncate openaiMessages at={truncate_at}")
-    session_data["openaiMessages"] = openai_messages[:truncate_at]
-    
-    # 3. 清理 turnBoundaries
-    turn_boundaries = session_data.get("turnBoundaries", [])
-    session_data["turnBoundaries"] = [
-        b for b in turn_boundaries 
-        if b.get("message_count", 0) <= len(session_data["openaiMessages"])
-    ]
-    
-    save_session(session_id, session_data)
-    print(f"[TRUNCATE] after: {len(session_data['events'])} events, {len(session_data['openaiMessages'])} openaiMessages")
-    
-    # 3.5 同步更新 events.jsonl 文件
-    from agents.core.session_backend_jsonl import JsonlSessionBackend
-    backend = JsonlSessionBackend()
-    backend.truncate(session_id, truncate_at)
-    print(f"[TRUNCATE] truncated events.jsonl at seq={truncate_at}")
-    
-    # 4. 同步更新内存中的 session（如果活跃）
     session_info = _active_sessions.get(session_id)
     if session_info and session_info.get("svc"):
         svc = session_info["svc"]
@@ -400,12 +370,16 @@ async def api_truncate_session(session_id: str, data: TruncateRequest) -> dict[s
 @router.post("/api/sessions/{session_id}/rewind")
 async def api_rewind_session(session_id: str, data: RewindRequest) -> dict[str, Any]:
     print(f"[REWIND] session_id={session_id}, turns={data.turns}")
-    session_data = load_session(session_id)
-    if session_data is None:
+    
+    from agents.core.session_backend_jsonl import JsonlSessionBackend
+    backend = JsonlSessionBackend()
+    
+    events = backend.load_all_events(session_id)
+    if not events:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    turn_boundaries = session_data.get("turnBoundaries", [])
-    print(f"[REWIND] turnBoundaries: {turn_boundaries}")
+    turn_boundaries = [e for e in events if e.get("type") == "turn_boundary"]
+    print(f"[REWIND] turnBoundaries: {len(turn_boundaries)}")
     
     if not turn_boundaries:
         return {"success": False, "message": "No turn boundaries found"}
@@ -422,21 +396,31 @@ async def api_rewind_session(session_id: str, data: RewindRequest) -> dict[str, 
     if not target_boundary:
         return {"success": False, "message": "Target turn not found"}
     
-    message_count = target_boundary.get("message_count", 0)
-    messages = session_data.get("openaiMessages", [])
-    print(f"[REWIND] target_turn={target_turn}, message_count={message_count}, before={len(messages)}")
-    session_data["openaiMessages"] = messages[:message_count]
+    truncate_at_seq = target_boundary.get("seq")
+    print(f"[REWIND] target_turn={target_turn}, truncate_at_seq={truncate_at_seq}")
+    backend.truncate(session_id, truncate_at_seq)
     
-    checkpoint_count = target_boundary.get("checkpoint_count", 0)
-    checkpoint_store = session_data.get("checkpointStore", {})
-    snapshots = checkpoint_store.get("snapshots", [])
-    checkpoint_store["snapshots"] = snapshots[:checkpoint_count]
-    session_data["checkpointStore"] = checkpoint_store
+    session_info = _active_sessions.get(session_id)
+    if session_info and session_info.get("svc"):
+        svc = session_info["svc"]
+        messages = svc.get_messages()
+        user_count = 0
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "user":
+                user_count += 1
+        target_user_count = target_boundary.get("user_message_count", 0)
+        if target_user_count < user_count:
+            truncate_at = len(messages)
+            user_count = 0
+            for i, msg in enumerate(messages):
+                if msg.get("role") == "user":
+                    if user_count >= target_user_count:
+                        truncate_at = i
+                        break
+                    user_count += 1
+            svc.truncate_messages_to(truncate_at)
     
-    session_data["turnBoundaries"] = [b for b in turn_boundaries if b.get("turn") <= target_turn]
-    
-    save_session(session_id, session_data)
-    print(f"[REWIND] after: {len(session_data['openaiMessages'])} messages")
+    print(f"[REWIND] truncated to turn {target_turn}")
     return {
         "success": True, 
         "message": f"Rewound to turn {target_turn}",
@@ -498,6 +482,17 @@ async def api_revert_commit(session_id: str, data: RevertCommitRequest) -> dict[
     return {"success": False, "message": "Session not active"}
 
 
+@router.get("/api/sessions/{session_id}/permission-mode")
+async def api_get_permission_mode(session_id: str) -> dict[str, Any]:
+    session_info = _active_sessions.get(session_id)
+    if session_info and session_info.get("svc"):
+        svc = session_info["svc"]
+        mode = getattr(svc, 'permission_mode', 'default')
+        return {"permission_mode": mode}
+    
+    return {"permission_mode": "default"}
+
+
 @router.put("/api/sessions/{session_id}/permission-mode")
 async def api_update_permission_mode(session_id: str, data: PermissionModeRequest) -> dict[str, Any]:
     session_info = _active_sessions.get(session_id)
@@ -506,13 +501,124 @@ async def api_update_permission_mode(session_id: str, data: PermissionModeReques
         svc.set_permission_mode(data.mode)
         return {"success": True, "permission_mode": data.mode}
     
-    session_data = load_session(session_id)
-    if session_data:
-        session_data["permissionMode"] = data.mode
-        save_session(session_id, session_data)
-        return {"success": True, "permission_mode": data.mode}
+    return {"success": False, "message": "Session not active"}
+
+
+@router.get("/api/sessions/{session_id}/token-breakdown")
+async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
+    """获取 token 三段分解：system/tools/messages
     
-    return {"success": False, "message": "Session not found"}
+    返回字符数（前端可用于计算比例），以及估算的 token 数（约 4 字符 = 1 token）
+    支持活跃和非活跃 session（从 JSONL 事件恢复）
+    """
+    session_info = _active_sessions.get(session_id)
+    
+    # Try active session first
+    if session_info and session_info.get("svc"):
+        svc = session_info["svc"]
+        agent = getattr(svc, '_agent', None)
+        if agent:
+            # System prompt
+            system_prompt = getattr(agent, '_system_prompt', '') or ''
+            system_chars = len(system_prompt)
+            
+            # Tools schema (JSON representation)
+            tools = getattr(agent, 'tools', [])
+            tools_schema = []
+            for tool in tools:
+                if not tool.get('deferred'):
+                    tools_schema.append({
+                        'name': tool.get('name', ''),
+                        'description': tool.get('description', ''),
+                        'parameters': tool.get('parameters', {}),
+                    })
+            tools_chars = len(json.dumps(tools_schema, ensure_ascii=False))
+            
+            # Messages
+            session = getattr(svc, 'session', None) or getattr(agent, 'session', None)
+            messages_chars = 0
+            if session:
+                messages = session.get_messages_for_llm()
+                for msg in messages:
+                    if msg.get('role') != 'system':
+                        content = msg.get('content', '')
+                        if isinstance(content, str):
+                            messages_chars += len(content)
+                        elif isinstance(content, list):
+                            for item in content:
+                                if isinstance(item, dict) and item.get('type') == 'text':
+                                    messages_chars += len(item.get('text', ''))
+            
+            return {
+                "system_chars": system_chars,
+                "tools_chars": tools_chars,
+                "messages_chars": messages_chars,
+                "system_tokens": system_chars // 4,
+                "tools_tokens": tools_chars // 4,
+                "messages_tokens": messages_chars // 4,
+            }
+    
+    # Fallback: compute from JSONL events for inactive sessions
+    from pathlib import Path
+    sessions_dir = Path.home() / ".mycode" / "sessions"
+    events_file = sessions_dir / f"{session_id}.events.jsonl"
+    
+    if not events_file.exists():
+        return {
+            "system_chars": 0,
+            "tools_chars": 0,
+            "messages_chars": 0,
+            "system_tokens": 0,
+            "tools_tokens": 0,
+            "messages_tokens": 0,
+        }
+    
+    # Parse events to reconstruct token breakdown
+    system_chars = 0
+    tools_chars = 0
+    messages_chars = 0
+    
+    with open(events_file) as f:
+        for line in f:
+            try:
+                event = json.loads(line.strip())
+                event_type = event.get("type", "")
+                
+                # Assistant message with tool calls -> tools
+                if event_type == "assistant_message":
+                    content = event.get("content", "")
+                    if content:
+                        messages_chars += len(content)
+                    # Tool calls embedded in assistant_message
+                    tool_calls = event.get("tool_calls", [])
+                    if tool_calls:
+                        for tc in tool_calls:
+                            func = tc.get("function", {})
+                            tools_chars += len(json.dumps(func.get("arguments", "{}"), ensure_ascii=False))
+                
+                # Tool results -> tools
+                elif event_type == "tool_result_msg":
+                    tools_chars += len(event.get("content", ""))
+                
+                # User messages -> messages
+                elif event_type == "user_message":
+                    messages_chars += len(event.get("content", ""))
+                
+            except (json.JSONDecodeError, Exception):
+                continue
+    
+    # Estimate: if no system_prompt event, assume a default system prompt size
+    if system_chars == 0:
+        system_chars = 2000  # reasonable default
+    
+    return {
+        "system_chars": system_chars,
+        "tools_chars": tools_chars,
+        "messages_chars": messages_chars,
+        "system_tokens": system_chars // 4,
+        "tools_tokens": tools_chars // 4,
+        "messages_tokens": messages_chars // 4,
+    }
 
 
 @router.post("/api/sessions/{session_id}/steer")
@@ -536,48 +642,38 @@ async def api_fork_session(session_id: str, data: Optional[ForkRequest] = None) 
     """
     print(f"[FORK] source session_id={session_id}, data={data}")
     
-    # 先尝试从session_manager获取session
     from agents.session_manager import get_session_manager
+    from agents.core.session import Session, get_session_backend, session_dir
+    
     sm = get_session_manager()
     agent = sm.get_agent(session_id)
     session = sm.get(session_id)
     
     if agent and session:
-        # Session在内存中，先保存
         print(f"[FORK] Session {session_id} found in memory, saving...")
         await agent.save()
     
-    session_data = load_session(session_id)
-    if session_data is None:
+    backend = get_session_backend()
+    events = backend.load_all_events(session_id)
+    if not events:
         raise HTTPException(status_code=404, detail="Session not found")
     
-    # 标题单一数据源：事件流投影（内存 session 优先，其次从事件日志重建）
     original_title = None
     if session is not None:
         original_title = session.projections.get("title")
     if not original_title:
-        from agents.core.session import Session
         loaded = Session.load_from_events(session_id)
         if loaded is not None:
             original_title = loaded.projections.get("title")
-    events = session_data.get("events", [])
     print(f"[FORK] original: title={original_title}, events={len(events)}")
     
     new_session_id = uuid.uuid4().hex[:8]
-    new_session_data = copy.deepcopy(session_data)
     
-    new_session_data["metadata"] = new_session_data.get("metadata", {}).copy()
-    new_session_data["metadata"]["id"] = new_session_id
-    new_session_data["metadata"]["startTime"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
-    
-    # 无标题时用 session_id 作为 base_name
     base_name = original_title or session_id
-    
     if "(fork " in base_name:
         base_name = base_name.rsplit("(fork ", 1)[0]
     
     all_sessions = list_sessions()
-    
     fork_num = 1
     while True:
         fork_name = f"{base_name}(fork {fork_num})"
@@ -588,97 +684,60 @@ async def api_fork_session(session_id: str, data: Optional[ForkRequest] = None) 
     
     print(f"[FORK] new: id={new_session_id}, name={fork_name}")
     
-    # 原子切割：根据 at_seq 或 keep_user_messages
+    truncated_events = list(events)
     if data and data.at_seq is not None:
-        # 模式 1：从指定 seq 切割
-        truncate_at = data.at_seq
-        print(f"[FORK] truncating events at seq={truncate_at}")
-        new_session_data["events"] = events[:truncate_at]
+        truncated_events = [e for e in events if e.get("seq", 0) < data.at_seq]
+        print(f"[FORK] truncating events at seq={data.at_seq}, kept={len(truncated_events)}")
     elif data and data.keep_user_messages is not None:
-        # 模式 2：保留前 N 条用户消息
         user_count = 0
-        truncate_at = len(events)
-        for i, event in enumerate(events):
+        keep_until = len(truncated_events)
+        for i, event in enumerate(truncated_events):
             if event.get("type") == "user_message":
                 user_count += 1
                 if user_count >= data.keep_user_messages:
-                    # 找到第N个user_message后，继续找下一个非user_message的位置
-                    for j in range(i + 1, len(events)):
-                        if events[j].get("type") == "user_message":
-                            truncate_at = j
+                    for j in range(i + 1, len(truncated_events)):
+                        if truncated_events[j].get("type") == "user_message":
+                            keep_until = j
                             break
                     else:
-                        # 没有更多user_message，保留到末尾
-                        truncate_at = len(events)
+                        keep_until = len(truncated_events)
                     break
-        print(f"[FORK] truncating events to keep {data.keep_user_messages} user messages, truncate_at={truncate_at}")
-        new_session_data["events"] = events[:truncate_at]
+        truncated_events = truncated_events[:keep_until]
+        print(f"[FORK] truncating events to keep {data.keep_user_messages} user messages, kept={len(truncated_events)}")
     
-    # 标题走事件流：fork 名写入新会话事件日志（单一数据源，随事件重建）
-    fork_events = new_session_data.setdefault("events", [])
-    fork_events.append({
+    title_event = {
         "type": "session/title",
         "time": int(time.time() * 1000),
         "session_id": new_session_id,
         "title": fork_name,
-        "seq": len(fork_events),
-    })
+        "seq": len(truncated_events),
+    }
+    truncated_events.append(title_event)
     
-    # 同步更新 openaiMessages（向后兼容）
-    if "openaiMessages" in new_session_data:
-        openai_messages = new_session_data["openaiMessages"]
-        if data and data.keep_user_messages is not None:
-            user_count = 0
-            truncate_at = len(openai_messages)
-            for i, msg in enumerate(openai_messages):
-                if msg.get("role") == "user":
-                    if user_count >= data.keep_user_messages:
-                        truncate_at = i
-                        break
-                    user_count += 1
-            new_session_data["openaiMessages"] = openai_messages[:truncate_at]
+    from agents.core.session_backend_jsonl import JsonlSessionBackend
+    new_backend = JsonlSessionBackend()
+    for event in truncated_events:
+        new_backend.append(new_session_id, event)
+    print(f"[FORK] wrote {len(truncated_events)} events to {new_session_id}")
     
-    save_session(new_session_id, new_session_data)
-    
-    # 复制 events.jsonl 文件
-    try:
-        from agents.core.session import session_dir
-        import shutil
-        source_events = session_dir() / f"{session_id}.events.jsonl"
-        if source_events.exists():
-            target_events = session_dir() / f"{new_session_id}.events.jsonl"
-            # 读取并截断events
-            truncated_events = new_session_data.get("events", [])
-            with target_events.open("w", encoding="utf-8") as f:
-                import json
-                for event in truncated_events:
-                    f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
-            print(f"[FORK] copied events: {source_events} -> {target_events} ({len(truncated_events)} events)")
-    except Exception as e:
-        print(f"[FORK] failed to copy events: {e}")
-    
-    # 为新会话构建投影 checkpoint（list_sessions 侧栏立即可见 fork 标题）
     try:
         from agents.core.session_projection_cache import (
-            ProjectionCheckpoint,
-            CheckpointRow,
-            get_projection_cache,
-            get_projection_registry,
             restore_projections,
             SessionHeader,
             FORMAT_VERSION,
         )
-        fork_events = new_session_data.get("events", [])
-        new_metadata = new_session_data.get("metadata", {})
+        cwd = session.projections.get("cwd") if session else None
+        if not cwd and loaded is not None:
+            cwd = loaded.projections.get("cwd")
         header = SessionHeader(
             id=new_session_id,
             version=FORMAT_VERSION,
-            created_at=new_metadata.get("created_at", int(time.time() * 1000)),
-            cwd=new_metadata.get("cwd"),
-            is_seeded=new_metadata.get("is_seeded", False),
-            inherited_event_count=new_metadata.get("inherited_event_count", 0),
+            created_at=int(time.time() * 1000),
+            cwd=cwd,
+            is_seeded=False,
+            inherited_event_count=len(truncated_events),
         )
-        projections = restore_projections(new_session_id, fork_events, header)
+        projections = restore_projections(new_session_id, truncated_events, header)
         print(f"[FORK] projcache built for {new_session_id}: title={projections.get('title')}")
     except Exception as e:
         print(f"[FORK] failed to build projcache: {e}")
@@ -720,6 +779,24 @@ async def api_permission_response(session_id: str, data: PermissionResponseReque
     return {"success": False, "message": "Session not active"}
 
 
+class UpdatePlanRequest(BaseModel):
+    plan_file_path: str
+    content: str
+
+
+@router.post("/api/sessions/{session_id}/plan/update")
+async def api_plan_update(session_id: str, data: UpdatePlanRequest) -> dict[str, Any]:
+    """Update the plan file content."""
+    try:
+        plan_path = Path(data.plan_file_path)
+        if not plan_path.exists():
+            return {"success": False, "message": "Plan file not found"}
+        plan_path.write_text(data.content, encoding="utf-8")
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
 @router.get("/api/sessions/{session_id}/stats")
 def api_session_stats(session_id: str) -> dict[str, Any]:
     session_info = _active_sessions.get(session_id)
@@ -727,21 +804,46 @@ def api_session_stats(session_id: str) -> dict[str, Any]:
         svc = session_info["svc"]
         stats = svc.get_stats()
         agent = svc.agent
+        # Get cached tokens from agent if available
+        cached_tokens = getattr(agent, 'cached_tokens', 0)
         return {
             "input_tokens": stats.get("input", 0),
             "output_tokens": stats.get("output", 0),
+            "cached_tokens": cached_tokens,
             "context_window": agent.context_window,
             "effective_window": agent.effective_window,
             "last_input_token_count": agent.last_input_token_count,
         }
-    session_data = load_session(session_id)
-    if session_data:
+    # Check if session exists by checking events file
+    from pathlib import Path
+    sessions_dir = Path.home() / ".mycode" / "sessions"
+    events_file = sessions_dir / f"{session_id}.events.jsonl"
+    if events_file.exists():
+        # Try to get cached_tokens from last stats event
+        cached_tokens = 0
+        input_tokens = 0
+        output_tokens = 0
+        last_input_token_count = 0
+        context_window = 128000
+        with open(events_file) as f:
+            for line in f:
+                try:
+                    event = json.loads(line.strip())
+                    if event.get("type") == "stats":
+                        cached_tokens = event.get("cached_tokens", 0)
+                        input_tokens = event.get("input_tokens", 0)
+                        output_tokens = event.get("output_tokens", 0)
+                        last_input_token_count = event.get("last_input_token_count", 0)
+                        context_window = event.get("context_window", 128000)
+                except (json.JSONDecodeError, Exception):
+                    continue
         return {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "context_window": 128000,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cached_tokens": cached_tokens,
+            "context_window": context_window,
             "effective_window": 108000,
-            "last_input_token_count": 0,
+            "last_input_token_count": last_input_token_count,
         }
     raise HTTPException(status_code=404, detail="Session not found")
 
@@ -772,20 +874,62 @@ def api_compression_stats(session_id: str) -> dict[str, Any]:
             **stats,
             "folded_memories": folded_memories,
         }
-    session_data = load_session(session_id)
-    if session_data:
-        return {
-            "utilization": 0,
-            "token_count": 0,
-            "effective_window": 108800,
-            "context_window": 200000,
-            "l1_budget": {"triggered": 0, "tokens_saved": 0},
-            "l2_snip": {"triggered": 0, "tokens_saved": 0},
-            "l3_microcompact": {"triggered": 0, "tokens_saved": 0},
-            "l4_fold": {"triggered": 0, "last_fold_time": None},
-            "folded_memories": session_data.get("foldedSessionMemories", []),
-        }
-    raise HTTPException(status_code=404, detail="Session not found")
+    # Fallback: compute from JSONL events for inactive sessions
+    from pathlib import Path
+    sessions_dir = Path.home() / ".mycode" / "sessions"
+    events_file = sessions_dir / f"{session_id}.events.jsonl"
+
+    if not events_file.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Parse events to find last stats event and compression events
+    token_count = 0
+    context_window = 128000
+    effective_window = 108800
+    compression_events = []
+    folded_memories = []
+
+    with open(events_file) as f:
+        for line in f:
+            try:
+                event = json.loads(line.strip())
+                event_type = event.get("type", "")
+
+                if event_type == "stats":
+                    token_count = event.get("last_input_token_count", 0)
+                    context_window = event.get("context_window", 128000)
+                    effective_window = event.get("effective_window", 108800)
+                elif event_type == "compression":
+                    compression_events.append(event)
+                elif event_type == "fold":
+                    folded_memories.append({
+                        "time": event.get("time", ""),
+                        "trigger": event.get("trigger", "auto"),
+                        "episode": event.get("episode", ""),
+                        "working": event.get("working", ""),
+                    })
+            except (json.JSONDecodeError, Exception):
+                continue
+
+    utilization = token_count / effective_window if effective_window else 0
+
+    # Compute compression stats from events
+    l1_triggered = sum(1 for e in compression_events if e.get("level") == "l1_budget")
+    l2_triggered = sum(1 for e in compression_events if e.get("level") == "l2_snip")
+    l3_triggered = sum(1 for e in compression_events if e.get("level") == "l3_microcompact")
+    l4_triggered = sum(1 for e in compression_events if e.get("level") == "l4_fold")
+
+    return {
+        "utilization": round(utilization, 3),
+        "token_count": token_count,
+        "effective_window": effective_window,
+        "context_window": context_window,
+        "l1_budget": {"triggered": l1_triggered, "tokens_saved": 0},
+        "l2_snip": {"triggered": l2_triggered, "tokens_saved": 0},
+        "l3_microcompact": {"triggered": l3_triggered, "tokens_saved": 0},
+        "l4_fold": {"triggered": l4_triggered, "last_fold_time": None},
+        "folded_memories": folded_memories,
+    }
 
 
 @router.get("/api/sessions/{session_id}/context-store")
@@ -812,8 +956,11 @@ def api_context_store(session_id: str) -> dict[str, Any]:
             "total_raw_size": sum(e["content_size"] for e in entries),
             "active_entries": len([e for e in entries if e.get("type") == "tool_result_msg"]),
         }
-    session_data = load_session(session_id)
-    if session_data:
+    # Check if session exists by checking events file
+    from pathlib import Path
+    sessions_dir = Path.home() / ".mycode" / "sessions"
+    events_file = sessions_dir / f"{session_id}.events.jsonl"
+    if events_file.exists():
         return {
             "entries": [],
             "total_entries": 0,
@@ -821,6 +968,107 @@ def api_context_store(session_id: str) -> dict[str, Any]:
             "active_entries": 0,
         }
     raise HTTPException(status_code=404, detail="Session not found")
+
+
+@router.get("/api/sessions/{session_id}/file-changes")
+async def api_session_file_changes(session_id: str) -> dict[str, Any]:
+    """Get file changes for a session using git-based snapshots.
+    
+    Returns a list of file diffs between the first and last snapshot of the session.
+    Each file includes path, status (added/modified/deleted), old_content, new_content.
+    """
+    from agents.core.snapshot_service import SnapshotService
+    from agents.core.git_repository import GitRepositoryManager
+    
+    # Get session cwd from metadata or active session
+    cwd = None
+    session_info = _active_sessions.get(session_id)
+    if session_info and session_info.get("svc"):
+        svc = session_info["svc"]
+        agent = svc.agent
+        cwd = getattr(agent, 'workspace', None) or getattr(agent, 'cwd', None)
+    
+    if not cwd:
+        # Try to get cwd from session metadata
+        from agents.core.session import list_sessions
+        for s in list_sessions():
+            if s.get("id") == session_id:
+                cwd = s.get("cwd")
+                break
+    
+    if not cwd:
+        return {"files": [], "total": 0}
+    
+    snapshot_dir = Path.home() / ".mycode" / "snapshots"
+    snapshot_service = SnapshotService(cwd, snapshot_dir)
+    git_repo = GitRepositoryManager(cwd, snapshot_dir)
+    
+    try:
+        snapshots = await snapshot_service.list(session_id)
+        if not snapshots:
+            return {"files": [], "total": 0}
+        
+        # Get the first and last snapshot
+        first_snapshot = snapshots[-1]  # oldest
+        last_snapshot = snapshots[0]    # newest
+        
+        files = []
+        
+        if len(snapshots) == 1:
+            # Only one snapshot, diff against current state
+            inspection = await snapshot_service.inspect(first_snapshot.id)
+            first_manifest = await snapshot_service.get_manifest(first_snapshot.id)
+            
+            for f in inspection.files:
+                old_content = ""
+                new_content = ""
+                is_new = f.status == "added"
+                
+                # Get old content from first snapshot tree
+                if f.status in ("modified", "deleted"):
+                    old_content = await git_repo.get_file_content(first_manifest.tree_hash, f.path)
+                
+                # Get new content from current working tree
+                if f.status in ("added", "modified"):
+                    file_path = Path(cwd) / f.path
+                    if file_path.exists():
+                        new_content = file_path.read_text(encoding="utf-8", errors="replace")
+                
+                files.append({
+                    "file_path": f.path,
+                    "is_new": is_new,
+                    "old_content": old_content,
+                    "new_content": new_content,
+                })
+        else:
+            # Diff between first and last snapshot
+            diffs = await snapshot_service.diff(first_snapshot.id, last_snapshot.id)
+            first_manifest = await snapshot_service.get_manifest(first_snapshot.id)
+            last_manifest = await snapshot_service.get_manifest(last_snapshot.id)
+            
+            for f in diffs:
+                old_content = ""
+                new_content = ""
+                is_new = f.status == "added"
+                
+                # Get old content from first snapshot tree
+                if f.status in ("modified", "deleted"):
+                    old_content = await git_repo.get_file_content(first_manifest.tree_hash, f.path)
+                
+                # Get new content from last snapshot tree
+                if f.status in ("added", "modified"):
+                    new_content = await git_repo.get_file_content(last_manifest.tree_hash, f.path)
+                
+                files.append({
+                    "file_path": f.path,
+                    "is_new": is_new,
+                    "old_content": old_content,
+                    "new_content": new_content,
+                })
+        
+        return {"files": files, "total": len(files)}
+    except Exception as e:
+        return {"files": [], "total": 0, "error": str(e)}
 
 
 @router.get("/api/sessions/{session_id}/events")

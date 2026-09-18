@@ -18,6 +18,7 @@ class SessionManager:
         self._sessions: dict[str, Session] = {}
         self._agents: dict[str, Any] = {}
         self._chat_tasks: dict[str, asyncio.Task] = {}
+        self._restore_locks: dict[str, asyncio.Lock] = {}  # 每个 session 的 restore 锁
     
     def create(
         self,
@@ -68,90 +69,56 @@ class SessionManager:
         """Register a chat task for a session so it can be cancelled later."""
         self._chat_tasks[session_id] = task
     
-    def restore(self, session_id: str, cwd: str | None = None) -> tuple[Any, Session] | None:
+    async def restore(self, session_id: str, cwd: str | None = None) -> tuple[Any, Session] | None:
         """恢复 session。优先从内存获取，其次从 JSONL，最后从旧 JSON 文件。"""
         import logging
         logger = logging.getLogger(__name__)
         
         logger.info(f"[DEBUG] Attempting to restore session: {session_id}")
         
-        # 1. 先检查内存
-        existing_agent = self.get_agent(session_id)
-        existing_session = self.get(session_id)
-        if existing_agent and existing_session:
-            logger.info(f"[DEBUG] Session {session_id} found in memory")
-            return existing_agent, existing_session
-        
-        # 2. 尝试从 JSONL 加载
-        session = Session.load_from_events(session_id)
-        
-        # 3. 如果 JSONL 不存在，尝试从旧 JSON 文件恢复
-        if not session:
-            session = self._restore_from_json(session_id)
-        if not session:
-            return None
-        
-        from agents.agent import Agent
-        from agents.config import load_config
-        
-        config = load_config()
-        api_key, api_base, model_name = self._resolve_model(config, None)
-        
-        agent = Agent(
-            model=model_name,
-            api_key=api_key,
-            api_base=api_base,
-            session_id=session.id,
-            workspace=cwd or session.projections.get("cwd"),
-        )
-        agent.session = session
-        
-        agent._current_turn = max(
-            (e.get("turn", 0) for e in session._log if e["type"] == "turn/start"),
-            default=0,
-        )
-        
-        # 重建 agent 的消息历史
-        self._rebuild_agent_messages(agent, session)
-        
-        self._sessions[session_id] = session
-        self._agents[session_id] = agent
-        
-        return agent, session
-    
-    def _restore_from_json(self, session_id: str) -> Session | None:
-        """从旧 JSON session 文件恢复，转换为事件日志格式。"""
-        from agents.core.session import load_session as load_json_session
-        
-        data = load_json_session(session_id)
-        if not data:
-            return None
-        
-        session = Session(session_id)
-        
-        openai_messages = data.get("openaiMessages", [])
-        for msg in openai_messages:
-            role = msg.get("role", "")
-            content = msg.get("content", "")
+        # 获取 session 级别的 restore 锁，防止并发 restore
+        if session_id not in self._restore_locks:
+            self._restore_locks[session_id] = asyncio.Lock()
+        async with self._restore_locks[session_id]:
+            # 1. 先检查内存（在锁内再次检查，防止并发创建）
+            existing_agent = self.get_agent(session_id)
+            existing_session = self.get(session_id)
+            if existing_agent and existing_session:
+                logger.info(f"[DEBUG] Session {session_id} found in memory")
+                return existing_agent, existing_session
             
-            if role == "user":
-                if isinstance(content, str):
-                    session.append("user_message", {"content": content})
-            elif role == "assistant":
-                thinking = msg.get("thinking")
-                tool_calls = msg.get("tool_calls")
-                session.append("assistant_message", {
-                    "content": content or "",
-                    "thinking": thinking,
-                    "tool_calls": tool_calls,
-                })
-            elif role == "tool":
-                session.append("tool_result_msg", {
-                    "call_id": msg.get("tool_call_id", ""),
-                    "content": content or "",
-                })
-        
-        return session if session._log else None
+            # 2. 尝试从 JSONL 加载
+            session = Session.load_from_events(session_id)
+            if not session:
+                return None
+            
+            from agents.agent import Agent
+            from agents.config import load_config
+            
+            config = load_config()
+            api_key, api_base, model_name = self._resolve_model(config, None)
+            
+            agent = Agent(
+                model=model_name,
+                api_key=api_key,
+                api_base=api_base,
+                session_id=session.id,
+                workspace=cwd or session.projections.get("cwd"),
+            )
+            agent.session = session
+            
+            agent._current_turn = max(
+                (e.get("turn", 0) for e in session._log if e["type"] == "turn/start"),
+                default=0,
+            )
+            
+            # 重建 agent 的消息历史
+            self._rebuild_agent_messages(agent, session)
+            
+            self._sessions[session_id] = session
+            self._agents[session_id] = agent
+            
+            return agent, session
     
     def _rebuild_agent_messages(self, agent: Any, session: Session) -> None:
         """从 session 事件日志重建 agent 的系统提示词。"""

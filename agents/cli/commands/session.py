@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..registry import command
-from ...core.session import list_sessions, load_session, delete_session, clean_sessions
+from ...core.session import list_sessions, Session, delete_session, clean_sessions
 from ...logging import print_info, print_error
 
 if TYPE_CHECKING:
@@ -109,13 +109,12 @@ async def cmd_switch(agent: "Agent", args: str) -> None:
     if not target:
         print_error("Usage: /switch <session_id>  (see /sessions)")
         return
-    session = load_session(target)
+    session = Session.load_from_events(target)
     if not session:
         print_error(f"Session not found: {target}")
         return
-    from agents.core.session import session_to_restore_dict
     agent.session_id = target
-    agent.restore_session(session_to_restore_dict(session))
+    agent.restore_session({"events": list(session.events)})
 
 
 @command(
@@ -141,13 +140,12 @@ async def cmd_resume(agent: "Agent", args: str) -> None:
             print(f"  {i+1}. {sid}... - {title} ({start}, {msgs} msgs)")
         print_info("Usage: /resume <session_id> or /switch <session_id>")
         return
-    session = load_session(target)
+    session = Session.load_from_events(target)
     if not session:
         print_error(f"Session not found: {target}")
         return
-    from agents.core.session import session_to_restore_dict
     agent.session_id = target
-    agent.restore_session(session_to_restore_dict(session))
+    agent.restore_session({"events": list(session.events)})
     print_info(f"Resumed session {target}")
 
 

@@ -11,8 +11,6 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from agents.core.session import load_session, save_session
-
 router = APIRouter(tags=["chat"])
 
 project_root = Path(__file__).parent.parent.parent.parent
@@ -127,7 +125,7 @@ async def api_chat_stream(data: ChatMessage) -> dict[str, Any]:
         is_new_session = False
         if data.session_id:
             logger.info(f"[DEBUG] Trying to restore session: {data.session_id}")
-            result = sm.restore(data.session_id, data.cwd)
+            result = await sm.restore(data.session_id, data.cwd)
             if result:
                 agent, session = result
                 logger.info(f"[DEBUG] Session restored successfully: {session.id}")
@@ -256,14 +254,15 @@ class RevertRequest(BaseModel):
 
 
 def _resolve_session_workspace(session_id: str) -> Path | None:
-    """解析会话工作区：活会话投影优先，否则读磁盘状态文件 metadata.cwd。"""
+    """解析会话工作区：活会话投影优先，否则从事件日志重建。"""
     from agents.session_manager import get_session_manager
     session = get_session_manager().get(session_id)
     cwd = session.projections.get("cwd") if session is not None else None
     if not cwd:
-        data = load_session(session_id)
-        if data:
-            cwd = (data.get("metadata") or {}).get("cwd")
+        from agents.core.session import Session
+        loaded = Session.load_from_events(session_id)
+        if loaded is not None:
+            cwd = loaded.projections.get("cwd")
     return Path(cwd).resolve() if cwd else None
 
 

@@ -8,6 +8,7 @@ export interface PermissionRequest {
   tool_name: string;
   message?: string;
   sub_agent_id?: string;
+  plan_file_path?: string;
 }
 
 export interface QuestionRequest {
@@ -67,6 +68,9 @@ export interface SessionState {
   fileSnapshots: FileSnapshot[];
   contextUsed: number;
   contextTotal: number;
+  statsInputTokens: number;
+  statsOutputTokens: number;
+  statsCachedTokens: number;
 }
 
 export function createEmptySessionState(sessionId: string | null = null): SessionState {
@@ -83,6 +87,9 @@ export function createEmptySessionState(sessionId: string | null = null): Sessio
     fileSnapshots: [],
     contextUsed: 0,
     contextTotal: 128000,
+    statsInputTokens: 0,
+    statsOutputTokens: 0,
+    statsCachedTokens: 0,
   };
 }
 
@@ -310,6 +317,26 @@ class SessionStore {
     state.contextUsed = used;
     state.contextTotal = total;
     this.notify();
+  }
+
+  setDetailedStats(sessionId: string, inputTokens: number, outputTokens: number, cachedTokens: number): void {
+    const state = this.getOrCreate(sessionId);
+    if (state.statsInputTokens === inputTokens && 
+        state.statsOutputTokens === outputTokens && 
+        state.statsCachedTokens === cachedTokens) return;
+    state.statsInputTokens = inputTokens;
+    state.statsOutputTokens = outputTokens;
+    state.statsCachedTokens = cachedTokens;
+    this.notify();
+  }
+
+  getDetailedStats(sessionId: string): { inputTokens: number; outputTokens: number; cachedTokens: number } {
+    const state = this.sessions.get(sessionId);
+    return {
+      inputTokens: state?.statsInputTokens ?? 0,
+      outputTokens: state?.statsOutputTokens ?? 0,
+      cachedTokens: state?.statsCachedTokens ?? 0,
+    };
   }
 
   getVersion(): number {

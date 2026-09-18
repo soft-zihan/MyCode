@@ -177,7 +177,8 @@ def _check_permission_inner(
         return {"action": "allow"}
     
     if tool_name == "exit_plan_mode":
-        return {"action": "confirm", "message": "Exit plan mode and proceed to implementation"}
+        # Let the tool handle the confirmation internally with the plan content
+        return {"action": "allow"}
 
     if mode == "acceptEdits" and tool_name in EDIT_TOOLS:
         return {"action": "allow"}

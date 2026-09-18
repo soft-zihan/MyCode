@@ -35,7 +35,7 @@ from agents.core.session_memory import (
     format_folded_memory,
     parse_folded_memory,
 )
-from agents.core.session import save_folded_session_memory, save_session, Session
+from agents.core.session import save_folded_session_memory, Session
 from agents.core.subagent import get_sub_agent_config
 from agents.tools import ToolDef, tool_definitions, execute_tool, CONCURRENCY_SAFE_TOOLS, check_permission, \
     get_active_tool_definitions
@@ -601,7 +601,7 @@ class Agent:
         self._steer_queue.append(message)
 
     async def save(self) -> None:
-        await self._auto_save()
+        pass
 
     @property
     def last_response(self) -> str:
@@ -821,7 +821,6 @@ class Agent:
                 print_divider()
             except Exception:
                 pass  # Ignore console errors in server environment
-            await self._auto_save()
 
     async def run_once(self, prompt: str) -> dict:
         self._output_buffer = []
@@ -1263,21 +1262,6 @@ class Agent:
             if self._turn_number - turn < self.MEMORY_RECALL_COOLDOWN_TURNS
         }
 
-    async def _auto_save(self) -> None:
-        if self.is_sub_agent:
-            return
-        try:
-            from .core.session_lifecycle import SessionState
-            state = SessionState(
-                session_id=self.session_id,
-                model=self.model,
-                start_time=self.session_start_time,
-                cwd=str(self.workspace),
-            )
-            await asyncio.to_thread(self._session_lifecycle._save_state, state, self.session)
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).error(f"[SAVE] auto-save failed for {self.session_id}: {e}")
 
     #自动压缩
     async def _check_and_compact(self)->None:
@@ -1359,6 +1343,7 @@ class Agent:
 
     async def _execute_tool_call(self, name: str, inp: dict) -> str:
         from .observability.trace import trace_span
+        from agents.logging import print_info
         _tool_t0 = time.time()
         try:
             _inp_preview = json.dumps(inp, ensure_ascii=False, default=str)[:1000]
@@ -1373,12 +1358,15 @@ class Agent:
         if self._current_sub_agent_id:
             trace_attrs["sub_agent_id"] = self._current_sub_agent_id
         timeout = self._tool_timeout(name)
+        print_info(f"[DEBUG] _execute_tool_call: {name}, timeout={timeout}s")
         with trace_span("tool_call", **trace_attrs) as span:
             try:
+                print_info(f"[DEBUG] _execute_tool_call: calling asyncio.wait_for for {name}")
                 result = await asyncio.wait_for(
                     self._execute_tool_call_inner(name, inp),
                     timeout=timeout,
                 )
+                print_info(f"[DEBUG] _execute_tool_call: {name} done, took {time.time()-_tool_t0:.2f}s")
                 span.set_attribute("success", True)
                 span.set_attribute("duration_s", round(time.time() - _tool_t0, 2))
                 span.set_attribute("langfuse.observation.output", str(result)[:2000])
@@ -1424,7 +1412,10 @@ class Agent:
             # Route MCP tool calls to the MCP manager
         if self._mcp_manager.is_mcp_tool(name):
             return await self._mcp_manager.call_tool(name, inp)
+        from agents.logging import print_info
+        print_info(f"[DEBUG] _execute_tool_call_inner: calling execute_tool for {name}")
         result = await execute_tool(name, inp, self._read_file_state)
+        print_info(f"[DEBUG] _execute_tool_call_inner: execute_tool done for {name}")
         if name == "skill_create":
             try:
                 parsed = json.loads(result)
@@ -1747,20 +1738,95 @@ class Agent:
                         result_msg += f"Plan system entry created: {plan_result.get('slug', '')}\n\n"
                     result_msg += f"Plan file: {saved_plan_path}\n\n"
                     result_msg += f"## Approved Plan:\n{plan_content}\n\n"
-                    result_msg += f"Proceed with implementation."
+                    
+                    if plan_result and plan_result.get("slug"):
+                        from agents.plan.plan_manager import start_plan_execution
+                        plan_slug = plan_result["slug"]
+                        print_info(f"Starting plan execution: {plan_slug}")
+                        
+                        # 纯状态管理，零 LLM 调用
+                        exec_result = start_plan_execution(plan_slug)
+                        
+                        result_msg += f"\n\n## Plan Tasks Ready\n"
+                        result_msg += f"Status: {exec_result.get('status', 'unknown')}\n"
+                        result_msg += f"Total tasks: {exec_result.get('total_tasks', 0)}\n"
+                        result_msg += f"Pending tasks: {exec_result.get('pending_tasks', 0)}\n\n"
+                        
+                        # 返回 task 列表，让主 Agent 自己执行
+                        tasks = exec_result.get("tasks", [])
+                        if tasks:
+                            result_msg += "## Task List\n\n"
+                            for t in tasks:
+                                result_msg += f"### Task {t['id']}: {t['title']}\n"
+                                result_msg += f"- **File**: `{t.get('file', 'N/A')}`\n"
+                                result_msg += f"- **Acceptance**: {t.get('acceptance', 'N/A')}\n"
+                                result_msg += f"- **Status**: {t['status']}\n\n"
+                            
+                            result_msg += "\n## Instructions\n\n"
+                            result_msg += "Please execute these tasks one by one. For each task:\n"
+                            result_msg += "1. Call `mark_task_in_progress(slug, task_id)` before starting\n"
+                            result_msg += "2. Implement the task (write code, create files, etc.)\n"
+                            result_msg += "3. Verify the implementation (run tests, check output)\n"
+                            result_msg += "4. Call `mark_task_done(slug, task_id, commit, verification)` after success\n"
+                            result_msg += "5. If failed, call `mark_task_failed(slug, task_id, reason)`\n"
+                            result_msg += "6. After all tasks done, call `complete_plan(slug)`\n"
+                        else:
+                            result_msg += "No pending tasks found."
+                    else:
+                        result_msg += f"Proceed with implementation."
+                    
                     return result_msg
                 
                 print_info(f"Plan approved. Executing in {target_mode} mode.")
-                return (
+                result_msg = (
                     f"User approved the plan. Permission mode: {target_mode}\n\n"
                     f"## Approved Plan:\n{plan_content}\n\n"
-                    f"Proceed with implementation."
                 )
+                
+                if plan_result and plan_result.get("slug"):
+                    from agents.plan.plan_manager import start_plan_execution
+                    plan_slug = plan_result["slug"]
+                    print_info(f"Starting plan execution: {plan_slug}")
+                    
+                    # 纯状态管理，零 LLM 调用
+                    exec_result = start_plan_execution(plan_slug)
+                    
+                    result_msg += f"\n\n## Plan Tasks Ready\n"
+                    result_msg += f"Status: {exec_result.get('status', 'unknown')}\n"
+                    result_msg += f"Total tasks: {exec_result.get('total_tasks', 0)}\n"
+                    result_msg += f"Pending tasks: {exec_result.get('pending_tasks', 0)}\n\n"
+                    
+                    # 返回 task 列表，让主 Agent 自己执行
+                    tasks = exec_result.get("tasks", [])
+                    if tasks:
+                        result_msg += "## Task List\n\n"
+                        for t in tasks:
+                            result_msg += f"### Task {t['id']}: {t['title']}\n"
+                            result_msg += f"- **File**: `{t.get('file', 'N/A')}`\n"
+                            result_msg += f"- **Acceptance**: {t.get('acceptance', 'N/A')}\n"
+                            result_msg += f"- **Status**: {t['status']}\n\n"
+                        
+                        result_msg += "\n## Instructions\n\n"
+                        result_msg += "Please execute these tasks one by one. For each task:\n"
+                        result_msg += "1. Call `mark_task_in_progress(slug, task_id)` before starting\n"
+                        result_msg += "2. Implement the task (write code, create files, etc.)\n"
+                        result_msg += "3. Verify the implementation (run tests, check output)\n"
+                        result_msg += "4. Call `mark_task_done(slug, task_id, commit, verification)` after success\n"
+                        result_msg += "5. If failed, call `mark_task_failed(slug, task_id, reason)`\n"
+                        result_msg += "6. After all tasks done, call `complete_plan(slug)`\n"
+                    else:
+                        result_msg += "No pending tasks found."
+                else:
+                    result_msg += f"Proceed with implementation."
+                
+                return result_msg
             
             # Web 模式：通过 permission gate 让用户审批计划
             # 将计划内容作为确认消息发送给用户
             confirmed = await self._confirm_dangerous(
-                f"Plan completed. Exit plan mode?\n\n## Plan:\n{plan_content}"
+                f"Plan completed. Exit plan mode?\n\n## Plan:\n{plan_content}",
+                extra_data={"plan_file_path": self._plan_file_path} if self._plan_file_path else None,
+                tool_name="exit_plan_mode",
             )
             
             if not confirmed:
@@ -1804,7 +1870,43 @@ class Agent:
             if plan_result:
                 result_msg += f"Plan system entry created: {plan_result.get('slug', '')}\n\n"
             result_msg += f"## Approved Plan:\n{plan_content}\n\n"
-            result_msg += f"Proceed with implementation."
+            
+            if plan_result and plan_result.get("slug"):
+                from agents.plan.plan_manager import start_plan_execution
+                plan_slug = plan_result["slug"]
+                print_info(f"Starting plan execution: {plan_slug}")
+                
+                # 纯状态管理，零 LLM 调用
+                exec_result = start_plan_execution(plan_slug)
+                
+                result_msg += f"\n\n## Plan Tasks Ready\n"
+                result_msg += f"Status: {exec_result.get('status', 'unknown')}\n"
+                result_msg += f"Total tasks: {exec_result.get('total_tasks', 0)}\n"
+                result_msg += f"Pending tasks: {exec_result.get('pending_tasks', 0)}\n\n"
+                
+                # 返回 task 列表，让主 Agent 自己执行
+                tasks = exec_result.get("tasks", [])
+                if tasks:
+                    result_msg += "## Task List\n\n"
+                    for t in tasks:
+                        result_msg += f"### Task {t['id']}: {t['title']}\n"
+                        result_msg += f"- **File**: `{t.get('file', 'N/A')}`\n"
+                        result_msg += f"- **Acceptance**: {t.get('acceptance', 'N/A')}\n"
+                        result_msg += f"- **Status**: {t['status']}\n\n"
+                    
+                    result_msg += "\n## Instructions\n\n"
+                    result_msg += "Please execute these tasks one by one. For each task:\n"
+                    result_msg += "1. Call `mark_task_in_progress(slug, task_id)` before starting\n"
+                    result_msg += "2. Implement the task (write code, create files, etc.)\n"
+                    result_msg += "3. Verify the implementation (run tests, check output)\n"
+                    result_msg += "4. Call `mark_task_done(slug, task_id, commit, verification)` after success\n"
+                    result_msg += "5. If failed, call `mark_task_failed(slug, task_id, reason)`\n"
+                    result_msg += "6. After all tasks done, call `complete_plan(slug)`\n"
+                else:
+                    result_msg += "No pending tasks found."
+            else:
+                result_msg += f"Proceed with implementation."
+            
             return result_msg
 
         return f"Unknown plan mode tool: {name}"
@@ -1948,6 +2050,11 @@ class Agent:
             sub_agent.session_id = sub_session.id
             sub_agent._current_sub_agent_id = sub_agent_id
             
+            # 确保子代理的 trace 关联到父代理的 session
+            from .observability.tracer import set_current_session_id
+            parent_session_id = self.session_id
+            set_current_session_id(parent_session_id)
+            
             start_time = time.time()
             try:
                 result = await sub_agent.run_once(prompt)
@@ -1999,13 +2106,13 @@ class Agent:
     async def _call_openai_stream(self) -> dict:
         return await self._loop.call_model_stream()
 
-    async def _confirm_dangerous(self, command: str) -> bool:
+    async def _confirm_dangerous(self, command: str, extra_data: dict | None = None, tool_name: str | None = None) -> bool:
         self._permission_gate.set_session(self.session)
         self._permission_gate.set_confirm_fn(self.confirm_fn) if self.confirm_fn else None
         self._permission_gate.set_sub_agent_id(self._current_sub_agent_id)
         self._permission_gate.set_abort_fn(self._abort_requested)
-        self._permission_gate.set_current_tool_name(getattr(self, '_current_tool_name', 'unknown'))
-        return await self._permission_gate.confirm(command)
+        self._permission_gate.set_current_tool_name(tool_name or getattr(self, '_current_tool_name', 'unknown'))
+        return await self._permission_gate.confirm(command, extra_data=extra_data)
     
     async def request_permission(self, request_id: str, command: str, tool_name: str, 
                                   message: str = "", sub_agent_id: str | None = None,

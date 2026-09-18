@@ -84,3 +84,103 @@ details > summary::marker {
   display: none;
   content: '';
 }
+
+/* StatsBar */
+.stats-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 16px;
+  font-size: 11px;
+  color: #6b7280;
+  border-top: 1px solid #f3f4f6;
+  background: #fafafa;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.stats-bar-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.stats-bar-item {
+  white-space: nowrap;
+}
+
+.stats-bar-sep {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: #d1d5db;
+}
+
+.stats-bar-context-bar {
+  width: 48px;
+  height: 4px;
+  background: #e5e7eb;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.stats-bar-context-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideInRight {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes slideInLeft {
+  from { transform: translateX(-100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+/* Message fade in */
+.message-node {
+  animation: fadeIn 0.2s ease-out;
+}
+
+/* Sidebar transitions */
+.sidebar-transition {
+  transition: transform 0.2s ease-out, opacity 0.2s ease-out;
+}
+
+/* Tool card hover effects */
+.tool-card {
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.1s;
+}
+
+.tool-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+}
+
+/* Button press effect */
+button:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+/* Tab transitions */
+.tab-indicator {
+  transition: left 0.2s ease-out, width 0.2s ease-out;
+}
+
+/* Loading pulse */
+.loading-pulse {
+  animation: pulse-soft 1.5s ease-in-out infinite;
+}

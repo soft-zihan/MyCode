@@ -15,7 +15,7 @@ ToolDef = dict
 PermissionMode = str
 
 READ_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "compact_context", "shell_status", "search_history", "list_task_notes", "plan_status", "plan_list", "plan_read_artifact", "plan_explore", "plan_continue", "plan_retry", "plan_recall", "plan_check_expired"}
-EDIT_TOOLS = {"write_file", "edit_file", "skill_create", "write_workflow_pattern", "write_wiki_entry", "plan_propose", "plan_update", "plan_task_done", "plan_task_failed", "plan_add_artifact", "plan_archive", "plan_save_explore", "plan_abandon", "plan_reopen", "plan_pause", "plan_resume", "plan_skip", "plan_redo", "plan_rollback", "ask_user", "todolist"}
+EDIT_TOOLS = {"write_file", "edit_file", "skill_create", "write_workflow_pattern", "write_wiki_entry", "plan_propose", "plan_update", "plan_task_start", "plan_task_done", "plan_task_failed", "plan_complete", "plan_add_artifact", "plan_archive", "plan_save_explore", "plan_abandon", "plan_reopen", "plan_pause", "plan_resume", "plan_skip", "plan_redo", "plan_rollback", "ask_user", "todolist"}
 
 CONCURRENCY_SAFE_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "shell_status"}
 
@@ -101,8 +101,10 @@ TOOL_EXECUTION_MODES: dict[str, str] = {
     "tool_search": "sequential",
     "plan_propose": "sequential",
     "plan_update": "sequential",
+    "plan_task_start": "sequential",
     "plan_task_done": "sequential",
     "plan_task_failed": "sequential",
+    "plan_complete": "sequential",
     "plan_add_artifact": "sequential",
     "plan_archive": "sequential",
     "plan_save_explore": "sequential",
@@ -474,13 +476,27 @@ tool_definitions: list[ToolDef] = [
         },
     },
     {
-        "name": "plan_task_done",
-        "description": "Mark a task as done in a plan.",
+        "name": "plan_task_start",
+        "description": "Mark a task as in-progress before starting implementation.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "slug": {"type": "string", "description": "Plan slug"},
                 "task_id": {"type": "integer", "description": "Task ID (1-indexed)"},
+            },
+            "required": ["slug", "task_id"],
+        },
+    },
+    {
+        "name": "plan_task_done",
+        "description": "Mark a task as done after successful implementation and verification.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Plan slug"},
+                "task_id": {"type": "integer", "description": "Task ID (1-indexed)"},
+                "commit": {"type": "string", "description": "Git commit hash (optional)"},
+                "verification": {"type": "string", "description": "Verification result as JSON string (optional)"},
             },
             "required": ["slug", "task_id"],
         },
@@ -496,6 +512,17 @@ tool_definitions: list[ToolDef] = [
                 "error": {"type": "string", "description": "Error message"},
             },
             "required": ["slug", "task_id"],
+        },
+    },
+    {
+        "name": "plan_complete",
+        "description": "Mark the entire plan as completed (ready to archive). Call this after all tasks are done.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Plan slug"},
+            },
+            "required": ["slug"],
         },
     },
     {

@@ -4,6 +4,44 @@ import remarkGfm from 'remark-gfm';
 import { CodeBlock } from './CodeBlock';
 import { Brain } from 'lucide-react';
 
+const FILE_EXTENSIONS = [
+  'py', 'ts', 'tsx', 'js', 'jsx', 'json', 'md', 'txt', 'html', 'css', 'scss', 'sass', 'less',
+  'yaml', 'yml', 'toml', 'xml', 'sh', 'bash', 'zsh', 'go', 'rs', 'java', 'c', 'cpp', 'h', 'hpp',
+  'rb', 'php', 'swift', 'kt', 'scala', 'r', 'sql', 'graphql', 'proto', 'dockerfile', 'env',
+  'gitignore', 'lock', 'cfg', 'ini', 'conf', 'log', 'csv', 'xlsx', 'pdf', 'doc', 'docx'
+];
+
+const BACKTICK_FILE_REGEX = new RegExp(
+  '`([^`]+\\.(' + FILE_EXTENSIONS.join('|') + '))`',
+  'gi'
+);
+
+const STANDALONE_FILE_REGEX = new RegExp(
+  '(?<![`\\[\\/\\w])' +
+  '([\\w.-]+(?:\\/[\\w.-]+)*\\.(' + FILE_EXTENSIONS.join('|') + '))' +
+  '(?![`\\]\\w])',
+  'gi'
+);
+
+function linkifyFilePaths(text: string): string {
+  if (!text) return text;
+  
+  let result = text.replace(BACKTICK_FILE_REGEX, (match, path) => {
+    if (match.includes('](')) return match;
+    return `[${path}](${path})`;
+  });
+  
+  result = result.replace(STANDALONE_FILE_REGEX, (match, path) => {
+    const beforeMatch = result.substring(0, result.indexOf(match));
+    if (beforeMatch.endsWith('](') || beforeMatch.endsWith('[')) {
+      return match;
+    }
+    return `[${path}](${path})`;
+  });
+  
+  return result;
+}
+
 interface MessageRendererProps {
   content: string;
   isStreaming?: boolean;
@@ -90,9 +128,13 @@ export const MessageRenderer: React.FC<MessageRendererProps> = ({
       );
     },
     a({ node, href, children, ...props }) {
-      // Intercept file links like [filename](file:///path/to/file)
-      if (href?.startsWith('file://')) {
-        const filePath = href.replace('file://', '');
+      if (!href) {
+        return <a {...props}>{children}</a>;
+      }
+      
+      // Intercept file links like [filename](file:///path/to/file) or relative paths like [file.py](file.py)
+      if (href.startsWith('file://') || (!href.startsWith('http') && !href.startsWith('#') && !href.startsWith('mailto:'))) {
+        const filePath = href.startsWith('file://') ? href.replace('file://', '') : href;
         return (
           <a
             href="#"
@@ -182,7 +224,7 @@ export const MessageRenderer: React.FC<MessageRendererProps> = ({
           remarkPlugins={[remarkGfm]}
           components={components}
         >
-          {content}
+          {linkifyFilePaths(content)}
         </ReactMarkdown>
         {isStreaming && (
           <span className="inline-flex items-center ml-1">

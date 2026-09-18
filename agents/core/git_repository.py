@@ -223,11 +223,33 @@ class GitRepositoryManager:
         parts = result.strip().split("\t", 1)
         if len(parts) != 2:
             return None
-        mode_blob = parts[0]
+        mode_type_blob = parts[0]
         file_path = parts[1]
-        mode_type, blob = mode_blob.split()
+        mode, obj_type, blob = mode_type_blob.split()
         return {
             "path": file_path,
-            "mode": mode_type,
+            "mode": mode,
+            "type": obj_type,
             "blob": blob,
         }
+
+    async def get_file_content(self, tree_id: str, path: str) -> str:
+        """Get the content of a file from a specific tree."""
+        entry = await self.get_tree_entry(tree_id, path)
+        if not entry:
+            return ""
+        blob = entry["blob"]
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            "cat-file",
+            "-p",
+            blob,
+            cwd=self.repo_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        try:
+            return stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            return ""

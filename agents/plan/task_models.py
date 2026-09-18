@@ -119,12 +119,16 @@ def parse_tasks_from_markdown(content: str) -> list[StructuredTask]:
     import re
     
     tasks = []
-    task_pattern = r"### Task (\d+): (.+?)(?=\n(?:### Task|\Z))"
+    task_pattern = r"### Task (\d+): ([^\n]+)"
     
-    for match in re.finditer(task_pattern, content, re.DOTALL):
+    for match in re.finditer(task_pattern, content):
         task_id = int(match.group(1))
         title = match.group(2).strip()
-        task_block = match.group(0)
+        
+        start = match.end()
+        next_match = re.search(r"### Task \d+:", content[start:])
+        end = start + next_match.start() if next_match else len(content)
+        task_block = content[match.start():end]
         
         file_match = re.search(r"\*\*文件\*\*:\s*`?([^`\n]+)`?", task_block)
         function_match = re.search(r"\*\*函数\*\*:\s*`?([^`\n]+)`?", task_block)

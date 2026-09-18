@@ -15,9 +15,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .session import save_session
-from .workspace import get_workspace
-
 
 def _sanitize_for_utf8(value: Any) -> Any:
     if isinstance(value, str):
@@ -91,7 +88,6 @@ class SessionLifecycle:
             cwd=state.cwd,
         )
         
-        self._save_state(new_state, new_session)
         return f"Forked session {old_id} -> {new_session.id}. You are now on the new branch.", new_session
 
     # ── 上下文编辑 ──
@@ -171,21 +167,3 @@ class SessionLifecycle:
         session.hide_events(seqs_to_delete)
         
         return f"Kept {len(seqs_to_keep)} message(s), removed {len(seqs_to_delete)}."
-
-    # ── 序列化 ──
-
-    def _save_state(self, state: SessionState, session: Any) -> None:
-        save_session(state.session_id, {
-            "metadata": {
-                "id": state.session_id,
-                "model": state.model,
-                "cwd": state.cwd or str(get_workspace()),
-                "startTime": state.start_time,
-                "messageCount": len(session.get_messages_for_llm()),
-            },
-            "parent_session": session.parent_session,
-            "origin": session.origin,
-            "agent_type": session.agent_type,
-            "plan_slug": session.plan_slug,
-            "events": _sanitize_for_utf8(session._log),
-        })

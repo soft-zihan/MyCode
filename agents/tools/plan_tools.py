@@ -12,8 +12,10 @@ from agents.plan.plan_manager import (
     get_tasks,
     get_next_task,
     has_failed_tasks,
+    mark_task_in_progress,
     mark_task_done,
     mark_task_failed,
+    complete_plan,
     add_artifact,
     read_artifact,
     archive_plan,
@@ -147,14 +149,37 @@ def plan_update(inp: dict) -> str:
     return json.dumps({"status": "updated", "slug": slug})
 
 
-def plan_task_done(inp: dict) -> str:
+def plan_task_start(inp: dict) -> str:
     slug = inp.get("slug", "").strip()
     task_id = inp.get("task_id")
     if not slug or task_id is None:
         return "Error: slug and task_id are required"
 
-    if mark_task_done(slug, int(task_id)):
-        return json.dumps({"status": "done", "slug": slug, "task_id": task_id})
+    if mark_task_in_progress(slug, int(task_id)):
+        return json.dumps({"status": "in-progress", "slug": slug, "task_id": task_id})
+    return f"Error: task {task_id} not found in plan '{slug}'"
+
+
+def plan_task_done(inp: dict) -> str:
+    slug = inp.get("slug", "").strip()
+    task_id = inp.get("task_id")
+    commit = inp.get("commit", "")
+    verification_str = inp.get("verification", "")
+    
+    if not slug or task_id is None:
+        return "Error: slug and task_id are required"
+    
+    # Parse verification JSON if provided
+    verification = None
+    if verification_str:
+        try:
+            import json
+            verification = json.loads(verification_str)
+        except json.JSONDecodeError:
+            verification = {"raw": verification_str}
+
+    if mark_task_done(slug, int(task_id), commit=commit, verification=verification):
+        return json.dumps({"status": "done", "slug": slug, "task_id": task_id, "commit": commit})
     return f"Error: task {task_id} not found in plan '{slug}'"
 
 
@@ -165,9 +190,19 @@ def plan_task_failed(inp: dict) -> str:
     if not slug or task_id is None:
         return "Error: slug and task_id are required"
 
-    if mark_task_failed(slug, int(task_id), error):
+    if mark_task_failed(slug, int(task_id), reason=error):
         return json.dumps({"status": "failed", "slug": slug, "task_id": task_id, "error": error})
     return f"Error: task {task_id} not found in plan '{slug}'"
+
+
+def plan_complete(inp: dict) -> str:
+    slug = inp.get("slug", "").strip()
+    if not slug:
+        return "Error: slug is required"
+
+    if complete_plan(slug):
+        return json.dumps({"status": "ready_to_archive", "slug": slug})
+    return f"Error: plan '{slug}' not found"
 
 
 def plan_add_artifact(inp: dict) -> str:

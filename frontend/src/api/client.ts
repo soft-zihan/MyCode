@@ -473,6 +473,7 @@ export async function rewindSession(sessionId: string, turns: number): Promise<{
 export interface SessionStats {
   input_tokens: number;
   output_tokens: number;
+  cached_tokens: number;
   context_window: number;
   effective_window: number;
   last_input_token_count: number;
@@ -593,6 +594,16 @@ export async function respondToPermission(sessionId: string, requestId: string, 
     body: JSON.stringify({ rpc_id: requestId, allowed, session_id: sessionId }),
   });
   if (!res.ok) throw new Error('Failed to respond to permission');
+}
+
+export async function updatePlanFile(sessionId: string, planFilePath: string, content: string): Promise<{ success: boolean; message?: string }> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan/update`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ plan_file_path: planFilePath, content }),
+  });
+  if (!res.ok) throw new Error('Failed to update plan file');
+  return res.json();
 }
 
 export async function respondToQuestion(sessionId: string, requestId: string, answer: string): Promise<void> {
@@ -770,6 +781,21 @@ export interface ContextStoreData {
 export async function fetchContextStore(sessionId: string): Promise<ContextStoreData> {
   const res = await fetch(`${API_BASE}/sessions/${sessionId}/context-store`);
   if (!res.ok) throw new Error('Failed to fetch context store');
+  return res.json();
+}
+
+export interface TokenBreakdown {
+  system_chars: number;
+  tools_chars: number;
+  messages_chars: number;
+  system_tokens: number;
+  tools_tokens: number;
+  messages_tokens: number;
+}
+
+export async function fetchTokenBreakdown(sessionId: string): Promise<TokenBreakdown> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/token-breakdown`);
+  if (!res.ok) throw new Error('Failed to fetch token breakdown');
   return res.json();
 }
 

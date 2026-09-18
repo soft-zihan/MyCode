@@ -80,8 +80,10 @@ from agents.tools.plan_tools import (
     plan_status as _plan_status_tool,
     plan_list as _plan_list_tool,
     plan_update as _plan_update_tool,
+    plan_task_start as _plan_task_start_tool,
     plan_task_done as _plan_task_done_tool,
     plan_task_failed as _plan_task_failed_tool,
+    plan_complete as _plan_complete_tool,
     plan_add_artifact as _plan_add_artifact_tool,
     plan_read_artifact as _plan_read_artifact_tool,
     plan_archive as _plan_archive_tool,
@@ -209,8 +211,10 @@ async def execute_tool(
         "plan_status": _plan_status_tool,
         "plan_list": _plan_list_tool,
         "plan_update": _plan_update_tool,
+        "plan_task_start": _plan_task_start_tool,
         "plan_task_done": _plan_task_done_tool,
         "plan_task_failed": _plan_task_failed_tool,
+        "plan_complete": _plan_complete_tool,
         "plan_add_artifact": _plan_add_artifact_tool,
         "plan_read_artifact": _plan_read_artifact_tool,
         "plan_archive": _plan_archive_tool,
@@ -233,10 +237,16 @@ async def execute_tool(
         return f"Unknown tool: {name}"
 
     import inspect
+    import time
+    from agents.logging import print_info
+    t0 = time.time()
     if inspect.iscoroutinefunction(handler):
+        print_info(f"[DEBUG] execute_tool: calling async handler for {name}")
         result = await handler(inp)
     else:
+        print_info(f"[DEBUG] execute_tool: calling asyncio.to_thread for {name}")
         result = await asyncio.to_thread(handler, inp)
+    print_info(f"[DEBUG] execute_tool: handler done for {name}, took {time.time()-t0:.2f}s")
     result = _truncate_result(result)
 
     if name in ("write_file", "edit_file") and read_file_state is not None and not result.startswith("Error"):
