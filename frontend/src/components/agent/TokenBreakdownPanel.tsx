@@ -12,12 +12,6 @@ const COLORS = {
   messages: '#3b82f6',
 };
 
-const LABELS = {
-  system: 'System',
-  tools: 'Tools',
-  messages: 'Messages',
-};
-
 const formatTokens = (n: number): string => {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
@@ -159,7 +153,7 @@ export function TokenBreakdownPanel({ sessionId }: TokenBreakdownProps) {
                     ))}
                   </Pie>
                   <Tooltip
-                    formatter={(value: number) => formatTokens(value)}
+                    formatter={(value) => formatTokens(Number(value))}
                     contentStyle={{ fontSize: '11px', padding: '4px 8px' }}
                   />
                 </PieChart>

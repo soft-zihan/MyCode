@@ -143,7 +143,6 @@ export const Composer: React.FC<ComposerProps> = ({
   onSubmit,
   files,
   placeholder = 'Type a message... (@ files, / commands, Shift+Enter for newline)',
-  onSlashCommand,
 }) => {
   const fileItemsRef = useRef<SuggestionItem[]>([]);
   
@@ -180,7 +179,7 @@ export const Composer: React.FC<ComposerProps> = ({
                   editor: props.editor,
                 });
                 unmount = props.mount(component.element, {
-                  onPosition: (data) => {
+                  onPosition: (data: { strategy: string; x: number; y: number }) => {
                     const el = component?.element as HTMLElement;
                     if (el) {
                       // Position popup so bottom edge aligns with top of composer container
@@ -247,7 +246,7 @@ export const Composer: React.FC<ComposerProps> = ({
                   editor: props.editor,
                 });
                 unmount = props.mount(component.element, {
-                  onPosition: (data) => {
+                  onPosition: (data: { strategy: string; x: number; y: number }) => {
                     const el = component?.element as HTMLElement;
                     if (el) {
                       // Position popup so bottom edge aligns with top of composer container

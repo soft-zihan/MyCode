@@ -881,3 +881,34 @@ export async function fetchTraceStatus(): Promise<TraceStatus> {
   if (!res.ok) throw new Error('Failed to fetch trace status');
   return res.json();
 }
+
+// Plan APIs
+export async function getPlanStatus(sessionId: string, slug: string): Promise<{ success: boolean; data?: any; message?: string }> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan/${slug}/status`);
+  if (!res.ok) return { success: false, message: 'Failed to fetch plan status' };
+  return res.json();
+}
+
+export async function planPause(sessionId: string, slug: string): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan/${slug}/pause`, { method: 'POST' });
+  return res.json();
+}
+
+export async function planResume(sessionId: string, slug: string): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan/${slug}/resume`, { method: 'POST' });
+  return res.json();
+}
+
+export async function planSkipTask(sessionId: string, slug: string, taskId: number): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan/${slug}/skip-task`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ task_id: taskId }),
+  });
+  return res.json();
+}
+
+export async function planAbandon(sessionId: string, slug: string): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan/${slug}/abandon`, { method: 'POST' });
+  return res.json();
+}

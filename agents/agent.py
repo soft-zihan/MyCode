@@ -365,12 +365,33 @@ class Agent:
     Write your plan incrementally to this file using write_file or edit_file. This is the ONLY file you are allowed to edit.
 
     ## Workflow
-    1. **Assess**: 理解用户需求，必要时用 ask_user 确认。调研现有代码，明确需求边界。
-    2. **Write Plan**: 按以下三区域格式写入 plan 文件：
+
+    ### Phase 1: Grill（需求澄清）
+
+    理解用户需求。如果需求不清晰，用 **Grill** 方式问用户：
+
+    1. 识别不清晰的决策点（技术选型、边界条件、优先级等）
+    2. 一次问多个问题，每个问题给推荐答案
+    3. 用户回答后继续，直到需求清晰
+
+    Grill 格式：
+    ```
+    ❓ Q1 - 认证方式：用 JWT 还是 Session？
+    ➡️ 推荐：JWT（无状态，适合分布式）
+
+    ❓ Q2 - 用户存储：PostgreSQL 还是 MongoDB？
+    ➡️ 推荐：PostgreSQL（项目已在用）
+    ```
+
+    如果需求已经清晰，跳过 Grill 直接写计划。
+
+    ### Phase 2: Write Plan（写计划）
+
+    按以下三区域格式写入 plan 文件：
 
     ```markdown
     <!-- SPEC START -->
-    # Spec: {{feature_name}}
+    # Spec: {{{{feature_name}}}}
 
     ## 动机
     为什么需要这个功能？
@@ -391,7 +412,7 @@ class Agent:
     <!-- SPEC END -->
 
     <!-- PLAN START -->
-    # Plan: {{feature_name}}
+    # Plan: {{{{feature_name}}}}
 
     ## 技术方案
     实现方案概述。
@@ -413,7 +434,9 @@ class Agent:
     <!-- TASKS END -->
     ```
 
-    3. **Exit**: Call exit_plan_mode when your plan is ready for user review.
+    ### Phase 3: Exit（提交审批）
+
+    Call exit_plan_mode when your plan is ready for user review.
 
     ## 追加模式
     如果 plan 文件已存在，先 read_file 读取现有内容。保留 SPEC 和 PLAN 区域不变，在 TASKS 区域末尾追加新的 tasks。

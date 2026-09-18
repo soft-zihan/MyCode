@@ -797,6 +797,93 @@ async def api_plan_update(session_id: str, data: UpdatePlanRequest) -> dict[str,
         return {"success": False, "message": str(e)}
 
 
+@router.get("/api/sessions/{session_id}/plan/{slug}/status")
+async def api_plan_status(session_id: str, slug: str) -> dict[str, Any]:
+    """Get plan status and tasks."""
+    try:
+        from agents.plan.plan_manager import get_plan, get_tasks
+        plan = get_plan(slug)
+        if not plan:
+            return {"success": False, "message": f"Plan '{slug}' not found"}
+        
+        tasks = get_tasks(slug)
+        done = sum(1 for t in tasks if t.status == "done")
+        failed = sum(1 for t in tasks if t.status == "failed")
+        pending = sum(1 for t in tasks if t.status == "pending")
+        
+        return {
+            "success": True,
+            "data": {
+                "slug": plan.slug,
+                "status": plan.status.value,
+                "tasks": {
+                    "total": len(tasks),
+                    "done": done,
+                    "failed": failed,
+                    "pending": pending,
+                },
+                "task_list": [
+                    {"id": t.id, "description": t.description, "status": t.status}
+                    for t in tasks
+                ],
+            }
+        }
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
+@router.post("/api/sessions/{session_id}/plan/{slug}/pause")
+async def api_plan_pause(session_id: str, slug: str) -> dict[str, Any]:
+    """Pause plan execution."""
+    try:
+        from agents.plan.plan_manager import pause_plan
+        if pause_plan(slug):
+            return {"success": True}
+        return {"success": False, "message": "Cannot pause plan"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
+@router.post("/api/sessions/{session_id}/plan/{slug}/resume")
+async def api_plan_resume(session_id: str, slug: str) -> dict[str, Any]:
+    """Resume plan execution."""
+    try:
+        from agents.plan.plan_manager import resume_plan
+        if resume_plan(slug):
+            return {"success": True}
+        return {"success": False, "message": "Cannot resume plan"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
+class SkipTaskRequest(BaseModel):
+    task_id: int
+
+
+@router.post("/api/sessions/{session_id}/plan/{slug}/skip-task")
+async def api_plan_skip_task(session_id: str, slug: str, data: SkipTaskRequest) -> dict[str, Any]:
+    """Skip a task in plan."""
+    try:
+        from agents.plan.plan_manager import skip_task
+        if skip_task(slug, data.task_id):
+            return {"success": True}
+        return {"success": False, "message": "Cannot skip task"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
+@router.post("/api/sessions/{session_id}/plan/{slug}/abandon")
+async def api_plan_abandon(session_id: str, slug: str) -> dict[str, Any]:
+    """Abandon plan."""
+    try:
+        from agents.plan.plan_manager import abandon_plan
+        if abandon_plan(slug):
+            return {"success": True}
+        return {"success": False, "message": "Cannot abandon plan"}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
 @router.get("/api/sessions/{session_id}/stats")
 def api_session_stats(session_id: str) -> dict[str, Any]:
     session_info = _active_sessions.get(session_id)
