@@ -14,7 +14,6 @@ import { QuestionDialog } from '../../components/agent/QuestionDialog';
 import { PlanApprovalDialog } from '../../components/agent/PlanApprovalDialog';
 import { PlanProgressPanel } from '../../components/agent/PlanProgressPanel';
 import { PlanControlPanel } from '../../components/agent/PlanControlPanel';
-import { McpPanel } from '../../components/agent/McpPanel';
 import { TodoListPanel } from '../../components/chat/TodoListPanel';
 import { PageLayout } from '../../components/PageLayout';
 import { useChat } from './hooks/useChat';
@@ -562,22 +561,13 @@ export default function ChatPage() {
             <div className="flex-1 overflow-hidden flex flex-col">
               {rightTab === 'control' ? (
                 <div className="flex-1 overflow-auto flex flex-col">
-                  {/* Token stats at top */}
                   <div className="border-b border-gray-200">
                     <TokenBreakdownPanel sessionId={currentSessionId} />
                   </div>
-                  {/* Plan control */}
                   <PlanControlPanel
                     sessionId={currentSessionId || ''}
                     planSlug={planSlug || ''}
                   />
-                  {/* MCP servers */}
-                  <div className="border-t border-gray-200">
-                    <div className="px-3 py-2 text-xs font-medium text-gray-700 bg-gray-50">
-                      MCP 服务
-                    </div>
-                    <McpPanel />
-                  </div>
                 </div>
               ) : (
                 <div className="flex-1 overflow-auto flex flex-col">

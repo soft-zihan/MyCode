@@ -19,64 +19,18 @@ interface PlanControlPanelProps {
   planSlug: string;
 }
 
-type SubTab = 'progress' | 'artifacts' | 'ledger';
-
 export function PlanControlPanel({ sessionId, planSlug }: PlanControlPanelProps) {
   const [progress, setProgress] = useState<PlanProgress | null>(null);
   const [artifacts, setArtifacts] = useState<Record<string, string>>({});
   const [ledger, setLedger] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [subTab, setSubTab] = useState<SubTab>('progress');
   const [expandedArtifact, setExpandedArtifact] = useState<string | null>(null);
-
-  // If no planSlug, show strategy selection
-  if (!planSlug) {
-    return (
-      <div className="flex-1 overflow-auto p-3">
-        <div className="text-xs font-medium text-gray-700 mb-2 flex items-center gap-1">
-          <Settings className="w-3.5 h-3.5" />
-          Plan 策略配置
-        </div>
-        <div className="space-y-3">
-          <div>
-            <label className="block text-[10px] text-gray-500 mb-1">需求澄清策略</label>
-            <select className="w-full text-xs border border-gray-200 rounded px-2 py-1">
-              <option>simple - 简单需求直接跳过</option>
-              <option>design-tree - 复杂需求设计树</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-[10px] text-gray-500 mb-1">任务分解策略</label>
-            <select className="w-full text-xs border border-gray-200 rounded px-2 py-1">
-              <option>structured - 结构化分解</option>
-              <option>flat - 扁平列表</option>
-              <option>vertical-slice - 垂直切片</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-[10px] text-gray-500 mb-1">审查策略</label>
-            <select className="w-full text-xs border border-gray-200 rounded px-2 py-1">
-              <option>single-axis - 单轴审查</option>
-              <option>dual-axis - 双轴审查</option>
-              <option>none - 跳过审查</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-[10px] text-gray-500 mb-1">执行策略</label>
-            <select className="w-full text-xs border border-gray-200 rounded px-2 py-1">
-              <option>direct - 直接执行</option>
-            </select>
-          </div>
-        </div>
-        <div className="mt-4 p-2 bg-blue-50 rounded text-[10px] text-blue-700">
-          💡 在 Plan 模式下，AI 将根据以上策略制定计划
-        </div>
-      </div>
-    );
-  }
+  const [showExecution, setShowExecution] = useState(true);
+  const [showArtifacts, setShowArtifacts] = useState(true);
 
   const fetchProgress = async () => {
+    if (!planSlug) return;
     try {
       setLoading(true);
       const result = await getPlanStatus(sessionId, planSlug);
@@ -93,24 +47,24 @@ export function PlanControlPanel({ sessionId, planSlug }: PlanControlPanelProps)
   };
 
   const fetchArtifacts = async () => {
+    if (!planSlug) return;
     try {
       const result = await getPlanArtifacts(sessionId, planSlug);
       if (result.success && result.data) {
         setArtifacts(result.data);
       }
     } catch (err) {
-      // Silent fail for artifacts
     }
   };
 
   const fetchLedger = async () => {
+    if (!planSlug) return;
     try {
       const result = await getPlanLedger(sessionId, planSlug);
       if (result.success && result.data) {
         setLedger(result.data);
       }
     } catch (err) {
-      // Silent fail for ledger
     }
   };
 
@@ -148,12 +102,14 @@ export function PlanControlPanel({ sessionId, planSlug }: PlanControlPanelProps)
     }
   };
 
-  // 如果没有 planSlug，显示策略选择界面
   if (!planSlug) {
     return (
-      <div className="p-3 space-y-3">
-        <div className="text-xs font-medium text-gray-700">Plan 策略配置</div>
-        <div className="space-y-2">
+      <div className="flex-1 overflow-auto p-3">
+        <div className="text-xs font-medium text-gray-700 mb-2 flex items-center gap-1">
+          <Settings className="w-3.5 h-3.5" />
+          Plan 策略配置
+        </div>
+        <div className="space-y-3">
           <div>
             <label className="block text-[10px] text-gray-500 mb-1">需求澄清策略</label>
             <select className="w-full text-xs border border-gray-200 rounded px-2 py-1">
@@ -207,10 +163,11 @@ export function PlanControlPanel({ sessionId, planSlug }: PlanControlPanelProps)
   const progressPercent = tasks.total > 0 ? Math.round((tasks.done / tasks.total) * 100) : 0;
   const isPaused = progress.status === 'paused';
   const isCompleted = progress.status === 'completed' || progress.status === 'ready_to_archive';
+  const currentTask = progress.task_list?.find(t => t.status === 'in-progress');
+  const currentPhase = isCompleted ? '已完成' : isPaused ? '已暂停' : currentTask ? '执行中' : '准备中';
 
   return (
     <div className="flex-1 overflow-auto flex flex-col">
-      {/* Header with controls */}
       <div className="px-3 py-2 bg-green-50 border-b border-green-100">
         <div className="flex items-center gap-2 mb-2">
           <span className="text-xs font-medium text-green-800">
@@ -254,7 +211,6 @@ export function PlanControlPanel({ sessionId, planSlug }: PlanControlPanelProps)
           )}
         </div>
 
-        {/* Progress bar */}
         <div className="flex items-center gap-2">
           <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
             <div
@@ -268,92 +224,109 @@ export function PlanControlPanel({ sessionId, planSlug }: PlanControlPanelProps)
         </div>
       </div>
 
-      {/* Sub tabs */}
-      <div className="flex border-b border-gray-200">
+      <div className="border-b border-gray-200">
         <button
-          onClick={() => setSubTab('progress')}
-          className={`flex-1 px-2 py-1.5 text-xs font-medium transition-colors ${
-            subTab === 'progress' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'
-          }`}
+          onClick={() => setShowExecution(!showExecution)}
+          className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
         >
-          <List className="w-3 h-3 inline mr-1" />
-          Tasks
+          {showExecution ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+          执行状态
+          <span className="ml-auto text-[10px] text-gray-500">{currentPhase}</span>
         </button>
-        <button
-          onClick={() => setSubTab('artifacts')}
-          className={`flex-1 px-2 py-1.5 text-xs font-medium transition-colors ${
-            subTab === 'artifacts' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'
-          }`}
-        >
-          <FileText className="w-3 h-3 inline mr-1" />
-          Artifacts
-        </button>
-        <button
-          onClick={() => setSubTab('ledger')}
-          className={`flex-1 px-2 py-1.5 text-xs font-medium transition-colors ${
-            subTab === 'ledger' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'
-          }`}
-        >
-          <History className="w-3 h-3 inline mr-1" />
-          Ledger
-        </button>
-      </div>
-
-      {/* Tab content */}
-      <div className="flex-1 overflow-auto">
-        {subTab === 'progress' && (
-          <div className="p-2">
-            {progress.task_list && progress.task_list.length > 0 ? (
-              <div className="space-y-1">
-                {progress.task_list.map((task) => (
-                  <div
-                    key={task.id}
-                    className="flex items-center gap-2 text-xs p-1.5 rounded hover:bg-gray-50"
-                  >
-                    {task.status === 'done' && (
-                      <CheckCircle className="w-4 h-4 text-green-500 flex-shrink-0" />
-                    )}
-                    {task.status === 'failed' && (
-                      <XCircle className="w-4 h-4 text-red-500 flex-shrink-0" />
-                    )}
-                    {task.status === 'in-progress' && (
-                      <Clock className="w-4 h-4 text-blue-500 animate-pulse flex-shrink-0" />
-                    )}
-                    {task.status === 'pending' && (
-                      <Clock className="w-4 h-4 text-gray-400 flex-shrink-0" />
-                    )}
-                    {task.status === 'skipped' && (
-                      <SkipForward className="w-4 h-4 text-gray-400 flex-shrink-0" />
-                    )}
-                    <span className={`flex-1 ${
-                      task.status === 'done' ? 'text-green-700 line-through' :
-                      task.status === 'failed' ? 'text-red-700' :
-                      task.status === 'in-progress' ? 'text-blue-700 font-medium' :
-                      task.status === 'skipped' ? 'text-gray-400 line-through' :
-                      'text-gray-600'
-                    }`}>
-                      {task.id}. {task.description}
-                    </span>
-                    {task.status === 'pending' && (
-                      <button
-                        onClick={() => handleSkip(task.id)}
-                        className="p-0.5 text-gray-400 hover:text-gray-600"
-                        title="跳过"
-                      >
-                        <SkipForward className="w-3 h-3" />
-                      </button>
-                    )}
-                  </div>
-                ))}
+        {showExecution && (
+          <div className="px-3 pb-2 max-h-[250px] overflow-auto">
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-2 text-[11px]">
+                <span className="text-gray-500 w-16">当前环节:</span>
+                <span className="text-gray-700 font-medium">{currentPhase}</span>
               </div>
-            ) : (
-              <div className="text-xs text-gray-500 p-2">No tasks yet</div>
-            )}
+              {currentTask && (
+                <div className="flex items-center gap-2 text-[11px]">
+                  <span className="text-gray-500 w-16">当前任务:</span>
+                  <span className="text-gray-700 truncate flex-1">#{currentTask.id}. {currentTask.description}</span>
+                </div>
+              )}
+              <div className="flex items-center gap-2 text-[11px]">
+                <span className="text-gray-500 w-16">进度:</span>
+                <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-blue-500 transition-all duration-300"
+                    style={{ width: `${progressPercent}%` }}
+                  />
+                </div>
+                <span className="text-gray-600 font-medium">{progressPercent}%</span>
+              </div>
+            </div>
           </div>
         )}
+      </div>
 
-        {subTab === 'artifacts' && (
-          <div className="p-2">
+      <div className="border-b border-gray-200">
+        <div className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-50">
+          <List className="w-3 h-3" />
+          任务列表
+        </div>
+        <div className="p-2 max-h-[200px] overflow-auto">
+          {progress.task_list && progress.task_list.length > 0 ? (
+            <div className="space-y-1">
+              {progress.task_list.map((task) => (
+                <div
+                  key={task.id}
+                  className="flex items-center gap-2 text-xs p-1.5 rounded hover:bg-gray-50"
+                >
+                  {task.status === 'done' && (
+                    <CheckCircle className="w-4 h-4 text-green-500 flex-shrink-0" />
+                  )}
+                  {task.status === 'failed' && (
+                    <XCircle className="w-4 h-4 text-red-500 flex-shrink-0" />
+                  )}
+                  {task.status === 'in-progress' && (
+                    <Clock className="w-4 h-4 text-blue-500 animate-pulse flex-shrink-0" />
+                  )}
+                  {task.status === 'pending' && (
+                    <Clock className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                  )}
+                  {task.status === 'skipped' && (
+                    <SkipForward className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                  )}
+                  <span className={`flex-1 ${
+                    task.status === 'done' ? 'text-green-700 line-through' :
+                    task.status === 'failed' ? 'text-red-700' :
+                    task.status === 'in-progress' ? 'text-blue-700 font-medium' :
+                    task.status === 'skipped' ? 'text-gray-400 line-through' :
+                    'text-gray-600'
+                  }`}>
+                    {task.id}. {task.description}
+                  </span>
+                  {task.status === 'pending' && (
+                    <button
+                      onClick={() => handleSkip(task.id)}
+                      className="p-0.5 text-gray-400 hover:text-gray-600"
+                      title="跳过"
+                    >
+                      <SkipForward className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-xs text-gray-500 p-2">No tasks yet</div>
+          )}
+        </div>
+      </div>
+
+      <div className="border-b border-gray-200">
+        <button
+          onClick={() => setShowArtifacts(!showArtifacts)}
+          className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50"
+        >
+          {showArtifacts ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+          产物查看
+          <span className="ml-auto text-[10px] text-gray-500">{Object.keys(artifacts).length} 个文件</span>
+        </button>
+        {showArtifacts && (
+          <div className="px-3 pb-2 max-h-[300px] overflow-auto">
             {Object.keys(artifacts).length > 0 ? (
               <div className="space-y-1">
                 {Object.entries(artifacts).map(([filename, content]) => (
@@ -369,7 +342,7 @@ export function PlanControlPanel({ sessionId, planSlug }: PlanControlPanelProps)
                       )}
                       <FileText className="w-3 h-3 text-blue-500" />
                       {filename}
-                      <span className="text-gray-400 ml-auto">{content.length} chars</span>
+                      <span className="text-gray-400 ml-auto text-[10px]">{content.length} chars</span>
                     </button>
                     {expandedArtifact === filename && (
                       <div className="border-t border-gray-200 p-2 max-h-48 overflow-auto">
@@ -382,46 +355,50 @@ export function PlanControlPanel({ sessionId, planSlug }: PlanControlPanelProps)
                 ))}
               </div>
             ) : (
-              <div className="text-xs text-gray-500 p-2">No artifacts</div>
+              <div className="text-xs text-gray-500 p-2">暂无产物文件</div>
             )}
           </div>
         )}
+      </div>
 
-        {subTab === 'ledger' && (
-          <div className="p-2">
-            {ledger.length > 0 ? (
-              <div className="space-y-1">
-                {ledger.slice().reverse().map((entry, i) => (
-                  <div key={i} className="text-xs p-1.5 rounded bg-gray-50 border border-gray-100">
-                    <div className="flex items-center gap-2">
-                      <span className={`px-1 py-0.5 rounded text-[10px] font-medium ${
-                        entry.status === 'done' ? 'bg-green-100 text-green-700' :
-                        entry.status === 'failed' ? 'bg-red-100 text-red-700' :
-                        entry.status === 'started' ? 'bg-blue-100 text-blue-700' :
-                        'bg-gray-100 text-gray-700'
-                      }`}>
-                        {entry.status}
+      <div className="flex-1 min-h-0 flex flex-col">
+        <div className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-50 border-b border-gray-200">
+          <History className="w-3 h-3" />
+          执行日志
+        </div>
+        <div className="flex-1 overflow-auto p-2">
+          {ledger.length > 0 ? (
+            <div className="space-y-1">
+              {ledger.slice().reverse().map((entry, i) => (
+                <div key={i} className="text-xs p-1.5 rounded bg-gray-50 border border-gray-100">
+                  <div className="flex items-center gap-2">
+                    <span className={`px-1 py-0.5 rounded text-[10px] font-medium ${
+                      entry.status === 'done' ? 'bg-green-100 text-green-700' :
+                      entry.status === 'failed' ? 'bg-red-100 text-red-700' :
+                      entry.status === 'started' ? 'bg-blue-100 text-blue-700' :
+                      'bg-gray-100 text-gray-700'
+                    }`}>
+                      {entry.status}
+                    </span>
+                    {entry.task_id && <span className="text-gray-500">Task {entry.task_id}</span>}
+                    {entry.finished && (
+                      <span className="text-gray-400 ml-auto text-[10px]">
+                        {new Date(entry.finished).toLocaleTimeString()}
                       </span>
-                      {entry.task_id && <span className="text-gray-500">Task {entry.task_id}</span>}
-                      {entry.finished && (
-                        <span className="text-gray-400 ml-auto text-[10px]">
-                          {new Date(entry.finished).toLocaleTimeString()}
-                        </span>
-                      )}
-                    </div>
-                    {entry.verification?.command && (
-                      <div className="mt-1 text-[10px] text-gray-500 font-mono truncate">
-                        $ {entry.verification.command}
-                      </div>
                     )}
                   </div>
-                ))}
-              </div>
-            ) : (
-              <div className="text-xs text-gray-500 p-2">No ledger entries</div>
-            )}
-          </div>
-        )}
+                  {entry.verification?.command && (
+                    <div className="mt-1 text-[10px] text-gray-500 font-mono truncate">
+                      $ {entry.verification.command}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-xs text-gray-500 p-2">暂无执行日志</div>
+          )}
+        </div>
       </div>
     </div>
   );
