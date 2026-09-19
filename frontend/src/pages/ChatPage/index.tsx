@@ -12,7 +12,6 @@ import { TokenBreakdownPanel } from '../../components/agent/TokenBreakdownPanel'
 import { DeliverablesPanel } from '../../components/agent/DeliverablesPanel';
 import { QuestionDialog } from '../../components/agent/QuestionDialog';
 import { PlanApprovalDialog } from '../../components/agent/PlanApprovalDialog';
-import { PlanProgressPanel } from '../../components/agent/PlanProgressPanel';
 import { PlanControlPanel } from '../../components/agent/PlanControlPanel';
 import { McpPanel } from '../../components/agent/McpPanel';
 import { TodoListPanel } from '../../components/chat/TodoListPanel';
@@ -299,14 +298,6 @@ export default function ChatPage() {
           {/* TodoList Panel */}
           {todos && todos.length > 0 && (
             <TodoListPanel todos={todos} />
-          )}
-
-          {/* Plan Progress Panel */}
-          {planSlug && currentSessionId && (
-            <PlanProgressPanel
-              sessionId={currentSessionId}
-              planSlug={planSlug}
-            />
           )}
 
           {/* Goal Mode UI */}
