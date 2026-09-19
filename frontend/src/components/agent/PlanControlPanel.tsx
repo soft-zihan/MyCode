@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { CheckCircle, XCircle, Clock, Play, Pause, SkipForward, X, FileText, List, History, ChevronDown, ChevronRight, Settings } from 'lucide-react';
-import { getPlanStatus, planPause, planResume, planSkipTask, planAbandon, getPlanArtifacts, getPlanLedger } from '../../api/client';
+import { getPlanStatus, planPause, planResume, planSkipTask, planAbandon, getPlanArtifacts, getPlanLedger, fetchPlanStrategies, savePlanStrategies, PlanStrategies } from '../../api/client';
 
 interface PlanProgress {
   slug: string;
@@ -28,6 +28,24 @@ export function PlanControlPanel({ sessionId, planSlug }: PlanControlPanelProps)
   const [expandedArtifact, setExpandedArtifact] = useState<string | null>(null);
   const [showExecution, setShowExecution] = useState(true);
   const [showArtifacts, setShowArtifacts] = useState(true);
+  const [strategies, setStrategies] = useState<PlanStrategies | null>(null);
+
+  useEffect(() => {
+    if (!planSlug) {
+      fetchPlanStrategies().then(setStrategies).catch(console.error);
+    }
+  }, [planSlug]);
+
+  const handleStrategyChange = async (key: keyof PlanStrategies, value: string) => {
+    if (!strategies) return;
+    const updated = { ...strategies, [key]: value };
+    setStrategies(updated);
+    try {
+      await savePlanStrategies(updated);
+    } catch (err) {
+      console.error('Failed to save strategy:', err);
+    }
+  };
 
   const fetchProgress = async () => {
     if (!planSlug) return;
@@ -103,6 +121,13 @@ export function PlanControlPanel({ sessionId, planSlug }: PlanControlPanelProps)
   };
 
   if (!planSlug) {
+    if (!strategies) {
+      return (
+        <div className="p-4 flex items-center justify-center">
+          <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500" />
+        </div>
+      );
+    }
     return (
       <div className="flex-1 overflow-auto p-3">
         <div className="text-xs font-medium text-gray-700 mb-2 flex items-center gap-1">
@@ -112,31 +137,60 @@ export function PlanControlPanel({ sessionId, planSlug }: PlanControlPanelProps)
         <div className="space-y-3">
           <div>
             <label className="block text-[10px] text-gray-500 mb-1">需求澄清策略</label>
-            <select className="w-full text-xs border border-gray-200 rounded px-2 py-1">
-              <option>simple - 简单需求直接跳过</option>
-              <option>design-tree - 复杂需求设计树</option>
+            <select
+              value={strategies.grill_spec}
+              onChange={(e) => handleStrategyChange('grill_spec', e.target.value)}
+              className="w-full text-xs border border-gray-200 rounded px-2 py-1"
+            >
+              <option value="simple">simple - 简单需求直接跳过</option>
+              <option value="design-tree">design-tree - 复杂需求设计树</option>
             </select>
           </div>
           <div>
             <label className="block text-[10px] text-gray-500 mb-1">任务分解策略</label>
-            <select className="w-full text-xs border border-gray-200 rounded px-2 py-1">
-              <option>structured - 结构化分解</option>
-              <option>flat - 扁平列表</option>
-              <option>vertical-slice - 垂直切片</option>
+            <select
+              value={strategies.tasks}
+              onChange={(e) => handleStrategyChange('tasks', e.target.value)}
+              className="w-full text-xs border border-gray-200 rounded px-2 py-1"
+            >
+              <option value="structured">structured - 结构化分解</option>
+              <option value="flat">flat - 扁平列表</option>
+              <option value="vertical-slice">vertical-slice - 垂直切片</option>
             </select>
           </div>
           <div>
             <label className="block text-[10px] text-gray-500 mb-1">审查策略</label>
-            <select className="w-full text-xs border border-gray-200 rounded px-2 py-1">
-              <option>single-axis - 单轴审查</option>
-              <option>dual-axis - 双轴审查</option>
-              <option>none - 跳过审查</option>
+            <select
+              value={strategies.review}
+              onChange={(e) => handleStrategyChange('review', e.target.value)}
+              className="w-full text-xs border border-gray-200 rounded px-2 py-1"
+            >
+              <option value="single-axis">single-axis - 单轴审查</option>
+              <option value="dual-axis">dual-axis - 双轴审查</option>
+              <option value="none">none - 跳过审查</option>
             </select>
           </div>
           <div>
             <label className="block text-[10px] text-gray-500 mb-1">执行策略</label>
-            <select className="w-full text-xs border border-gray-200 rounded px-2 py-1">
-              <option>direct - 直接执行</option>
+            <select
+              value={strategies.execute}
+              onChange={(e) => handleStrategyChange('execute', e.target.value)}
+              className="w-full text-xs border border-gray-200 rounded px-2 py-1"
+            >
+              <option value="direct">direct - 直接执行</option>
+              <option value="subagent">subagent - 子智能体执行</option>
+              <option value="tdd">tdd - TDD 循环执行</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-[10px] text-gray-500 mb-1">收敛策略</label>
+            <select
+              value={strategies.converge}
+              onChange={(e) => handleStrategyChange('converge', e.target.value)}
+              className="w-full text-xs border border-gray-200 rounded px-2 py-1"
+            >
+              <option value="none">none - 跳过收敛</option>
+              <option value="gap-analysis">gap-analysis - 差距分析</option>
             </select>
           </div>
         </div>

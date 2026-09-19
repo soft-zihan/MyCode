@@ -209,6 +209,7 @@ class Agent:
 
         self.total_input_tokens = 0
         self.total_output_tokens = 0
+        self.total_cached_tokens = 0
         self.last_input_token_count = 0
         self.current_turns = 0
         self.last_api_call_time = 0

@@ -506,9 +506,9 @@ async def api_update_permission_mode(session_id: str, data: PermissionModeReques
 
 @router.get("/api/sessions/{session_id}/token-breakdown")
 async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
-    """获取 token 三段分解：system/tools/messages
+    """获取 token 详细分解：system/tools/messages/context_files
     
-    返回字符数（前端可用于计算比例），以及估算的 token 数（约 4 字符 = 1 token）
+    返回字符数和估算的 token 数（约 4 字符 = 1 token）
     支持活跃和非活跃 session（从 JSONL 事件恢复）
     """
     session_info = _active_sessions.get(session_id)
@@ -534,13 +534,31 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
                     })
             tools_chars = len(json.dumps(tools_schema, ensure_ascii=False))
             
-            # Messages
+            # Context files (files added via @ mention)
+            context_files_chars = 0
+            context_files_list = []
             session = getattr(svc, 'session', None) or getattr(agent, 'session', None)
+            if session:
+                context_files = getattr(session, 'context_files', []) or []
+                for cf in context_files:
+                    path = cf.get('path', '')
+                    content = cf.get('content', '')
+                    chars = len(content)
+                    context_files_chars += chars
+                    context_files_list.append({
+                        'path': path,
+                        'chars': chars,
+                        'tokens': chars // 4,
+                    })
+            
+            # Messages
             messages_chars = 0
+            message_count = 0
             if session:
                 messages = session.get_messages_for_llm()
                 for msg in messages:
                     if msg.get('role') != 'system':
+                        message_count += 1
                         content = msg.get('content', '')
                         if isinstance(content, str):
                             messages_chars += len(content)
@@ -549,13 +567,21 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
                                 if isinstance(item, dict) and item.get('type') == 'text':
                                     messages_chars += len(item.get('text', ''))
             
+            total_chars = system_chars + tools_chars + messages_chars + context_files_chars
+            
             return {
                 "system_chars": system_chars,
                 "tools_chars": tools_chars,
                 "messages_chars": messages_chars,
+                "context_files_chars": context_files_chars,
+                "total_chars": total_chars,
                 "system_tokens": system_chars // 4,
                 "tools_tokens": tools_chars // 4,
                 "messages_tokens": messages_chars // 4,
+                "context_files_tokens": context_files_chars // 4,
+                "total_tokens": total_chars // 4,
+                "message_count": message_count,
+                "context_files": context_files_list,
             }
     
     # Fallback: compute from JSONL events for inactive sessions
@@ -568,15 +594,24 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
             "system_chars": 0,
             "tools_chars": 0,
             "messages_chars": 0,
+            "context_files_chars": 0,
+            "total_chars": 0,
             "system_tokens": 0,
             "tools_tokens": 0,
             "messages_tokens": 0,
+            "context_files_tokens": 0,
+            "total_tokens": 0,
+            "message_count": 0,
+            "context_files": [],
         }
     
     # Parse events to reconstruct token breakdown
     system_chars = 0
     tools_chars = 0
     messages_chars = 0
+    context_files_chars = 0
+    message_count = 0
+    context_files_list = []
     
     with open(events_file) as f:
         for line in f:
@@ -584,8 +619,24 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
                 event = json.loads(line.strip())
                 event_type = event.get("type", "")
                 
+                # System prompt
+                if event_type == "system_prompt":
+                    system_chars = len(event.get("content", ""))
+                
+                # Context files
+                elif event_type == "context_files":
+                    files = event.get("files", [])
+                    for cf in files:
+                        chars = len(cf.get("content", ""))
+                        context_files_chars += chars
+                        context_files_list.append({
+                            'path': cf.get('path', ''),
+                            'chars': chars,
+                            'tokens': chars // 4,
+                        })
+                
                 # Assistant message with tool calls -> tools
-                if event_type == "assistant_message":
+                elif event_type == "assistant_message":
                     content = event.get("content", "")
                     if content:
                         messages_chars += len(content)
@@ -602,6 +653,7 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
                 
                 # User messages -> messages
                 elif event_type == "user_message":
+                    message_count += 1
                     messages_chars += len(event.get("content", ""))
                 
             except (json.JSONDecodeError, Exception):
@@ -611,13 +663,21 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
     if system_chars == 0:
         system_chars = 2000  # reasonable default
     
+    total_chars = system_chars + tools_chars + messages_chars + context_files_chars
+    
     return {
         "system_chars": system_chars,
         "tools_chars": tools_chars,
         "messages_chars": messages_chars,
+        "context_files_chars": context_files_chars,
+        "total_chars": total_chars,
         "system_tokens": system_chars // 4,
         "tools_tokens": tools_chars // 4,
         "messages_tokens": messages_chars // 4,
+        "context_files_tokens": context_files_chars // 4,
+        "total_tokens": total_chars // 4,
+        "message_count": message_count,
+        "context_files": context_files_list,
     }
 
 
@@ -922,8 +982,7 @@ def api_session_stats(session_id: str) -> dict[str, Any]:
         svc = session_info["svc"]
         stats = svc.get_stats()
         agent = svc.agent
-        # Get cached tokens from agent if available
-        cached_tokens = getattr(agent, 'cached_tokens', 0)
+        cached_tokens = getattr(agent, 'total_cached_tokens', 0)
         return {
             "input_tokens": stats.get("input", 0),
             "output_tokens": stats.get("output", 0),
@@ -937,8 +996,8 @@ def api_session_stats(session_id: str) -> dict[str, Any]:
     sessions_dir = Path.home() / ".mycode" / "sessions"
     events_file = sessions_dir / f"{session_id}.events.jsonl"
     if events_file.exists():
-        # Try to get cached_tokens from last stats event
         cached_tokens = 0
+        total_cached_tokens = 0
         input_tokens = 0
         output_tokens = 0
         last_input_token_count = 0
@@ -949,6 +1008,7 @@ def api_session_stats(session_id: str) -> dict[str, Any]:
                     event = json.loads(line.strip())
                     if event.get("type") == "stats":
                         cached_tokens = event.get("cached_tokens", 0)
+                        total_cached_tokens = event.get("total_cached_tokens", total_cached_tokens + cached_tokens)
                         input_tokens = event.get("input_tokens", 0)
                         output_tokens = event.get("output_tokens", 0)
                         last_input_token_count = event.get("last_input_token_count", 0)
@@ -958,7 +1018,7 @@ def api_session_stats(session_id: str) -> dict[str, Any]:
         return {
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
-            "cached_tokens": cached_tokens,
+            "cached_tokens": total_cached_tokens,
             "context_window": context_window,
             "effective_window": 108000,
             "last_input_token_count": last_input_token_count,

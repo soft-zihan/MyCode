@@ -355,10 +355,12 @@ class AgentLoop:
             
             if not a.is_sub_agent:
                 cached_tokens = response["usage"].get("cached_tokens", 0)
+                a.total_cached_tokens += cached_tokens
                 a.session.append("stats", {
                     "input_tokens": a.total_input_tokens,
                     "output_tokens": a.total_output_tokens,
                     "cached_tokens": cached_tokens,
+                    "total_cached_tokens": a.total_cached_tokens,
                     "context_window": a.context_window,
                     "last_input_token_count": a.last_input_token_count,
                 })

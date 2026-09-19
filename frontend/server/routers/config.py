@@ -133,3 +133,26 @@ def api_update_config(data: ConfigUpdate) -> dict[str, Any]:
     )
     save_config(config)
     return {"status": "ok", "message": "Config saved successfully"}
+
+
+@router.get("/api/config/plan-strategies")
+def api_get_plan_strategies() -> dict[str, Any]:
+    """获取 Plan 策略配置"""
+    config = load_config()
+    return config.plan_strategies.to_dict()
+
+
+@router.put("/api/config/plan-strategies")
+def api_update_plan_strategies(data: dict[str, str]) -> dict[str, Any]:
+    """更新 Plan 策略配置"""
+    from agents.config import PlanStrategyConfig
+    config = load_config()
+    config.plan_strategies = PlanStrategyConfig(
+        grill_spec=data.get("grill_spec", config.plan_strategies.grill_spec),
+        tasks=data.get("tasks", config.plan_strategies.tasks),
+        execute=data.get("execute", config.plan_strategies.execute),
+        review=data.get("review", config.plan_strategies.review),
+        converge=data.get("converge", config.plan_strategies.converge),
+    )
+    save_config(config)
+    return {"status": "ok", "message": "Plan strategies saved successfully"}

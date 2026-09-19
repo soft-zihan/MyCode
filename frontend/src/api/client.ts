@@ -438,6 +438,29 @@ export async function saveConfig(config: AppConfig): Promise<void> {
   if (!res.ok) throw new Error('Failed to save config');
 }
 
+export interface PlanStrategies {
+  grill_spec: string;
+  tasks: string;
+  execute: string;
+  review: string;
+  converge: string;
+}
+
+export async function fetchPlanStrategies(): Promise<PlanStrategies> {
+  const res = await fetch(`${API_BASE}/config/plan-strategies`);
+  if (!res.ok) throw new Error('Failed to fetch plan strategies');
+  return res.json();
+}
+
+export async function savePlanStrategies(strategies: PlanStrategies): Promise<void> {
+  const res = await fetch(`${API_BASE}/config/plan-strategies`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(strategies),
+  });
+  if (!res.ok) throw new Error('Failed to save plan strategies');
+}
+
 // ── Prompt APIs ─────────────────────────────────────────────────────────────
 
 export interface PromptInfo {
@@ -814,13 +837,25 @@ export async function fetchContextStore(sessionId: string): Promise<ContextStore
   return res.json();
 }
 
+export interface ContextFile {
+  path: string;
+  chars: number;
+  tokens: number;
+}
+
 export interface TokenBreakdown {
   system_chars: number;
   tools_chars: number;
   messages_chars: number;
+  context_files_chars: number;
+  total_chars: number;
   system_tokens: number;
   tools_tokens: number;
   messages_tokens: number;
+  context_files_tokens: number;
+  total_tokens: number;
+  message_count: number;
+  context_files: ContextFile[];
 }
 
 export async function fetchTokenBreakdown(sessionId: string): Promise<TokenBreakdown> {

@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import { 
-  MessageSquare, PanelRight, Send, Square, Zap, File, X, Package, Cpu, Sliders
+  MessageSquare, PanelRight, Send, Square, Zap, File, X, Package, Cpu, Sliders, Layers
 } from 'lucide-react';
 import { ReviewPanel } from '../../components/ReviewPanel';
 import { DiffViewer } from '../../components/DiffViewer';
@@ -8,12 +8,11 @@ import { ChatView } from '../../components/chat/nodes';
 import { FileTree } from './components/FileTree';
 import { FileViewer } from './components/FileViewer';
 import { SessionsPanel } from './components/SessionsPanel';
-import { TokenBreakdownPanel } from '../../components/agent/TokenBreakdownPanel';
+import { ContextPanel } from '../../components/agent/ContextPanel';
 import { DeliverablesPanel } from '../../components/agent/DeliverablesPanel';
 import { QuestionDialog } from '../../components/agent/QuestionDialog';
 import { PlanApprovalDialog } from '../../components/agent/PlanApprovalDialog';
 import { PlanControlPanel } from '../../components/agent/PlanControlPanel';
-import { McpPanel } from '../../components/agent/McpPanel';
 import { TodoListPanel } from '../../components/chat/TodoListPanel';
 import { PageLayout } from '../../components/PageLayout';
 import { useChat } from './hooks/useChat';
@@ -32,6 +31,7 @@ export default function ChatPage() {
   const [changesSelectedFile, setChangesSelectedFile] = useState<string | null>(null);
   const [rightSidebarOpen, setRightSidebarOpen] = useState(true);
   const [rightTab, setRightTab] = useState<'files' | 'control'>('files');
+  const [controlSubTab, setControlSubTab] = useState<'context' | 'plan'>('context');
   const [changesExpanded, setChangesExpanded] = useState(false);
   const [fileList, setFileList] = useState<string[]>([]);
 
@@ -552,19 +552,38 @@ export default function ChatPage() {
             {/* Tab content */}
             <div className="flex-1 overflow-hidden flex flex-col">
               {rightTab === 'control' ? (
-                <div className="flex-1 overflow-auto flex flex-col">
-                  <div className="border-b border-gray-200">
-                    <TokenBreakdownPanel sessionId={currentSessionId} />
+                <div className="flex-1 overflow-hidden flex flex-col">
+                  {/* Control sub-tabs */}
+                  <div className="flex border-b border-gray-200 bg-gray-50">
+                    <button
+                      onClick={() => setControlSubTab('context')}
+                      className={`flex-1 px-2 py-1.5 text-xs font-medium transition-colors ${
+                        controlSubTab === 'context' ? 'text-blue-600 border-b-2 border-blue-600 bg-white' : 'text-gray-500 hover:text-gray-700'
+                      }`}
+                    >
+                      <Layers className="w-3 h-3 inline mr-1" />
+                      Context
+                    </button>
+                    <button
+                      onClick={() => setControlSubTab('plan')}
+                      className={`flex-1 px-2 py-1.5 text-xs font-medium transition-colors ${
+                        controlSubTab === 'plan' ? 'text-blue-600 border-b-2 border-blue-600 bg-white' : 'text-gray-500 hover:text-gray-700'
+                      }`}
+                    >
+                      <Sliders className="w-3 h-3 inline mr-1" />
+                      Plan
+                    </button>
                   </div>
-                  <PlanControlPanel
-                    sessionId={currentSessionId || ''}
-                    planSlug={planSlug || ''}
-                  />
-                  <div className="border-t border-gray-200">
-                    <div className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-50">
-                      MCP 服务
-                    </div>
-                    <McpPanel />
+                  {/* Sub-tab content */}
+                  <div className="flex-1 overflow-auto">
+                    {controlSubTab === 'context' ? (
+                      <ContextPanel sessionId={currentSessionId} />
+                    ) : (
+                      <PlanControlPanel
+                        sessionId={currentSessionId || ''}
+                        planSlug={planSlug || ''}
+                      />
+                    )}
                   </div>
                 </div>
               ) : (

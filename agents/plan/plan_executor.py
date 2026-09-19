@@ -157,15 +157,35 @@ class PlanExecutor:
         )
 
     async def _execute_subagent(self, task_id: int, task_title: str) -> TaskResult:
-        """子 Agent 执行"""
-        # 子 Agent 执行逻辑与直接执行类似，但使用隔离的上下文
-        # 实际实现时，主 Agent 会调用 agent 工具派发子 Agent
+        """子 Agent 执行
+        
+        子 Agent 执行使用隔离的上下文，适合独立的任务。
+        实际执行时，主 Agent 会通过 agent 工具派发子 Agent 执行任务。
+        当前实现委托给 execute_task_fn，由 Agent 决定如何执行。
+        """
+        append_ledger(self.slug, {
+            "task_id": task_id,
+            "status": "subagent_dispatch",
+            "note": "Delegated to execute_task_fn with subagent strategy",
+        })
         return await self._execute_direct(task_id, task_title)
 
     async def _execute_tdd(self, task_id: int, task_title: str) -> TaskResult:
-        """TDD 循环执行"""
-        # TDD 循环：先写测试，再实现功能
-        # 实际实现时，主 Agent 会按 TDD 流程执行
+        """TDD 循环执行
+        
+        TDD 流程：
+        1. 先编写测试用例
+        2. 运行测试（应失败）
+        3. 实现功能使测试通过
+        4. 重构代码
+        
+        当前实现委托给 execute_task_fn，由 Agent 按 TDD 流程执行。
+        """
+        append_ledger(self.slug, {
+            "task_id": task_id,
+            "status": "tdd_start",
+            "note": "Delegated to execute_task_fn with TDD strategy",
+        })
         return await self._execute_direct(task_id, task_title)
 
     async def review_task(self, task_id: int, task_context: dict) -> ReviewResult:
