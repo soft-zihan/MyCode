@@ -336,6 +336,19 @@ export async function fetchWorkspaceFile(path: string, cwd?: string): Promise<{ 
   return res.json();
 }
 
+export async function writeWorkspaceFile(path: string, content: string, cwd?: string): Promise<{ success: boolean; path: string; size: number }> {
+  const res = await fetch(`${API_BASE}/workspace/file`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path, content, cwd }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Write failed' }));
+    throw new Error(err.detail || 'Write failed');
+  }
+  return res.json();
+}
+
 export async function fetchAgents(): Promise<Agent[]> {
   const res = await fetch(`${API_BASE}/agents`);
   if (!res.ok) throw new Error('Failed to fetch agents');

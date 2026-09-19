@@ -29,6 +29,12 @@ class MoveRequest(BaseModel):
     cwd: Optional[str] = None
 
 
+class WriteFileRequest(BaseModel):
+    path: str
+    content: str
+    cwd: Optional[str] = None
+
+
 @router.get("/api/directories")
 def api_list_directories(path: Optional[str] = None) -> dict[str, Any]:
     if path:
@@ -147,6 +153,27 @@ def api_workspace_create_file(data: CreateFileRequest) -> dict[str, Any]:
         return {"success": True, "path": str(file_path.relative_to(workspace_path))}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create file: {str(e)}")
+
+
+@router.put("/api/workspace/file")
+def api_workspace_write_file(data: WriteFileRequest) -> dict[str, Any]:
+    workspace_path = Path(data.cwd) if data.cwd else Path.cwd()
+    file_path = workspace_path / data.path
+
+    if not data.path or not data.path.strip():
+        raise HTTPException(status_code=400, detail="File path cannot be empty")
+
+    try:
+        file_path.resolve().relative_to(workspace_path.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    try:
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(data.content, encoding="utf-8")
+        return {"success": True, "path": data.path, "size": len(data.content)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to write file: {str(e)}")
 
 
 @router.post("/api/workspace/rename")

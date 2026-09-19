@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import { 
-  MessageSquare, PanelRight, Send, Square, Zap, File, X, Package, Cpu, Sliders, Layers
+  MessageSquare, PanelRight, Send, Square, Zap, File, X, Package, Cpu, Sliders, Layers, BookOpen
 } from 'lucide-react';
 import { ReviewPanel } from '../../components/ReviewPanel';
 import { DiffViewer } from '../../components/DiffViewer';
@@ -12,7 +12,7 @@ import { ContextPanel } from '../../components/agent/ContextPanel';
 import { DeliverablesPanel } from '../../components/agent/DeliverablesPanel';
 import { QuestionDialog } from '../../components/agent/QuestionDialog';
 import { PlanApprovalDialog } from '../../components/agent/PlanApprovalDialog';
-import { PlanControlPanel } from '../../components/agent/PlanControlPanel';
+import { WikiPanel } from '../../components/agent/WikiPanel';
 import { TodoListPanel } from '../../components/chat/TodoListPanel';
 import { PageLayout } from '../../components/PageLayout';
 import { useChat } from './hooks/useChat';
@@ -36,7 +36,7 @@ export default function ChatPage() {
   const [changesSelectedFile, setChangesSelectedFile] = useState<string | null>(null);
   const [rightSidebarOpen, setRightSidebarOpen] = useState(true);
   const [rightTab, setRightTab] = useState<'files' | 'control'>('files');
-  const [controlSubTab, setControlSubTab] = useState<'context' | 'plan'>('context');
+  const [controlSubTab, setControlSubTab] = useState<'context' | 'wiki'>('context');
   const [changesExpanded, setChangesExpanded] = useState(false);
   const [fileList, setFileList] = useState<string[]>([]);
   const [rightSidebarWidth, setRightSidebarWidth] = useState(() => {
@@ -616,13 +616,13 @@ export default function ChatPage() {
                       Context
                     </button>
                     <button
-                      onClick={() => setControlSubTab('plan')}
+                      onClick={() => setControlSubTab('wiki')}
                       className={`flex-1 px-2 py-1.5 text-xs font-medium transition-colors ${
-                        controlSubTab === 'plan' ? 'text-blue-600 border-b-2 border-blue-600 bg-white' : 'text-gray-500 hover:text-gray-700'
+                        controlSubTab === 'wiki' ? 'text-blue-600 border-b-2 border-blue-600 bg-white' : 'text-gray-500 hover:text-gray-700'
                       }`}
                     >
-                      <Sliders className="w-3 h-3 inline mr-1" />
-                      Plan
+                      <BookOpen className="w-3 h-3 inline mr-1" />
+                      Wiki
                     </button>
                   </div>
                   {/* Sub-tab content */}
@@ -630,9 +630,10 @@ export default function ChatPage() {
                     {controlSubTab === 'context' ? (
                       <ContextPanel sessionId={currentSessionId} />
                     ) : (
-                      <PlanControlPanel
-                        sessionId={currentSessionId || ''}
-                        planSlug={planSlug || ''}
+                      <WikiPanel 
+                        cwd={currentCwd}
+                        onFileSelect={setSelectedFile}
+                        selectedFile={selectedFile}
                       />
                     )}
                   </div>
@@ -716,12 +717,16 @@ export default function ChatPage() {
           // Files panel shows file content (editable)
           if (!selectedFile) return null;
           
+          // .mycode/ 下的文件可编辑
+          const isEditable = selectedFile.includes('.mycode/');
+          
           return (
             <div className="w-1/2 border-l border-gray-200">
               <FileViewer
                 filePath={selectedFile}
                 cwd={currentCwd || undefined}
                 onClose={() => setSelectedFile(null)}
+                editable={isEditable}
               />
             </div>
           );
