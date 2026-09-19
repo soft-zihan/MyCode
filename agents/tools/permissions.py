@@ -42,6 +42,45 @@ def is_dangerous(command: str) -> bool:
     return any(p.search(command) for p in DANGEROUS_PATTERNS)
 
 
+# Plan mode 下允许的只读命令
+READONLY_COMMANDS = {
+    "ls", "cat", "head", "tail", "less", "more",
+    "find", "grep", "egrep", "fgrep",
+    "git log", "git show", "git diff", "git status", "git branch", "git remote",
+    "pwd", "echo", "wc", "file", "du", "df",
+    "tree", "stat",
+    "python -c", "python3 -c",  # 允许 python 单行脚本（用于查看）
+}
+
+
+def _is_readonly_shell_command(command: str) -> bool:
+    """检查 shell 命令是否为只读命令。"""
+    if not command:
+        return False
+    cmd_lower = command.strip().lower()
+    # 检查是否以只读命令开头
+    for readonly in READONLY_COMMANDS:
+        if cmd_lower.startswith(readonly):
+            # 排除危险操作（如 cat > file）
+            if ">" in command or "|" in command:
+                # 允许管道到 grep/less/more/head/tail
+                pipe_safe = False
+                if "|" in command:
+                    parts = command.split("|")
+                    if len(parts) >= 2:
+                        last_part = parts[-1].strip().lower()
+                        for safe in ["grep", "less", "more", "head", "tail", "wc", "sort", "uniq"]:
+                            if last_part.startswith(safe):
+                                pipe_safe = True
+                                break
+                    if not pipe_safe:
+                        return False
+                if ">" in command:
+                    return False
+            return True
+    return False
+
+
 def _parse_rule(rule: str) -> dict:
     m = re.match(r"^([a-z_]+)\((.+)\)$", rule)
     if m:
@@ -213,7 +252,11 @@ def _check_permission_inner(
                 return {"action": "allow"}
             return {"action": "deny", "message": f"Blocked in plan mode: {tool_name}"}
         if tool_name == "run_shell":
-            return {"action": "deny", "message": "Shell commands blocked in plan mode"}
+            command = inp.get("command", "")
+            # Plan mode 允许只读命令
+            if _is_readonly_shell_command(command):
+                return {"action": "allow"}
+            return {"action": "deny", "message": "Shell commands blocked in plan mode (only read-only commands allowed)"}
 
     if tool_name == "enter_plan_mode":
         return {"action": "allow"}
