@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import { 
-  MessageSquare, PanelRight, Send, Square, Zap, File, X, Package, Cpu
+  MessageSquare, PanelRight, Send, Square, Zap, File, X, Package, Cpu, Sliders
 } from 'lucide-react';
 import { ReviewPanel } from '../../components/ReviewPanel';
 import { DiffViewer } from '../../components/DiffViewer';
@@ -14,6 +14,7 @@ import { QuestionDialog } from '../../components/agent/QuestionDialog';
 import { PlanApprovalDialog } from '../../components/agent/PlanApprovalDialog';
 import { PlanProgressPanel } from '../../components/agent/PlanProgressPanel';
 import { PlanControlPanel } from '../../components/agent/PlanControlPanel';
+import { McpPanel } from '../../components/agent/McpPanel';
 import { TodoListPanel } from '../../components/chat/TodoListPanel';
 import { PageLayout } from '../../components/PageLayout';
 import { useChat } from './hooks/useChat';
@@ -31,6 +32,7 @@ export default function ChatPage() {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [changesSelectedFile, setChangesSelectedFile] = useState<string | null>(null);
   const [rightSidebarOpen, setRightSidebarOpen] = useState(true);
+  const [rightTab, setRightTab] = useState<'files' | 'control'>('files');
   const [changesExpanded, setChangesExpanded] = useState(false);
   const [fileList, setFileList] = useState<string[]>([]);
 
@@ -528,49 +530,85 @@ export default function ChatPage() {
 
         {/* Right Sidebar - Stacked collapsible panels */}
         {rightSidebarOpen && (
-          <div className="w-72 border-l border-gray-200 bg-white flex flex-col overflow-y-auto">
-            {/* Token stats - fixed at top */}
-            <div className="border-b border-gray-200 flex-shrink-0">
-              <TokenBreakdownPanel sessionId={currentSessionId} compact />
+          <div className="w-72 border-l border-gray-200 bg-white flex flex-col">
+            {/* Tab buttons */}
+            <div className="flex border-b border-gray-200 flex-shrink-0">
+              <button
+                onClick={() => setRightTab('files')}
+                className={`flex-1 px-2 py-1.5 text-xs font-medium transition-colors ${
+                  rightTab === 'files' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <File className="w-3 h-3 inline mr-1" />
+                Files
+                {fileSnapshots.length > 0 && (
+                  <span className="ml-1 px-1 py-0.5 bg-blue-500 text-white text-[9px] rounded-full">
+                    {fileSnapshots.length}
+                  </span>
+                )}
+              </button>
+              <button
+                onClick={() => setRightTab('control')}
+                className={`flex-1 px-2 py-1.5 text-xs font-medium transition-colors ${
+                  rightTab === 'control' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                <Sliders className="w-3 h-3 inline mr-1" />
+                Control
+              </button>
             </div>
 
-            {/* Plan Control Panel - collapsible */}
-            {planSlug && currentSessionId && (
-              <PlanControlPanel
-                sessionId={currentSessionId}
-                planSlug={planSlug}
-              />
-            )}
-
-            {/* Files section - collapsible */}
-            <div className="flex-1 flex flex-col min-h-0">
-              <FileTree
-                key={currentSessionId || 'default'}
-                onFileSelect={setSelectedFile}
-                onAddToChat={handleAddToChat}
-                selectedFile={selectedFile}
-                cwd={currentCwd}
-                visible={true}
-                refreshTrigger={fileTreeRefreshTrigger}
-              />
-              {/* Changes section at bottom of Files */}
-              {fileSnapshots.length > 0 && (
-                <div className="border-t border-gray-200">
-                  <button
-                    onClick={() => setChangesExpanded(!changesExpanded)}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-gray-700 bg-gray-50 hover:bg-gray-100"
-                  >
-                    <Package className="w-3 h-3" />
-                    Changes ({fileSnapshots.length})
-                    <span className="ml-auto text-gray-400">
-                      {changesExpanded ? '▼' : '▶'}
-                    </span>
-                  </button>
-                  {changesExpanded && (
-                    <DeliverablesPanel
-                      snapshots={fileSnapshots}
-                      onOpenFile={setChangesSelectedFile}
-                    />
+            {/* Tab content */}
+            <div className="flex-1 overflow-hidden flex flex-col">
+              {rightTab === 'control' ? (
+                <div className="flex-1 overflow-auto flex flex-col">
+                  {/* Token stats at top */}
+                  <div className="border-b border-gray-200">
+                    <TokenBreakdownPanel sessionId={currentSessionId} />
+                  </div>
+                  {/* Plan control */}
+                  <PlanControlPanel
+                    sessionId={currentSessionId || ''}
+                    planSlug={planSlug || ''}
+                  />
+                  {/* MCP servers */}
+                  <div className="border-t border-gray-200">
+                    <div className="px-3 py-2 text-xs font-medium text-gray-700 bg-gray-50">
+                      MCP 服务
+                    </div>
+                    <McpPanel />
+                  </div>
+                </div>
+              ) : (
+                <div className="flex-1 overflow-auto flex flex-col">
+                  <FileTree
+                    key={currentSessionId || 'default'}
+                    onFileSelect={setSelectedFile}
+                    onAddToChat={handleAddToChat}
+                    selectedFile={selectedFile}
+                    cwd={currentCwd}
+                    visible={true}
+                    refreshTrigger={fileTreeRefreshTrigger}
+                  />
+                  {fileSnapshots.length > 0 && (
+                    <div className="border-t border-gray-200">
+                      <button
+                        onClick={() => setChangesExpanded(!changesExpanded)}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-gray-700 bg-gray-50 hover:bg-gray-100"
+                      >
+                        <Package className="w-3 h-3" />
+                        Changes ({fileSnapshots.length})
+                        <span className="ml-auto text-gray-400">
+                          {changesExpanded ? '▼' : '▶'}
+                        </span>
+                      </button>
+                      {changesExpanded && (
+                        <DeliverablesPanel
+                          snapshots={fileSnapshots}
+                          onOpenFile={setChangesSelectedFile}
+                        />
+                      )}
+                    </div>
                   )}
                 </div>
               )}
