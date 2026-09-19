@@ -254,8 +254,8 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
 
   // 按项目最新 session 时间排序
   const sortedProjects = Object.entries(grouped).sort(([, a], [, b]) => {
-    const aLatest = a.length > 0 ? (a[0].startTime || 0) : 0;
-    const bLatest = b.length > 0 ? (b[0].startTime || 0) : 0;
+    const aLatest = a.length > 0 ? new Date(a[0].startTime).getTime() : 0;
+    const bLatest = b.length > 0 ? new Date(b[0].startTime).getTime() : 0;
     return bLatest - aLatest;
   });
 
