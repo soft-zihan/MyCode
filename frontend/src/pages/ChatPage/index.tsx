@@ -26,6 +26,11 @@ const formatTokens = (tokens: number): string => {
   return `${tokens}`;
 };
 
+const RIGHT_SIDEBAR_MIN = 200;
+const RIGHT_SIDEBAR_MAX = 600;
+const RIGHT_SIDEBAR_DEFAULT = 288;
+const RIGHT_SIDEBAR_WIDTH_KEY = 'right-sidebar-width';
+
 export default function ChatPage() {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [changesSelectedFile, setChangesSelectedFile] = useState<string | null>(null);
@@ -34,6 +39,45 @@ export default function ChatPage() {
   const [controlSubTab, setControlSubTab] = useState<'context' | 'plan'>('context');
   const [changesExpanded, setChangesExpanded] = useState(false);
   const [fileList, setFileList] = useState<string[]>([]);
+  const [rightSidebarWidth, setRightSidebarWidth] = useState(() => {
+    const saved = localStorage.getItem(RIGHT_SIDEBAR_WIDTH_KEY);
+    return saved ? parseInt(saved, 10) : RIGHT_SIDEBAR_DEFAULT;
+  });
+  const [isDraggingRight, setIsDraggingRight] = useState(false);
+
+  useEffect(() => {
+    localStorage.setItem(RIGHT_SIDEBAR_WIDTH_KEY, String(rightSidebarWidth));
+  }, [rightSidebarWidth]);
+
+  const handleRightDragStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsDraggingRight(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isDraggingRight) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const newWidth = window.innerWidth - e.clientX;
+      setRightSidebarWidth(Math.max(RIGHT_SIDEBAR_MIN, Math.min(RIGHT_SIDEBAR_MAX, newWidth)));
+    };
+
+    const handleMouseUp = () => {
+      setIsDraggingRight(false);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, [isDraggingRight]);
 
   const {
     inputValue,
@@ -521,7 +565,14 @@ export default function ChatPage() {
 
         {/* Right Sidebar - Stacked collapsible panels */}
         {rightSidebarOpen && (
-          <div className="w-72 border-l border-gray-200 bg-white flex flex-col">
+          <div className="relative border-l border-gray-200 bg-white flex flex-col" style={{ width: `${rightSidebarWidth}px` }}>
+            {/* Drag handle */}
+            <div
+              className="absolute top-0 -left-1 w-2 h-full cursor-col-resize group z-10"
+              onMouseDown={handleRightDragStart}
+            >
+              <div className="absolute inset-y-0 right-0 w-0.5 bg-transparent group-hover:bg-blue-400 group-active:bg-blue-500 transition-colors" />
+            </div>
             {/* Tab buttons */}
             <div className="flex border-b border-gray-200 flex-shrink-0">
               <button
