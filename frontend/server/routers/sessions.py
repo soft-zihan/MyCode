@@ -586,6 +586,15 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
                 plan_mode_chars = latest_stats.get("plan_mode_chars", 0)
                 plan_mode_tokens = int((plan_mode_chars / 4) * scale) if actual_input_tokens > 0 and total_chars > 0 else plan_mode_chars // 4
                 
+                # 按工具名拆分的结果 token
+                tool_result_by_name_chars = latest_stats.get("tool_result_by_name", {})
+                tool_result_by_name = {}
+                if tool_result_by_name_chars and tool_tokens > 0:
+                    total_tool_chars = sum(tool_result_by_name_chars.values())
+                    if total_tool_chars > 0:
+                        for tool_name, chars in tool_result_by_name_chars.items():
+                            tool_result_by_name[tool_name] = int(tool_tokens * (chars / total_tool_chars))
+                
                 return {
                     "base_prompt_tokens": base_prompt_tokens,
                     "claude_md_tokens": claude_md_tokens,
@@ -601,6 +610,7 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
                     "user_tokens": user_tokens,
                     "assistant_tokens": assistant_tokens,
                     "tool_tokens": tool_tokens,
+                    "tool_result_by_name": tool_result_by_name,
                     "total_tokens": actual_input_tokens,
                     "is_plan_mode": is_plan_mode,
                     "plan_mode_tokens": plan_mode_tokens,
@@ -713,6 +723,15 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
             
             messages_tokens = user_tokens + assistant_tokens + tool_tokens
             
+            # 按工具名拆分的结果 token
+            tool_result_by_name_chars = getattr(agent, '_tool_result_chars', {})
+            tool_result_by_name = {}
+            if tool_result_by_name_chars and tool_tokens > 0:
+                total_tool_chars = sum(tool_result_by_name_chars.values())
+                if total_tool_chars > 0:
+                    for tool_name, chars in tool_result_by_name_chars.items():
+                        tool_result_by_name[tool_name] = int(tool_tokens * (chars / total_tool_chars))
+            
             return {
                 "base_prompt_tokens": base_prompt_tokens,
                 "claude_md_tokens": claude_md_tokens,
@@ -728,6 +747,7 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
                 "user_tokens": user_tokens,
                 "assistant_tokens": assistant_tokens,
                 "tool_tokens": tool_tokens,
+                "tool_result_by_name": tool_result_by_name,
                 "total_tokens": actual_input_tokens if actual_input_tokens > 0 else total_chars // 4,
                 "is_plan_mode": is_plan_mode,
                 "plan_mode_tokens": plan_mode_tokens,
@@ -882,6 +902,15 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
     plan_mode_chars = latest_stats.get("plan_mode_chars", 0)
     plan_mode_tokens = int((plan_mode_chars / 4) * scale) if actual_input_tokens > 0 and total_chars > 0 else plan_mode_chars // 4
     
+    # 按工具名拆分的结果 token
+    tool_result_by_name_chars = latest_stats.get("tool_result_by_name", {})
+    tool_result_by_name = {}
+    if tool_result_by_name_chars and tool_tokens > 0:
+        total_tool_chars = sum(tool_result_by_name_chars.values())
+        if total_tool_chars > 0:
+            for tool_name, chars in tool_result_by_name_chars.items():
+                tool_result_by_name[tool_name] = int(tool_tokens * (chars / total_tool_chars))
+    
     return {
         "base_prompt_tokens": base_prompt_tokens,
         "claude_md_tokens": claude_md_tokens,
@@ -897,6 +926,7 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
         "user_tokens": user_tokens,
         "assistant_tokens": assistant_tokens,
         "tool_tokens": tool_tokens,
+        "tool_result_by_name": tool_result_by_name,
         "total_tokens": actual_input_tokens,
         "is_plan_mode": is_plan_mode,
         "plan_mode_tokens": plan_mode_tokens,

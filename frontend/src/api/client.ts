@@ -855,6 +855,8 @@ export interface TokenBreakdown {
   user_tokens: number;
   assistant_tokens: number;
   tool_tokens: number;
+  // 按工具名拆分的结果 token
+  tool_result_by_name: Record<string, number>;
   // 总计
   total_tokens: number;
   // Plan mode

@@ -371,6 +371,8 @@ class AgentLoop:
                     "assistant_chars": asm.get("assistant_chars", 0),
                     "tool_result_chars": asm.get("tool_result_chars", 0),
                     "tool_count": asm.get("tool_count", 0),
+                    # Tool result breakdown by name
+                    "tool_result_by_name": asm.get("tool_result_by_name", {}),
                     # System prompt 细粒度 (chars)
                     "system_base_chars": asm.get("system_base_chars", 0),
                     "system_claude_md_chars": asm.get("system_claude_md_chars", 0),
@@ -838,6 +840,8 @@ class AgentLoop:
                         "user_chars": _user_chars,
                         "assistant_chars": _assistant_chars,
                         "tool_result_chars": _tool_result_chars,
+                        # Tool result breakdown by name
+                        "tool_result_by_name": dict(getattr(a, '_tool_result_chars', {})),
                         # System prompt 细粒度
                         "system_base_chars": _system_base_chars,
                         "system_claude_md_chars": _system_claude_md_chars,

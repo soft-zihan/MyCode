@@ -137,9 +137,11 @@ export function AppSidebar({ children }: AppSidebarProps) {
       </div>
       {navBar}
       <div
-        className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-blue-400 active:bg-blue-500 transition-colors"
+        className="absolute top-0 -right-1 w-2 h-full cursor-col-resize group"
         onMouseDown={handleMouseDown}
-      />
+      >
+        <div className="absolute inset-y-0 left-0 w-0.5 bg-transparent group-hover:bg-blue-400 group-active:bg-blue-500 transition-colors" />
+      </div>
     </div>
   );
 }
