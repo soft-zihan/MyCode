@@ -22,7 +22,8 @@ VALID_WIKI_TYPES = {
     "user",
     "reference",
     "workflow_pattern",
-    "task_notes",
+    "session_notes",
+    "project",  # Project documentation and test scripts
 }
 
 MAX_INDEX_LINES = 200
@@ -105,6 +106,27 @@ def write_wiki_entry(
         meta = infer_facets(raw_meta, wiki_type)
 
         filepath.write_text(format_frontmatter(meta, content))
+
+        try:
+            from agents.core.snapshot_service import SnapshotService
+            from agents.core.workspace import get_workspace
+            snapshots_dir = Path.home() / ".mycode" / "snapshots"
+            svc = SnapshotService(str(get_workspace()), str(snapshots_dir))
+            try:
+                loop = asyncio.get_running_loop()
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    snap = loop.run_in_executor(
+                        pool,
+                        lambda: asyncio.run(svc.capture(session_id="wiki", label=f"wiki:{wiki_type}/{slug}"))
+                    ).result()
+            except RuntimeError:
+                snap = asyncio.run(svc.capture(session_id="wiki", label=f"wiki:{wiki_type}/{slug}"))
+            meta["checkpoint_id"] = snap.id
+            filepath.write_text(format_frontmatter(meta, content))
+        except Exception:
+            pass
+
         record_wiki_change(str(filepath.relative_to(wiki_dir)))
         _git_commit(f"wiki: add {wiki_type}/{slug}")
         update_wiki_index()
@@ -375,6 +397,24 @@ def load_wiki_index() -> str:
     return content
 
 
+def list_project_docs() -> list[str]:
+    """List project documentation files."""
+    project_dir = get_wiki_dir() / "project"
+    if not project_dir.exists():
+        return []
+    
+    docs = []
+    for f in project_dir.rglob("*.md"):
+        rel_path = f.relative_to(project_dir)
+        docs.append(str(rel_path))
+    for f in project_dir.rglob("*.py"):
+        if "test" in f.name.lower():
+            rel_path = f.relative_to(project_dir)
+            docs.append(str(rel_path))
+    
+    return sorted(docs)[:20]  # Limit to 20 entries
+
+
 # ── Wiki 召回（side query） ──
 
 SELECT_WIKI_PROMPT = """You are selecting wiki entries that will be useful to an AI coding assistant as it processes a user's query. You will be given the user's query and a list of available wiki entries with their filenames and descriptions.
@@ -571,26 +611,52 @@ def init_wiki_git() -> None:
 def build_wiki_prompt_section() -> str:
     index = load_wiki_index()
     wiki_dir = str(get_wiki_dir())
+    project_docs = list_project_docs()
+
+    project_section = ""
+    if project_docs:
+        project_section = f"""
+## Project Documentation
+Available project docs and test scripts at `{wiki_dir}/project/`:
+{chr(10).join(f"- {p}" for p in project_docs[:10])}
+Read these for project-specific context and testing guidance."""
 
     return f"""# Wiki System
 
 You have a persistent, file-based wiki system at `{wiki_dir}`.
 
-## Wiki Types
-- **knowledge**: Project architecture, technical decisions, code conventions, reusable principles
-- **self_improvement**: Debugging lessons, error patterns (may be [待确认])
-- **user**: User's role, preferences, working habits
-- **reference**: External docs, API links, tool locations
-- **workflow_pattern**: Reusable workflow patterns (Symptom → Root cause → Workaround, compiled to Skill when high-frequency)
+## Wiki Categories
+
+### 1. Session Notes (session_notes/)
+- Temporary notes from each session, written incrementally
+- Searchable via `search_history` tool to find past session context
+- Deleted when the corresponding session is deleted
+- Use `list_session_notes` and `read_session_notes` tools to browse and read details
+
+### 2. Long-term Memory (knowledge/, workflow_pattern/, self_improvement/, user/, reference/)
+- Persistent knowledge recalled automatically based on current task
+- workflow_pattern entries can be compiled into executable Skills when high-frequency
+- No manual action needed - recall is automatic
+
+### 3. Project Documentation (project/)
+- Project-specific docs and test scripts
+- Can be updated via project git repo or by you after completing work
+- When updating, ensure version alignment with project state
+{project_section}
+
+### 4. Plans (plans/)
+- Plan artifacts with their own lifecycle
+- Can be converted to/from wiki entries when appropriate
 
 ## Wiki Recall
 Wiki entries are automatically recalled based on your current task. You don't need to manually search.
 
 ## When to Save
-- When the user corrects you or gives feedback
-- When you discover a debugging lesson
-- When you learn a user preference
-- When you find a reusable pattern
+- When the user corrects you or gives feedback → self_improvement
+- When you discover a debugging lesson → self_improvement or knowledge
+- When you learn a user preference → user
+- When you find a reusable pattern → workflow_pattern
+- When you complete significant work → update project docs if needed
 
 ## What NOT to Save
 - Code patterns you can read from the codebase

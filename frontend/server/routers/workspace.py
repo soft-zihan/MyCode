@@ -71,6 +71,11 @@ def api_workspace_tree(cwd: Optional[str] = None) -> dict[str, Any]:
     if not workspace_path.exists():
         workspace_path = Path.cwd()
     
+    # Directories to always exclude
+    EXCLUDED_DIRS = {"node_modules", "__pycache__", ".venv", ".venv-1", "Library", "Applications", ".Trash"}
+    # Hidden directories to include (not exclude)
+    INCLUDED_HIDDEN = {".mycode"}
+    
     def build_tree(path: Path, depth: int = 0) -> Optional[dict[str, Any]]:
         if depth > 10:
             return None
@@ -82,12 +87,15 @@ def api_workspace_tree(cwd: Optional[str] = None) -> dict[str, Any]:
         }
         
         if path.is_dir():
-            if path.name.startswith(".") or path.name in {"node_modules", "__pycache__", ".venv", ".venv-1", "Library", "Applications", ".Trash"}:
+            # Exclude hidden dirs unless they're in INCLUDED_HIDDEN
+            if path.name.startswith(".") and path.name not in INCLUDED_HIDDEN:
+                return None
+            if path.name in EXCLUDED_DIRS:
                 return None
             children = []
             try:
                 all_children = list(path.iterdir())
-                dirs = sorted([c for c in all_children if c.is_dir() and not (c.name.startswith(".") or c.name in {"node_modules", "__pycache__", ".venv", ".venv-1", "Library", "Applications", ".Trash"})], key=lambda p: p.name.lower())
+                dirs = sorted([c for c in all_children if c.is_dir() and not (c.name in EXCLUDED_DIRS or (c.name.startswith(".") and c.name not in INCLUDED_HIDDEN))], key=lambda p: p.name.lower())
                 files = sorted([c for c in all_children if c.is_file()], key=lambda p: p.name.lower())
                 for child in dirs + files:
                     child_tree = build_tree(child, depth + 1)
@@ -239,11 +247,22 @@ def api_workspace_file(path: str, cwd: Optional[str] = None) -> dict[str, Any]:
     
     try:
         content = file_path.read_text(encoding="utf-8")
-        return {
+        result = {
             "path": path,
             "content": content,
             "size": file_path.stat().st_size,
         }
+        
+        if ".mycode/wiki/" in str(file_path) and file_path.suffix == ".md":
+            try:
+                from agents.memory.frontmatter import parse_frontmatter
+                meta, body = parse_frontmatter(content)
+                result["frontmatter"] = meta
+                result["content"] = body
+            except Exception:
+                pass
+        
+        return result
     except UnicodeDecodeError:
         raise HTTPException(status_code=400, detail="Binary file")
     except Exception as e:

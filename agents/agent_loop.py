@@ -21,6 +21,29 @@ if TYPE_CHECKING:
     from agents.agent import Agent
 
 
+def _capture_file_snapshot(file_path: str) -> dict | None:
+    """Capture file content before/after modification for Code Review."""
+    try:
+        from agents.tools.runtime import get_runtime, DockerRuntime
+        rt = get_runtime()
+        if isinstance(rt, DockerRuntime):
+            abs_path = file_path
+            if not abs_path.startswith("/"):
+                abs_path = f"{rt.workdir}/{abs_path}"
+        else:
+            from agents.tools import resolve_tool_path
+            abs_path = str(resolve_tool_path(file_path, must_exist=False).resolve())
+        
+        path = Path(abs_path)
+        if path.exists():
+            content = path.read_text(encoding="utf-8", errors="replace")
+            return {"file_path": file_path, "content": content, "is_new": False}
+        else:
+            return {"file_path": file_path, "content": "", "is_new": True}
+    except Exception:
+        return None
+
+
 def _safe_utf8_text(text: str) -> str:
     if not text:
         return text
@@ -503,15 +526,33 @@ class AgentLoop:
 
         a = self._agent
 
-        async def _run_oai_safe(ct_item: dict) -> tuple[dict, str]:
+        async def _run_oai_safe(ct_item: dict) -> tuple[dict, str, dict | None]:
+            pre_snapshot = None
+            if ct_item["fn"] in ("write_file", "edit_file"):
+                pre_snapshot = _capture_file_snapshot(ct_item["inp"].get("file_path", ""))
+            
             raw = await a.execute_tool_call(ct_item["fn"], ct_item["inp"])
             raw = _safe_utf8_text(raw)
             res = a.persist_large_result(ct_item["fn"], raw)
-            a.publish_tool_result_event(ct_item["tc"]["id"], ct_item["fn"], res, "ok")
-            return ct_item, res
+            
+            post_snapshot = None
+            if ct_item["fn"] in ("write_file", "edit_file") and pre_snapshot:
+                post_snapshot = _capture_file_snapshot(ct_item["inp"].get("file_path", ""))
+            
+            file_snapshot = None
+            if pre_snapshot and post_snapshot:
+                file_snapshot = {
+                    "file_path": pre_snapshot["file_path"],
+                    "is_new": pre_snapshot["is_new"],
+                    "old_content": pre_snapshot["content"],
+                    "new_content": post_snapshot["content"],
+                }
+            
+            a.publish_tool_result_event(ct_item["tc"]["id"], ct_item["fn"], res, "ok", snapshot=file_snapshot)
+            return ct_item, res, file_snapshot
 
         results = await asyncio.gather(*[_run_oai_safe(ct) for ct in items])
-        for ct_item, res in results:
+        for ct_item, res, file_snapshot in results:
             a.record_tool_outcome(ct_item["fn"], not a.looks_like_tool_failure(ct_item["fn"], "", res))
             
             # 检查工具调用警告
@@ -567,11 +608,30 @@ class AgentLoop:
 
             t0 = time.time()
             print_info(f"[DEBUG] _execute_sequential_batch: calling execute_tool_call for {fn_name}")
+            
+            pre_snapshot = None
+            if fn_name in ("write_file", "edit_file"):
+                pre_snapshot = _capture_file_snapshot(ct["inp"].get("file_path", ""))
+            
             raw = await a.execute_tool_call(ct["fn"], ct["inp"])
             print_info(f"[DEBUG] _execute_sequential_batch: execute_tool_call done for {fn_name}, took {time.time()-t0:.2f}s")
             raw = _safe_utf8_text(raw)
             res = a.persist_large_result(ct["fn"], raw)
-            a.publish_tool_result_event(ct["tc"]["id"], ct["fn"], res, "ok")
+            
+            post_snapshot = None
+            if fn_name in ("write_file", "edit_file") and pre_snapshot:
+                post_snapshot = _capture_file_snapshot(ct["inp"].get("file_path", ""))
+            
+            file_snapshot = None
+            if pre_snapshot and post_snapshot:
+                file_snapshot = {
+                    "file_path": pre_snapshot["file_path"],
+                    "is_new": pre_snapshot["is_new"],
+                    "old_content": pre_snapshot["content"],
+                    "new_content": post_snapshot["content"],
+                }
+            
+            a.publish_tool_result_event(ct["tc"]["id"], ct["fn"], res, "ok", snapshot=file_snapshot)
             a.record_tool_outcome(ct["fn"], not a.looks_like_tool_failure(ct["fn"], raw, res))
             print_info(f"[DEBUG] _execute_sequential_batch: tool {fn_name} completed")
 

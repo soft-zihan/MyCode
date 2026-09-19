@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { X, Save, Edit3, Eye } from 'lucide-react';
+import { X, Save, Edit3, Eye, GitCommit } from 'lucide-react';
 import Editor from '@monaco-editor/react';
 import { fetchWorkspaceFile, writeWorkspaceFile } from '../../../api/client';
 
@@ -19,14 +19,19 @@ export function FileViewer({ filePath, cwd, onClose, readOnly = true, editable =
   const [isEditing, setIsEditing] = useState(!readOnly);
   const [hasChanges, setHasChanges] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [frontmatter, setFrontmatter] = useState<Record<string, any> | null>(null);
 
   useEffect(() => {
     setLoading(true);
     setError(null);
+    setFrontmatter(null);
     fetchWorkspaceFile(filePath, cwd)
       .then(data => {
         setContent(data.content);
         setEditedContent(data.content);
+        if (data.frontmatter) {
+          setFrontmatter(data.frontmatter);
+        }
       })
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));
@@ -90,6 +95,12 @@ export function FileViewer({ filePath, cwd, onClose, readOnly = true, editable =
           {hasChanges && (
             <span className="text-[10px] text-orange-500 bg-orange-50 px-1.5 py-0.5 rounded">
               未保存
+            </span>
+          )}
+          {frontmatter?.checkpoint_id && (
+            <span className="flex items-center gap-1 text-[10px] text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded" title={`Checkpoint: ${frontmatter.checkpoint_id}`}>
+              <GitCommit className="w-3 h-3" />
+              {frontmatter.checkpoint_id.slice(-8)}
             </span>
           )}
         </div>

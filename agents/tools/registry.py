@@ -14,7 +14,7 @@ from typing import Any, Callable, Awaitable
 ToolDef = dict
 PermissionMode = str
 
-READ_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "compact_context", "shell_status", "search_history", "list_task_notes", "plan_status", "plan_list", "plan_read_artifact", "plan_explore", "plan_continue", "plan_retry", "plan_recall", "plan_check_expired"}
+READ_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "compact_context", "shell_status", "search_history", "list_session_notes", "plan_status", "plan_list", "plan_read_artifact", "plan_explore", "plan_continue", "plan_retry", "plan_recall", "plan_check_expired"}
 EDIT_TOOLS = {"write_file", "edit_file", "skill_create", "write_workflow_pattern", "write_wiki_entry", "plan_propose", "plan_update", "plan_task_start", "plan_task_done", "plan_task_failed", "plan_complete", "plan_add_artifact", "plan_archive", "plan_save_explore", "plan_abandon", "plan_reopen", "plan_pause", "plan_resume", "plan_skip", "plan_redo", "plan_rollback", "ask_user", "todolist"}
 
 CONCURRENCY_SAFE_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "shell_status"}
@@ -78,7 +78,7 @@ TOOL_EXECUTION_MODES: dict[str, str] = {
     "grep_search": "parallel",
     "shell_status": "parallel",
     "search_history": "parallel",
-    "list_task_notes": "parallel",
+    "list_session_notes": "parallel",
     "plan_status": "parallel",
     "plan_list": "parallel",
     "plan_read_artifact": "parallel",
@@ -259,22 +259,22 @@ tool_definitions: list[ToolDef] = [
         },
     },
     {
-        "name": "list_task_notes",
-        "description": "List all task notes from previous sessions. Returns a list of session IDs with titles and timestamps. The latest task note content is included in the result for immediate reference.",
+        "name": "list_session_notes",
+        "description": "List all session notes from previous sessions. Returns a list of session IDs with titles and timestamps. The latest session note content is included in the result for immediate reference.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "limit": {"type": "integer", "description": "Maximum number of task notes to list (default: 10)"},
+                "limit": {"type": "integer", "description": "Maximum number of session notes to list (default: 10)"},
             },
         },
     },
     {
-        "name": "read_task_notes",
-        "description": "Read the full content of a specific task note by session ID. This tool is automatically invoked when you need to read a specific task note.",
+        "name": "read_session_notes",
+        "description": "Read the full content of a specific session note by session ID. Use this to get detailed context from a past session.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "session_id": {"type": "string", "description": "The session ID to read task notes for. If omitted, reads the current session's notes."},
+                "session_id": {"type": "string", "description": "The session ID to read session notes for. If omitted, reads the current session's notes."},
             },
         },
         "deferred": True,

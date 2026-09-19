@@ -92,10 +92,10 @@ class ToolDispatcher:
             return self._execute_context_restore_tool(inp)
         if name == "search_history":
             return self._execute_search_history_tool(inp)
-        if name == "list_task_notes":
-            return self._execute_list_task_notes_tool(inp)
-        if name == "read_task_notes":
-            return self._execute_read_task_notes_tool(inp)
+        if name == "list_session_notes":
+            return self._execute_list_session_notes_tool(inp)
+        if name == "read_session_notes":
+            return self._execute_read_session_notes_tool(inp)
         if name in ("enter_plan_mode", "exit_plan_mode"):
             return await self.agent._execute_plan_mode_tool(name)
         if name == "agent":
@@ -226,15 +226,15 @@ class ToolDispatcher:
 
         return "\n".join(result_lines)
 
-    def _execute_list_task_notes_tool(self, inp: dict) -> str:
-        """执行 list_task_notes 工具。"""
+    def _execute_list_session_notes_tool(self, inp: dict) -> str:
+        """执行 list_session_notes 工具。"""
         limit = int(inp.get("limit") or 10)
 
         from agents.wiki.wiki_manager import get_wiki_dir
-        wiki_dir = get_wiki_dir() / "task_notes"
+        wiki_dir = get_wiki_dir() / "session_notes"
 
         if not wiki_dir.exists():
-            return "No task notes found."
+            return "No session notes found."
 
         notes = []
         for f in wiki_dir.glob("*.md"):
@@ -255,12 +255,12 @@ class ToolDispatcher:
                 pass
 
         if not notes:
-            return "No task notes found."
+            return "No session notes found."
 
         notes.sort(key=lambda x: x["time"], reverse=True)
         notes = notes[:limit]
 
-        result_lines = [f"Found {len(notes)} task notes:"]
+        result_lines = [f"Found {len(notes)} session notes:"]
         for note in notes:
             result_lines.append(f"  [{note['session_id']}] {note['title']} ({note['time']})")
 
@@ -271,20 +271,20 @@ class ToolDispatcher:
 
         return "\n".join(result_lines)
 
-    def _execute_read_task_notes_tool(self, inp: dict) -> str:
-        """执行 read_task_notes 工具。"""
+    def _execute_read_session_notes_tool(self, inp: dict) -> str:
+        """执行 read_session_notes 工具。"""
         session_id = str(inp.get("session_id") or "").strip()
 
         from agents.wiki.wiki_manager import get_wiki_dir
-        wiki_dir = get_wiki_dir() / "task_notes"
+        wiki_dir = get_wiki_dir() / "session_notes"
 
         if not wiki_dir.exists():
-            return "No task notes found."
+            return "No session notes found."
 
         if session_id:
             filepath = wiki_dir / f"session_{session_id}.md"
             if not filepath.exists():
-                return f"Error: task note for session '{session_id}' not found."
+                return f"Error: session note for session '{session_id}' not found."
 
             content = filepath.read_text()
             from agents.memory.frontmatter import parse_frontmatter
@@ -293,7 +293,7 @@ class ToolDispatcher:
 
         filepath = wiki_dir / f"session_{self.agent.session_id}.md"
         if not filepath.exists():
-            return f"No task notes found for current session '{self.agent.session_id}'."
+            return f"No session notes found for current session '{self.agent.session_id}'."
 
         content = filepath.read_text()
         from agents.memory.frontmatter import parse_frontmatter

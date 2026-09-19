@@ -913,11 +913,13 @@ class Agent:
         self.session.append("tool_call", event_data)
         trace_event("stream.tool_call", call_id=call_id, name=name, sub_agent_id=self._current_sub_agent_id)
 
-    def publish_tool_result_event(self, call_id: str, name: str, result: str, status: str) -> None:
+    def publish_tool_result_event(self, call_id: str, name: str, result: str, status: str, snapshot: dict | None = None) -> None:
         from agents.observability.trace import trace_event
         event_data = {"call_id": call_id, "name": name, "result": result, "status": status, "turn": self._current_turn, "step": self._current_step}
         if self._current_sub_agent_id:
             event_data["sub_agent_id"] = self._current_sub_agent_id
+        if snapshot:
+            event_data["snapshot"] = snapshot
         self.session.append("tool_result", event_data)
         trace_event("stream.tool_result", call_id=call_id, name=name, sub_agent_id=self._current_sub_agent_id)
 

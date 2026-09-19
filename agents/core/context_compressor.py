@@ -40,9 +40,9 @@ SINGLE_RESULT_CHAR_LIMIT = 30000
 SideQueryFn = Callable[[str, str], Awaitable[str]]
 
 # 任务笔记和项目知识编译的 system prompt
-COMPILE_TASK_NOTES_AND_KNOWLEDGE_SYSTEM = """You are a task state recorder. Extract two types of information from the conversation history:
+COMPILE_TASK_NOTES_AND_KNOWLEDGE_SYSTEM = """You are a session state recorder. Extract two types of information from the conversation history:
 
-1. **Task Notes** (current task state):
+1. **Session Notes** (current session state):
    - What is the user's goal?
    - What steps have been completed?
    - What problems were encountered? What solutions were tried?
@@ -57,12 +57,12 @@ COMPILE_TASK_NOTES_AND_KNOWLEDGE_SYSTEM = """You are a task state recorder. Extr
 
 Output as JSON:
 {
-  "task_notes": "Task notes content (markdown format)",
+  "session_notes": "Session notes content (markdown format)",
   "project_knowledge": "Project knowledge content (markdown format)"
 }
 
 Guidelines:
-- Task notes should be concise and actionable, focusing on current task state.
+- Session notes should be concise and actionable, focusing on current session state.
 - Project knowledge should be generalizable and reusable across sessions.
 - IMPORTANT: If the user mentioned any conventions, standards, or best practices (like using @functools.lru_cache), you MUST include them in project_knowledge.
 - Do NOT extract user intention or wishes as "plan" - those belong to user profile.
@@ -378,8 +378,8 @@ class ContextCompressor:
         if not transcript.strip():
             return False
         
-        # 一次 side query 同时编译任务笔记和项目知识
-        task_notes = ""
+        # 一次 side query 同时编译会话笔记和项目知识
+        session_notes = ""
         project_knowledge = ""
         summary = ""
         
@@ -391,13 +391,13 @@ class ContextCompressor:
                 )
                 print(f"[side_query] raw response length={len(raw) if raw else 0}")
                 compiled = self._parse_compiled_result(raw)
-                task_notes = compiled.get("task_notes", "")
+                session_notes = compiled.get("session_notes", "")
                 project_knowledge = compiled.get("project_knowledge", "")
-                print(f"[side_query] parsed: task_notes={len(task_notes)}chars, project_knowledge={len(project_knowledge)}chars")
+                print(f"[side_query] parsed: session_notes={len(session_notes)}chars, project_knowledge={len(project_knowledge)}chars")
                 
-                # 任务笔记作为摘要注入新上下文
-                if task_notes:
-                    summary = self._format_task_notes_as_summary(task_notes)
+                # 会话笔记作为摘要注入新上下文
+                if session_notes:
+                    summary = self._format_session_notes_as_summary(session_notes)
                 else:
                     summary = format_folded_memory(fallback_folded_memory(transcript))
             except Exception as e:
@@ -411,7 +411,7 @@ class ContextCompressor:
         
         session.append("session_folded", {
             "summary": summary,
-            "task_notes": task_notes,
+            "session_notes": session_notes,
             "project_knowledge": project_knowledge,
             "trigger": "auto",
         })
@@ -423,7 +423,7 @@ class ContextCompressor:
                 "trigger": "auto",
                 "session_id": session_id,
                 "summary": summary,
-                "task_notes": task_notes,
+                "session_notes": session_notes,
                 "project_knowledge": project_knowledge,
             }
             folded_memories.append(record)
@@ -432,12 +432,12 @@ class ContextCompressor:
             pass
         
         # 异步写入 wiki
-        if task_notes or project_knowledge:
+        if session_notes or project_knowledge:
             # 传播 contextvar 到异步任务
             from agents.core.workspace import _current_workspace
             workspace = _current_workspace.get()
             asyncio.create_task(
-                self._write_wiki_async(session_id, task_notes, project_knowledge, workspace)
+                self._write_wiki_async(session_id, session_notes, project_knowledge, workspace)
             )
         
         self._session_fold_count += 1
@@ -445,9 +445,9 @@ class ContextCompressor:
         return True
 
     def _build_compile_prompt(self, transcript: str) -> str:
-        """构建编译任务笔记和项目知识的 prompt。"""
+        """构建编译会话笔记和项目知识的 prompt。"""
         return (
-            "Extract task notes and project knowledge from the following conversation history.\n\n"
+            "Extract session notes and project knowledge from the following conversation history.\n\n"
             "Conversation transcript:\n"
             f"{transcript}"
         )
@@ -468,25 +468,25 @@ class ContextCompressor:
             parsed = json.loads(text)
             if isinstance(parsed, dict):
                 return {
-                    "task_notes": str(parsed.get("task_notes", "")),
+                    "session_notes": str(parsed.get("session_notes", "")),
                     "project_knowledge": str(parsed.get("project_knowledge", "")),
                 }
         except Exception:
             pass
         
-        # 如果解析失败，将整个内容作为任务笔记
+        # 如果解析失败，将整个内容作为会话笔记
         return {
-            "task_notes": text,
+            "session_notes": text,
             "project_knowledge": "",
         }
 
-    def _format_task_notes_as_summary(self, task_notes: str) -> str:
-        """将任务笔记格式化为摘要，注入新上下文。"""
+    def _format_session_notes_as_summary(self, session_notes: str) -> str:
+        """将会话笔记格式化为摘要，注入新上下文。"""
         return (
             "<session-folded-memory>\n"
-            "Previous raw conversation history was compacted. Use these task notes as session state, "
+            "Previous raw conversation history was compacted. Use these session notes as session state, "
             "but verify file contents and live environment state before making code changes.\n\n"
-            f"{task_notes}\n"
+            f"{session_notes}\n"
             "</session-folded-memory>\n\n"
             "Continue the task from this state."
         )
@@ -494,7 +494,7 @@ class ContextCompressor:
     async def _write_wiki_async(
         self,
         session_id: str,
-        task_notes: str,
+        session_notes: str,
         project_knowledge: str,
         workspace: Path | None = None,
     ) -> None:
@@ -504,33 +504,33 @@ class ContextCompressor:
             from agents.core.workspace import set_workspace, reset_workspace
             token = set_workspace(workspace)
             try:
-                await self._do_write_wiki(session_id, task_notes, project_knowledge)
+                await self._do_write_wiki(session_id, session_notes, project_knowledge)
             finally:
                 reset_workspace(token)
         else:
-            await self._do_write_wiki(session_id, task_notes, project_knowledge)
+            await self._do_write_wiki(session_id, session_notes, project_knowledge)
     
     async def _do_write_wiki(
         self,
         session_id: str,
-        task_notes: str,
+        session_notes: str,
         project_knowledge: str,
     ) -> None:
         """实际执行 wiki 写入。"""
-        print(f"[wiki_write] start session={session_id} task_notes={len(task_notes)}chars knowledge={len(project_knowledge)}chars")
+        print(f"[wiki_write] start session={session_id} session_notes={len(session_notes)}chars knowledge={len(project_knowledge)}chars")
         try:
             from agents.wiki.wiki_manager import (
                 write_wiki_entry, preflight_wiki_search, merge_wiki_entry
             )
 
-            if task_notes:
+            if session_notes:
                 write_wiki_entry(
-                    wiki_type="task_notes",
+                    wiki_type="session_notes",
                     name=f"session_{session_id}",
-                    content=task_notes,
-                    description=f"Task notes for session {session_id}",
+                    content=session_notes,
+                    description=f"Session notes for session {session_id}",
                 )
-                print(f"[wiki_write] task_notes written for session={session_id}")
+                print(f"[wiki_write] session_notes written for session={session_id}")
 
             if project_knowledge:
                 similar = await preflight_wiki_search(project_knowledge, "knowledge")

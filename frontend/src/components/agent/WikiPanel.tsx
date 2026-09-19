@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { 
   FolderTree, RefreshCw, FileText, BookOpen, Settings, Zap, Bot, 
-  MessageSquare, Lightbulb, User
+  MessageSquare, Folder
 } from 'lucide-react';
 import { fetchWorkspaceTree, WorkspaceNode } from '../../api/client';
 
@@ -11,7 +11,18 @@ interface WikiPanelProps {
   selectedFile: string | null;
 }
 
-const WIKI_CATEGORIES = [
+// Category 1: Session Notes (temporary but persistent)
+const SESSION_NOTES_CATEGORY = {
+  name: 'Session Notes',
+  icon: MessageSquare,
+  color: 'text-cyan-500',
+  bgColor: 'bg-cyan-50',
+  path: '.mycode/wiki/session_notes',
+  description: '会话笔记（临时但持久保存）',
+};
+
+// Category 2: Long-term Memory (knowledge, workflow_pattern, etc.)
+const MEMORY_CATEGORIES = [
   {
     name: 'Knowledge',
     icon: BookOpen,
@@ -21,39 +32,29 @@ const WIKI_CATEGORIES = [
     description: '项目知识',
   },
   {
-    name: 'Lessons',
-    icon: Lightbulb,
-    color: 'text-yellow-500',
-    bgColor: 'bg-yellow-50',
-    path: '.mycode/wiki/self_improvement',
-    description: '经验教训',
-  },
-  {
-    name: 'User',
-    icon: User,
-    color: 'text-purple-500',
-    bgColor: 'bg-purple-50',
-    path: '.mycode/wiki/user',
-    description: '用户偏好',
-  },
-  {
     name: 'Patterns',
     icon: Zap,
     color: 'text-orange-500',
     bgColor: 'bg-orange-50',
     path: '.mycode/wiki/workflow_pattern',
-    description: '工作流模式',
-  },
-  {
-    name: 'Session Notes',
-    icon: MessageSquare,
-    color: 'text-cyan-500',
-    bgColor: 'bg-cyan-50',
-    path: '.mycode/wiki/task_notes',
-    description: '会话笔记',
+    description: '工作流模式（可编译为 Skill）',
   },
 ];
 
+// Category 3: Project Documentation
+const PROJECT_DOCS_CATEGORY = {
+  name: 'Project Docs',
+  icon: Folder,
+  color: 'text-green-500',
+  bgColor: 'bg-green-50',
+  path: '.mycode/wiki/project',
+  description: '项目文档和测试脚本',
+};
+
+// Category 4: Plans (shown in Plan tab, not here)
+// Plans are managed separately in PlanControlPanel
+
+// Config categories (not wiki content, but project configuration)
 const CONFIG_CATEGORIES = [
   {
     name: 'Rules',
@@ -90,16 +91,34 @@ interface FileNode {
 }
 
 function filterTreeByPath(tree: WorkspaceNode | null, targetPath: string): FileNode[] {
-  if (!tree || !tree.children) return [];
+  if (!tree) return [];
   
   const result: FileNode[] = [];
   
-  for (const child of tree.children) {
-    // 处理 .mycode 下的直接子节点
-    const childPath = child.path.startsWith('.mycode/') ? child.path : `.mycode/${child.path}`;
+  function walk(node: WorkspaceNode, currentPath: string) {
+    const nodePath = currentPath ? `${currentPath}/${node.name}` : node.name;
     
-    if (childPath === targetPath || childPath.startsWith(targetPath + '/')) {
-      result.push(convertToFileNode(child));
+    // If this node matches the target path exactly, add it and STOP recursing
+    // (the TreeNode component will handle expanding its children)
+    if (nodePath === targetPath) {
+      result.push(convertToFileNode(node));
+      return;
+    }
+    
+    // If this node is a parent of the target, recurse into children
+    if (targetPath.startsWith(nodePath + '/') || nodePath.startsWith(targetPath + '/')) {
+      if (node.children) {
+        for (const child of node.children) {
+          walk(child, nodePath);
+        }
+      }
+    }
+  }
+  
+  // Start from root's children
+  if (tree.children) {
+    for (const child of tree.children) {
+      walk(child, '');
     }
   }
   
@@ -194,7 +213,7 @@ function CategorySection({
   onFileSelect, 
   selectedFile 
 }: {
-  category: typeof WIKI_CATEGORIES[0];
+  category: typeof MEMORY_CATEGORIES[0];
   files: FileNode[];
   expanded: boolean;
   onToggle: () => void;
@@ -290,17 +309,20 @@ export function WikiPanel({ cwd, onFileSelect, selectedFile }: WikiPanelProps) {
   }
   
   // 计算各类别文件数
-  const wikiFiles = WIKI_CATEGORIES.map(cat => ({
+  const sessionNotesFiles = filterTreeByPath(tree, SESSION_NOTES_CATEGORY.path);
+  const memoryFiles = MEMORY_CATEGORIES.map(cat => ({
     category: cat,
     files: filterTreeByPath(tree, cat.path),
   }));
-  
+  const projectDocsFiles = filterTreeByPath(tree, PROJECT_DOCS_CATEGORY.path);
   const configFiles = CONFIG_CATEGORIES.map(cat => ({
     category: cat,
     files: filterTreeByPath(tree, cat.path),
   }));
   
-  const totalWikiFiles = wikiFiles.reduce((sum, w) => sum + w.files.length, 0);
+  const totalSessionNotes = sessionNotesFiles.length;
+  const totalMemoryFiles = memoryFiles.reduce((sum, w) => sum + w.files.length, 0);
+  const totalProjectDocs = projectDocsFiles.length;
   const totalConfigFiles = configFiles.reduce((sum, c) => sum + c.files.length, 0);
   
   return (
@@ -313,7 +335,7 @@ export function WikiPanel({ cwd, onFileSelect, selectedFile }: WikiPanelProps) {
         </div>
         <div className="flex items-center gap-2">
           <span className="text-[10px] text-gray-500">
-            {totalWikiFiles} docs · {totalConfigFiles} configs
+            {totalSessionNotes + totalMemoryFiles + totalProjectDocs} docs · {totalConfigFiles} configs
           </span>
           <button
             onClick={fetchTree}
@@ -327,13 +349,30 @@ export function WikiPanel({ cwd, onFileSelect, selectedFile }: WikiPanelProps) {
       
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
-        {/* 用户文档 - Agent 产出的知识 */}
-        {totalWikiFiles > 0 && (
+        {/* Category 1: Session Notes */}
+        {totalSessionNotes > 0 && (
           <div className="border-b border-gray-200">
-            <div className="px-3 py-1.5 bg-gray-50 text-[10px] font-medium text-gray-500 uppercase tracking-wide">
-              用户文档
+            <div className="px-3 py-1.5 bg-cyan-50 text-[10px] font-medium text-cyan-700 uppercase tracking-wide">
+              会话笔记
             </div>
-            {wikiFiles.map(({ category, files }) => (
+            <CategorySection
+              category={SESSION_NOTES_CATEGORY}
+              files={sessionNotesFiles}
+              expanded={expandedCategories.has(SESSION_NOTES_CATEGORY.name)}
+              onToggle={() => toggleCategory(SESSION_NOTES_CATEGORY.name)}
+              onFileSelect={onFileSelect}
+              selectedFile={selectedFile}
+            />
+          </div>
+        )}
+        
+        {/* Category 2: Long-term Memory */}
+        {totalMemoryFiles > 0 && (
+          <div className="border-b border-gray-200">
+            <div className="px-3 py-1.5 bg-blue-50 text-[10px] font-medium text-blue-700 uppercase tracking-wide">
+              长期记忆
+            </div>
+            {memoryFiles.map(({ category, files }) => (
               <CategorySection
                 key={category.name}
                 category={category}
@@ -347,11 +386,28 @@ export function WikiPanel({ cwd, onFileSelect, selectedFile }: WikiPanelProps) {
           </div>
         )}
         
-        {/* 系统配置 - 项目维护的配置文件 */}
+        {/* Category 3: Project Documentation */}
+        {totalProjectDocs > 0 && (
+          <div className="border-b border-gray-200">
+            <div className="px-3 py-1.5 bg-green-50 text-[10px] font-medium text-green-700 uppercase tracking-wide">
+              项目文档
+            </div>
+            <CategorySection
+              category={PROJECT_DOCS_CATEGORY}
+              files={projectDocsFiles}
+              expanded={expandedCategories.has(PROJECT_DOCS_CATEGORY.name)}
+              onToggle={() => toggleCategory(PROJECT_DOCS_CATEGORY.name)}
+              onFileSelect={onFileSelect}
+              selectedFile={selectedFile}
+            />
+          </div>
+        )}
+        
+        {/* Config */}
         {totalConfigFiles > 0 && (
           <div>
             <div className="px-3 py-1.5 bg-gray-50 text-[10px] font-medium text-gray-500 uppercase tracking-wide">
-              系统配置
+              配置
             </div>
             {configFiles.map(({ category, files }) => (
               <CategorySection
@@ -368,7 +424,7 @@ export function WikiPanel({ cwd, onFileSelect, selectedFile }: WikiPanelProps) {
         )}
         
         {/* 空状态 */}
-        {totalWikiFiles === 0 && totalConfigFiles === 0 && (
+        {totalSessionNotes === 0 && totalMemoryFiles === 0 && totalProjectDocs === 0 && totalConfigFiles === 0 && (
           <div className="p-8 text-center text-sm text-gray-400">
             <BookOpen className="w-8 h-8 mx-auto mb-2 opacity-30" />
             <div>暂无文档</div>

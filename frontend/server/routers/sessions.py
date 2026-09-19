@@ -1450,6 +1450,9 @@ async def api_session_file_changes(session_id: str) -> dict[str, Any]:
             first_manifest = await snapshot_service.get_manifest(first_snapshot.id)
             
             for f in inspection.files:
+                if f.path.startswith(".mycode/") or f.path.startswith("manifests/"):
+                    continue
+                    
                 old_content = ""
                 new_content = ""
                 is_new = f.status == "added"
@@ -1477,6 +1480,9 @@ async def api_session_file_changes(session_id: str) -> dict[str, Any]:
             last_manifest = await snapshot_service.get_manifest(last_snapshot.id)
             
             for f in diffs:
+                if f.path.startswith(".mycode/") or f.path.startswith("manifests/"):
+                    continue
+                    
                 old_content = ""
                 new_content = ""
                 is_new = f.status == "added"

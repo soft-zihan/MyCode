@@ -327,7 +327,7 @@ export async function moveWorkspaceFile(sourcePath: string, targetPath: string, 
   return res.json();
 }
 
-export async function fetchWorkspaceFile(path: string, cwd?: string): Promise<{ path: string; content: string; size: number }> {
+export async function fetchWorkspaceFile(path: string, cwd?: string): Promise<{ path: string; content: string; size: number; frontmatter?: Record<string, any> }> {
   const url = cwd
     ? `${API_BASE}/workspace/file?path=${encodeURIComponent(path)}&cwd=${encodeURIComponent(cwd)}`
     : `${API_BASE}/workspace/file?path=${encodeURIComponent(path)}`;

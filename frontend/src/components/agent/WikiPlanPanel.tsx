@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { BookOpen, Target, Settings, FileText, FolderOpen, ChevronDown, ChevronRight } from 'lucide-react';
+import { BookOpen, Target, FileText, FolderOpen, ChevronDown, ChevronRight } from 'lucide-react';
 import { WikiPanel } from './WikiPanel';
 import { PlanControlPanel } from './PlanControlPanel';
 import { getPlanArtifacts, fetchWorkspaceTree, WorkspaceNode } from '../../api/client';
@@ -12,7 +12,7 @@ interface WikiPlanPanelProps {
   selectedFile: string | null;
 }
 
-type SubTab = 'docs' | 'plan-config' | 'plan-artifacts';
+type SubTab = 'wiki' | 'plan';
 
 interface PlanFile {
   name: string;
@@ -30,43 +30,46 @@ function PlanArtifactsPanel({ sessionId, planSlug, cwd, onFileSelect }: {
   const [planFiles, setPlanFiles] = useState<PlanFile[]>([]);
   const [expandedArtifact, setExpandedArtifact] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [resolvedSlug, setResolvedSlug] = useState<string>('');
 
   useEffect(() => {
-    if (!planSlug || !sessionId) return;
+    if (!sessionId) return;
     setLoading(true);
     
-    // Try API first
-    getPlanArtifacts(sessionId, planSlug)
-      .then(res => {
-        if (res.success && res.data) {
-          setArtifacts(res.data);
-        } else {
-          // Fallback: scan workspace tree for plan files
-          if (cwd) {
-            fetchWorkspaceTree(cwd)
-              .then(tree => {
-                const files = findPlanFiles(tree, planSlug);
-                setPlanFiles(files);
-              })
-              .catch(() => {});
+    // Try API first with provided slug
+    if (planSlug) {
+      getPlanArtifacts(sessionId, planSlug)
+        .then(res => {
+          if (res.success && res.data && Object.keys(res.data).length > 0) {
+            setResolvedSlug(planSlug);
+            setArtifacts(res.data);
+            setLoading(false);
+            return;
           }
-        }
-      })
-      .catch(() => {
-        // Fallback: scan workspace tree for plan files
-        if (cwd) {
-          fetchWorkspaceTree(cwd)
-            .then(tree => {
-              const files = findPlanFiles(tree, planSlug);
-              setPlanFiles(files);
-            })
-            .catch(() => {});
-        }
-      })
-      .finally(() => setLoading(false));
+        })
+        .catch(() => {});
+    }
+    
+    // Fallback: scan workspace tree for plan files
+    if (cwd) {
+      fetchWorkspaceTree(cwd)
+        .then(tree => {
+          // Find the plan directory with the most files
+          const bestMatch = findPlanWithFiles(tree);
+          
+          if (bestMatch) {
+            setResolvedSlug(bestMatch.slug);
+            setPlanFiles(bestMatch.files);
+          }
+        })
+        .catch(() => {})
+        .finally(() => setLoading(false));
+    } else {
+      setLoading(false);
+    }
   }, [sessionId, planSlug, cwd]);
 
-  if (!planSlug) {
+  if (!resolvedSlug && !planSlug) {
     return (
       <div className="p-6 text-center text-sm text-gray-400">
         <FolderOpen className="w-8 h-8 mx-auto mb-2 opacity-30" />
@@ -87,7 +90,7 @@ function PlanArtifactsPanel({ sessionId, planSlug, cwd, onFileSelect }: {
       <div className="p-6 text-center text-sm text-gray-400">
         <FileText className="w-8 h-8 mx-auto mb-2 opacity-30" />
         <div>Plan 暂无产物</div>
-        <div className="text-xs mt-1">Plan: {planSlug}</div>
+        <div className="text-xs mt-1">Plan: {resolvedSlug || planSlug}</div>
       </div>
     );
   }
@@ -96,14 +99,14 @@ function PlanArtifactsPanel({ sessionId, planSlug, cwd, onFileSelect }: {
     <div className="p-2 space-y-1">
       <div className="px-2 py-1.5 text-xs font-medium text-gray-700 flex items-center gap-1.5">
         <Target className="w-3.5 h-3.5 text-green-500" />
-        <span>{planSlug}</span>
+        <span>{resolvedSlug || planSlug}</span>
         <span className="text-[10px] text-gray-400 ml-auto">
           {artifactEntries.length + planFiles.length} 个文件
         </span>
       </div>
       
       {artifactEntries.map(([filename, content]) => {
-        const wikiPath = `.mycode/plans/${planSlug}/${filename}`;
+        const wikiPath = `.mycode/plans/${resolvedSlug || planSlug}/${filename}`;
         const isExpanded = expandedArtifact === filename;
         return (
           <div key={filename} className="border border-gray-200 rounded">
@@ -163,12 +166,13 @@ function PlanArtifactsPanel({ sessionId, planSlug, cwd, onFileSelect }: {
 
 function findPlanFiles(tree: WorkspaceNode, planSlug: string): PlanFile[] {
   const files: PlanFile[] = [];
-  const planDirPath = `.mycode/plans/${planSlug}`;
+  const planDirSuffix = `.mycode/plans/${planSlug}`;
   
   function walk(node: WorkspaceNode, currentPath: string) {
     const nodePath = currentPath ? `${currentPath}/${node.name}` : node.name;
     
-    if (node.type === 'file' && nodePath.startsWith(planDirPath)) {
+    // Match if path ends with .mycode/plans/{planSlug} or contains it
+    if (node.type === 'file' && (nodePath.endsWith(planDirSuffix) || nodePath.includes(planDirSuffix + '/'))) {
       files.push({
         name: node.name,
         path: nodePath,
@@ -185,8 +189,59 @@ function findPlanFiles(tree: WorkspaceNode, planSlug: string): PlanFile[] {
   return files;
 }
 
+function findPlanWithFiles(tree: WorkspaceNode): { slug: string; files: PlanFile[] } | null {
+  const plansDirSuffix = '.mycode/plans';
+  let bestMatch: { slug: string; files: PlanFile[] } | null = null;
+  let bestCount = 0;
+  
+  function walk(node: WorkspaceNode, currentPath: string) {
+    const nodePath = currentPath ? `${currentPath}/${node.name}` : node.name;
+    
+    // Check if this is a plan directory (path ends with .mycode/plans/{dirName})
+    if (node.type === 'directory' && nodePath.includes(plansDirSuffix + '/') && nodePath !== plansDirSuffix) {
+      const dirName = node.name;
+      if (dirName !== 'archive' && !dirName.startsWith('.')) {
+        // Count files in this plan directory
+        const files = findPlanFiles(tree, dirName);
+        if (files.length > bestCount) {
+          bestCount = files.length;
+          bestMatch = { slug: dirName, files };
+        }
+      }
+    } else if (node.type === 'directory' && node.children) {
+      for (const child of node.children) {
+        walk(child, nodePath);
+      }
+    }
+  }
+  
+  walk(tree, '');
+  return bestMatch;
+}
+
+function PlanCombinedPanel({ sessionId, planSlug, cwd, onFileSelect }: {
+  sessionId: string;
+  planSlug: string;
+  cwd: string | null;
+  onFileSelect: (path: string) => void;
+}) {
+  return (
+    <div className="flex flex-col h-full">
+      {/* Plan Control (Strategy Selector or Progress) */}
+      <div className="border-b border-gray-200">
+        <PlanControlPanel sessionId={sessionId} planSlug={planSlug} />
+      </div>
+      
+      {/* Plan Artifacts */}
+      <div className="flex-1 overflow-auto">
+        <PlanArtifactsPanel sessionId={sessionId} planSlug={planSlug} cwd={cwd} onFileSelect={onFileSelect} />
+      </div>
+    </div>
+  );
+}
+
 export function WikiPlanPanel({ cwd, sessionId, planSlug, onFileSelect, selectedFile }: WikiPlanPanelProps) {
-  const [subTab, setSubTab] = useState<SubTab>('docs');
+  const [subTab, setSubTab] = useState<SubTab>('wiki');
 
   // Fallback: derive plan slug from session ID if not provided
   const effectivePlanSlug = planSlug || (sessionId ? `plan-${sessionId}` : '');
@@ -195,43 +250,31 @@ export function WikiPlanPanel({ cwd, sessionId, planSlug, onFileSelect, selected
     <div className="flex flex-col h-full">
       <div className="flex border-b border-gray-200 bg-gray-50">
         <button
-          onClick={() => setSubTab('docs')}
+          onClick={() => setSubTab('wiki')}
           className={`flex-1 px-2 py-1.5 text-xs font-medium transition-colors ${
-            subTab === 'docs' ? 'text-blue-600 border-b-2 border-blue-600 bg-white' : 'text-gray-500 hover:text-gray-700'
+            subTab === 'wiki' ? 'text-blue-600 border-b-2 border-blue-600 bg-white' : 'text-gray-500 hover:text-gray-700'
           }`}
         >
           <BookOpen className="w-3 h-3 inline mr-1" />
-          文档
+          Wiki
         </button>
         <button
-          onClick={() => setSubTab('plan-config')}
+          onClick={() => setSubTab('plan')}
           className={`flex-1 px-2 py-1.5 text-xs font-medium transition-colors ${
-            subTab === 'plan-config' ? 'text-blue-600 border-b-2 border-blue-600 bg-white' : 'text-gray-500 hover:text-gray-700'
+            subTab === 'plan' ? 'text-blue-600 border-b-2 border-blue-600 bg-white' : 'text-gray-500 hover:text-gray-700'
           }`}
         >
-          <Settings className="w-3 h-3 inline mr-1" />
-          Plan 配置
-        </button>
-        <button
-          onClick={() => setSubTab('plan-artifacts')}
-          className={`flex-1 px-2 py-1.5 text-xs font-medium transition-colors ${
-            subTab === 'plan-artifacts' ? 'text-blue-600 border-b-2 border-blue-600 bg-white' : 'text-gray-500 hover:text-gray-700'
-          }`}
-        >
-          <FileText className="w-3 h-3 inline mr-1" />
-          Plan 产物
+          <Target className="w-3 h-3 inline mr-1" />
+          Plan
         </button>
       </div>
 
       <div className="flex-1 overflow-auto">
-        {subTab === 'docs' && (
+        {subTab === 'wiki' && (
           <WikiPanel cwd={cwd} onFileSelect={onFileSelect} selectedFile={selectedFile} />
         )}
-        {subTab === 'plan-config' && (
-          <PlanControlPanel sessionId={sessionId} planSlug="" />
-        )}
-        {subTab === 'plan-artifacts' && (
-          <PlanArtifactsPanel sessionId={sessionId} planSlug={effectivePlanSlug} cwd={cwd} onFileSelect={onFileSelect} />
+        {subTab === 'plan' && (
+          <PlanCombinedPanel sessionId={sessionId} planSlug={effectivePlanSlug} cwd={cwd} onFileSelect={onFileSelect} />
         )}
       </div>
     </div>

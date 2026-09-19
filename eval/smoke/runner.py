@@ -109,7 +109,7 @@ def setup_workspace(task: dict) -> Path:
         if wiki_dir.exists():
             import shutil
             # 清理 workflow_pattern 和 skills
-            for subdir in ["workflow_pattern", "knowledge", "task_notes"]:
+            for subdir in ["workflow_pattern", "knowledge", "session_notes"]:
                 p = wiki_dir / subdir
                 if p.exists():
                     shutil.rmtree(p, ignore_errors=True)

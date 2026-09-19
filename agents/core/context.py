@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -146,10 +147,27 @@ class ContextManager:
 
         if not self.agent.is_sub_agent:
             try:
-                from agents.wiki.wiki_capture import capture_session_to_session
+                from agents.wiki.wiki_capture import capture_session_to_session, should_trigger_compile
                 capture_session_to_session(self.agent.session_id, memory)
+
+                # Trigger wiki compilation if needed (extract knowledge from session notes)
+                if should_trigger_compile():
+                    side_query = self.agent._build_side_query(max_tokens=6000)
+                    asyncio.create_task(self._compile_wiki_async(side_query))
             except Exception:
                 pass
+
+    async def _compile_wiki_async(self, side_query: Any) -> None:
+        """异步触发 Wiki 编译（从 session 提取知识）。"""
+        try:
+            from agents.wiki.wiki_compiler import compile_pending_session
+            result = await compile_pending_session(side_query)
+            if result and not result.get("error"):
+                total = sum(v for k, v in result.items() if isinstance(v, int))
+                if total > 0:
+                    print(f"[wiki_compile] extracted {total} entries from session notes")
+        except Exception as e:
+            print(f"[wiki_compile] error: {type(e).__name__}: {e}")
 
     def _get_message_count(self) -> int:
         """获取消息数量。"""
