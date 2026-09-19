@@ -12,6 +12,28 @@ const formatTokens = (n: number): string => {
   return n.toString();
 };
 
+interface BreakdownItemProps {
+  label: string;
+  tokens: number;
+  totalTokens: number;
+  color: string;
+  indent?: number;
+  detail?: string;
+}
+
+function BreakdownItem({ label, tokens, totalTokens, color, indent = 0, detail }: BreakdownItemProps) {
+  const percent = totalTokens > 0 ? Math.round((tokens / totalTokens) * 100) : 0;
+  return (
+    <div className="flex items-center gap-2 py-0.5" style={{ paddingLeft: `${indent * 12}px` }}>
+      <div className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ backgroundColor: color }} />
+      <span className="text-xs text-gray-600 flex-1 truncate">{label}</span>
+      {detail && <span className="text-[10px] text-gray-400">{detail}</span>}
+      <span className="text-xs font-mono text-gray-900 w-12 text-right">{formatTokens(tokens)}</span>
+      <span className="text-[10px] text-gray-400 w-8 text-right">{percent}%</span>
+    </div>
+  );
+}
+
 export function ContextPanel({ sessionId }: ContextPanelProps) {
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [breakdown, setBreakdown] = useState<TokenBreakdownData | null>(null);
@@ -64,11 +86,13 @@ export function ContextPanel({ sessionId }: ContextPanelProps) {
   const cachePercent = inputTokens > 0 ? Math.round((cachedTokens / inputTokens) * 100) : 0;
   const contextPercent = contextWindow > 0 ? Math.round((contextUsed / contextWindow) * 100) : 0;
 
-  // 计算各部分占比
   const totalTokens = breakdown ? breakdown.total_tokens : 0;
-  const systemPercent = breakdown && totalTokens > 0 ? Math.round((breakdown.system_tokens / totalTokens) * 100) : 0;
-  const toolsPercent = breakdown && totalTokens > 0 ? Math.round((breakdown.tools_tokens / totalTokens) * 100) : 0;
-  const messagesPercent = breakdown && totalTokens > 0 ? Math.round((breakdown.messages_tokens / totalTokens) * 100) : 0;
+
+  // 计算各部分占比
+  const systemTotal = breakdown ? (
+    breakdown.base_prompt_tokens + breakdown.claude_md_tokens + breakdown.skills_tokens +
+    breakdown.memory_tokens + breakdown.wiki_tokens + breakdown.agents_tokens
+  ) : 0;
 
   return (
     <div className="flex-1 overflow-auto flex flex-col">
@@ -120,7 +144,7 @@ export function ContextPanel({ sessionId }: ContextPanelProps) {
         </div>
       </div>
 
-      {/* Context Breakdown - 从上到下 */}
+      {/* Context Composition - 层次结构 */}
       {breakdown && (
         <div className="px-3 py-2 border-b border-gray-200">
           <div className="flex items-center justify-between mb-2">
@@ -130,62 +154,89 @@ export function ContextPanel({ sessionId }: ContextPanelProps) {
 
           {/* Stacked bar */}
           <div className="w-full h-3 bg-gray-100 rounded-full overflow-hidden flex mb-3">
-            {breakdown.system_tokens > 0 && (
+            {systemTotal > 0 && (
               <div
                 className="h-full bg-purple-500"
-                style={{ width: `${systemPercent}%` }}
-                title={`System: ${formatTokens(breakdown.system_tokens)} (${systemPercent}%)`}
+                style={{ width: `${(systemTotal / totalTokens) * 100}%` }}
+                title={`System: ${formatTokens(systemTotal)}`}
               />
             )}
             {breakdown.tools_tokens > 0 && (
               <div
                 className="h-full bg-amber-500"
-                style={{ width: `${toolsPercent}%` }}
-                title={`Tools: ${formatTokens(breakdown.tools_tokens)} (${toolsPercent}%)`}
+                style={{ width: `${(breakdown.tools_tokens / totalTokens) * 100}%` }}
+                title={`Tools: ${formatTokens(breakdown.tools_tokens)}`}
               />
             )}
             {breakdown.messages_tokens > 0 && (
               <div
                 className="h-full bg-blue-500"
-                style={{ width: `${messagesPercent}%` }}
-                title={`Messages: ${formatTokens(breakdown.messages_tokens)} (${messagesPercent}%)`}
+                style={{ width: `${(breakdown.messages_tokens / totalTokens) * 100}%` }}
+                title={`Messages: ${formatTokens(breakdown.messages_tokens)}`}
               />
             )}
           </div>
 
-          {/* Details */}
-          <div className="space-y-2">
-            {/* System Prompt */}
-            <div className="flex items-center gap-2">
+          {/* 层次结构详情 */}
+          <div className="space-y-1">
+            {/* Plan Mode 提示 */}
+            {breakdown.is_plan_mode && breakdown.plan_mode_tokens > 0 && (
+              <div className="flex items-center gap-2 py-1 px-2 mb-2 bg-orange-50 border border-orange-200 rounded">
+                <div className="w-3 h-3 rounded-sm bg-orange-500" />
+                <span className="text-xs text-orange-700 flex-1">Plan Mode</span>
+                <span className="text-xs font-mono text-orange-900">{formatTokens(breakdown.plan_mode_tokens)}</span>
+                <span className="text-[10px] text-orange-600 w-8 text-right">{totalTokens > 0 ? Math.round((breakdown.plan_mode_tokens / totalTokens) * 100) : 0}%</span>
+              </div>
+            )}
+
+            {/* Layer 1: System Prompt */}
+            <div className="flex items-center gap-2 py-0.5 font-medium">
               <div className="w-3 h-3 rounded-sm bg-purple-500" />
-              <span className="text-xs text-gray-600 flex-1">System Prompt</span>
-              <span className="text-xs font-mono text-gray-900">{formatTokens(breakdown.system_tokens)}</span>
-              <span className="text-[10px] text-gray-400 w-8 text-right">{systemPercent}%</span>
+              <span className="text-xs text-gray-700 flex-1">System Prompt</span>
+              <span className="text-xs font-mono text-gray-900">{formatTokens(systemTotal)}</span>
+              <span className="text-[10px] text-gray-400 w-8 text-right">{totalTokens > 0 ? Math.round((systemTotal / totalTokens) * 100) : 0}%</span>
             </div>
+            <BreakdownItem label="Base Prompt" tokens={breakdown.base_prompt_tokens} totalTokens={totalTokens} color="#a855f7" indent={1} />
+            <BreakdownItem label="CLAUDE.md" tokens={breakdown.claude_md_tokens} totalTokens={totalTokens} color="#c084fc" indent={1} detail="项目规则" />
+            <BreakdownItem label="Skills" tokens={breakdown.skills_tokens} totalTokens={totalTokens} color="#d8b4fe" indent={1} />
+            <BreakdownItem label="Memory" tokens={breakdown.memory_tokens} totalTokens={totalTokens} color="#e9d5ff" indent={1} detail="跨会话" />
+            <BreakdownItem label="Wiki" tokens={breakdown.wiki_tokens} totalTokens={totalTokens} color="#f3e8ff" indent={1} />
+            <BreakdownItem label="Agents" tokens={breakdown.agents_tokens} totalTokens={totalTokens} color="#faf5ff" indent={1} detail="子代理" />
 
-            {/* Tools */}
-            <div className="flex items-center gap-2">
+            {/* Layer 2: Tools */}
+            <div className="flex items-center gap-2 py-0.5 font-medium mt-2">
               <div className="w-3 h-3 rounded-sm bg-amber-500" />
-              <span className="text-xs text-gray-600 flex-1">
-                Tools
-                <span className="text-[10px] text-gray-400 ml-1">
-                  ({breakdown.builtin_tool_count} built-in + {breakdown.mcp_tool_count} MCP)
-                </span>
-              </span>
+              <span className="text-xs text-gray-700 flex-1">Tools</span>
               <span className="text-xs font-mono text-gray-900">{formatTokens(breakdown.tools_tokens)}</span>
-              <span className="text-[10px] text-gray-400 w-8 text-right">{toolsPercent}%</span>
+              <span className="text-[10px] text-gray-400 w-8 text-right">{totalTokens > 0 ? Math.round((breakdown.tools_tokens / totalTokens) * 100) : 0}%</span>
             </div>
+            <BreakdownItem 
+              label="Built-in" 
+              tokens={Math.round(breakdown.tools_tokens * (breakdown.builtin_tool_count / (breakdown.builtin_tool_count + breakdown.mcp_tool_count || 1)))}
+              totalTokens={totalTokens} 
+              color="#f59e0b" 
+              indent={1} 
+              detail={`${breakdown.builtin_tool_count} 个`}
+            />
+            <BreakdownItem 
+              label="MCP" 
+              tokens={Math.round(breakdown.tools_tokens * (breakdown.mcp_tool_count / (breakdown.builtin_tool_count + breakdown.mcp_tool_count || 1)))}
+              totalTokens={totalTokens} 
+              color="#fbbf24" 
+              indent={1} 
+              detail={`${breakdown.mcp_tool_count} 个`}
+            />
 
-            {/* Messages */}
-            <div className="flex items-center gap-2">
+            {/* Layer 3: Messages */}
+            <div className="flex items-center gap-2 py-0.5 font-medium mt-2">
               <div className="w-3 h-3 rounded-sm bg-blue-500" />
-              <span className="text-xs text-gray-600 flex-1">
-                Messages
-                <span className="text-[10px] text-gray-400 ml-1">({breakdown.message_count} msgs)</span>
-              </span>
+              <span className="text-xs text-gray-700 flex-1">Messages</span>
               <span className="text-xs font-mono text-gray-900">{formatTokens(breakdown.messages_tokens)}</span>
-              <span className="text-[10px] text-gray-400 w-8 text-right">{messagesPercent}%</span>
+              <span className="text-[10px] text-gray-400 w-8 text-right">{totalTokens > 0 ? Math.round((breakdown.messages_tokens / totalTokens) * 100) : 0}%</span>
             </div>
+            <BreakdownItem label="User" tokens={breakdown.user_tokens} totalTokens={totalTokens} color="#3b82f6" indent={1} detail={`${breakdown.message_count} 条`} />
+            <BreakdownItem label="Assistant" tokens={breakdown.assistant_tokens} totalTokens={totalTokens} color="#60a5fa" indent={1} />
+            <BreakdownItem label="Tool Results" tokens={breakdown.tool_tokens} totalTokens={totalTokens} color="#93c5fd" indent={1} />
           </div>
         </div>
       )}

@@ -508,8 +508,7 @@ async def api_update_permission_mode(session_id: str, data: PermissionModeReques
 async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
     """获取实际发给模型的 token 分解
     
-    基于 get_messages_for_llm() 和 get_active_tool_definitions() 计算
-    使用实际的 last_input_token_count 来校准
+    从最新的 stats 事件读取细粒度 breakdown 数据
     """
     session_info = _active_sessions.get(session_id)
     
@@ -517,78 +516,103 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
         svc = session_info["svc"]
         agent = getattr(svc, '_agent', None)
         if agent:
-            # 获取实际发给模型的 messages
-            messages = agent.messages or []
-            
-            # 分离 system prompt 和其他 messages
-            system_chars = 0
-            messages_chars = 0
-            message_count = 0
-            
-            for msg in messages:
-                role = msg.get('role', '')
-                content = msg.get('content', '')
+            # 从 session 获取最新的 stats 事件
+            session = getattr(svc, 'session', None) or getattr(agent, 'session', None)
+            if session:
+                # 从事件日志中获取最新的 stats
+                latest_stats = {}
+                for event in reversed(session._log):
+                    if event.get("type") == "stats":
+                        latest_stats = event
+                        break
                 
-                # 计算 content 的字符数
-                if isinstance(content, str):
-                    chars = len(content)
-                elif isinstance(content, list):
-                    chars = sum(len(item.get('text', '')) for item in content if isinstance(item, dict) and item.get('type') == 'text')
-                else:
-                    chars = 0
-                
-                if role == 'system':
-                    system_chars = chars
-                else:
-                    messages_chars += chars
-                    message_count += 1
-            
-            # 获取实际发给模型的 tools
-            from agents.tools.dispatcher import get_active_tool_definitions
-            tools = getattr(agent, 'tools', [])
-            tool_defs = get_active_tool_definitions(tools)
-            
-            # 计算 tools 的字符数（JSON 格式）
-            tools_json = json.dumps([{
-                'name': t.get('name', ''),
-                'description': t.get('description', ''),
-                'parameters': t.get('parameters', {}),
-            } for t in tool_defs], ensure_ascii=False)
-            tools_chars = len(tools_json)
-            
-            # 统计 MCP 工具数量
-            mcp_tool_count = sum(1 for t in tool_defs if t.get('name', '').startswith('mcp__'))
-            builtin_tool_count = len(tool_defs) - mcp_tool_count
-            
-            # 使用实际的 last_input_token_count
-            actual_input_tokens = getattr(agent, 'last_input_token_count', 0)
-            total_chars = system_chars + tools_chars + messages_chars
-            
-            # 如果有实际 token 数，按比例分配
-            if actual_input_tokens > 0 and total_chars > 0:
-                scale = actual_input_tokens / (total_chars / 4)
-                system_tokens = int((system_chars / 4) * scale)
-                tools_tokens = int((tools_chars / 4) * scale)
-                messages_tokens = actual_input_tokens - system_tokens - tools_tokens
-            else:
-                system_tokens = system_chars // 4
-                tools_tokens = tools_chars // 4
-                messages_tokens = messages_chars // 4
-            
-            return {
-                "system_chars": system_chars,
-                "system_tokens": system_tokens,
-                "tools_chars": tools_chars,
-                "tools_tokens": tools_tokens,
-                "messages_chars": messages_chars,
-                "messages_tokens": messages_tokens,
-                "total_chars": total_chars,
-                "total_tokens": actual_input_tokens if actual_input_tokens > 0 else (total_chars // 4),
-                "message_count": message_count,
-                "tool_count": len(tool_defs),
-                "builtin_tool_count": builtin_tool_count,
-                "mcp_tool_count": mcp_tool_count,
-            }
+                if latest_stats:
+                    # 使用实际 token 数按比例分配
+                    actual_input_tokens = latest_stats.get("last_input_token_count", 0)
+                    system_chars = latest_stats.get("system_chars", 0)
+                    user_chars = latest_stats.get("user_chars", 0)
+                    assistant_chars = latest_stats.get("assistant_chars", 0)
+                    tool_result_chars = latest_stats.get("tool_result_chars", 0)
+                    tool_count = latest_stats.get("tool_count", 0)
+                    
+                    # System prompt 细粒度
+                    system_base_chars = latest_stats.get("system_base_chars", 0)
+                    system_claude_md_chars = latest_stats.get("system_claude_md_chars", 0)
+                    system_skills_chars = latest_stats.get("system_skills_chars", 0)
+                    system_memory_chars = latest_stats.get("system_memory_chars", 0)
+                    system_wiki_chars = latest_stats.get("system_wiki_chars", 0)
+                    system_agents_chars = latest_stats.get("system_agents_chars", 0)
+                    system_workspace_chars = latest_stats.get("system_workspace_chars", 0)
+                    
+                    total_chars = system_chars + user_chars + assistant_chars + tool_result_chars
+                    
+                    # 获取 MCP 工具数量
+                    from agents.tools.dispatcher import get_active_tool_definitions
+                    tools = getattr(agent, 'tools', [])
+                    tool_defs = get_active_tool_definitions(tools)
+                    mcp_tool_count = sum(1 for t in tool_defs if t.get('name', '').startswith('mcp__'))
+                    builtin_tool_count = len(tool_defs) - mcp_tool_count
+                    
+                    # 按比例分配实际 token 数
+                    if actual_input_tokens > 0 and total_chars > 0:
+                        scale = actual_input_tokens / (total_chars / 4)
+                        system_tokens = int((system_chars / 4) * scale)
+                        user_tokens = int((user_chars / 4) * scale)
+                        assistant_tokens = int((assistant_chars / 4) * scale)
+                        tool_tokens = int((tool_result_chars / 4) * scale)
+                        
+                        # System prompt 细粒度
+                        base_prompt_tokens = int((system_base_chars / 4) * scale)
+                        claude_md_tokens = int((system_claude_md_chars / 4) * scale)
+                        skills_tokens = int((system_skills_chars / 4) * scale)
+                        memory_tokens = int((system_memory_chars / 4) * scale)
+                        wiki_tokens = int((system_wiki_chars / 4) * scale)
+                        agents_tokens = int((system_agents_chars / 4) * scale)
+                        # workspace 归入 base
+                        base_prompt_tokens += int((system_workspace_chars / 4) * scale)
+                    else:
+                        system_tokens = system_chars // 4
+                        user_tokens = user_chars // 4
+                        assistant_tokens = assistant_chars // 4
+                        tool_tokens = tool_result_chars // 4
+                        base_prompt_tokens = (system_base_chars + system_workspace_chars) // 4
+                        claude_md_tokens = system_claude_md_chars // 4
+                        skills_tokens = system_skills_chars // 4
+                        memory_tokens = system_memory_chars // 4
+                        wiki_tokens = system_wiki_chars // 4
+                        agents_tokens = system_agents_chars // 4
+                    
+                    messages_tokens = user_tokens + assistant_tokens + tool_tokens
+                    
+                    # Plan mode
+                    is_plan_mode = latest_stats.get("is_plan_mode", False)
+                    plan_mode_chars = latest_stats.get("plan_mode_chars", 0)
+                    plan_mode_tokens = int((plan_mode_chars / 4) * scale) if actual_input_tokens > 0 and total_chars > 0 else plan_mode_chars // 4
+                    
+                    return {
+                        # System prompt 细粒度
+                        "base_prompt_tokens": base_prompt_tokens,
+                        "claude_md_tokens": claude_md_tokens,
+                        "skills_tokens": skills_tokens,
+                        "memory_tokens": memory_tokens,
+                        "wiki_tokens": wiki_tokens,
+                        "agents_tokens": agents_tokens,
+                        # Tools
+                        "tools_tokens": tool_tokens,
+                        "builtin_tool_count": builtin_tool_count,
+                        "mcp_tool_count": mcp_tool_count,
+                        # Messages
+                        "messages_tokens": messages_tokens,
+                        "message_count": latest_stats.get("msg_count", 0),
+                        "user_tokens": user_tokens,
+                        "assistant_tokens": assistant_tokens,
+                        "tool_tokens": tool_tokens,
+                        # 总计
+                        "total_tokens": actual_input_tokens,
+                        # Plan mode
+                        "is_plan_mode": is_plan_mode,
+                        "plan_mode_tokens": plan_mode_tokens,
+                    }
     
     # Fallback: 从 JSONL 事件恢复
     from pathlib import Path
@@ -597,71 +621,103 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
     
     if not events_file.exists():
         return {
-            "system_chars": 0, "system_tokens": 0,
-            "tools_chars": 0, "tools_tokens": 0,
-            "messages_chars": 0, "messages_tokens": 0,
-            "total_chars": 0, "total_tokens": 0,
-            "message_count": 0, "tool_count": 0,
-            "builtin_tool_count": 0, "mcp_tool_count": 0,
+            "base_prompt_tokens": 0, "claude_md_tokens": 0, "skills_tokens": 0,
+            "memory_tokens": 0, "wiki_tokens": 0, "agents_tokens": 0,
+            "tools_tokens": 0, "builtin_tool_count": 0, "mcp_tool_count": 0,
+            "messages_tokens": 0, "message_count": 0,
+            "user_tokens": 0, "assistant_tokens": 0, "tool_tokens": 0,
+            "total_tokens": 0,
+            "is_plan_mode": False, "plan_mode_tokens": 0,
         }
     
-    system_chars = 0
-    messages_chars = 0
-    message_count = 0
-    last_input_token_count = 0
-    
+    # 从最新的 stats 事件读取
+    latest_stats = {}
     with open(events_file) as f:
         for line in f:
             try:
                 event = json.loads(line.strip())
-                event_type = event.get("type", "")
-                
-                if event_type == "system_prompt":
-                    system_chars = len(event.get("content", ""))
-                elif event_type in ("user_message", "assistant_message"):
-                    messages_chars += len(event.get("content", ""))
-                    message_count += 1
-                elif event_type == "tool_result_msg":
-                    messages_chars += len(event.get("content", ""))
-                    message_count += 1
-                elif event_type == "stats":
-                    # 从 stats 事件获取实际的 input token 数
-                    last_input_token_count = event.get("last_input_token_count", 0)
-            except (json.JSONDecodeError, Exception):
+                if event.get("type") == "stats":
+                    latest_stats = event
+            except:
                 continue
     
-    if system_chars == 0:
-        system_chars = 2000
+    if not latest_stats:
+        return {
+            "base_prompt_tokens": 0, "claude_md_tokens": 0, "skills_tokens": 0,
+            "memory_tokens": 0, "wiki_tokens": 0, "agents_tokens": 0,
+            "tools_tokens": 0, "builtin_tool_count": 0, "mcp_tool_count": 0,
+            "messages_tokens": 0, "message_count": 0,
+            "user_tokens": 0, "assistant_tokens": 0, "tool_tokens": 0,
+            "total_tokens": 0,
+            "is_plan_mode": False, "plan_mode_tokens": 0,
+        }
     
-    total_chars = system_chars + messages_chars
+    actual_input_tokens = latest_stats.get("last_input_token_count", 0)
+    system_chars = latest_stats.get("system_chars", 0)
+    user_chars = latest_stats.get("user_chars", 0)
+    assistant_chars = latest_stats.get("assistant_chars", 0)
+    tool_result_chars = latest_stats.get("tool_result_chars", 0)
     
-    # 如果有实际 token 数，按比例分配
-    if last_input_token_count > 0 and total_chars > 0:
-        estimated_tokens = total_chars // 4
-        if estimated_tokens > 0:
-            scale = last_input_token_count / estimated_tokens
-            system_tokens = int((system_chars // 4) * scale)
-            messages_tokens = last_input_token_count - system_tokens
-        else:
-            system_tokens = 0
-            messages_tokens = last_input_token_count
+    system_base_chars = latest_stats.get("system_base_chars", 0)
+    system_claude_md_chars = latest_stats.get("system_claude_md_chars", 0)
+    system_skills_chars = latest_stats.get("system_skills_chars", 0)
+    system_memory_chars = latest_stats.get("system_memory_chars", 0)
+    system_wiki_chars = latest_stats.get("system_wiki_chars", 0)
+    system_agents_chars = latest_stats.get("system_agents_chars", 0)
+    system_workspace_chars = latest_stats.get("system_workspace_chars", 0)
+    
+    total_chars = system_chars + user_chars + assistant_chars + tool_result_chars
+    
+    if actual_input_tokens > 0 and total_chars > 0:
+        scale = actual_input_tokens / (total_chars / 4)
+        system_tokens = int((system_chars / 4) * scale)
+        user_tokens = int((user_chars / 4) * scale)
+        assistant_tokens = int((assistant_chars / 4) * scale)
+        tool_tokens = int((tool_result_chars / 4) * scale)
+        
+        base_prompt_tokens = int(((system_base_chars + system_workspace_chars) / 4) * scale)
+        claude_md_tokens = int((system_claude_md_chars / 4) * scale)
+        skills_tokens = int((system_skills_chars / 4) * scale)
+        memory_tokens = int((system_memory_chars / 4) * scale)
+        wiki_tokens = int((system_wiki_chars / 4) * scale)
+        agents_tokens = int((system_agents_chars / 4) * scale)
     else:
         system_tokens = system_chars // 4
-        messages_tokens = messages_chars // 4
+        user_tokens = user_chars // 4
+        assistant_tokens = assistant_chars // 4
+        tool_tokens = tool_result_chars // 4
+        base_prompt_tokens = (system_base_chars + system_workspace_chars) // 4
+        claude_md_tokens = system_claude_md_chars // 4
+        skills_tokens = system_skills_chars // 4
+        memory_tokens = system_memory_chars // 4
+        wiki_tokens = system_wiki_chars // 4
+        agents_tokens = system_agents_chars // 4
+    
+    messages_tokens = user_tokens + assistant_tokens + tool_tokens
+    
+    # Plan mode
+    is_plan_mode = latest_stats.get("is_plan_mode", False)
+    plan_mode_chars = latest_stats.get("plan_mode_chars", 0)
+    plan_mode_tokens = int((plan_mode_chars / 4) * scale) if actual_input_tokens > 0 and total_chars > 0 else plan_mode_chars // 4
     
     return {
-        "system_chars": system_chars,
-        "system_tokens": system_tokens,
-        "tools_chars": 0,
-        "tools_tokens": 0,
-        "messages_chars": messages_chars,
-        "messages_tokens": messages_tokens,
-        "total_chars": total_chars,
-        "total_tokens": last_input_token_count if last_input_token_count > 0 else (total_chars // 4),
-        "message_count": message_count,
-        "tool_count": 0,
+        "base_prompt_tokens": base_prompt_tokens,
+        "claude_md_tokens": claude_md_tokens,
+        "skills_tokens": skills_tokens,
+        "memory_tokens": memory_tokens,
+        "wiki_tokens": wiki_tokens,
+        "agents_tokens": agents_tokens,
+        "tools_tokens": tool_tokens,
         "builtin_tool_count": 0,
         "mcp_tool_count": 0,
+        "messages_tokens": messages_tokens,
+        "message_count": latest_stats.get("msg_count", 0),
+        "user_tokens": user_tokens,
+        "assistant_tokens": assistant_tokens,
+        "tool_tokens": tool_tokens,
+        "total_tokens": actual_input_tokens,
+        "is_plan_mode": is_plan_mode,
+        "plan_mode_tokens": plan_mode_tokens,
     }
 
 

@@ -356,6 +356,8 @@ class AgentLoop:
             if not a.is_sub_agent:
                 cached_tokens = response["usage"].get("cached_tokens", 0)
                 a.total_cached_tokens += cached_tokens
+                # 从 assembly_metrics 中提取细粒度数据
+                asm = response.get("_assembly_metrics", {})
                 a.session.append("stats", {
                     "input_tokens": a.total_input_tokens,
                     "output_tokens": a.total_output_tokens,
@@ -363,6 +365,23 @@ class AgentLoop:
                     "total_cached_tokens": a.total_cached_tokens,
                     "context_window": a.context_window,
                     "last_input_token_count": a.last_input_token_count,
+                    # Token breakdown (chars)
+                    "system_chars": asm.get("system_chars", 0),
+                    "user_chars": asm.get("user_chars", 0),
+                    "assistant_chars": asm.get("assistant_chars", 0),
+                    "tool_result_chars": asm.get("tool_result_chars", 0),
+                    "tool_count": asm.get("tool_count", 0),
+                    # System prompt 细粒度 (chars)
+                    "system_base_chars": asm.get("system_base_chars", 0),
+                    "system_claude_md_chars": asm.get("system_claude_md_chars", 0),
+                    "system_skills_chars": asm.get("system_skills_chars", 0),
+                    "system_memory_chars": asm.get("system_memory_chars", 0),
+                    "system_wiki_chars": asm.get("system_wiki_chars", 0),
+                    "system_agents_chars": asm.get("system_agents_chars", 0),
+                    "system_workspace_chars": asm.get("system_workspace_chars", 0),
+                    # Plan mode
+                    "is_plan_mode": asm.get("is_plan_mode", False),
+                    "plan_mode_chars": asm.get("plan_mode_chars", 0),
                 })
 
     async def _finalize_text_response(self) -> None:
@@ -646,6 +665,66 @@ class AgentLoop:
                 _msg_chars = sum(len(str(m.get("content", ""))) for m in raw_messages)
                 _tool_count = len(tool_defs)
 
+                # 计算 token breakdown（细粒度）
+                _system_chars = 0
+                _user_chars = 0
+                _assistant_chars = 0
+                _tool_result_chars = 0
+                # System prompt 各部分
+                _system_base_chars = 0
+                _system_claude_md_chars = 0
+                _system_skills_chars = 0
+                _system_memory_chars = 0
+                _system_wiki_chars = 0
+                _system_agents_chars = 0
+                _system_workspace_chars = 0
+                
+                for msg in raw_messages:
+                    role = msg.get("role", "")
+                    content = msg.get("content", "")
+                    if isinstance(content, str):
+                        chars = len(content)
+                    elif isinstance(content, list):
+                        chars = sum(len(item.get("text", "")) for item in content if isinstance(item, dict) and item.get("type") == "text")
+                    else:
+                        chars = 0
+                    if role == "system":
+                        _system_chars = chars
+                    elif role == "user":
+                        _user_chars += chars
+                    elif role == "assistant":
+                        _assistant_chars += chars
+                    elif role == "tool":
+                        _tool_result_chars += chars
+                
+                # 计算 system prompt 各部分（重新构建以获取各部分大小）
+                try:
+                    from agents.core.prompt import (
+                        load_claude_md, build_skill_descriptions,
+                        build_memory_prompt_section, build_wiki_prompt_section,
+                        build_agent_descriptions, build_workspace_structure, get_deferred_tool_names
+                    )
+                    _system_claude_md_chars = len(load_claude_md())
+                    _system_skills_chars = len(build_skill_descriptions())
+                    _system_memory_chars = len(build_memory_prompt_section())
+                    _system_wiki_chars = len(build_wiki_prompt_section())
+                    _system_agents_chars = len(build_agent_descriptions())
+                    _system_workspace_chars = len(build_workspace_structure())
+                    deferred = get_deferred_tool_names()
+                    deferred_section = f"\n\nThe following deferred tools are available via tool_search: {', '.join(deferred)}." if deferred else ""
+                    _system_base_chars = _system_chars - _system_claude_md_chars - _system_skills_chars - _system_memory_chars - _system_wiki_chars - _system_agents_chars - _system_workspace_chars - len(deferred_section)
+                except Exception:
+                    _system_base_chars = _system_chars
+                
+                # 计算 plan mode 的额外 token 占用
+                _plan_mode_chars = 0
+                _is_plan_mode = a.permission_mode == "plan"
+                if _is_plan_mode and hasattr(a, '_plan_mode_manager') and a._plan_mode_manager:
+                    try:
+                        _plan_mode_chars = len(a._plan_mode_manager.build_plan_mode_prompt())
+                    except Exception:
+                        _plan_mode_chars = 0
+
                 stream = await a.openai_client.chat.completions.create(**create_params)
 
                 content = ""
@@ -754,6 +833,22 @@ class AgentLoop:
                         "msg_count": _msg_count,
                         "msg_chars": _msg_chars,
                         "tool_count": _tool_count,
+                        # Token breakdown
+                        "system_chars": _system_chars,
+                        "user_chars": _user_chars,
+                        "assistant_chars": _assistant_chars,
+                        "tool_result_chars": _tool_result_chars,
+                        # System prompt 细粒度
+                        "system_base_chars": _system_base_chars,
+                        "system_claude_md_chars": _system_claude_md_chars,
+                        "system_skills_chars": _system_skills_chars,
+                        "system_memory_chars": _system_memory_chars,
+                        "system_wiki_chars": _system_wiki_chars,
+                        "system_agents_chars": _system_agents_chars,
+                        "system_workspace_chars": _system_workspace_chars,
+                        # Plan mode
+                        "is_plan_mode": _is_plan_mode,
+                        "plan_mode_chars": _plan_mode_chars,
                     },
                 }
 
@@ -788,6 +883,22 @@ class AgentLoop:
                     span.set_attribute("assembly.msg_count", asm["msg_count"])
                     span.set_attribute("assembly.msg_chars", asm["msg_chars"])
                     span.set_attribute("assembly.tool_count", asm["tool_count"])
+                    # Token breakdown
+                    span.set_attribute("assembly.system_chars", asm["system_chars"])
+                    span.set_attribute("assembly.user_chars", asm["user_chars"])
+                    span.set_attribute("assembly.assistant_chars", asm["assistant_chars"])
+                    span.set_attribute("assembly.tool_result_chars", asm["tool_result_chars"])
+                    # System prompt 细粒度
+                    span.set_attribute("assembly.system_base_chars", asm.get("system_base_chars", 0))
+                    span.set_attribute("assembly.system_claude_md_chars", asm.get("system_claude_md_chars", 0))
+                    span.set_attribute("assembly.system_skills_chars", asm.get("system_skills_chars", 0))
+                    span.set_attribute("assembly.system_memory_chars", asm.get("system_memory_chars", 0))
+                    span.set_attribute("assembly.system_wiki_chars", asm.get("system_wiki_chars", 0))
+                    span.set_attribute("assembly.system_agents_chars", asm.get("system_agents_chars", 0))
+                    span.set_attribute("assembly.system_workspace_chars", asm.get("system_workspace_chars", 0))
+                    # Plan mode
+                    span.set_attribute("assembly.is_plan_mode", asm.get("is_plan_mode", False))
+                    span.set_attribute("assembly.plan_mode_chars", asm.get("plan_mode_chars", 0))
                 
                 from agents.observability.cost_tracker import record_tokens
                 record_tokens(a.model, input_tokens, output_tokens, cached_tokens)

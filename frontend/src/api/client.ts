@@ -838,18 +838,28 @@ export async function fetchContextStore(sessionId: string): Promise<ContextStore
 }
 
 export interface TokenBreakdown {
-  system_chars: number;
-  system_tokens: number;
-  tools_chars: number;
+  // System prompt 细粒度
+  base_prompt_tokens: number;
+  claude_md_tokens: number;
+  skills_tokens: number;
+  memory_tokens: number;
+  wiki_tokens: number;
+  agents_tokens: number;
+  // Tools
   tools_tokens: number;
-  messages_chars: number;
-  messages_tokens: number;
-  total_chars: number;
-  total_tokens: number;
-  message_count: number;
-  tool_count: number;
   builtin_tool_count: number;
   mcp_tool_count: number;
+  // Messages
+  messages_tokens: number;
+  message_count: number;
+  user_tokens: number;
+  assistant_tokens: number;
+  tool_tokens: number;
+  // 总计
+  total_tokens: number;
+  // Plan mode
+  is_plan_mode: boolean;
+  plan_mode_tokens: number;
 }
 
 export async function fetchTokenBreakdown(sessionId: string): Promise<TokenBreakdown> {

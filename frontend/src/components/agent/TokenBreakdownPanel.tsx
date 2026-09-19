@@ -99,8 +99,14 @@ export function TokenBreakdownPanel({ sessionId, compact = false }: TokenBreakdo
   const cachePercent = inputTokens > 0 ? Math.round((cachedTokens / inputTokens) * 100) : 0;
   const contextPercent = contextWindow > 0 ? Math.round((contextUsed / contextWindow) * 100) : 0;
 
+  // 计算 system tokens 总和
+  const systemTokens = breakdown ? (
+    breakdown.base_prompt_tokens + breakdown.claude_md_tokens + breakdown.skills_tokens +
+    breakdown.memory_tokens + breakdown.wiki_tokens + breakdown.agents_tokens
+  ) : 0;
+
   const chartData = breakdown ? [
-    { name: 'System', value: breakdown.system_tokens, color: COLORS.system },
+    { name: 'System', value: systemTokens, color: COLORS.system },
     { name: 'Tools', value: breakdown.tools_tokens, color: COLORS.tools },
     { name: 'Messages', value: breakdown.messages_tokens, color: COLORS.messages },
   ].filter(d => d.value > 0) : [];
