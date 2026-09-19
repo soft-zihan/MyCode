@@ -81,6 +81,39 @@ async def api_list_mcp_tools() -> list[dict[str, Any]]:
         return [{"error": str(e)}]
 
 
+@router.get("/api/mcp/status")
+def api_get_mcp_status() -> list[dict[str, Any]]:
+    """获取所有 MCP Server 的状态（包括启用/禁用）。"""
+    from frontend.server.mcp_manager import global_mcp_manager
+    return global_mcp_manager.get_all_servers_status()
+
+
+@router.post("/api/mcp/{server_name}/enable")
+async def api_enable_mcp_server(server_name: str) -> dict[str, Any]:
+    """动态启用一个 MCP Server。"""
+    from frontend.server.mcp_manager import global_mcp_manager
+    success = await global_mcp_manager.enable_server(server_name)
+    if success:
+        disabled = api_get_disabled_mcp_servers()
+        if server_name in disabled:
+            disabled.remove(server_name)
+            api_set_disabled_mcp_servers(disabled)
+    return {"success": success, "server": server_name}
+
+
+@router.post("/api/mcp/{server_name}/disable")
+async def api_disable_mcp_server(server_name: str) -> dict[str, Any]:
+    """动态禁用一个 MCP Server。"""
+    from frontend.server.mcp_manager import global_mcp_manager
+    success = await global_mcp_manager.disable_server(server_name)
+    if success:
+        disabled = api_get_disabled_mcp_servers()
+        if server_name not in disabled:
+            disabled.append(server_name)
+            api_set_disabled_mcp_servers(disabled)
+    return {"success": success, "server": server_name}
+
+
 @router.get("/api/tools/native")
 def api_list_native_tools() -> list[dict[str, Any]]:
     from agents.tools import tool_definitions

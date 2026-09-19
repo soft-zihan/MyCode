@@ -528,6 +528,62 @@ class McpManager:
         self._tools.clear()
         self._connected = False
 
+    async def enable_server(self, server_name: str) -> bool:
+        """动态启用（连接）一个 MCP Server。"""
+        if server_name in self._connections:
+            return True
+        configs = self._load_configs()
+        cfg = configs.get(server_name)
+        if not cfg:
+            return False
+        timeout = 15.0
+        try:
+            if "url" in cfg:
+                conn: McpConnection | McpHttpConnection = McpHttpConnection(
+                    server_name, cfg["url"], cfg.get("headers"),
+                )
+            else:
+                conn = McpConnection(
+                    server_name, cfg["command"], cfg.get("args"), cfg.get("env"),
+                )
+            await conn.connect()
+            await asyncio.wait_for(conn.initialize(), timeout=timeout)
+            server_tools = await asyncio.wait_for(conn.list_tools(), timeout=timeout)
+            self._connections[server_name] = conn
+            self._tools.extend(server_tools)
+            print_info(f"MCP enabled: {server_name} ({len(server_tools)} tools)")
+            return True
+        except Exception as e:
+            print_error(f"MCP failed to enable: {server_name}: {e}")
+            conn.close()
+            return False
+
+    async def disable_server(self, server_name: str) -> bool:
+        """动态禁用（断开）一个 MCP Server。"""
+        conn = self._connections.pop(server_name, None)
+        if not conn:
+            return False
+        conn.close()
+        self._tools = [t for t in self._tools if t["serverName"] != server_name]
+        print_info(f"MCP disabled: {server_name}")
+        return True
+
+    def get_all_servers_status(self) -> list[dict]:
+        """获取所有配置的 MCP Server 的状态。"""
+        configs = self._load_configs()
+        result = []
+        for name, cfg in configs.items():
+            is_connected = name in self._connections
+            conn = self._connections.get(name)
+            tool_count = len([t for t in self._tools if t["serverName"] == name]) if is_connected else 0
+            result.append({
+                "name": name,
+                "enabled": is_connected,
+                "tool_count": tool_count,
+                "type": "http" if "url" in cfg else "stdio",
+            })
+        return result
+
     # ─── 配置加载 ──────────────────────────────────────
 
     def _load_configs(self) -> dict[str, dict]:

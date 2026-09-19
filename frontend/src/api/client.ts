@@ -369,9 +369,38 @@ export interface McpServer {
   env: Record<string, string>;
 }
 
+export interface McpServerStatus {
+  name: string;
+  enabled: boolean;
+  tool_count: number;
+  type: 'stdio' | 'http';
+}
+
 export async function fetchMcpServers(): Promise<McpServer[]> {
   const res = await fetch(`${API_BASE}/mcp`);
   if (!res.ok) throw new Error('Failed to fetch MCP servers');
+  return res.json();
+}
+
+export async function fetchMcpStatus(): Promise<McpServerStatus[]> {
+  const res = await fetch(`${API_BASE}/mcp/status`);
+  if (!res.ok) throw new Error('Failed to fetch MCP status');
+  return res.json();
+}
+
+export async function enableMcpServer(serverName: string): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/mcp/${encodeURIComponent(serverName)}/enable`, {
+    method: 'POST',
+  });
+  if (!res.ok) throw new Error('Failed to enable MCP server');
+  return res.json();
+}
+
+export async function disableMcpServer(serverName: string): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/mcp/${encodeURIComponent(serverName)}/disable`, {
+    method: 'POST',
+  });
+  if (!res.ok) throw new Error('Failed to disable MCP server');
   return res.json();
 }
 
