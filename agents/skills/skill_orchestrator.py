@@ -1,7 +1,6 @@
-"""SkillOrchestrator — Skill 检索、进化、使用追踪的编排器。
+"""SkillOrchestrator — Skill 进化、使用追踪的编排器。
 
 职责：
-- 用户消息增强（注入相关 Skill 上下文）
 - Skill 进化触发与执行
 - Skill 使用追踪与评判
 - 后台 Skill 任务管理
@@ -25,7 +24,7 @@ RefreshFn = Callable[[], None]
 
 
 class SkillOrchestrator:
-    """Skill 检索、进化、使用追踪的编排器。"""
+    """Skill 进化、使用追踪的编排器。"""
 
     def __init__(
         self,
@@ -93,65 +92,7 @@ class SkillOrchestrator:
     def set_refresh_system_prompt(self, fn: RefreshFn) -> None:
         self._refresh_system_prompt = fn
 
-    # ── 消息增强 ──
 
-    def augment_message(self, user_message: str) -> tuple[str, dict[str, Any] | None]:
-        """用检索到的 Skill 上下文增强用户消息。
-        
-        优先检查 hook 匹配（关键词直接召回），如果没有匹配则走 BM25 检索。
-        """
-        from agents.observability.tracer import tracer
-        
-        with tracer.span("skill.recall", {
-            "langfuse.observation.type": "chain",
-            "mycode.skill.query": user_message[:200],
-        }) as span:
-            try:
-                # 1. 先检查 hook 匹配（关键词直接召回）
-                from agents.skills.skills import discover_skills
-                from .skill_hook import match_skill_hooks, format_hook_skill_context
-                
-                all_skills = discover_skills()
-                hook_matches = match_skill_hooks(user_message, all_skills)
-                
-                if hook_matches:
-                    # Hook 匹配成功，直接注入
-                    context = format_hook_skill_context(hook_matches)
-                    # 构建 top_ref 用于后续追踪
-                    top_ref = {
-                        "name": hook_matches[0]["name"],
-                        "matched_keywords": hook_matches[0]["matched_keywords"],
-                        "source": "hook",
-                        "all_hits": hook_matches,
-                    }
-                    self._last_retrieved_skill_hits = hook_matches
-                    if span:
-                        span.set_attribute("mycode.skill.recalled_count", len(hook_matches))
-                        span.set_attribute("mycode.skill.method", "hook")
-                        span.set_attribute("mycode.skill.skills", [h["name"] for h in hook_matches])
-                    return f"{user_message}\n\n{context}", top_ref
-                
-                # 2. 没有 hook 匹配，走正常的 BM25 检索
-                from agents.skills.skills import format_retrieved_skill_context
-
-                context, top_ref = format_retrieved_skill_context(user_message, limit=3)
-            except Exception as e:
-                if span:
-                    span.record_error(e)
-                    span.set_attribute("mycode.skill.recalled_count", 0)
-                return user_message, None
-            if top_ref and isinstance(top_ref.get("all_hits"), list):
-                self._last_retrieved_skill_hits = list(top_ref.get("all_hits") or [])
-                if span:
-                    span.set_attribute("mycode.skill.recalled_count", len(top_ref["all_hits"]))
-                    span.set_attribute("mycode.skill.method", "bm25")
-                    span.set_attribute("mycode.skill.skills", [h["name"] for h in top_ref["all_hits"]])
-            else:
-                if span:
-                    span.set_attribute("mycode.skill.recalled_count", 0)
-            if not context.strip():
-                return user_message, top_ref
-            return f"{user_message}\n\n{context}", top_ref
 
     # ── 对话消息提取 ──
 

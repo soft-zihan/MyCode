@@ -553,8 +553,6 @@ class Agent:
             ready_skill_extraction_window = self._skill_orchestrator.pop_pending_extraction_window(
                 original_user_message, self._tool_error_streak
             )
-            user_message, ref = self._skill_orchestrator.augment_message(original_user_message)
-            self._skill_orchestrator.last_retrieved_skill_reference = ref
 
         self._aborted = False
         self._abort_event.clear()

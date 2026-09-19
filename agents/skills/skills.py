@@ -386,26 +386,6 @@ def retrieve_relevant_skills(
     return hits[: max(1, int(limit or 1))]
 
 
-def format_retrieved_skill_context(query: str, *, limit: int = 3) -> tuple[str, dict[str, Any] | None]:
-    hits = retrieve_relevant_skills(query, limit=limit)
-    if not hits:
-        return "", None
-    lines = [
-        "<retrieved_skills>",
-        "These skills were retrieved for the current user request. Use a skill only if it directly matches the user's intent; otherwise ignore this block.",
-    ]
-    for idx, hit in enumerate(hits, start=1):
-        lines.append(
-            f"{idx}. {hit['name']} (score={float(hit['score']):.3f}, source={hit['source']}): {hit['description']}"
-        )
-        if hit.get("when_to_use"):
-            lines.append(f"   When to use: {hit['when_to_use']}")
-    lines.append("</retrieved_skills>")
-    top = dict(hits[0])
-    top["all_hits"] = hits
-    return "\n".join(lines), top
-
-
 def reset_skill_cache() -> None:
     # 测试或运行中刷新 skills 时使用；普通用户通常重启程序即可。
     _skills_cache.clear()
