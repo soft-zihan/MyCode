@@ -1,7 +1,8 @@
-import { useState } from 'react';
-import { BookOpen, Target, Settings, FileText } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { BookOpen, Target, Settings, FileText, FolderOpen, ChevronDown, ChevronRight } from 'lucide-react';
 import { WikiPanel } from './WikiPanel';
 import { PlanControlPanel } from './PlanControlPanel';
+import { getPlanArtifacts } from '../../api/client';
 
 interface WikiPlanPanelProps {
   cwd: string | null;
@@ -13,12 +14,98 @@ interface WikiPlanPanelProps {
 
 type SubTab = 'docs' | 'plan-config' | 'plan-artifacts';
 
+function PlanArtifactsPanel({ sessionId, planSlug, onFileSelect }: {
+  sessionId: string;
+  planSlug: string;
+  onFileSelect: (path: string) => void;
+}) {
+  const [artifacts, setArtifacts] = useState<Record<string, string>>({});
+  const [expandedArtifact, setExpandedArtifact] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!planSlug || !sessionId) return;
+    setLoading(true);
+    getPlanArtifacts(sessionId, planSlug)
+      .then(res => {
+        if (res.success && res.data) setArtifacts(res.data);
+      })
+      .finally(() => setLoading(false));
+  }, [sessionId, planSlug]);
+
+  if (!planSlug) {
+    return (
+      <div className="p-6 text-center text-sm text-gray-400">
+        <FolderOpen className="w-8 h-8 mx-auto mb-2 opacity-30" />
+        <div>暂无活跃 Plan</div>
+        <div className="text-xs mt-1">使用 Plan 模式创建计划</div>
+      </div>
+    );
+  }
+
+  if (loading) {
+    return <div className="p-4 text-sm text-gray-500">加载中...</div>;
+  }
+
+  const artifactEntries = Object.entries(artifacts);
+
+  if (artifactEntries.length === 0) {
+    return (
+      <div className="p-6 text-center text-sm text-gray-400">
+        <FileText className="w-8 h-8 mx-auto mb-2 opacity-30" />
+        <div>Plan 暂无产物</div>
+        <div className="text-xs mt-1">Plan: {planSlug}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-2 space-y-1">
+      <div className="px-2 py-1.5 text-xs font-medium text-gray-700 flex items-center gap-1.5">
+        <Target className="w-3.5 h-3.5 text-green-500" />
+        <span>{planSlug}</span>
+        <span className="text-[10px] text-gray-400 ml-auto">{artifactEntries.length} 个文件</span>
+      </div>
+      {artifactEntries.map(([filename, content]) => {
+        const wikiPath = `.mycode/plans/${planSlug}/${filename}`;
+        const isExpanded = expandedArtifact === filename;
+        return (
+          <div key={filename} className="border border-gray-200 rounded">
+            <div className="flex items-center">
+              <button
+                onClick={() => setExpandedArtifact(isExpanded ? null : filename)}
+                className="flex-1 flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+              >
+                {isExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                <FileText className="w-3 h-3 text-blue-500" />
+                {filename}
+                <span className="text-gray-400 ml-auto text-[10px]">{content.length} chars</span>
+              </button>
+              <button
+                onClick={() => onFileSelect(wikiPath)}
+                className="px-2 py-1.5 text-[10px] text-blue-600 hover:bg-blue-50 border-l border-gray-200"
+                title="在编辑器中打开"
+              >
+                打开
+              </button>
+            </div>
+            {isExpanded && (
+              <div className="border-t border-gray-200 p-2 max-h-48 overflow-auto">
+                <pre className="text-xs text-gray-600 whitespace-pre-wrap font-mono">{content}</pre>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export function WikiPlanPanel({ cwd, sessionId, planSlug, onFileSelect, selectedFile }: WikiPlanPanelProps) {
   const [subTab, setSubTab] = useState<SubTab>('docs');
 
   return (
     <div className="flex flex-col h-full">
-      {/* Sub-tabs */}
       <div className="flex border-b border-gray-200 bg-gray-50">
         <button
           onClick={() => setSubTab('docs')}
@@ -49,7 +136,6 @@ export function WikiPlanPanel({ cwd, sessionId, planSlug, onFileSelect, selected
         </button>
       </div>
 
-      {/* Content */}
       <div className="flex-1 overflow-auto">
         {subTab === 'docs' && (
           <WikiPanel cwd={cwd} onFileSelect={onFileSelect} selectedFile={selectedFile} />
@@ -58,7 +144,7 @@ export function WikiPlanPanel({ cwd, sessionId, planSlug, onFileSelect, selected
           <PlanControlPanel sessionId={sessionId} planSlug="" />
         )}
         {subTab === 'plan-artifacts' && (
-          <PlanControlPanel sessionId={sessionId} planSlug={planSlug} />
+          <PlanArtifactsPanel sessionId={sessionId} planSlug={planSlug} onFileSelect={onFileSelect} />
         )}
       </div>
     </div>

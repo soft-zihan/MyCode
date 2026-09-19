@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { 
   FolderTree, RefreshCw, FileText, BookOpen, Settings, Zap, Bot, 
-  MessageSquare, ClipboardList, Brain, Target, Lightbulb, User, Link2
+  MessageSquare, Lightbulb, User
 } from 'lucide-react';
 import { fetchWorkspaceTree, WorkspaceNode } from '../../api/client';
 
@@ -11,16 +11,7 @@ interface WikiPanelProps {
   selectedFile: string | null;
 }
 
-// Wiki 分类配置 - 按重要性排序
 const WIKI_CATEGORIES = [
-  {
-    name: 'Plans',
-    icon: Target,
-    color: 'text-green-500',
-    bgColor: 'bg-green-50',
-    path: '.mycode/plans',
-    description: '计划产物',
-  },
   {
     name: 'Knowledge',
     icon: BookOpen,
@@ -63,7 +54,6 @@ const WIKI_CATEGORIES = [
   },
 ];
 
-// 项目配置类
 const CONFIG_CATEGORIES = [
   {
     name: 'Rules',
@@ -262,7 +252,7 @@ export function WikiPanel({ cwd, onFileSelect, selectedFile }: WikiPanelProps) {
     if (!cwd) return;
     setLoading(true);
     try {
-      const result = await fetchWorkspaceTree(cwd, '.mycode');
+      const result = await fetchWorkspaceTree(cwd);
       setTree(result);
     } catch (err) {
       console.error('Failed to fetch wiki tree:', err);
@@ -337,11 +327,11 @@ export function WikiPanel({ cwd, onFileSelect, selectedFile }: WikiPanelProps) {
       
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
-        {/* Wiki 文档区 */}
+        {/* 用户文档 - Agent 产出的知识 */}
         {totalWikiFiles > 0 && (
           <div className="border-b border-gray-200">
             <div className="px-3 py-1.5 bg-gray-50 text-[10px] font-medium text-gray-500 uppercase tracking-wide">
-              文档
+              用户文档
             </div>
             {wikiFiles.map(({ category, files }) => (
               <CategorySection
@@ -357,11 +347,11 @@ export function WikiPanel({ cwd, onFileSelect, selectedFile }: WikiPanelProps) {
           </div>
         )}
         
-        {/* 项目配置区 */}
+        {/* 系统配置 - 项目维护的配置文件 */}
         {totalConfigFiles > 0 && (
           <div>
             <div className="px-3 py-1.5 bg-gray-50 text-[10px] font-medium text-gray-500 uppercase tracking-wide">
-              配置
+              系统配置
             </div>
             {configFiles.map(({ category, files }) => (
               <CategorySection
