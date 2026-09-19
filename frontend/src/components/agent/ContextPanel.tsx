@@ -209,22 +209,35 @@ export function ContextPanel({ sessionId }: ContextPanelProps) {
               <span className="text-xs font-mono text-gray-900">{formatTokens(breakdown.tools_tokens)}</span>
               <span className="text-[10px] text-gray-400 w-8 text-right">{totalTokens > 0 ? Math.round((breakdown.tools_tokens / totalTokens) * 100) : 0}%</span>
             </div>
-            <BreakdownItem 
-              label="Built-in" 
-              tokens={Math.round(breakdown.tools_tokens * (breakdown.builtin_tool_count / (breakdown.builtin_tool_count + breakdown.mcp_tool_count || 1)))}
-              totalTokens={totalTokens} 
-              color="#f59e0b" 
-              indent={1} 
-              detail={`${breakdown.builtin_tool_count} 个`}
-            />
-            <BreakdownItem 
-              label="MCP" 
-              tokens={Math.round(breakdown.tools_tokens * (breakdown.mcp_tool_count / (breakdown.builtin_tool_count + breakdown.mcp_tool_count || 1)))}
-              totalTokens={totalTokens} 
-              color="#fbbf24" 
-              indent={1} 
-              detail={`${breakdown.mcp_tool_count} 个`}
-            />
+            {(breakdown.builtin_tool_count > 0 || breakdown.mcp_tool_count > 0) ? (
+              <>
+                <BreakdownItem 
+                  label="Built-in" 
+                  tokens={Math.round(breakdown.tools_tokens * (breakdown.builtin_tool_count / (breakdown.builtin_tool_count + breakdown.mcp_tool_count)))}
+                  totalTokens={totalTokens} 
+                  color="#f59e0b" 
+                  indent={1} 
+                  detail={`${breakdown.builtin_tool_count} 个`}
+                />
+                <BreakdownItem 
+                  label="MCP" 
+                  tokens={Math.round(breakdown.tools_tokens * (breakdown.mcp_tool_count / (breakdown.builtin_tool_count + breakdown.mcp_tool_count)))}
+                  totalTokens={totalTokens} 
+                  color="#fbbf24" 
+                  indent={1} 
+                  detail={`${breakdown.mcp_tool_count} 个`}
+                />
+              </>
+            ) : (
+              <BreakdownItem 
+                label="Tool Definitions" 
+                tokens={breakdown.tools_tokens}
+                totalTokens={totalTokens} 
+                color="#f59e0b" 
+                indent={1} 
+                detail="估算"
+              />
+            )}
 
             {/* Layer 3: Messages */}
             <div className="flex items-center gap-2 py-0.5 font-medium mt-2">

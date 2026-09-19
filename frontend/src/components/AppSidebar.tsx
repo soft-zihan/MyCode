@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { MessageSquare, Brain, Sparkles, Bot, Wrench, LineChart, PanelLeft, PanelRight } from 'lucide-react';
 
@@ -15,9 +15,54 @@ const navItems = [
   { path: '/trace', icon: LineChart, label: 'Trace' },
 ];
 
+const MIN_WIDTH = 180;
+const MAX_WIDTH = 400;
+const DEFAULT_WIDTH = 224;
+const STORAGE_KEY = 'sidebar-width';
+
 export function AppSidebar({ children }: AppSidebarProps) {
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
+  const [width, setWidth] = useState(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    return saved ? parseInt(saved, 10) : DEFAULT_WIDTH;
+  });
+  const [isDragging, setIsDragging] = useState(false);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, String(width));
+  }, [width]);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  }, []);
+
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    if (!isDragging) return;
+    const newWidth = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, e.clientX));
+    setWidth(newWidth);
+  }, [isDragging]);
+
+  const handleMouseUp = useCallback(() => {
+    setIsDragging(false);
+  }, []);
+
+  useEffect(() => {
+    if (isDragging) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    } else {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    }
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDragging, handleMouseMove, handleMouseUp]);
 
   const navBar = (
     <div className="border-t border-gray-200 bg-gray-50">
@@ -86,11 +131,15 @@ export function AppSidebar({ children }: AppSidebarProps) {
   }
 
   return (
-    <div className="w-56 border-r border-gray-200 bg-white flex flex-col h-full">
+    <div className="relative border-r border-gray-200 bg-white flex flex-col h-full" style={{ width: `${width}px` }}>
       <div className="flex-1 overflow-y-auto">
         {children}
       </div>
       {navBar}
+      <div
+        className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-blue-400 active:bg-blue-500 transition-colors"
+        onMouseDown={handleMouseDown}
+      />
     </div>
   );
 }

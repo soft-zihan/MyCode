@@ -548,7 +548,7 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
                 total_chars = system_chars + user_chars + assistant_chars + tool_result_chars
                 
                 # 获取 MCP 工具数量
-                from agents.tools.dispatcher import get_active_tool_definitions
+                from agents.tools.registry import get_active_tool_definitions
                 tools = getattr(agent, 'tools', [])
                 tool_defs = get_active_tool_definitions(tools)
                 mcp_tool_count = sum(1 for t in tool_defs if t.get('name', '').startswith('mcp__'))
@@ -637,7 +637,7 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
                     message_count += 1
             
             # 获取 tools
-            from agents.tools.dispatcher import get_active_tool_definitions
+            from agents.tools.registry import get_active_tool_definitions
             tools = getattr(agent, 'tools', [])
             tool_defs = get_active_tool_definitions(tools)
             tools_json = json.dumps([{
@@ -828,7 +828,25 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
         system_workspace_chars = latest_stats.get("system_workspace_chars", 0)
         message_count = latest_stats.get("msg_count", 0)
     
-    total_chars = system_chars + user_chars + assistant_chars + tool_result_chars
+    # 计算 tools 定义的字符数（用于缩放计算）
+    try:
+        from frontend.server.mcp_manager import global_mcp_manager
+        tool_defs = global_mcp_manager.get_tool_definitions()
+        tools_json = json.dumps([{
+            'name': t.get('name', ''),
+            'description': t.get('description', ''),
+            'parameters': t.get('parameters', {}),
+        } for t in tool_defs], ensure_ascii=False)
+        tools_chars = len(tools_json)
+        builtin_tool_count = 0
+        mcp_tool_count = len(tool_defs)
+    except:
+        tools_chars = 0
+        builtin_tool_count = latest_stats.get("tool_count", 0)
+        mcp_tool_count = 0
+    
+    # total_chars 包含 tools
+    total_chars = system_chars + tools_chars + user_chars + assistant_chars + tool_result_chars
     
     if actual_input_tokens > 0 and total_chars > 0:
         scale = actual_input_tokens / (total_chars / 4)
@@ -836,6 +854,7 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
         user_tokens = int((user_chars / 4) * scale)
         assistant_tokens = int((assistant_chars / 4) * scale)
         tool_tokens = int((tool_result_chars / 4) * scale)
+        tools_definition_tokens = int((tools_chars / 4) * scale)
         
         base_prompt_tokens = int(((system_base_chars + system_workspace_chars) / 4) * scale)
         claude_md_tokens = int((system_claude_md_chars / 4) * scale)
@@ -848,6 +867,7 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
         user_tokens = user_chars // 4
         assistant_tokens = assistant_chars // 4
         tool_tokens = tool_result_chars // 4
+        tools_definition_tokens = tools_chars // 4
         base_prompt_tokens = (system_base_chars + system_workspace_chars) // 4
         claude_md_tokens = system_claude_md_chars // 4
         skills_tokens = system_skills_chars // 4
@@ -869,11 +889,11 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
         "memory_tokens": memory_tokens,
         "wiki_tokens": wiki_tokens,
         "agents_tokens": agents_tokens,
-        "tools_tokens": tool_tokens,
-        "builtin_tool_count": 0,
-        "mcp_tool_count": 0,
+        "tools_tokens": tools_definition_tokens,
+        "builtin_tool_count": builtin_tool_count,
+        "mcp_tool_count": mcp_tool_count,
         "messages_tokens": messages_tokens,
-        "message_count": latest_stats.get("msg_count", 0),
+        "message_count": message_count if 'message_count' in dir() else latest_stats.get("msg_count", 0),
         "user_tokens": user_tokens,
         "assistant_tokens": assistant_tokens,
         "tool_tokens": tool_tokens,
