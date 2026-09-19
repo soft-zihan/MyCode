@@ -58,9 +58,8 @@ export function ContextPanel({ sessionId }: ContextPanelProps) {
 
   useEffect(() => {
     loadData();
-    const interval = setInterval(loadData, 5000);
-    return () => clearInterval(interval);
-  }, [loadData]);
+    // 只在 session 切换时刷新，不自动轮询
+  }, [sessionId]);
 
   if (!sessionId) {
     return (
