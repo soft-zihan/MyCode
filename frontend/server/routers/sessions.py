@@ -509,7 +509,7 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
     """获取实际发给模型的 token 分解
     
     基于 get_messages_for_llm() 和 get_active_tool_definitions() 计算
-    返回各部分的字符数和估算 token 数（约 4 字符 = 1 token）
+    使用实际的 last_input_token_count 来校准
     """
     session_info = _active_sessions.get(session_id)
     
@@ -560,17 +560,30 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
             mcp_tool_count = sum(1 for t in tool_defs if t.get('name', '').startswith('mcp__'))
             builtin_tool_count = len(tool_defs) - mcp_tool_count
             
+            # 使用实际的 last_input_token_count
+            actual_input_tokens = getattr(agent, 'last_input_token_count', 0)
             total_chars = system_chars + tools_chars + messages_chars
+            
+            # 如果有实际 token 数，按比例分配
+            if actual_input_tokens > 0 and total_chars > 0:
+                scale = actual_input_tokens / (total_chars / 4)
+                system_tokens = int((system_chars / 4) * scale)
+                tools_tokens = int((tools_chars / 4) * scale)
+                messages_tokens = actual_input_tokens - system_tokens - tools_tokens
+            else:
+                system_tokens = system_chars // 4
+                tools_tokens = tools_chars // 4
+                messages_tokens = messages_chars // 4
             
             return {
                 "system_chars": system_chars,
-                "system_tokens": system_chars // 4,
+                "system_tokens": system_tokens,
                 "tools_chars": tools_chars,
-                "tools_tokens": tools_chars // 4,
+                "tools_tokens": tools_tokens,
                 "messages_chars": messages_chars,
-                "messages_tokens": messages_chars // 4,
+                "messages_tokens": messages_tokens,
                 "total_chars": total_chars,
-                "total_tokens": total_chars // 4,
+                "total_tokens": actual_input_tokens if actual_input_tokens > 0 else (total_chars // 4),
                 "message_count": message_count,
                 "tool_count": len(tool_defs),
                 "builtin_tool_count": builtin_tool_count,
@@ -595,6 +608,7 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
     system_chars = 0
     messages_chars = 0
     message_count = 0
+    last_input_token_count = 0
     
     with open(events_file) as f:
         for line in f:
@@ -610,6 +624,9 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
                 elif event_type == "tool_result_msg":
                     messages_chars += len(event.get("content", ""))
                     message_count += 1
+                elif event_type == "stats":
+                    # 从 stats 事件获取实际的 input token 数
+                    last_input_token_count = event.get("last_input_token_count", 0)
             except (json.JSONDecodeError, Exception):
                 continue
     
@@ -618,15 +635,29 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
     
     total_chars = system_chars + messages_chars
     
+    # 如果有实际 token 数，按比例分配
+    if last_input_token_count > 0 and total_chars > 0:
+        estimated_tokens = total_chars // 4
+        if estimated_tokens > 0:
+            scale = last_input_token_count / estimated_tokens
+            system_tokens = int((system_chars // 4) * scale)
+            messages_tokens = last_input_token_count - system_tokens
+        else:
+            system_tokens = 0
+            messages_tokens = last_input_token_count
+    else:
+        system_tokens = system_chars // 4
+        messages_tokens = messages_chars // 4
+    
     return {
         "system_chars": system_chars,
-        "system_tokens": system_chars // 4,
+        "system_tokens": system_tokens,
         "tools_chars": 0,
         "tools_tokens": 0,
         "messages_chars": messages_chars,
-        "messages_tokens": messages_chars // 4,
+        "messages_tokens": messages_tokens,
         "total_chars": total_chars,
-        "total_tokens": total_chars // 4,
+        "total_tokens": last_input_token_count if last_input_token_count > 0 else (total_chars // 4),
         "message_count": message_count,
         "tool_count": 0,
         "builtin_tool_count": 0,
