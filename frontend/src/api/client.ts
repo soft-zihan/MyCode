@@ -9,6 +9,7 @@ export interface Session {
   cwd: string;
   messageCount: number;
   name?: string;
+  plan_slug?: string;
 }
 
 export interface SessionDetail {
@@ -910,5 +911,17 @@ export async function planSkipTask(sessionId: string, slug: string, taskId: numb
 
 export async function planAbandon(sessionId: string, slug: string): Promise<{ success: boolean }> {
   const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan/${slug}/abandon`, { method: 'POST' });
+  return res.json();
+}
+
+export async function getPlanArtifacts(sessionId: string, slug: string): Promise<{ success: boolean; data?: Record<string, string>; message?: string }> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan/${slug}/artifacts`);
+  if (!res.ok) return { success: false, message: 'Failed to fetch plan artifacts' };
+  return res.json();
+}
+
+export async function getPlanLedger(sessionId: string, slug: string): Promise<{ success: boolean; data?: any[]; message?: string }> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan/${slug}/ledger`);
+  if (!res.ok) return { success: false, message: 'Failed to fetch plan ledger' };
   return res.json();
 }

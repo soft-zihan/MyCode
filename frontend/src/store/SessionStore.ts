@@ -52,6 +52,7 @@ export interface SessionState {
     running?: boolean;
     lastMessage?: string;
     cwd?: string;
+    plan_slug?: string;
   };
   streamState: {
     active: boolean;
@@ -282,6 +283,10 @@ class SessionStore {
     const sessionState = this.getOrCreate(sessionId);
     sessionState.goalState = state;
     this.notify();
+  }
+
+  getPlanSlug(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.projections?.plan_slug;
   }
 
   getFileSnapshots(sessionId: string): FileSnapshot[] {

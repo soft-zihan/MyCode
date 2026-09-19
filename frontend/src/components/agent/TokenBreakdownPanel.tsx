@@ -4,6 +4,7 @@ import { fetchSessionStats, fetchTokenBreakdown, SessionStats, TokenBreakdown as
 
 interface TokenBreakdownProps {
   sessionId: string | null;
+  compact?: boolean;
 }
 
 const COLORS = {
@@ -18,7 +19,7 @@ const formatTokens = (n: number): string => {
   return n.toString();
 };
 
-export function TokenBreakdownPanel({ sessionId }: TokenBreakdownProps) {
+export function TokenBreakdownPanel({ sessionId, compact = false }: TokenBreakdownProps) {
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [breakdown, setBreakdown] = useState<TokenBreakdownData | null>(null);
   const [loading, setLoading] = useState(false);
@@ -43,6 +44,36 @@ export function TokenBreakdownPanel({ sessionId }: TokenBreakdownProps) {
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  // Compact mode: just show token counts inline
+  if (compact) {
+    if (!sessionId || !stats) {
+      return (
+        <div className="px-3 py-2 text-xs text-gray-400">
+          No session active
+        </div>
+      );
+    }
+    return (
+      <div className="px-3 py-2 flex items-center gap-3 text-xs">
+        <span className="text-gray-500">
+          <span className="font-medium text-gray-700">{formatTokens(stats.input_tokens)}</span> in
+        </span>
+        <span className="text-gray-300">|</span>
+        <span className="text-gray-500">
+          <span className="font-medium text-gray-700">{formatTokens(stats.output_tokens)}</span> out
+        </span>
+        {stats.cached_tokens && stats.cached_tokens > 0 && (
+          <>
+            <span className="text-gray-300">|</span>
+            <span className="text-green-600">
+              {Math.round((stats.cached_tokens / stats.input_tokens) * 100)}% cache
+            </span>
+          </>
+        )}
+      </div>
+    );
+  }
 
   if (!sessionId) {
     return (

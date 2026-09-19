@@ -126,6 +126,10 @@ def check_permission(
     inp: dict,
     mode: str = "default",
     plan_file_path: str | None = None,
+    plan_dir: str | None = None,
+    sub_agent_type: str | None = None,
+    allowed_commands: list[str] | None = None,
+    plan_execution_active: bool = False,
 ) -> dict:
     """Returns {"action": "allow"|"deny"|"confirm", "message": ...}"""
     from agents.observability.tracer import tracer
@@ -134,8 +138,10 @@ def check_permission(
         "langfuse.observation.type": "guardrail",
         "mycode.permission.tool_name": tool_name,
         "mycode.permission.mode": mode,
+        "mycode.permission.sub_agent_type": sub_agent_type or "",
+        "mycode.permission.plan_execution_active": plan_execution_active,
     }) as span:
-        result = _check_permission_inner(tool_name, inp, mode, plan_file_path)
+        result = _check_permission_inner(tool_name, inp, mode, plan_file_path, plan_dir, sub_agent_type, allowed_commands, plan_execution_active)
         if span:
             span.set_attribute("mycode.permission.action", result["action"])
             if result.get("message"):
@@ -148,10 +154,35 @@ def _check_permission_inner(
     inp: dict,
     mode: str = "default",
     plan_file_path: str | None = None,
+    plan_dir: str | None = None,
+    sub_agent_type: str | None = None,
+    allowed_commands: list[str] | None = None,
+    plan_execution_active: bool = False,
 ) -> dict:
     """Internal permission check logic."""
     if mode == "bypassPermissions":
         return {"action": "allow"}
+
+    # 执行阶段禁止直接编辑 tasks.md
+    if plan_execution_active and tool_name in EDIT_TOOLS:
+        file_path = inp.get("file_path") or inp.get("path") or ""
+        if "tasks.md" in file_path and ".mycode/plans" in file_path:
+            return {"action": "deny", "message": "Direct editing of tasks.md is forbidden during plan execution. Use mark_task_done/mark_task_failed instead."}
+
+    # Reviewer 子 Agent 的 run_shell 白名单验证
+    if sub_agent_type == "reviewer" and tool_name == "run_shell":
+        command = inp.get("command", "")
+        if allowed_commands:
+            # 检查命令是否在白名单中
+            command_allowed = False
+            for allowed in allowed_commands:
+                if allowed.strip() and allowed.strip() in command:
+                    command_allowed = True
+                    break
+            if not command_allowed:
+                return {"action": "deny", "message": f"Reviewer run_shell: command not in whitelist. Allowed: {allowed_commands}"}
+        else:
+            return {"action": "deny", "message": "Reviewer run_shell: no allowed_commands provided"}
 
     rule_result = _check_permission_rules(tool_name, inp)
     if rule_result == "deny":
@@ -167,6 +198,17 @@ def _check_permission_inner(
             return {"action": "deny", "message": "todolist is disabled in plan mode. Use the plan system's tasks.md instead."}
         if tool_name in EDIT_TOOLS:
             file_path = inp.get("file_path") or inp.get("path")
+            # Plan 模式允许写 {plan_dir}/ 下任意文件
+            if plan_dir and file_path:
+                try:
+                    from pathlib import Path
+                    file_path_obj = Path(file_path).resolve()
+                    plan_dir_obj = Path(plan_dir).resolve()
+                    if file_path_obj.is_relative_to(plan_dir_obj):
+                        return {"action": "allow"}
+                except (ValueError, OSError):
+                    pass
+            # 向后兼容：允许写 plan_file_path
             if plan_file_path and file_path == plan_file_path:
                 return {"action": "allow"}
             return {"action": "deny", "message": f"Blocked in plan mode: {tool_name}"}

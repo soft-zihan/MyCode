@@ -76,6 +76,7 @@ def plan_status(inp: dict) -> str:
     done = sum(1 for t in tasks if t.status == "done")
     failed = sum(1 for t in tasks if t.status == "failed")
     pending = sum(1 for t in tasks if t.status == "pending")
+    in_progress = sum(1 for t in tasks if t.status == "in-progress")
 
     result = {
         "slug": plan.slug,
@@ -90,12 +91,18 @@ def plan_status(inp: dict) -> str:
             "done": done,
             "failed": failed,
             "pending": pending,
+            "in_progress": in_progress,
         },
     }
 
     if tasks:
         result["task_list"] = [
-            {"id": t.id, "description": t.description, "status": t.status}
+            {
+                "id": t.id,
+                "title": t.description,
+                "file": t.file,
+                "status": t.status,
+            }
             for t in tasks
         ]
 

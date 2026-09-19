@@ -164,6 +164,10 @@ class Session:
         
         # Plan 系统关联
         self.plan_slug: str | None = None
+        
+        # 策略快照（用于持久化 Plan 执行时的策略版本）
+        # 格式: {stage: {name, source, content_hash}}
+        self.plan_strategy_snapshot: dict[str, dict[str, str]] = {}
     
     @property
     def seq(self) -> int:
@@ -834,6 +838,7 @@ def list_sessions() -> list[dict[str, Any]]:
                 "parent_session": session.parent_session,
                 "origin": session.origin,
                 "agent_type": session.agent_type,
+                "plan_slug": session.plan_slug,
             }
             results.append(metadata)
             seen_ids.add(session.id)
@@ -860,6 +865,7 @@ def list_sessions() -> list[dict[str, Any]]:
                 "parent_session": "",
                 "origin": "",
                 "agent_type": "",
+                "plan_slug": None,
             }
             
             if rows.get("cwd") and rows["cwd"].get("val"):
@@ -868,6 +874,8 @@ def list_sessions() -> list[dict[str, Any]]:
                 metadata["startTime"] = rows["updated_at"]["val"]
             if rows.get("title") and rows["title"].get("val"):
                 metadata["name"] = rows["title"]["val"]
+            if rows.get("plan_slug") and rows["plan_slug"].get("val"):
+                metadata["plan_slug"] = rows["plan_slug"]["val"]
             
             return metadata
         except Exception:

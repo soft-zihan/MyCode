@@ -884,6 +884,37 @@ async def api_plan_abandon(session_id: str, slug: str) -> dict[str, Any]:
         return {"success": False, "message": str(e)}
 
 
+@router.get("/api/sessions/{session_id}/plan/{slug}/artifacts")
+async def api_plan_artifacts(session_id: str, slug: str) -> dict[str, Any]:
+    """Get plan artifacts (spec.md, tasks.md, design.md)."""
+    try:
+        from agents.plan.plan_manager import get_plan, read_artifact
+        plan = get_plan(slug)
+        if not plan:
+            return {"success": False, "message": f"Plan '{slug}' not found"}
+        
+        artifacts = {}
+        for filename in ["spec.md", "tasks.md", "design.md"]:
+            content = read_artifact(slug, filename)
+            if content:
+                artifacts[filename] = content
+        
+        return {"success": True, "data": artifacts}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
+@router.get("/api/sessions/{session_id}/plan/{slug}/ledger")
+async def api_plan_ledger(session_id: str, slug: str) -> dict[str, Any]:
+    """Get plan ledger (execution history)."""
+    try:
+        from agents.plan.plan_manager import read_ledger
+        entries = read_ledger(slug)
+        return {"success": True, "data": entries}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
 @router.get("/api/sessions/{session_id}/stats")
 def api_session_stats(session_id: str) -> dict[str, Any]:
     session_info = _active_sessions.get(session_id)

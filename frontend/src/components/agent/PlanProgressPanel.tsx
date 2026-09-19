@@ -11,7 +11,7 @@ interface PlanProgress {
     failed: number;
     pending: number;
   };
-  task_list?: { id: number; description: string; status: string }[];
+  task_list?: { id: number; title: string; file?: string; status: string }[];
 }
 
 interface PlanProgressPanelProps {
@@ -73,6 +73,9 @@ export function PlanProgressPanel({ sessionId, planSlug }: PlanProgressPanelProp
   }
 
   if (error) {
+    if (error.includes('not found')) {
+      return null;
+    }
     return <div className="p-4 text-sm text-red-500">错误: {error}</div>;
   }
 
@@ -170,7 +173,7 @@ export function PlanProgressPanel({ sessionId, planSlug }: PlanProgressPanelProp
                   task.status === 'skipped' ? 'text-gray-400 line-through' :
                   'text-gray-600'
                 }`}>
-                  {task.id}. {task.description}
+                  {task.id}. {task.title}
                 </span>
                 {task.status === 'pending' && !isCompleted && (
                   <button

@@ -41,6 +41,7 @@ export function useChat() {
   const pendingQuestion = useSessionStore(() => sessionId ? sessionStore.getPendingQuestion(sessionId) : undefined);
   const todos = useSessionStore(() => sessionId ? sessionStore.getTodos(sessionId) : EMPTY_TODOS);
   const goalState = useSessionStore(() => sessionId ? sessionStore.getGoalState(sessionId) : undefined);
+  const planSlug = useSessionStore(() => sessionId ? sessionStore.getPlanSlug(sessionId) : undefined);
   const fileSnapshots = useSessionStore(() => sessionId ? sessionStore.getFileSnapshots(sessionId) : EMPTY_FILE_SNAPSHOTS);
   const contextUsed = useSessionStore(() => sessionId ? sessionStore.getContextUsed(sessionId) : 0);
   const statsInputTokens = useSessionStore(() => sessionId ? sessionStore.getDetailedStats(sessionId).inputTokens : 0);
@@ -108,6 +109,15 @@ export function useChat() {
         if (titleSessionId && title) {
           // 后端已通过事件流持久化标题（单一数据源），前端只更新本地投影
           sessionStore.updateProjections(titleSessionId, { title });
+          setSessionRefreshTrigger(prev => prev + 1);
+        }
+        return;
+      }
+      
+      if (eventType === 'session/plan_linked') {
+        const planSlug = event.plan_slug;
+        if (planSlug && eventSessionId) {
+          sessionStore.updateProjections(eventSessionId, { plan_slug: planSlug });
           setSessionRefreshTrigger(prev => prev + 1);
         }
         return;
@@ -362,6 +372,7 @@ export function useChat() {
           cwd: metadata.cwd,
           updatedAt: Date.now(),
           running: projections.running ?? false,
+          plan_slug: projections.plan_slug,
         });
         
         if (metadata.cwd) {
@@ -924,6 +935,7 @@ export function useChat() {
     pendingSteerMessages,
     setPendingSteerMessages,
     goalState,
+    planSlug,
     
     // Handlers
     handleAddToChat,

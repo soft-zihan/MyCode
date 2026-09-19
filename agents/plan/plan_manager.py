@@ -229,12 +229,28 @@ def update_plan_status_in_dir(plan_dir: Path, status: PlanStatus) -> None:
 # ── Task 管理 ──
 
 def get_tasks(slug: str) -> list[Task]:
+    """解析 tasks.md，支持两种格式：
+    1. 简单格式: - [ ] 1. task description
+    2. 结构化格式: ### Task 1: title ...
+    """
     plans_dir = get_plans_dir()
     tasks_path = plans_dir / slug / "tasks.md"
     if not tasks_path.exists():
         return []
 
     content = tasks_path.read_text()
+    
+    # 先尝试解析结构化格式
+    structured = _parse_structured_tasks(content)
+    if structured:
+        return structured
+    
+    # 回退到简单格式
+    return _parse_simple_tasks(content)
+
+
+def _parse_simple_tasks(content: str) -> list[Task]:
+    """解析简单格式: - [ ] 1. task description"""
     tasks: list[Task] = []
 
     for line in content.split("\n"):
@@ -262,6 +278,44 @@ def get_tasks(slug: str) -> list[Task]:
             status=status,
         ))
 
+    return tasks
+
+
+def _parse_structured_tasks(content: str) -> list[Task]:
+    """解析结构化格式: ### Task 1: title ..."""
+    tasks: list[Task] = []
+    task_pattern = r"### Task (\d+): ([^\n]+)"
+    
+    for match in re.finditer(task_pattern, content):
+        task_id = int(match.group(1))
+        title = match.group(2).strip()
+        
+        start = match.end()
+        next_match = re.search(r"### Task \d+:", content[start:])
+        end = start + next_match.start() if next_match else len(content)
+        task_block = content[match.start():end]
+        
+        file_match = re.search(r"\*\*文件\*\*:\s*`?([^`\n]+)`?", task_block)
+        function_match = re.search(r"\*\*函数\*\*:\s*`?([^`\n]+)`?", task_block)
+        interface_match = re.search(r"\*\*接口\*\*:\s*`?([^`\n]+)`?", task_block)
+        acceptance_match = re.search(r"\*\*验收\*\*:\s*`?([^`\n]+)`?", task_block)
+        status_match = re.search(r"\*\*状态\*\*:\s*\[[ x~!-]\]\s*(\w+)", task_block)
+        error_match = re.search(r'\*\*错误\*\*:\s*"([^"]+)"', task_block)
+        retry_match = re.search(r"\*\*重试次数\*\*:\s*(\d+)", task_block)
+        
+        task = Task(
+            id=task_id,
+            description=title,
+            file=file_match.group(1).strip() if file_match else "",
+            function=function_match.group(1).strip() if function_match else "",
+            interface=interface_match.group(1).strip() if interface_match else "",
+            acceptance=acceptance_match.group(1).strip() if acceptance_match else "",
+            status=status_match.group(1).strip() if status_match else "pending",
+            error=error_match.group(1).strip() if error_match else "",
+            retry_count=int(retry_match.group(1)) if retry_match else 0,
+        )
+        tasks.append(task)
+    
     return tasks
 
 
@@ -510,11 +564,22 @@ def _get_ledger_path(slug: str) -> Path:
 
 
 def append_ledger(slug: str, entry: dict) -> None:
-    """追加 ledger 条目。"""
+    """追加 ledger 条目（原子写入，使用文件锁）。"""
     import json
+    import fcntl
+    
     ledger_path = _get_ledger_path(slug)
+    
+    # 使用文件锁确保原子写入
     with open(ledger_path, "a") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        try:
+            # 获取排他锁
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            f.flush()
+        finally:
+            # 释放锁
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 def read_ledger(slug: str) -> list[dict]:
@@ -626,8 +691,16 @@ def _get_current_commit(plan_dir: Path) -> str:
         return ""
 
 
-def _auto_commit(plan_dir: Path, message: str, round_num: int = 1) -> None:
-    """自动 commit 所有未提交的变更。"""
+def _auto_commit(plan_dir: Path, message: str, round_num: int = 1, allowed_files: list[str] | None = None) -> None:
+    """自动 commit 所有未提交的变更。
+    
+    Args:
+        plan_dir: Plan 目录
+        message: Commit 消息
+        round_num: 轮次号
+        allowed_files: 允许 commit 的文件列表（从 task 的 **文件** 字段提取）。
+                       如果提供，只 commit 这些文件；否则 commit 所有变更。
+    """
     import subprocess
     try:
         # 检查是否有未提交的变更
@@ -641,14 +714,24 @@ def _auto_commit(plan_dir: Path, message: str, round_num: int = 1) -> None:
         if not result.stdout.strip():
             return
         
-        # git add -A
-        subprocess.run(
-            ["git", "add", "-A"],
-            cwd=plan_dir,
-            capture_output=True,
-            timeout=10,
-            check=True,
-        )
+        # 如果提供了 allowed_files，只 add 这些文件
+        if allowed_files:
+            for file_path in allowed_files:
+                subprocess.run(
+                    ["git", "add", file_path],
+                    cwd=plan_dir,
+                    capture_output=True,
+                    timeout=10,
+                )
+        else:
+            # git add -A
+            subprocess.run(
+                ["git", "add", "-A"],
+                cwd=plan_dir,
+                capture_output=True,
+                timeout=10,
+                check=True,
+            )
         
         # git commit
         commit_msg = message
@@ -698,7 +781,7 @@ def start_plan_execution(slug: str) -> dict:
     """
     update_plan_status(slug, PlanStatus.IN_PROGRESS)
     
-    tasks = get_structured_tasks(slug)
+    tasks = get_tasks(slug)
     pending_tasks = [t for t in tasks if t.status == "pending"]
     
     return {
@@ -709,7 +792,7 @@ def start_plan_execution(slug: str) -> dict:
         "tasks": [
             {
                 "id": t.id,
-                "title": t.title,
+                "title": t.description,
                 "file": t.file,
                 "acceptance": t.acceptance,
                 "status": t.status,
@@ -732,17 +815,31 @@ def mark_task_done(slug: str, task_id: int, commit: str = "", verification: dict
         task_id: Task ID
         commit: 完成时的 git commit hash
         verification: 验证结果 {"command": "...", "exit_code": N, "output_snippet": "..."}
+                      必须提供，否则拒绝标记完成。
+    
+    Returns:
+        bool: 是否成功标记
     """
     from datetime import datetime, timezone
+    
+    # 强制验证证据
+    if not verification:
+        return False
+    
+    # 验证必须包含 command 和 exit_code
+    if not verification.get("command"):
+        return False
+    if verification.get("exit_code") is None:
+        return False
     
     ledger_entry = {
         "task_id": task_id,
         "status": "done",
-        "started": "",  # 主 Agent 可以记录实际开始时间
+        "started": "",
         "finished": datetime.now(timezone.utc).isoformat(),
         "commit": commit,
         "review_rounds": 1,
-        "verification": verification or {},
+        "verification": verification,
     }
     append_ledger(slug, ledger_entry)
     

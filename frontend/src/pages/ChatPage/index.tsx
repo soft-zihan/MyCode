@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import { 
-  MessageSquare, PanelRight, Send, Square, Zap, File, X, BarChart3, Package, Cpu
+  MessageSquare, PanelRight, Send, Square, Zap, File, X, Package, Cpu
 } from 'lucide-react';
 import { ReviewPanel } from '../../components/ReviewPanel';
 import { DiffViewer } from '../../components/DiffViewer';
@@ -12,6 +12,8 @@ import { TokenBreakdownPanel } from '../../components/agent/TokenBreakdownPanel'
 import { DeliverablesPanel } from '../../components/agent/DeliverablesPanel';
 import { QuestionDialog } from '../../components/agent/QuestionDialog';
 import { PlanApprovalDialog } from '../../components/agent/PlanApprovalDialog';
+import { PlanProgressPanel } from '../../components/agent/PlanProgressPanel';
+import { PlanControlPanel } from '../../components/agent/PlanControlPanel';
 import { TodoListPanel } from '../../components/chat/TodoListPanel';
 import { PageLayout } from '../../components/PageLayout';
 import { useChat } from './hooks/useChat';
@@ -29,7 +31,8 @@ export default function ChatPage() {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [changesSelectedFile, setChangesSelectedFile] = useState<string | null>(null);
   const [rightSidebarOpen, setRightSidebarOpen] = useState(true);
-  const [rightTab, setRightTab] = useState<'files' | 'changes' | 'tokens'>('files');
+  const [rightTab, setRightTab] = useState<'files' | 'tokens' | 'plan'>('files');
+  const [changesExpanded, setChangesExpanded] = useState(false);
   const [fileList, setFileList] = useState<string[]>([]);
 
   const {
@@ -62,6 +65,7 @@ export default function ChatPage() {
     pendingSteerMessages,
     setPendingSteerMessages,
     goalState,
+    planSlug,
     handleAddToChat,
     handleRemoveContext,
     handleSessionSelect,
@@ -296,6 +300,14 @@ export default function ChatPage() {
             <TodoListPanel todos={todos} />
           )}
 
+          {/* Plan Progress Panel */}
+          {planSlug && currentSessionId && (
+            <PlanProgressPanel
+              sessionId={currentSessionId}
+              planSlug={planSlug}
+            />
+          )}
+
           {/* Goal Mode UI */}
           {goalState && (
             <div className={`border-t px-4 py-3 ${
@@ -515,9 +527,15 @@ export default function ChatPage() {
           </div>
         </div>
 
-        {/* Right Sidebar - Files / Context / Tokens / Changes */}
+        {/* Right Sidebar - Tokens / Files+Changes / Plan */}
         {rightSidebarOpen && (
           <div className="w-72 border-l border-gray-200 bg-white flex flex-col">
+            {/* Token stats at top */}
+            <div className="border-b border-gray-200">
+              <TokenBreakdownPanel sessionId={currentSessionId} compact />
+            </div>
+
+            {/* Tab buttons */}
             <div className="flex border-b border-gray-200">
               <button
                 onClick={() => setRightTab('files')}
@@ -527,66 +545,74 @@ export default function ChatPage() {
               >
                 <File className="w-3 h-3 inline mr-0.5" />
                 Files
-              </button>
-              <button
-                onClick={() => setRightTab('changes')}
-                className={`flex-1 px-1.5 py-1.5 text-[10px] font-medium transition-colors relative ${
-                  rightTab === 'changes' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                <Package className="w-3 h-3 inline mr-0.5" />
-                Changes
                 {fileSnapshots.length > 0 && (
-                  <span className="absolute -top-0.5 -right-0.5 w-4 h-4 bg-blue-500 text-white text-[9px] rounded-full flex items-center justify-center">
+                  <span className="ml-1 px-1 py-0.5 bg-blue-500 text-white text-[9px] rounded-full">
                     {fileSnapshots.length}
                   </span>
                 )}
               </button>
-              <button
-                onClick={() => setRightTab('tokens')}
-                className={`flex-1 px-1.5 py-1.5 text-[10px] font-medium transition-colors ${
-                  rightTab === 'tokens' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                <BarChart3 className="w-3 h-3 inline mr-0.5" />
-                Tokens
-              </button>
-            </div>
-            <div className="flex-1 overflow-hidden">
-              {rightTab === 'files' ? (
-                <FileTree
-                  key={currentSessionId || 'default'}
-                  onFileSelect={setSelectedFile}
-                  onAddToChat={handleAddToChat}
-                  selectedFile={selectedFile}
-                  cwd={currentCwd}
-                  visible={true}
-                  refreshTrigger={fileTreeRefreshTrigger}
-                />
-              ) : rightTab === 'changes' ? (
-                <DeliverablesPanel
-                  snapshots={fileSnapshots}
-                  onOpenFile={setChangesSelectedFile}
-                />
-              ) : (
-                <TokenBreakdownPanel
-                  sessionId={currentSessionId}
-                />
+              {planSlug && currentSessionId && (
+                <button
+                  onClick={() => setRightTab('plan')}
+                  className={`flex-1 px-1.5 py-1.5 text-[10px] font-medium transition-colors ${
+                    rightTab === 'plan' ? 'text-green-600 border-b-2 border-green-600' : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  📋 Plan
+                </button>
               )}
+            </div>
+
+            {/* Tab content */}
+            <div className="flex-1 overflow-hidden flex flex-col">
+              {rightTab === 'files' ? (
+                <div className="flex-1 overflow-auto flex flex-col">
+                  <FileTree
+                    key={currentSessionId || 'default'}
+                    onFileSelect={setSelectedFile}
+                    onAddToChat={handleAddToChat}
+                    selectedFile={selectedFile}
+                    cwd={currentCwd}
+                    visible={true}
+                    refreshTrigger={fileTreeRefreshTrigger}
+                  />
+                  {/* Changes section at bottom of Files */}
+                  {fileSnapshots.length > 0 && (
+                    <div className="border-t border-gray-200">
+                      <button
+                        onClick={() => setChangesExpanded(!changesExpanded)}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-gray-700 bg-gray-50 hover:bg-gray-100"
+                      >
+                        <Package className="w-3 h-3" />
+                        Changes ({fileSnapshots.length})
+                        <span className="ml-auto text-gray-400">
+                          {changesExpanded ? '▼' : '▶'}
+                        </span>
+                      </button>
+                      {changesExpanded && (
+                        <DeliverablesPanel
+                          snapshots={fileSnapshots}
+                          onOpenFile={setChangesSelectedFile}
+                        />
+                      )}
+                    </div>
+                  )}
+                </div>
+              ) : rightTab === 'plan' && planSlug && currentSessionId ? (
+                <PlanControlPanel
+                  sessionId={currentSessionId}
+                  planSlug={planSlug}
+                />
+              ) : null}
             </div>
           </div>
         )}
 
         {/* File Viewer Overlay */}
         {(() => {
-          const activeFile = rightTab === 'changes' ? changesSelectedFile : selectedFile;
-          const setActiveFile = rightTab === 'changes' ? setChangesSelectedFile : setSelectedFile;
-          
-          if (!activeFile) return null;
-          
-          // Changes 面板显示 diff
-          if (rightTab === 'changes') {
-            const snapshot = fileSnapshots.find(s => s.file_path === activeFile);
+          // Changes file takes priority for diff view
+          if (changesSelectedFile) {
+            const snapshot = fileSnapshots.find(s => s.file_path === changesSelectedFile);
             if (snapshot) {
               return (
                 <div className="w-1/2 border-l border-gray-200">
@@ -598,11 +624,11 @@ export default function ChatPage() {
                         }`}>
                           {snapshot.is_new ? 'NEW' : 'EDIT'}
                         </span>
-                        <span className="text-sm font-medium text-gray-700">{activeFile.split('/').pop()}</span>
-                        <span className="text-xs text-gray-400">{activeFile}</span>
+                        <span className="text-sm font-medium text-gray-700">{changesSelectedFile.split('/').pop()}</span>
+                        <span className="text-xs text-gray-400">{changesSelectedFile}</span>
                       </div>
                       <button
-                        onClick={() => setActiveFile(null)}
+                        onClick={() => setChangesSelectedFile(null)}
                         className="p-1 hover:bg-gray-200 rounded"
                       >
                         <X className="w-4 h-4" />
@@ -621,14 +647,15 @@ export default function ChatPage() {
             }
           }
           
-          // Files 面板显示文件内容（可编辑）
+          // Files panel shows file content (editable)
+          if (!selectedFile) return null;
+          
           return (
             <div className="w-1/2 border-l border-gray-200">
               <FileViewer
-                filePath={activeFile}
+                filePath={selectedFile}
                 cwd={currentCwd || undefined}
-                onClose={() => setActiveFile(null)}
-                readOnly={rightTab === 'changes'}
+                onClose={() => setSelectedFile(null)}
               />
             </div>
           );

@@ -252,6 +252,13 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
     grouped[cwd].push(session);
   }
 
+  // 按项目最新 session 时间排序
+  const sortedProjects = Object.entries(grouped).sort(([, a], [, b]) => {
+    const aLatest = a.length > 0 ? (a[0].startTime || 0) : 0;
+    const bLatest = b.length > 0 ? (b[0].startTime || 0) : 0;
+    return bLatest - aLatest;
+  });
+
   return (
     <div className="flex flex-col h-full">
       <div className="p-2 border-b border-gray-200">
@@ -274,7 +281,7 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
       ) : projects.length === 0 ? (
         <div className="p-4 text-sm text-gray-500 text-center">No projects yet.</div>
       ) : (
-        Object.entries(grouped).map(([cwd, projectSessions]) => {
+        sortedProjects.map(([cwd, projectSessions]) => {
           const isCollapsed = collapsedProjects.has(cwd);
           return (
             <div key={cwd} className="border-b border-gray-100">

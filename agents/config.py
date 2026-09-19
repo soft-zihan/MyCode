@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -43,23 +43,59 @@ class ModelEndpointConfig:
 
 
 @dataclass
+class PlanStrategyConfig:
+    """Plan 策略配置"""
+    grill_spec: str = "simple"
+    tasks: str = "structured"
+    execute: str = "direct"
+    review: str = "none"
+    converge: str = "none"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PlanStrategyConfig:
+        return cls(
+            grill_spec=data.get("grill_spec", "simple"),
+            tasks=data.get("tasks", "structured"),
+            execute=data.get("execute", "direct"),
+            review=data.get("review", "none"),
+            converge=data.get("converge", "none"),
+        )
+
+    def to_stage_dict(self) -> dict[str, str]:
+        """转换为 {stage: name} 格式"""
+        return {
+            "grill-spec": self.grill_spec,
+            "tasks": self.tasks,
+            "execute": self.execute,
+            "review": self.review,
+            "converge": self.converge,
+        }
+
+
+@dataclass
 class AppConfig:
     """应用配置"""
     endpoints: dict[str, ModelEndpointConfig]
     routing: dict[str, str]
     cross_session_memory: bool = True
+    plan_strategies: PlanStrategyConfig = field(default_factory=PlanStrategyConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "endpoints": {k: v.to_dict() for k, v in self.endpoints.items()},
             "routing": self.routing,
             "cross_session_memory": self.cross_session_memory,
+            "plan_strategies": self.plan_strategies.to_dict(),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AppConfig:
         endpoints_data = data.get("endpoints", {})
         routing_data = data.get("routing", {})
+        strategies_data = data.get("plan_strategies", {})
 
         endpoints = {
             k: ModelEndpointConfig.from_dict(v)
@@ -70,6 +106,7 @@ class AppConfig:
             endpoints=endpoints,
             routing=routing_data,
             cross_session_memory=data.get("cross_session_memory", True),
+            plan_strategies=PlanStrategyConfig.from_dict(strategies_data),
         )
 
 

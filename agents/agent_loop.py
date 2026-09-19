@@ -400,7 +400,13 @@ class AgentLoop:
             a.publish_tool_call_event(tc["id"], fn_name, inp)
             published_calls.append({"id": tc["id"], "fn": fn_name})
 
-            perm = check_permission(fn_name, inp, a.permission_mode, a.plan_file_path)
+            perm = check_permission(
+                fn_name,
+                inp,
+                a.permission_mode,
+                plan_file_path=a.plan_file_path,
+                plan_dir=str(a._plan_mode_manager.plan_dir) if a._plan_mode_manager and a._plan_mode_manager.plan_dir else None,
+            )
 
             if perm["action"] == "deny":
                 a.record_tool_outcome(fn_name, False)
