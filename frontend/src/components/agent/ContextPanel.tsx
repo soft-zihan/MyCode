@@ -1,18 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
 import { fetchSessionStats, fetchTokenBreakdown, SessionStats, TokenBreakdown as TokenBreakdownData } from '../../api/client';
 import { McpPanel } from './McpPanel';
 
 interface ContextPanelProps {
   sessionId: string | null;
 }
-
-const COLORS = {
-  system: '#8b5cf6',
-  tools: '#f59e0b',
-  messages: '#3b82f6',
-  context_files: '#10b981',
-};
 
 const formatTokens = (n: number): string => {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -72,14 +64,11 @@ export function ContextPanel({ sessionId }: ContextPanelProps) {
   const cachePercent = inputTokens > 0 ? Math.round((cachedTokens / inputTokens) * 100) : 0;
   const contextPercent = contextWindow > 0 ? Math.round((contextUsed / contextWindow) * 100) : 0;
 
-  const chartData = breakdown ? [
-    { name: 'System', value: breakdown.system_tokens, color: COLORS.system },
-    { name: 'Tools', value: breakdown.tools_tokens, color: COLORS.tools },
-    { name: 'Messages', value: breakdown.messages_tokens, color: COLORS.messages },
-    { name: 'Context Files', value: breakdown.context_files_tokens, color: COLORS.context_files },
-  ].filter(d => d.value > 0) : [];
-
-  const totalBreakdown = chartData.reduce((sum, d) => sum + d.value, 0);
+  // 计算各部分占比
+  const totalTokens = breakdown ? breakdown.total_tokens : 0;
+  const systemPercent = breakdown && totalTokens > 0 ? Math.round((breakdown.system_tokens / totalTokens) * 100) : 0;
+  const toolsPercent = breakdown && totalTokens > 0 ? Math.round((breakdown.tools_tokens / totalTokens) * 100) : 0;
+  const messagesPercent = breakdown && totalTokens > 0 ? Math.round((breakdown.messages_tokens / totalTokens) * 100) : 0;
 
   return (
     <div className="flex-1 overflow-auto flex flex-col">
@@ -89,7 +78,7 @@ export function ContextPanel({ sessionId }: ContextPanelProps) {
           <span className="text-xs font-medium text-gray-700">Token Usage</span>
           {cachedTokens > 0 && (
             <span className="text-[10px] px-1.5 py-0.5 bg-green-100 text-green-700 rounded">
-              {cachePercent}% cache hit
+              {cachePercent}% cache
             </span>
           )}
         </div>
@@ -131,82 +120,72 @@ export function ContextPanel({ sessionId }: ContextPanelProps) {
         </div>
       </div>
 
-      {/* Context Breakdown */}
-      {chartData.length > 0 && (
-        <div className="px-3 py-2 border-b border-gray-200">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-xs font-medium text-gray-700">Context Breakdown</span>
-            <span className="text-[10px] text-gray-500">{formatTokens(totalBreakdown)} tokens</span>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <div className="w-20 h-20">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={chartData}
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={18}
-                    outerRadius={35}
-                    dataKey="value"
-                  >
-                    {chartData.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={entry.color} />
-                    ))}
-                  </Pie>
-                  <Tooltip
-                    formatter={(value) => formatTokens(Number(value))}
-                    contentStyle={{ fontSize: '10px', padding: '2px 6px' }}
-                  />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-
-            <div className="flex-1 space-y-1">
-              {chartData.map((item) => (
-                <div key={item.name} className="flex items-center justify-between text-[11px]">
-                  <div className="flex items-center gap-1.5">
-                    <div className="w-2 h-2 rounded-sm" style={{ backgroundColor: item.color }} />
-                    <span className="text-gray-600">{item.name}</span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="font-mono text-gray-900">{formatTokens(item.value)}</span>
-                    <span className="text-gray-400 w-8 text-right">
-                      {totalBreakdown > 0 ? Math.round((item.value / totalBreakdown) * 100) : 0}%
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Context Files List */}
-      {breakdown && breakdown.context_files && breakdown.context_files.length > 0 && (
-        <div className="px-3 py-2 border-b border-gray-200">
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-xs font-medium text-gray-700">Context Files</span>
-            <span className="text-[10px] text-gray-500">{breakdown.context_files.length} files</span>
-          </div>
-          <div className="space-y-0.5 max-h-24 overflow-auto">
-            {breakdown.context_files.map((file, i) => (
-              <div key={i} className="flex items-center justify-between text-[10px] py-0.5">
-                <span className="text-gray-600 truncate flex-1 mr-2">{file.path}</span>
-                <span className="text-gray-400 font-mono">{formatTokens(file.tokens)}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Messages Count */}
+      {/* Context Breakdown - 从上到下 */}
       {breakdown && (
         <div className="px-3 py-2 border-b border-gray-200">
-          <div className="flex items-center justify-between text-xs">
-            <span className="text-gray-600">Messages</span>
-            <span className="font-medium text-gray-900">{breakdown.message_count}</span>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-medium text-gray-700">Context Composition</span>
+            <span className="text-[10px] text-gray-500">{formatTokens(totalTokens)} tokens</span>
+          </div>
+
+          {/* Stacked bar */}
+          <div className="w-full h-3 bg-gray-100 rounded-full overflow-hidden flex mb-3">
+            {breakdown.system_tokens > 0 && (
+              <div
+                className="h-full bg-purple-500"
+                style={{ width: `${systemPercent}%` }}
+                title={`System: ${formatTokens(breakdown.system_tokens)} (${systemPercent}%)`}
+              />
+            )}
+            {breakdown.tools_tokens > 0 && (
+              <div
+                className="h-full bg-amber-500"
+                style={{ width: `${toolsPercent}%` }}
+                title={`Tools: ${formatTokens(breakdown.tools_tokens)} (${toolsPercent}%)`}
+              />
+            )}
+            {breakdown.messages_tokens > 0 && (
+              <div
+                className="h-full bg-blue-500"
+                style={{ width: `${messagesPercent}%` }}
+                title={`Messages: ${formatTokens(breakdown.messages_tokens)} (${messagesPercent}%)`}
+              />
+            )}
+          </div>
+
+          {/* Details */}
+          <div className="space-y-2">
+            {/* System Prompt */}
+            <div className="flex items-center gap-2">
+              <div className="w-3 h-3 rounded-sm bg-purple-500" />
+              <span className="text-xs text-gray-600 flex-1">System Prompt</span>
+              <span className="text-xs font-mono text-gray-900">{formatTokens(breakdown.system_tokens)}</span>
+              <span className="text-[10px] text-gray-400 w-8 text-right">{systemPercent}%</span>
+            </div>
+
+            {/* Tools */}
+            <div className="flex items-center gap-2">
+              <div className="w-3 h-3 rounded-sm bg-amber-500" />
+              <span className="text-xs text-gray-600 flex-1">
+                Tools
+                <span className="text-[10px] text-gray-400 ml-1">
+                  ({breakdown.builtin_tool_count} built-in + {breakdown.mcp_tool_count} MCP)
+                </span>
+              </span>
+              <span className="text-xs font-mono text-gray-900">{formatTokens(breakdown.tools_tokens)}</span>
+              <span className="text-[10px] text-gray-400 w-8 text-right">{toolsPercent}%</span>
+            </div>
+
+            {/* Messages */}
+            <div className="flex items-center gap-2">
+              <div className="w-3 h-3 rounded-sm bg-blue-500" />
+              <span className="text-xs text-gray-600 flex-1">
+                Messages
+                <span className="text-[10px] text-gray-400 ml-1">({breakdown.message_count} msgs)</span>
+              </span>
+              <span className="text-xs font-mono text-gray-900">{formatTokens(breakdown.messages_tokens)}</span>
+              <span className="text-[10px] text-gray-400 w-8 text-right">{messagesPercent}%</span>
+            </div>
           </div>
         </div>
       )}

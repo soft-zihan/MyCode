@@ -506,112 +506,95 @@ async def api_update_permission_mode(session_id: str, data: PermissionModeReques
 
 @router.get("/api/sessions/{session_id}/token-breakdown")
 async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
-    """获取 token 详细分解：system/tools/messages/context_files
+    """获取实际发给模型的 token 分解
     
-    返回字符数和估算的 token 数（约 4 字符 = 1 token）
-    支持活跃和非活跃 session（从 JSONL 事件恢复）
+    基于 get_messages_for_llm() 和 get_active_tool_definitions() 计算
+    返回各部分的字符数和估算 token 数（约 4 字符 = 1 token）
     """
     session_info = _active_sessions.get(session_id)
     
-    # Try active session first
     if session_info and session_info.get("svc"):
         svc = session_info["svc"]
         agent = getattr(svc, '_agent', None)
         if agent:
-            # System prompt
-            system_prompt = getattr(agent, '_system_prompt', '') or ''
-            system_chars = len(system_prompt)
+            # 获取实际发给模型的 messages
+            messages = agent.messages or []
             
-            # Tools schema (JSON representation)
-            tools = getattr(agent, 'tools', [])
-            tools_schema = []
-            for tool in tools:
-                if not tool.get('deferred'):
-                    tools_schema.append({
-                        'name': tool.get('name', ''),
-                        'description': tool.get('description', ''),
-                        'parameters': tool.get('parameters', {}),
-                    })
-            tools_chars = len(json.dumps(tools_schema, ensure_ascii=False))
-            
-            # Context files (files added via @ mention)
-            context_files_chars = 0
-            context_files_list = []
-            session = getattr(svc, 'session', None) or getattr(agent, 'session', None)
-            if session:
-                context_files = getattr(session, 'context_files', []) or []
-                for cf in context_files:
-                    path = cf.get('path', '')
-                    content = cf.get('content', '')
-                    chars = len(content)
-                    context_files_chars += chars
-                    context_files_list.append({
-                        'path': path,
-                        'chars': chars,
-                        'tokens': chars // 4,
-                    })
-            
-            # Messages
+            # 分离 system prompt 和其他 messages
+            system_chars = 0
             messages_chars = 0
             message_count = 0
-            if session:
-                messages = session.get_messages_for_llm()
-                for msg in messages:
-                    if msg.get('role') != 'system':
-                        message_count += 1
-                        content = msg.get('content', '')
-                        if isinstance(content, str):
-                            messages_chars += len(content)
-                        elif isinstance(content, list):
-                            for item in content:
-                                if isinstance(item, dict) and item.get('type') == 'text':
-                                    messages_chars += len(item.get('text', ''))
             
-            total_chars = system_chars + tools_chars + messages_chars + context_files_chars
+            for msg in messages:
+                role = msg.get('role', '')
+                content = msg.get('content', '')
+                
+                # 计算 content 的字符数
+                if isinstance(content, str):
+                    chars = len(content)
+                elif isinstance(content, list):
+                    chars = sum(len(item.get('text', '')) for item in content if isinstance(item, dict) and item.get('type') == 'text')
+                else:
+                    chars = 0
+                
+                if role == 'system':
+                    system_chars = chars
+                else:
+                    messages_chars += chars
+                    message_count += 1
+            
+            # 获取实际发给模型的 tools
+            from agents.tools.dispatcher import get_active_tool_definitions
+            tools = getattr(agent, 'tools', [])
+            tool_defs = get_active_tool_definitions(tools)
+            
+            # 计算 tools 的字符数（JSON 格式）
+            tools_json = json.dumps([{
+                'name': t.get('name', ''),
+                'description': t.get('description', ''),
+                'parameters': t.get('parameters', {}),
+            } for t in tool_defs], ensure_ascii=False)
+            tools_chars = len(tools_json)
+            
+            # 统计 MCP 工具数量
+            mcp_tool_count = sum(1 for t in tool_defs if t.get('name', '').startswith('mcp__'))
+            builtin_tool_count = len(tool_defs) - mcp_tool_count
+            
+            total_chars = system_chars + tools_chars + messages_chars
             
             return {
                 "system_chars": system_chars,
-                "tools_chars": tools_chars,
-                "messages_chars": messages_chars,
-                "context_files_chars": context_files_chars,
-                "total_chars": total_chars,
                 "system_tokens": system_chars // 4,
+                "tools_chars": tools_chars,
                 "tools_tokens": tools_chars // 4,
+                "messages_chars": messages_chars,
                 "messages_tokens": messages_chars // 4,
-                "context_files_tokens": context_files_chars // 4,
+                "total_chars": total_chars,
                 "total_tokens": total_chars // 4,
                 "message_count": message_count,
-                "context_files": context_files_list,
+                "tool_count": len(tool_defs),
+                "builtin_tool_count": builtin_tool_count,
+                "mcp_tool_count": mcp_tool_count,
             }
     
-    # Fallback: compute from JSONL events for inactive sessions
+    # Fallback: 从 JSONL 事件恢复
     from pathlib import Path
     sessions_dir = Path.home() / ".mycode" / "sessions"
     events_file = sessions_dir / f"{session_id}.events.jsonl"
     
     if not events_file.exists():
         return {
-            "system_chars": 0,
-            "tools_chars": 0,
-            "messages_chars": 0,
-            "context_files_chars": 0,
-            "total_chars": 0,
-            "system_tokens": 0,
-            "tools_tokens": 0,
-            "messages_tokens": 0,
-            "context_files_tokens": 0,
-            "total_tokens": 0,
-            "message_count": 0,
-            "context_files": [],
+            "system_chars": 0, "system_tokens": 0,
+            "tools_chars": 0, "tools_tokens": 0,
+            "messages_chars": 0, "messages_tokens": 0,
+            "total_chars": 0, "total_tokens": 0,
+            "message_count": 0, "tool_count": 0,
+            "builtin_tool_count": 0, "mcp_tool_count": 0,
         }
     
-    # Parse events to reconstruct token breakdown
     system_chars = 0
-    tools_chars = 0
     messages_chars = 0
-    context_files_chars = 0
     message_count = 0
-    context_files_list = []
     
     with open(events_file) as f:
         for line in f:
@@ -619,65 +602,35 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
                 event = json.loads(line.strip())
                 event_type = event.get("type", "")
                 
-                # System prompt
                 if event_type == "system_prompt":
                     system_chars = len(event.get("content", ""))
-                
-                # Context files
-                elif event_type == "context_files":
-                    files = event.get("files", [])
-                    for cf in files:
-                        chars = len(cf.get("content", ""))
-                        context_files_chars += chars
-                        context_files_list.append({
-                            'path': cf.get('path', ''),
-                            'chars': chars,
-                            'tokens': chars // 4,
-                        })
-                
-                # Assistant message with tool calls -> tools
-                elif event_type == "assistant_message":
-                    content = event.get("content", "")
-                    if content:
-                        messages_chars += len(content)
-                    # Tool calls embedded in assistant_message
-                    tool_calls = event.get("tool_calls", [])
-                    if tool_calls:
-                        for tc in tool_calls:
-                            func = tc.get("function", {})
-                            tools_chars += len(json.dumps(func.get("arguments", "{}"), ensure_ascii=False))
-                
-                # Tool results -> tools
-                elif event_type == "tool_result_msg":
-                    tools_chars += len(event.get("content", ""))
-                
-                # User messages -> messages
-                elif event_type == "user_message":
-                    message_count += 1
+                elif event_type in ("user_message", "assistant_message"):
                     messages_chars += len(event.get("content", ""))
-                
+                    message_count += 1
+                elif event_type == "tool_result_msg":
+                    messages_chars += len(event.get("content", ""))
+                    message_count += 1
             except (json.JSONDecodeError, Exception):
                 continue
     
-    # Estimate: if no system_prompt event, assume a default system prompt size
     if system_chars == 0:
-        system_chars = 2000  # reasonable default
+        system_chars = 2000
     
-    total_chars = system_chars + tools_chars + messages_chars + context_files_chars
+    total_chars = system_chars + messages_chars
     
     return {
         "system_chars": system_chars,
-        "tools_chars": tools_chars,
-        "messages_chars": messages_chars,
-        "context_files_chars": context_files_chars,
-        "total_chars": total_chars,
         "system_tokens": system_chars // 4,
-        "tools_tokens": tools_chars // 4,
+        "tools_chars": 0,
+        "tools_tokens": 0,
+        "messages_chars": messages_chars,
         "messages_tokens": messages_chars // 4,
-        "context_files_tokens": context_files_chars // 4,
+        "total_chars": total_chars,
         "total_tokens": total_chars // 4,
         "message_count": message_count,
-        "context_files": context_files_list,
+        "tool_count": 0,
+        "builtin_tool_count": 0,
+        "mcp_tool_count": 0,
     }
 
 

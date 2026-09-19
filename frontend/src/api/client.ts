@@ -837,25 +837,19 @@ export async function fetchContextStore(sessionId: string): Promise<ContextStore
   return res.json();
 }
 
-export interface ContextFile {
-  path: string;
-  chars: number;
-  tokens: number;
-}
-
 export interface TokenBreakdown {
   system_chars: number;
-  tools_chars: number;
-  messages_chars: number;
-  context_files_chars: number;
-  total_chars: number;
   system_tokens: number;
+  tools_chars: number;
   tools_tokens: number;
+  messages_chars: number;
   messages_tokens: number;
-  context_files_tokens: number;
+  total_chars: number;
   total_tokens: number;
   message_count: number;
-  context_files: ContextFile[];
+  tool_count: number;
+  builtin_tool_count: number;
+  mcp_tool_count: number;
 }
 
 export async function fetchTokenBreakdown(sessionId: string): Promise<TokenBreakdown> {
