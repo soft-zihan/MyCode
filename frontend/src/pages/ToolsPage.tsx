@@ -157,6 +157,20 @@ const toolDetails: Record<string, {
     executionMode: 'parallel',
     category: 'Wiki & 记忆',
   },
+  git_diff_before_last_compress: {
+    idempotent: true,
+    returns: '压缩前修改的文件列表（路径、状态、行数）。',
+    errorHandling: '无压缩历史时返回提示。',
+    executionMode: 'parallel',
+    category: '上下文管理',
+  },
+  git_diff_session: {
+    idempotent: true,
+    returns: '指定会话修改的文件列表（路径、状态、行数）。',
+    errorHandling: '会话不存在时返回错误。',
+    executionMode: 'parallel',
+    category: '上下文管理',
+  },
   // Skills
   skill_create: {
     idempotent: false,
