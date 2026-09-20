@@ -14,7 +14,6 @@ from agents._utils import (
 from .skill_file_ops import (
     ONLINE_PROVENANCE_INDEX,
     ONLINE_PROVENANCE_LOG,
-    SKILL_USAGE_STATS,
     get_evolution_dir,
     load_skill_stats,
 )
@@ -26,9 +25,6 @@ from .eval_rules import (
 from .eval_replay import (
     DEFAULT_MIN_REPLAY_SAMPLES,
     DEFAULT_MIN_PROMOTION_TESTS,
-    DEFAULT_MIN_RETRIEVED,
-    DEFAULT_MIN_USED_RATE,
-    DEFAULT_MIN_RELEVANCE_RATE,
     DEFAULT_MIN_RULE_PASS_RATE,
     _active_skill_snapshots,
     _rows_by_skill,
@@ -56,9 +52,6 @@ async def _evaluate_online_skill_evolution_core(
     *,
     min_replay_samples: int = DEFAULT_MIN_REPLAY_SAMPLES,
     min_promotion_tests: int = DEFAULT_MIN_PROMOTION_TESTS,
-    min_retrieved: int = DEFAULT_MIN_RETRIEVED,
-    min_used_rate: float = DEFAULT_MIN_USED_RATE,
-    min_relevance_rate: float = DEFAULT_MIN_RELEVANCE_RATE,
     min_rule_pass_rate: float = DEFAULT_MIN_RULE_PASS_RATE,
     write_report: bool = True,
     write_artifacts: bool = True,
@@ -68,7 +61,6 @@ async def _evaluate_online_skill_evolution_core(
     root = get_evolution_dir()
     provenance_rows = _read_jsonl(root / ONLINE_PROVENANCE_LOG)
     provenance_index = _read_json(root / ONLINE_PROVENANCE_INDEX, {})
-    usage_stats = _read_json(root / SKILL_USAGE_STATS, {})
     lifecycle_stats = load_skill_stats()
     active_skills = _active_skill_snapshots()
     grouped_rows = _rows_by_skill(provenance_rows)
@@ -101,17 +93,13 @@ async def _evaluate_online_skill_evolution_core(
     all_names = set(active_skills)
     if isinstance(provenance_index, dict):
         all_names.update(str(name) for name in provenance_index if str(name).strip())
-    if isinstance(usage_stats, dict):
-        all_names.update(str(name) for name in usage_stats if str(name).strip())
     all_names.update(str(name) for name in lifecycle_stats if str(name).strip())
 
     skills: list[dict[str, Any]] = []
     for name in sorted(all_names):
         lineage_raw = provenance_index.get(name, {}) if isinstance(provenance_index, dict) else {}
-        usage_raw = usage_stats.get(name, {}) if isinstance(usage_stats, dict) else {}
         lifecycle_raw = lifecycle_stats.get(name, {}) if isinstance(lifecycle_stats, dict) else {}
         lineage = lineage_raw if isinstance(lineage_raw, dict) else {}
-        usage = usage_raw if isinstance(usage_raw, dict) else {}
         lifecycle = lifecycle_raw if isinstance(lifecycle_raw, dict) else {}
         snapshot = active_skills.get(name, {})
         if not snapshot:
@@ -132,24 +120,13 @@ async def _evaluate_online_skill_evolution_core(
         )
         public_rule_summary = dict(rule_summary)
         public_rule_summary.pop("outcomes", None)
-        retrieved = int(usage.get("retrieved", lifecycle.get("retrieved", 0)) or 0)
-        relevant = int(usage.get("relevant", lifecycle.get("relevant", 0)) or 0)
-        used = int(usage.get("used", lifecycle.get("used", 0)) or 0)
-        pruned = bool(usage.get("pruned") or lifecycle.get("pruned"))
         promotion_test_count = sum(1 for item in replay_pool if item.get("split") == "promotion_test")
         status, reasons = _skill_status(
             replay_count=len(replay_pool),
             promotion_test_count=promotion_test_count,
-            retrieved=retrieved,
-            relevant=relevant,
-            used=used,
-            pruned=pruned,
             rule_summary=rule_summary,
             min_replay_samples=min_replay_samples,
             min_promotion_tests=min_promotion_tests,
-            min_retrieved=min_retrieved,
-            min_used_rate=min_used_rate,
-            min_relevance_rate=min_relevance_rate,
             min_rule_pass_rate=min_rule_pass_rate,
         )
         current_version = (
@@ -193,12 +170,6 @@ async def _evaluate_online_skill_evolution_core(
                 "evolutions": int(lifecycle.get("evolutions", 0) or 0),
                 "invocations": int(lifecycle.get("invocations", 0) or 0),
                 "feedback": int(lifecycle.get("feedback", 0) or 0),
-                "retrieved": retrieved,
-                "relevant": relevant,
-                "used": used,
-                "relevance_rate": _ratio(relevant, retrieved),
-                "used_rate": _ratio(used, retrieved),
-                "used_when_relevant_rate": _ratio(used, relevant),
                 "replay": {
                     "count": len(replay_pool),
                     "mutate_dev": sum(1 for item in replay_pool if item.get("split") == "mutate_dev"),
@@ -253,7 +224,7 @@ async def _evaluate_online_skill_evolution_core(
             "lineage": "group online provenance and usage by skill",
             "replay": "freeze compact online conversation windows as replay samples",
             "rules": "compile deterministic rules and optional LLM judge rules from each active skill's description and instructions",
-            "gate": "mark skills incubating, watch, healthy, pruned, or unobserved from replay, rule, and usage signals",
+            "gate": "mark skills incubating, watch, healthy, or unobserved from replay and rule signals",
             "champion": "promote the current active version into a local online-eval champion only when it is healthy and beats the prior champion gate",
         },
         "llm_judge": {
@@ -264,9 +235,6 @@ async def _evaluate_online_skill_evolution_core(
         "thresholds": {
             "min_replay_samples": min_replay_samples,
             "min_promotion_tests": min_promotion_tests,
-            "min_retrieved": min_retrieved,
-            "min_used_rate": min_used_rate,
-            "min_relevance_rate": min_relevance_rate,
             "min_rule_pass_rate": min_rule_pass_rate,
         },
         "aggregate": {
@@ -303,9 +271,6 @@ def evaluate_online_skill_evolution(
     *,
     min_replay_samples: int = DEFAULT_MIN_REPLAY_SAMPLES,
     min_promotion_tests: int = DEFAULT_MIN_PROMOTION_TESTS,
-    min_retrieved: int = DEFAULT_MIN_RETRIEVED,
-    min_used_rate: float = DEFAULT_MIN_USED_RATE,
-    min_relevance_rate: float = DEFAULT_MIN_RELEVANCE_RATE,
     min_rule_pass_rate: float = DEFAULT_MIN_RULE_PASS_RATE,
     write_report: bool = True,
     write_artifacts: bool = True,
@@ -316,9 +281,6 @@ def evaluate_online_skill_evolution(
         _evaluate_online_skill_evolution_core(
             min_replay_samples=min_replay_samples,
             min_promotion_tests=min_promotion_tests,
-            min_retrieved=min_retrieved,
-            min_used_rate=min_used_rate,
-            min_relevance_rate=min_relevance_rate,
             min_rule_pass_rate=min_rule_pass_rate,
             write_report=write_report,
             write_artifacts=write_artifacts,
@@ -333,9 +295,6 @@ async def evaluate_online_skill_evolution_async(
     side_query: SideQuery | None = None,
     min_replay_samples: int = DEFAULT_MIN_REPLAY_SAMPLES,
     min_promotion_tests: int = DEFAULT_MIN_PROMOTION_TESTS,
-    min_retrieved: int = DEFAULT_MIN_RETRIEVED,
-    min_used_rate: float = DEFAULT_MIN_USED_RATE,
-    min_relevance_rate: float = DEFAULT_MIN_RELEVANCE_RATE,
     min_rule_pass_rate: float = DEFAULT_MIN_RULE_PASS_RATE,
     write_report: bool = True,
     write_artifacts: bool = True,
@@ -343,9 +302,6 @@ async def evaluate_online_skill_evolution_async(
     return await _evaluate_online_skill_evolution_core(
         min_replay_samples=min_replay_samples,
         min_promotion_tests=min_promotion_tests,
-        min_retrieved=min_retrieved,
-        min_used_rate=min_used_rate,
-        min_relevance_rate=min_relevance_rate,
         min_rule_pass_rate=min_rule_pass_rate,
         write_report=write_report,
         write_artifacts=write_artifacts,
@@ -355,7 +311,7 @@ async def evaluate_online_skill_evolution_async(
 
 
 def _status_rank(status: str) -> int:
-    order = {"watch": 0, "incubating": 1, "unobserved": 2, "pruned": 3, "healthy": 4}
+    order = {"watch": 0, "incubating": 1, "unobserved": 2, "healthy": 3}
     return order.get(str(status or ""), 9)
 
 
@@ -424,7 +380,6 @@ def format_online_skill_eval(report: dict[str, Any] | None = None) -> str:
             key=lambda item: (
                 _status_rank(str(item.get("status") or "")),
                 -int((item.get("replay") or {}).get("count", 0) if isinstance(item.get("replay"), dict) else 0),
-                -int(item.get("retrieved", 0) or 0),
                 str(item.get("skill") or ""),
             ),
         )
@@ -455,8 +410,6 @@ def format_online_skill_eval(report: dict[str, Any] | None = None) -> str:
                 f"best_candidate_score={float(best_candidate.get('average_score', 0.0) or 0.0):.2f}, "
                 f"rule_pass={_pct(float(eval_data.get('pass_rate', 0) or 0))}, "
                 f"hard_failures={eval_data.get('hard_failures', 0)}, "
-                f"retrieved={item.get('retrieved', 0)}, "
-                f"used_rate={_pct(float(item.get('used_rate', 0) or 0))}, "
                 f"champion={promotion.get('status', 'n/a')}"
                 f"{suffix}"
             )

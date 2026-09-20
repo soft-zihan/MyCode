@@ -486,7 +486,7 @@ class McpManager:
 
     async def call_tool(self, prefixed_name: str, args: dict) -> str:
         """把带前缀的 MCP 工具调用路由到正确的 MCP Server。"""
-        from agents.observability.tracer import tracer
+        from agents.observability.trace import trace_span
         # 工具名格式为 mcp__serverName__toolName。
         parts = prefixed_name.split("__")
         if len(parts) < 3:
@@ -498,28 +498,26 @@ class McpManager:
         if not conn:
             raise RuntimeError(f"MCP server '{server_name}' not connected")
         
-        with tracer.span("mcp.tool_call", {
-            "langfuse.observation.type": "tool",
-            "mycode.mcp.server_name": server_name,
-            "mycode.mcp.tool_name": tool_name,
-            "langfuse.observation.input": json.dumps(args)[:500],
-        }) as span:
+        with trace_span(
+            "mcp.tool_call",
+            name=f"mcp.{server_name}.{tool_name}",
+            input=json.dumps(args, ensure_ascii=False, default=str)[:4000],
+            metadata={
+                "server_name": server_name,
+                "tool_name": tool_name,
+            },
+        ) as span:
             import time
             t0 = time.time()
             try:
                 result = await conn.call_tool(tool_name, args)
                 duration_s = round(time.time() - t0, 3)
-                if span:
-                    span.set_attribute("mycode.mcp.duration_s", duration_s)
-                    span.set_attribute("mycode.mcp.success", True)
-                    span.set_attribute("langfuse.observation.output", result[:500])
+                span.update(output=str(result)[:4000], metadata={"duration_s": duration_s, "success": True})
                 return result
             except Exception as e:
                 duration_s = round(time.time() - t0, 3)
-                if span:
-                    span.set_attribute("mycode.mcp.duration_s", duration_s)
-                    span.set_attribute("mycode.mcp.success", False)
-                    span.record_error(e)
+                span.update(output=str(e)[:2000], metadata={"duration_s": duration_s, "success": False})
+                span.record_error(e)
                 raise
 
     async def disconnect_all(self) -> None:

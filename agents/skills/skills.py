@@ -17,7 +17,6 @@ from .skill_file_ops import (
     record_online_skill_provenance,
     record_skill_feedback,
     record_skill_invocation,
-    record_skill_usage_judgments,
 )
 
 
@@ -129,10 +128,12 @@ def _load_executable_skills(skills: list[SkillDefinition]) -> None:
 
     from agents.observability.trace import trace_event
     trace_event(
-        "executable_skills.loaded",
-        total=result.get("total", 0),
-        loaded=result.get("loaded", 0),
-        failed=result.get("failed", 0),
+        "skill.load_batch",
+        metadata={
+            "total": result.get("total", 0),
+            "loaded": result.get("loaded", 0),
+            "failed": result.get("failed", 0),
+        },
     )
 
 def _load_skills_from_dir( base_dir: Path, source: str, skills:dict[str, SkillDefinition], overwrite: bool = True) -> None:
@@ -476,10 +477,3 @@ def record_feedback(skill_name: str, rating: str, note: str = "") -> None:
 
 def skill_stats() -> str:
     return format_skill_stats()
-
-
-def record_usage_judgments(judgments: list[dict[str, Any]]) -> dict[str, Any]:
-    result = record_skill_usage_judgments(judgments)
-    if result.get("pruned"):
-        reset_skill_cache()
-    return result

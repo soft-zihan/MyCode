@@ -11,19 +11,7 @@ from pathlib import Path
 from typing import Any
 
 
-def _resolve_tool_path(raw_path: str, *, must_exist: bool = True) -> Path:
-    from agents.core.workspace import get_workspace
-    path = Path(raw_path)
-    if path.is_absolute():
-        return path
-    if path.exists():
-        return path
-
-    workspace = get_workspace()
-    candidate = workspace / path
-    if must_exist:
-        return candidate if candidate.exists() else path
-    return candidate
+from agents.tools.paths import resolve_tool_path, workspace_guard_error
 
 
 def read_file(inp: dict) -> str:
@@ -34,7 +22,7 @@ def read_file(inp: dict) -> str:
         if isinstance(rt, DockerRuntime):
             path_str = inp["file_path"]
         else:
-            path_str = str(_resolve_tool_path(inp["file_path"]))
+            path_str = str(resolve_tool_path(inp["file_path"]))
 
         content = rt.read_file(path_str)
         lines = content.split("\n")
@@ -72,7 +60,7 @@ def write_file(inp: dict) -> str:
         if isinstance(rt, DockerRuntime):
             path_str = inp["file_path"]
         else:
-            path_str = str(_resolve_tool_path(inp["file_path"], must_exist=False))
+            path_str = str(resolve_tool_path(inp["file_path"], must_exist=False))
 
         rt.write_file(path_str, inp["content"])
         _auto_update_memory_index(path_str)
@@ -151,7 +139,7 @@ def edit_file(inp: dict) -> str:
         if isinstance(rt, DockerRuntime):
             path_str = inp["file_path"]
         else:
-            path_str = str(_resolve_tool_path(inp["file_path"]))
+            path_str = str(resolve_tool_path(inp["file_path"]))
 
         content = rt.read_file(path_str)
 
@@ -183,7 +171,11 @@ def list_files(inp: dict) -> str:
         if isinstance(rt, DockerRuntime):
             base = inp.get("path") or "."
         else:
-            base = str(_resolve_tool_path(inp.get("path") or "."))
+            resolved = resolve_tool_path(inp.get("path") or ".")
+            guard_error = workspace_guard_error(resolved)
+            if guard_error:
+                return guard_error
+            base = str(resolved)
 
         pattern = inp["pattern"]
         files = rt.list_files(base, pattern)

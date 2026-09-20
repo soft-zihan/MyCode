@@ -40,7 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fork", action="store_true", help="Fork session when resuming")
     parser.add_argument("--max-cost", type=float, default=None, help="Max USD spend")
     parser.add_argument("--max-turns", type=int, default=None, help="Max agentic turns")
-    parser.add_argument("--trace", action="store_true", help="Enable JSONL trace logging")
+    parser.add_argument("--trace", action="store_true", help="Show trace status")
     parser.add_argument("--help", "-h", action="store_true", help="Show help")
     return parser.parse_args()
 
@@ -438,7 +438,7 @@ Options:
   --fork              Fork session when resuming
   --max-cost USD      Max USD spend
   --max-turns N       Max agentic turns
-  --trace             Enable JSONL trace logging
+  --trace             Show trace status
   --help, -h          Show help
 """)
         sys.exit(0)
@@ -448,9 +448,8 @@ Options:
     resolved_api_base, resolved_api_key = _resolve_api_config(args.api_base)
 
     if args.trace:
-        from .observability.trace import set_trace_enabled, trace_path
-        set_trace_enabled(True)
-        print_info(f"Trace logging enabled: {trace_path()}")
+        from .observability.trace import tracing_enabled
+        print_info(f"Trace: Langfuse={'ON' if tracing_enabled() else 'OFF'}")
 
     if not resolved_api_key:
         print_error(

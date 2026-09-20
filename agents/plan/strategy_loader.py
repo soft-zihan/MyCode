@@ -34,6 +34,20 @@ DEFAULT_STRATEGIES: dict[str, str] = {
 VALID_STAGES = frozenset(DEFAULT_STRATEGIES.keys())
 
 
+def strategy_config_from_app_config() -> dict[str, str]:
+    """从全局应用配置读取五阶段策略选择（键名转为连字符阶段名）。"""
+    from agents.config import load_config
+
+    c = load_config().plan_strategies
+    return {
+        "grill-spec": c.grill_spec,
+        "tasks": c.tasks,
+        "execute": c.execute,
+        "review": c.review,
+        "converge": c.converge,
+    }
+
+
 def _strategy_dirs(workspace: Path) -> list[Path]:
     """返回策略目录列表（按优先级降序）。"""
     return [

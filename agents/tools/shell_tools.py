@@ -11,7 +11,8 @@ import threading
 import time as _time
 from typing import Any
 
-from agents.observability.trace import trace_event
+from agents.logging import print_error
+from agents.observability.trace import start_trace_span
 
 
 BACKGROUND_JOBS: dict[str, dict[str, Any]] = {}
@@ -55,19 +56,25 @@ def _watch_background(job_id: str) -> None:
     job["status"] = "completed" if exit_code == 0 else "failed"
     job["end_time"] = _time.time()
     job["finished_at"] = _time.time()
-    trace_event(
-        "bg.done",
-        job_id=job_id,
-        command=job["command"],
-        exit_code=exit_code,
-        duration_s=round(job["end_time"] - job["start_time"], 2),
-        output_preview=output[:300],
-    )
+    span = job.pop("_span", None)
+    if span:
+        span.update(
+            output=output[:4000],
+            metadata={
+                "exit_code": exit_code,
+                "status": job["status"],
+                "duration_s": round(job["end_time"] - job["start_time"], 2),
+            },
+        )
+        if exit_code != 0:
+            span.record_error(RuntimeError(f"background command exited with code {exit_code}"))
+        span.end()
+
     if _on_background_done:
         try:
             _on_background_done(job_id, job["command"], output, exit_code)
-        except Exception:
-            pass
+        except Exception as exc:
+            print_error(f"[shell] background done callback failed: {type(exc).__name__}: {exc}")
 
 
 def _start_background_shell(command: str) -> str:
@@ -84,6 +91,16 @@ def _start_background_shell(command: str) -> str:
     except Exception as e:
         return f"Error starting background command: {e}"
     job_id = _next_job_id()
+    span = start_trace_span(
+        "bg.task",
+        name=f"bg.task.{job_id}",
+        input=command[:4000],
+        metadata={
+            "job_id": job_id,
+            "pid": proc.pid,
+            "command": command[:4000],
+        },
+    )
     BACKGROUND_JOBS[job_id] = {
         "command": command,
         "process": proc,
@@ -93,9 +110,9 @@ def _start_background_shell(command: str) -> str:
         "output": None,
         "exit_code": None,
         "end_time": None,
+        "_span": span,
     }
     threading.Thread(target=_watch_background, args=(job_id,), daemon=True).start()
-    trace_event("bg.start", job_id=job_id, pid=proc.pid, command=command)
     return (
         f"Background command started (job_id={job_id}, pid={proc.pid}). "
         "It is running in the background; you can continue with other work. "

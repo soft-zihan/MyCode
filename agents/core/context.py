@@ -27,19 +27,6 @@ class ContextManager:
         """获取 LLM 消息历史（从事件日志派生）。"""
         return self.agent.session.get_messages_for_llm()
 
-    def truncate_messages_to(self, index: int) -> None:
-        """截断事件日志到指定索引。"""
-        messages = self.agent.session.get_messages_for_llm()
-        if index >= len(messages):
-            return
-        msg_count = 0
-        for i, event in enumerate(self.agent.session._log):
-            if event["type"] in ("user_message", "assistant_message", "tool_result_msg", "memory_injection"):
-                if msg_count >= index:
-                    self.agent.session._log = self.agent.session._log[:i]
-                    return
-                msg_count += 1
-
     def append_user_message(self, content: str, snapshot_id: str | None = None) -> None:
         """追加用户消息到事件日志。"""
         data = {"content": content}
@@ -113,13 +100,6 @@ class ContextManager:
             self.agent._folded_session_memories,
         )
         if compacted:
-            from agents.observability.trace import trace_event
-            trace_event(
-                "compact",
-                trigger=trigger,
-                messages_after=self._get_message_count(),
-                ctx_tokens=self.agent.last_input_token_count,
-            )
             from agents.logging import print_info
             print_info("Conversation compacted.")
             self.agent.last_input_token_count = 0
@@ -138,7 +118,7 @@ class ContextManager:
     async def _record_folded_session_memory(self, trigger: str, memory: dict[str, Any]) -> None:
         """记录折叠会话记忆。"""
         record = {
-            "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "time": time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime()),
             "trigger": trigger,
             "session_id": self.agent.session_id,
             **memory,
@@ -147,27 +127,77 @@ class ContextManager:
 
         if not self.agent.is_sub_agent:
             try:
-                from agents.wiki.wiki_capture import capture_session_to_session, should_trigger_compile
-                capture_session_to_session(self.agent.session_id, memory)
+                from agents.wiki.wiki_capture import (
+                    capture_session_to_session, 
+                    get_last_extract_pos,
+                )
+                
+                # 获取所有事件
+                all_events = self.agent.session._log
+                
+                # 获取上次提取位置（水位线）
+                last_pos = get_last_extract_pos(self.agent.session_id)
+                
+                # 只提取新事件（自上次水位线以来）
+                new_events = [e for e in all_events if e.get("seq", 0) > last_pos]
+                
+                if new_events:
+                    # 计算分段序号（基于已存在的文件数量）
+                    from agents.wiki.wiki_manager import get_wiki_dir
+                    from datetime import datetime, timezone
+                    now = datetime.now(timezone.utc)
+                    session_dir = get_wiki_dir() / "session" / now.strftime("%Y/%m/%d")
+                    slug = self.agent.session_id.replace("/", "_").replace("\\", "_")[:40]
+                    existing_segments = list(session_dir.glob(f"{slug}_seg*.md")) if session_dir.exists() else []
+                    segment_index = len(existing_segments) + 1
+                    
+                    # 捕获新事件到 session 文件
+                    # 注意：水位线不在此推进，编译成功后由 _compile_single_session_async 更新；
+                    # 失败时 segment 保持 compiled=false，由补编译机制重试
+                    captured_path = capture_session_to_session(self.agent.session_id, new_events, segment_index)
 
-                # Trigger wiki compilation if needed (extract knowledge from session notes)
-                if should_trigger_compile():
-                    side_query = self.agent._build_side_query(max_tokens=6000)
-                    asyncio.create_task(self._compile_wiki_async(side_query))
-            except Exception:
-                pass
+                    # 立即编译当前段，而不是攒文件
+                    if captured_path:
+                        side_query = self.agent._build_side_query(max_tokens=6000)
+                        asyncio.create_task(self._compile_single_session_async(captured_path, side_query))
+            except Exception as e:
+                print(f"[wiki_capture] fold capture failed for {self.agent.session_id}: {type(e).__name__}: {e}")
 
-    async def _compile_wiki_async(self, side_query: Any) -> None:
-        """异步触发 Wiki 编译（从 session 提取知识）。"""
+    async def _compile_single_session_async(self, session_path: Any, side_query: Any) -> None:
+        """异步编译单个 session 文件。编译成功后才推进水位线。"""
         try:
-            from agents.wiki.wiki_compiler import compile_pending_session
-            result = await compile_pending_session(side_query)
-            if result and not result.get("error"):
-                total = sum(v for k, v in result.items() if isinstance(v, int))
-                if total > 0:
-                    print(f"[wiki_compile] extracted {total} entries from session notes")
+            from agents.wiki.wiki_compiler import compile_single_session, check_and_compile_pending_sessions
+            result = await compile_single_session(session_path, side_query)
+            if result is None:
+                # compile lock 被占用，segment 保持 compiled=false，由补编译机制重试
+                print(f"[wiki_compile_single] lock busy, deferred: {session_path.name}")
+                return
+            
+            # 编译成功：从 frontmatter 读取 max_seq，推进水位线
+            try:
+                from agents.memory.frontmatter import parse_frontmatter
+                from agents.wiki.wiki_capture import get_last_extract_pos, set_last_extract_pos
+                meta = parse_frontmatter(session_path.read_text()).meta
+                session_id = meta.get("session_id", "")
+                seg_max_seq = int(meta.get("max_seq", "0"))
+                if session_id and seg_max_seq > get_last_extract_pos(session_id):
+                    set_last_extract_pos(session_id, seg_max_seq)
+            except Exception as e:
+                print(f"[wiki_compile_single] watermark update failed for {session_path.name}: {type(e).__name__}: {e}")
+                raise
+            
+            total = sum(v for k, v in result.items() if isinstance(v, int))
+            if total > 0:
+                print(f"[wiki_compile] extracted {total} entries from single session")
+            
+            # 编译完成后，检查其他 session 是否需要补编译
+            backfill_result = await check_and_compile_pending_sessions(side_query, threshold=20)
+            backfill_total = sum(v for k, v in backfill_result.items() if isinstance(v, int))
+            if backfill_total > 0:
+                print(f"[wiki_backfill] extracted {backfill_total} entries from pending sessions")
         except Exception as e:
-            print(f"[wiki_compile] error: {type(e).__name__}: {e}")
+            # 编译失败：水位线不推进，segment 保持 compiled=false，下次补编译自动重试
+            print(f"[wiki_compile_single] compile failed for {session_path.name}: {type(e).__name__}: {e}")
 
     def _get_message_count(self) -> int:
         """获取消息数量。"""

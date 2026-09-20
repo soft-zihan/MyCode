@@ -72,17 +72,20 @@ def write_wiki_entry(
     description: str = "",
     extra_meta: dict[str, str] | None = None,
     sub_dir: str = "",
+    session_id: str = "",
 ) -> Path:
-    from agents.observability.tracer import tracer
+    from agents.observability.trace import trace_span
     from agents.wiki.evolution.normalise_meta import infer_facets
     from agents.wiki.evolution.wiki_commit import record_wiki_change
 
-    with tracer.span("wiki.write", {
-        "langfuse.observation.type": "chain",
-        "mycode.wiki.wiki_type": wiki_type,
-        "mycode.wiki.name": name[:100],
-        "mycode.wiki.description": description[:100],
-    }) as span:
+    with trace_span(
+        "wiki.write",
+        metadata={
+            "wiki_type": wiki_type,
+            "name": name[:100],
+            "description": description[:100],
+        },
+    ) as span:
         wiki_dir = get_wiki_dir()
         type_dir = _ensure_type_dir(wiki_dir, wiki_type)
         if sub_dir:
@@ -141,7 +144,7 @@ def write_wiki_entry(
         _git_commit(f"wiki: add {wiki_type}/{filename}")
         update_wiki_index()
         if span:
-            span.set_attribute("mycode.wiki.filepath", str(filepath.relative_to(wiki_dir)))
+            span.set_metadata("filepath", str(filepath.relative_to(wiki_dir)))
         return filepath
 
 
@@ -279,14 +282,16 @@ async def preflight_wiki_search(
     Returns:
         [(entry, score), ...] 按分数降序
     """
-    from agents.observability.tracer import tracer
+    from agents.observability.trace import trace_span
     from agents.wiki.evolution.recall import hybrid_recall
-    with tracer.span("wiki.preflight", {
-        "langfuse.observation.type": "chain",
-        "mycode.wiki.query": content[:200],
-        "mycode.wiki.wiki_type": wiki_type,
-        "mycode.wiki.top_k": top_k,
-    }) as span:
+    with trace_span(
+        "wiki.preflight",
+        input=content[:200],
+        metadata={
+            "wiki_type": wiki_type,
+            "top_k": top_k,
+        },
+    ) as span:
         try:
             results = await hybrid_recall(
                 query=content,
@@ -295,10 +300,11 @@ async def preflight_wiki_search(
                 max_results=top_k,
             )
             if span:
-                span.set_attribute("mycode.wiki.found_count", len(results))
+                metadata: dict[str, Any] = {"found_count": len(results)}
                 if results:
-                    span.set_attribute("mycode.wiki.max_similarity", round(results[0][1], 3))
-                    span.set_attribute("mycode.wiki.entries", [r[0].rel_path for r in results[:5]])
+                    metadata["max_similarity"] = round(results[0][1], 3)
+                    metadata["entries"] = [r[0].rel_path for r in results[:5]]
+                span.add_metadata(**metadata)
             return results
         except Exception as e:
             if span:
@@ -341,7 +347,17 @@ def merge_wiki_entry(
         raise
 
 
-def mark_pattern_compiled(rel_path: str) -> None:
+def pattern_content_hash(content: str) -> str:
+    """Pattern 内容哈希，用于检测 pattern 更新后 skill 需要重新编译。"""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+
+
+def is_skill_stale(entry: WikiEntry) -> bool:
+    """检查 pattern 内容是否与已编译的 skill 不一致（需要重新编译）。"""
+    return entry.meta.get("compiled_content_hash") != pattern_content_hash(entry.content)
+
+
+def mark_pattern_compiled(rel_path: str, content_hash: str) -> None:
     wiki_dir = get_wiki_dir()
     filepath = wiki_dir / rel_path
     if not filepath.exists():
@@ -349,11 +365,13 @@ def mark_pattern_compiled(rel_path: str) -> None:
     try:
         result = parse_frontmatter(filepath.read_text())
         result.meta["compiled_to_skill"] = "true"
+        result.meta["compiled_content_hash"] = content_hash
         result.meta["modified"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         filepath.write_text(format_frontmatter(result.meta, result.body))
         _git_commit(f"wiki: pattern compiled to skill {rel_path}")
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[wiki] mark_pattern_compiled failed for {rel_path}: {type(e).__name__}: {e}")
+        raise
 
 
 # ── WIKI.md 索引 ──
@@ -443,29 +461,26 @@ def _format_wiki_manifest(entries: list[WikiEntry]) -> str:
 
 async def _try_compile_skill(pattern_rel_path: str, side_query: Any) -> None:
     """尝试将高频 workflow_pattern 编译为 skill。"""
-    from agents.observability.tracer import tracer
-    with tracer.span("skill.compile", {
-        "langfuse.observation.type": "chain",
-        "mycode.skill.pattern_rel_path": pattern_rel_path,
-    }) as span:
+    from agents.observability.trace import trace_span
+    with trace_span(
+        "skill.compile",
+        metadata={"pattern_rel_path": pattern_rel_path},
+    ) as span:
         try:
             from agents.wiki.wiki_compiler import compile_to_skill
             skill_path = await compile_to_skill(pattern_rel_path, side_query)
             if skill_path:
                 if span:
-                    span.set_attribute("mycode.skill.compiled", True)
-                    span.set_attribute("mycode.skill.skill_path", str(skill_path))
+                    span.add_metadata(compiled=True, skill_path=str(skill_path))
                 print(f"[skill_compile] compiled {pattern_rel_path} -> {skill_path}")
             else:
                 if span:
-                    span.set_attribute("mycode.skill.compiled", False)
-                    span.set_attribute("mycode.skill.reason", "skipped")
-                print(f"[skill_compile] skipped {pattern_rel_path} (applied_count < 2 or already compiled)")
+                    span.add_metadata(compiled=False, reason="skipped")
+                print(f"[skill_compile] skipped {pattern_rel_path} (applied_count < 2 or skill already up-to-date)")
         except Exception as e:
             if span:
                 span.record_error(e)
-                span.set_attribute("mycode.skill.compiled", False)
-                span.set_attribute("mycode.skill.reason", "error")
+                span.add_metadata(compiled=False, reason="error")
             print(f"[skill_compile] error: {type(e).__name__}: {e}")
 
 
@@ -475,27 +490,25 @@ async def select_relevant_wiki_entries(
     already_surfaced: set[str],
 ) -> list[WikiEntry]:
     import time
-    from agents.observability.tracer import tracer
+    from agents.observability.trace import trace_span
     t0 = time.time()
     
-    with tracer.span("wiki.recall", {
-        "langfuse.observation.type": "chain",
-        "mycode.wiki.query": query[:200],
-        "mycode.wiki.already_surfaced_count": len(already_surfaced),
-    }) as span:
+    with trace_span(
+        "wiki.recall",
+        input=query[:200],
+        metadata={"already_surfaced_count": len(already_surfaced)},
+    ) as span:
         entries = list_wiki_entries()
         if not entries:
             if span:
-                span.set_attribute("mycode.wiki.recalled_count", 0)
-                span.set_attribute("mycode.wiki.reason", "no_entries")
+                span.add_metadata(recalled_count=0, reason="no_entries")
             print(f"[wiki_select] no entries, took {time.time()-t0:.2f}s")
             return []
 
         candidates = [e for e in entries if e.rel_path not in already_surfaced]
         if not candidates:
             if span:
-                span.set_attribute("mycode.wiki.recalled_count", 0)
-                span.set_attribute("mycode.wiki.reason", "all_already_surfaced")
+                span.add_metadata(recalled_count=0, reason="all_already_surfaced")
             print(f"[wiki_select] all entries already surfaced, took {time.time()-t0:.2f}s")
             return []
 
@@ -512,10 +525,10 @@ async def select_relevant_wiki_entries(
                     updated_entry = read_wiki_entry(entry.rel_path)
                     if updated_entry:
                         entry = updated_entry
-                    # 检查是否需要编译为 skill
+                    # 检查是否需要编译为 skill（未编译，或 pattern 内容已变更）
                     if entry.type == "workflow_pattern":
                         applied_count = int(entry.meta.get("applied_count", "0"))
-                        if applied_count >= 2 and not entry.meta.get("compiled_to_skill"):
+                        if applied_count >= 2 and is_skill_stale(entry):
                             # 异步编译 skill
                             asyncio.create_task(
                                 _try_compile_skill(entry.rel_path, side_query)
@@ -523,15 +536,16 @@ async def select_relevant_wiki_entries(
                             print(f"[skill_compile] triggered for {entry.rel_path} (applied_count={applied_count})")
                     result.append(entry)
                 if span:
-                    span.set_attribute("mycode.wiki.recalled_count", len(result))
-                    span.set_attribute("mycode.wiki.recall_time_s", round(recall_time, 3))
-                    span.set_attribute("mycode.wiki.entries", [e.rel_path for e in result])
+                    span.add_metadata(
+                        recalled_count=len(result),
+                        recall_time_s=round(recall_time, 3),
+                        entries=[e.rel_path for e in result],
+                    )
                 print(f"[wiki_select] hybrid_recall found {len(scored)} entries in {recall_time:.2f}s, returning {len(result)}")
                 return result
             else:
                 if span:
-                    span.set_attribute("mycode.wiki.recalled_count", 0)
-                    span.set_attribute("mycode.wiki.recall_time_s", round(recall_time, 3))
+                    span.add_metadata(recalled_count=0, recall_time_s=round(recall_time, 3))
                 print(f"[wiki_select] hybrid_recall found 0 entries in {recall_time:.2f}s")
         except Exception as e:
             if span:
@@ -564,9 +578,11 @@ async def select_relevant_wiki_entries(
                 increment_applied_count(e.rel_path)
                 result.append(e)
             if span:
-                span.set_attribute("mycode.wiki.recalled_count", len(result))
-                span.set_attribute("mycode.wiki.method", "side_query")
-                span.set_attribute("mycode.wiki.entries", [e.rel_path for e in result])
+                span.add_metadata(
+                    recalled_count=len(result),
+                    method="side_query",
+                    entries=[e.rel_path for e in result],
+                )
             return result
         except Exception:
             return []

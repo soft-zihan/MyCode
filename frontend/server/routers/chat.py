@@ -20,7 +20,6 @@ class ChatMessage(BaseModel):
     message: str
     session_id: Optional[str] = None
     context_files: Optional[list[str]] = None
-    agent: Optional[str] = None
     model: Optional[str] = None
     permission_mode: Optional[str] = None
     cwd: Optional[str] = None
@@ -136,7 +135,6 @@ async def api_chat_stream(data: ChatMessage) -> dict[str, Any]:
             logger.info(f"[DEBUG] Creating new session (requested: {data.session_id})")
             agent, session = sm.create(
                 data.model,
-                data.agent,
                 data.permission_mode,
                 data.cwd,
             )
@@ -149,12 +147,9 @@ async def api_chat_stream(data: ChatMessage) -> dict[str, Any]:
                 register_project(data.cwd)
         else:
             # Session restored - check if agent type changed
-            if data.agent == "plan" and agent.permission_mode != "plan":
-                logger.info(f"[DEBUG] Switching to plan mode for existing session {session.id}")
-                agent.toggle_plan_mode()
-            elif data.agent != "plan" and agent.permission_mode == "plan":
-                logger.info(f"[DEBUG] Switching out of plan mode for existing session {session.id}")
-                agent.toggle_plan_mode()
+            if data.permission_mode and data.permission_mode != agent.permission_mode:
+                logger.info(f"[DEBUG] Syncing permission mode {agent.permission_mode} -> {data.permission_mode} for session {session.id}")
+                agent.set_permission_mode(data.permission_mode)
         
         # Build context
         context = ""
@@ -268,14 +263,14 @@ def _resolve_session_workspace(session_id: str) -> Path | None:
 
 @router.post("/api/revert")
 def api_revert_file(data: RevertRequest) -> dict[str, Any]:
-    from agents.tools import _resolve_tool_path
+    from agents.tools.paths import resolve_tool_path
     from agents.core.workspace import workspace_scope
     workspace = _resolve_session_workspace(data.session_id)
     if workspace is None:
         raise HTTPException(status_code=404, detail=f"Session '{data.session_id}' has no recorded workspace")
     try:
         with workspace_scope(workspace):
-            target = _resolve_tool_path(data.file_path, must_exist=False)
+            target = resolve_tool_path(data.file_path, must_exist=False)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(data.old_content)
         return {"success": True, "file_path": str(target)}

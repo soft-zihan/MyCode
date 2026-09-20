@@ -99,6 +99,8 @@ class PermissionResponseData(BaseModel):
     rpc_id: str
     allowed: bool
     session_id: str
+    feedback: str = ""
+    choice: str = ""
 
 
 class QuestionResponseData(BaseModel):
@@ -118,7 +120,7 @@ async def api_respond_permission(data: PermissionResponseData):
         return {"success": False, "message": "Session not active"}
     
     # Use set_permission_response to work with the permission gate
-    agent.set_permission_response(data.rpc_id, data.allowed)
+    agent.set_permission_response(data.rpc_id, data.allowed, data.feedback, data.choice)
     return {"success": True}
 
 

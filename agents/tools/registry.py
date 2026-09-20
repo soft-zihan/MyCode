@@ -477,7 +477,7 @@ tool_definitions: list[ToolDef] = [
             "type": "object",
             "properties": {
                 "slug": {"type": "string", "description": "Plan slug"},
-                "status": {"type": "string", "enum": ["proposed", "in-progress", "completed", "archived", "abandoned"], "description": "New status"},
+                "status": {"type": "string", "enum": ["proposed", "in-progress", "paused", "completed", "archived", "abandoned"], "description": "New status"},
                 "tags": {"type": "array", "items": {"type": "string"}, "description": "New tags"},
             },
             "required": ["slug"],
@@ -504,9 +504,9 @@ tool_definitions: list[ToolDef] = [
                 "slug": {"type": "string", "description": "Plan slug"},
                 "task_id": {"type": "integer", "description": "Task ID (1-indexed)"},
                 "commit": {"type": "string", "description": "Git commit hash (optional)"},
-                "verification": {"type": "string", "description": "Verification result as JSON string (optional)"},
+                "verification": {"type": "string", "description": 'REQUIRED. Verification evidence as JSON string: {"command": "...", "exit_code": 0, "output_snippet": "..."}'},
             },
-            "required": ["slug", "task_id"],
+            "required": ["slug", "task_id", "verification"],
         },
     },
     {

@@ -105,14 +105,6 @@ async def _with_retry(fn, max_retries: int = 3):
             await asyncio.sleep(delay)
 
 
-SNIP_THRESHOLD = 0.60
-SNIP_PLACEHOLDER = "[Content snipped - re-read if needed]"
-SNIPPABLE_TOOLS = {"read_file", "outline_file", "grep_search", "list_files", "run_shell"}
-MICROCOMPACT_IDLE_S = 5 * 60
-
-KEEP_RECENT_RESULTS = 3
-
-
 def _get_max_output_tokens(model: str) -> int:
     m = model.lower()
     if "opus-4-6" in m:
@@ -201,12 +193,6 @@ class Agent:
         self._user_message_written_this_turn: bool = False
         self._permission_waiters: dict[str, asyncio.Future] = {}
 
-        if not is_sub_agent:
-            from agents.observability.trace import set_trace_session, get_trace_session
-            old_session = get_trace_session()
-            set_trace_session(self.session_id)
-            logging.getLogger(__name__).info(f"[DEBUG] Agent.__init__ set trace session: {self.session_id} (was: {old_session})")
-
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.total_cached_tokens = 0
@@ -235,7 +221,8 @@ class Agent:
         self._aborted = False
         self._abort_event = asyncio.Event()
         self._parent_abort_event = parent_abort_event
-        self._current_task:asyncio.Task | None = None
+        self._current_task: asyncio.Task | None = None
+        self._current_trace_id: str | None = None
         self._confirmed_paths: set[str] = set()
 
         self._context_cleared: bool = False
@@ -284,15 +271,11 @@ class Agent:
             )
 
             if self.permission_mode == "plan":
-                self._plan_mode_manager.plan_file_path = self._plan_mode_manager.generate_plan_file_path()
+                self._plan_mode_manager.plan_dir = self._plan_mode_manager.generate_plan_dir()
                 self._system_prompt = self._base_system_prompt + self._plan_mode_manager.build_plan_mode_prompt()
-                print(f"[DEBUG] Agent.__init__: Entered plan mode. Plan file: {self._plan_mode_manager.plan_file_path}")
-                print(f"[DEBUG] Agent.__init__: System prompt contains 'Plan Mode': {'Plan Mode' in self._system_prompt}")
+                print(f"[DEBUG] Agent.__init__: Entered plan mode. Plan dir: {self._plan_mode_manager.plan_dir}")
             else:
                 self._system_prompt = self._base_system_prompt
-
-            from agents.observability.rewind import init_rewind
-            init_rewind()
 
             self._openai_client = openai.AsyncOpenAI(base_url=api_base, api_key=api_key)
 
@@ -354,29 +337,66 @@ class Agent:
         else:
             return None
 
-        async def _sq_openai(system:str, user_message:str)->str:
-            resp = await client.chat.completions.create(
-                model=model,
-                max_tokens=max(1, int(max_tokens)),
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user_message},
-                ],
+        async def _sq_openai(system: str, user_message: str) -> str:
+            from agents.observability.trace import trace_span
 
-            )
-            if not resp.choices:
-                logging.warning("side_query returned no OpenAI-compatible choices: model=%s", model)
-                return ""
-            choice = resp.choices[0]
-            content = choice.message.content or ""
-            if not content.strip():
-                logging.warning(
-                    "side_query returned empty OpenAI-compatible response: model=%s finish_reason=%s message=%s",
-                    model,
-                    getattr(choice, "finish_reason", ""),
-                    choice.message,
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_message},
+            ]
+            normalized_max_tokens = max(1, int(max_tokens))
+            input_payload = json.dumps({
+                "model": model,
+                "max_tokens": normalized_max_tokens,
+                "messages": messages,
+            }, ensure_ascii=False, default=str)[:4000]
+
+            with trace_span(
+                "side_query",
+                name=f"side_query.{model}",
+                model=model,
+                input=input_payload,
+                metadata={"max_tokens": normalized_max_tokens},
+            ) as span:
+                resp = await client.chat.completions.create(
+                    model=model,
+                    max_tokens=normalized_max_tokens,
+                    messages=messages,
                 )
-            return content
+                if not resp.choices:
+                    logging.warning("side_query returned no OpenAI-compatible choices: model=%s", model)
+                    span.update(output="")
+                    span.record_error(RuntimeError("side_query returned no choices"))
+                    return ""
+
+                choice = resp.choices[0]
+                content = choice.message.content or ""
+                usage = getattr(resp, "usage", None)
+                if usage is not None:
+                    input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+                    output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+                    cached_tokens = int(getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", 0) or 0)
+                    cached_tokens = min(cached_tokens, input_tokens)
+                    span.update(usage_details={
+                        "input": input_tokens - cached_tokens,
+                        "input_cached_tokens": cached_tokens,
+                        "output": output_tokens,
+                        "total": input_tokens + output_tokens,
+                    })
+
+                span.update(output=json.dumps({
+                    "content": content[:4000],
+                    "finish_reason": getattr(choice, "finish_reason", None),
+                }, ensure_ascii=False, default=str))
+
+                if not content.strip():
+                    logging.warning(
+                        "side_query returned empty OpenAI-compatible response: model=%s finish_reason=%s message=%s",
+                        model,
+                        getattr(choice, "finish_reason", ""),
+                        choice.message,
+                    )
+                return content
         return _sq_openai
 
     def abort(self) -> None:
@@ -421,7 +441,7 @@ class Agent:
         self._plan_mode_manager.plan_approval_fn = fn
 
     def _enter_plan_mode_internal(self) -> None:
-        from .observability.trace import trace_span
+        from .observability.trace import trace_event
 
         if self.permission_mode == "plan":
             return
@@ -433,14 +453,16 @@ class Agent:
         self.session.system_prompt = self._system_prompt
         print_info("Entered plan mode (read-only). Plan dir: " + str(self._plan_mode_manager.plan_dir))
 
-        with trace_span("plan_mode.enter",
-            langfuse_observation_type="chain",
-            plan_dir=str(self._plan_mode_manager.plan_dir) if self._plan_mode_manager.plan_dir else "",
-            previous_mode=self._plan_mode_manager.pre_plan_mode or "",
-        ):
-            pass
+        trace_event(
+            "plan_mode.enter",
+            metadata={
+                "plan_dir": str(self._plan_mode_manager.plan_dir or ""),
+                "previous_mode": self._plan_mode_manager.pre_plan_mode or "",
+            },
+        )
+        self._emit_permission_mode_event()
 
-    def _exit_plan_mode_internal(self) -> None:
+    def _exit_plan_mode_internal(self, emit: bool = True) -> None:
         if self.permission_mode != "plan":
             return
 
@@ -450,6 +472,14 @@ class Agent:
         self._system_prompt = self._base_system_prompt
         self.session.system_prompt = self._system_prompt
         print_info(f"Exited plan mode -> {self.permission_mode} mode")
+        if emit:
+            self._emit_permission_mode_event()
+
+    def _emit_permission_mode_event(self) -> None:
+        self.session.append("permission/mode_changed", {
+            "session_id": self.session.id,
+            "mode": self.permission_mode,
+        })
 
     def toggle_plan_mode(self) -> str:
         if self.permission_mode == "plan":
@@ -464,11 +494,18 @@ class Agent:
     def get_messages(self) -> list[dict]:
         return self.session.get_messages_for_llm()
 
-    def truncate_messages_to(self, index: int) -> None:
-        self._context_manager.truncate_messages_to(index)
-
     def set_permission_mode(self, mode: str) -> None:
+        if mode == self.permission_mode:
+            return
+        if mode == "plan":
+            # 进入 plan 必须走内部入口：重建 system prompt、创建草稿目录
+            self._enter_plan_mode_internal()
+            return
+        if self.permission_mode == "plan":
+            # 离开 plan：恢复 prompt、清理草稿目录（不发中间态事件），再落到目标模式
+            self._exit_plan_mode_internal(emit=False)
         self.permission_mode = mode
+        self._emit_permission_mode_event()
 
     def steer(self, message: str) -> None:
         if not hasattr(self, '_steer_queue') or self._steer_queue is None:
@@ -488,9 +525,20 @@ class Agent:
 
     async def chat(self, user_message:str)->None:
         from .core.workspace import set_workspace, reset_workspace
+        from .observability.trace import trace_context
+
+        trace_tags = ["sub-agent"] if self.is_sub_agent else ["main-agent"]
+        if self.permission_mode == "plan":
+            trace_tags.append("plan-mode")
+
         _ws_token = set_workspace(self.workspace)
         try:
-            await self._chat_inner(user_message)
+            with trace_context(
+                session_id=self.session_id if not self.is_sub_agent else None,
+                trace_name="agent-turn",
+                tags=trace_tags,
+            ):
+                await self._chat_inner(user_message)
         finally:
             reset_workspace(_ws_token)
 
@@ -499,28 +547,32 @@ class Agent:
         if not self._mcp_initialized and not self.is_sub_agent:
             print(f"[DEBUG] agent.chat: initializing MCP")
             self._mcp_initialized = True
-            try:
-                await asyncio.wait_for(
-                    self._mcp_manager.load_and_connect(),
-                    timeout=30.0
-                )
-                mcp_defs = self._mcp_manager.get_tool_definitions()
-                if mcp_defs:
-                    from agents.tools.mcp_registry import global_registry
-                    for mcp_def in mcp_defs:
-                        parts = mcp_def["name"].split("__")
-                        if len(parts) >= 3:
-                            server_name = parts[1]
-                            global_registry.register_mcp(mcp_def, server=server_name)
-                    self.tools = self.tools + mcp_defs
-            except asyncio.TimeoutError:
-                from .observability.trace import trace_error
-                trace_error("timeout", "MCP init timeout (30s)", operation="mcp_init")
-                print_error("MCP init timeout (30s) - continuing without MCP tools")
-            except Exception as e:
-                from .observability.trace import trace_error
-                trace_error(type(e).__name__, str(e), operation="mcp_init")
-                print_error(f"MCP init failed: {e}")
+            from .observability.trace import trace_span
+            with trace_span("mcp.init") as span:
+                try:
+                    await asyncio.wait_for(
+                        self._mcp_manager.load_and_connect(),
+                        timeout=30.0
+                    )
+                    mcp_defs = self._mcp_manager.get_tool_definitions()
+                    if mcp_defs:
+                        from agents.tools.mcp_registry import global_registry
+                        for mcp_def in mcp_defs:
+                            parts = mcp_def["name"].split("__")
+                            if len(parts) >= 3:
+                                server_name = parts[1]
+                                global_registry.register_mcp(mcp_def, server=server_name)
+                        self.tools = self.tools + mcp_defs
+                    span.add_metadata(success=True, tool_count=len(mcp_defs) if mcp_defs else 0)
+                except asyncio.TimeoutError:
+                    error = TimeoutError("MCP init timeout (30s)")
+                    span.update(output="timeout", metadata={"success": False})
+                    span.record_error(error)
+                    print_error("MCP init timeout (30s) - continuing without MCP tools")
+                except Exception as e:
+                    span.update(output=str(e)[:2000], metadata={"success": False})
+                    span.record_error(e)
+                    print_error(f"MCP init failed: {e}")
             print(f"[DEBUG] agent.chat: MCP init done")
 
         print(f"[DEBUG] agent.chat: before cross_session_memory")
@@ -548,9 +600,7 @@ class Agent:
         original_user_message = _safe_utf8_text(user_message)
         ready_skill_extraction_window: dict[str, Any] | None = None
         self._skill_orchestrator.last_retrieved_skill_reference = None
-        if not self.is_sub_agent:
-            from .observability.tracer import set_current_session_id
-            set_current_session_id(self.session_id)
+
         if not self.is_sub_agent:
             ready_skill_extraction_window = self._skill_orchestrator.pop_pending_extraction_window(
                 original_user_message, self._tool_error_streak
@@ -565,35 +615,32 @@ class Agent:
         self._user_message_written_this_turn = False
 
         self._current_turn += 1
-        print(f"[DEBUG] agent.chat: before turn/start - self.session_id = {self.session_id}, self.session.id = {self.session.id}, is_sub_agent = {self.is_sub_agent}")
-        if not self.is_sub_agent:
-            print(f"[DEBUG] agent.chat: BEFORE turn/start - self.session_id = {self.session_id}, self.session.id = {self.session.id}, id(self.session) = {id(self.session)}")
-        self.session.append("turn/start", {"turn": self._current_turn})
 
-        from .observability.trace import trace_event, trace_span
-        trace_kwargs: dict[str, Any] = {
-            "turn": self._turn_number,
-            "sub_agent": self.is_sub_agent,
-            "user_preview": user_message[:200],
-        }
-        if not self.is_sub_agent:
-            trace_kwargs["session"] = self.session_id
+        from .observability.trace import trace_span
 
+        _turn_event_start_seq = self.session.seq
         _turn_t0 = time.time()
         _turn_start_input_tokens = self.total_input_tokens
         _turn_start_output_tokens = self.total_output_tokens
         with trace_span(
             "turn",
-            **{
-                "langfuse.trace.name": "agent-turn",
-                "langfuse.observation.input": user_message[:500],
-                "mycode.turn.id": f"{self.session_id}:{self._current_turn}",
-                "mycode.turn.number": self._current_turn,
-                "mycode.event_range.start_seq": self.session.seq,
-                "mycode.sub_agent": self.is_sub_agent,
+            input=user_message[:4000],
+            metadata={
+                "session_id": self.session_id,
+                "model": self.model,
+                "workspace": str(self.workspace),
+                "permission_mode": self.permission_mode,
+                "turn_id": f"{self.session_id}:{self._current_turn}",
+                "turn_number": self._current_turn,
+                "event_range_start_seq": _turn_event_start_seq,
+                "is_sub_agent": self.is_sub_agent,
             },
         ) as turn_span:
-            trace_event("turn.start", **trace_kwargs)
+            self._current_trace_id = turn_span.get_trace_id()
+            self.session.append("turn/start", {
+                "turn": self._current_turn,
+                "trace_id": self._current_trace_id,
+            })
             coro = self._chat_openai(user_message)
             self._current_task = asyncio.create_task(coro)
             try:
@@ -603,58 +650,53 @@ class Agent:
                 if not self._user_message_written_this_turn:
                     self.session.append("user_message", {"content": original_user_message})
                     self._user_message_written_this_turn = True
-                from .observability.trace import trace_error
-                trace_error("cancelled", "Turn cancelled", operation="chat")
-                turn_span.set_attribute("mycode.aborted", True)
-                turn_span.set_attribute("mycode.event_range.end_seq", self.session.seq)
-                self.session.append("turn/end", {"turn": self._current_turn, "reason": "aborted", "sub_agent_id": self._current_sub_agent_id})
+                turn_span.add_metadata(aborted=True, event_range_end_seq=self.session.seq)
+                self.session.append("turn/end", {
+                    "turn": self._current_turn,
+                    "reason": "aborted",
+                    "sub_agent_id": self._current_sub_agent_id,
+                    "trace_id": self._current_trace_id,
+                })
                 raise
             except Exception as e:
-                from .observability.trace import trace_error
-                trace_error(type(e).__name__, str(e), operation="chat")
                 print_error(f"[ERROR] {type(e).__name__}: {e}")
-                trace_event(
-                    "turn.end",
-                    turn=self._turn_number,
-                    aborted=True,
-                    error=type(e).__name__,
-                    duration_s=round(time.time() - _turn_t0, 2),
-                )
                 turn_span.record_error(e)
-                turn_span.set_attribute("mycode.event_range.end_seq", self.session.seq)
+                turn_span.add_metadata(event_range_end_seq=self.session.seq)
                 self.session.append("error", {"message": str(e), "error_type": type(e).__name__, "sub_agent_id": self._current_sub_agent_id})
-                self.session.append("turn/end", {"turn": self._current_turn, "reason": "error", "error": str(e), "sub_agent_id": self._current_sub_agent_id})
+                self.session.append("turn/end", {
+                    "turn": self._current_turn,
+                    "reason": "error",
+                    "error": str(e),
+                    "sub_agent_id": self._current_sub_agent_id,
+                    "trace_id": self._current_trace_id,
+                })
                 return
             finally:
                 self._current_task = None
+                self._current_trace_id = None
             assistant_text = "".join(self._turn_output_buffer or []).strip()
-            thinking_text = "".join(self._turn_thinking_buffer or []).strip()
             self._turn_output_buffer = None
             self._turn_thinking_buffer = None
             self._turn_event_buffer = None
 
-            self.session.append("turn/end", {"turn": self._current_turn, "reason": "completed", "sub_agent_id": self._current_sub_agent_id})
-            trace_event(
-                "turn.end",
-                turn=self._turn_number,
-                aborted=self._aborted,
-                duration_s=round(time.time() - _turn_t0, 2),
-                assistant_preview=assistant_text[:500],
-                thinking_preview=thinking_text[:500] if thinking_text else None,
-                sub_agent_id=self._current_sub_agent_id,
+            self.session.append("turn/end", {
+                "turn": self._current_turn,
+                "reason": "completed",
+                "sub_agent_id": self._current_sub_agent_id,
+                "trace_id": self._current_trace_id,
+            })
+            turn_span.update(
+                output=assistant_text[:4000],
+                metadata={
+                    "event_range_end_seq": self.session.seq,
+                    "aborted": self._aborted,
+                    "input_tokens_delta": self.total_input_tokens - _turn_start_input_tokens,
+                    "output_tokens_delta": self.total_output_tokens - _turn_start_output_tokens,
+                    "duration_s": round(time.time() - _turn_t0, 2),
+                },
             )
-            turn_span.set_attribute("mycode.event_range.end_seq", self.session.seq)
-            turn_span.set_attribute("mycode.aborted", self._aborted)
-            turn_span.set_attribute("mycode.tokens.input_delta", self.total_input_tokens - _turn_start_input_tokens)
-            turn_span.set_attribute("mycode.tokens.output_delta", self.total_output_tokens - _turn_start_output_tokens)
-            turn_span.set_attribute("langfuse.observation.output", assistant_text[:500])
         self._last_assistant_text = assistant_text
         if not self.is_sub_agent and not self._aborted:
-            self._skill_orchestrator.schedule_background_task(
-                self._skill_orchestrator.run_skill_usage_tracking(original_user_message, assistant_text),
-                plan_mode=(self.permission_mode == "plan"),
-            )
-
             self._skill_orchestrator.turns_since_last_evolution += 1
             if ready_skill_extraction_window and self._skill_orchestrator.should_trigger_evolution():
                 self._skill_orchestrator.schedule_background_task(
@@ -823,10 +865,6 @@ class Agent:
         return self._current_sub_agent_id
 
     @property
-    def plan_file_path(self) -> str | None:
-        return self._plan_mode_manager.plan_file_path
-
-    @property
     def confirmed_paths(self) -> set[str]:
         return self._confirmed_paths
 
@@ -906,22 +944,18 @@ class Agent:
         self.session.append(event_type, event)
 
     def publish_tool_call_event(self, call_id: str, name: str, inp: dict) -> None:
-        from agents.observability.trace import trace_event
         event_data = {"call_id": call_id, "name": name, "input": inp, "turn": self._current_turn, "step": self._current_step}
         if self._current_sub_agent_id:
             event_data["sub_agent_id"] = self._current_sub_agent_id
         self.session.append("tool_call", event_data)
-        trace_event("stream.tool_call", call_id=call_id, name=name, sub_agent_id=self._current_sub_agent_id)
 
     def publish_tool_result_event(self, call_id: str, name: str, result: str, status: str, snapshot: dict | None = None) -> None:
-        from agents.observability.trace import trace_event
         event_data = {"call_id": call_id, "name": name, "result": result, "status": status, "turn": self._current_turn, "step": self._current_step}
         if self._current_sub_agent_id:
             event_data["sub_agent_id"] = self._current_sub_agent_id
         if snapshot:
             event_data["snapshot"] = snapshot
         self.session.append("tool_result", event_data)
-        trace_event("stream.tool_result", call_id=call_id, name=name, sub_agent_id=self._current_sub_agent_id)
 
     def record_tools_outcome(self, tool_name: str, success: bool) -> None:
         self._record_tool_outcome(tool_name, success)
@@ -1005,17 +1039,21 @@ class Agent:
     def restore_session(self, data:dict)->None:
         self._session_manager.restore_session(data)
 
-    def rewind(self, n: int = 1) -> str:
-        return self._session_manager.rewind(n)
-
-    def stage_revert(self, target_seq: int) -> dict:
-        return self._session_manager.stage_revert(target_seq)
-
-    def clear_revert(self, current_snapshot: list[dict]) -> dict:
-        return self._session_manager.clear_revert(current_snapshot)
-
-    def commit_revert(self, target_seq: int) -> dict:
-        return self._session_manager.commit_revert(target_seq)
+    async def rewind_turns(self, n: int = 1) -> str:
+        """统一回退：对话回退 N 轮 + 文件恢复到快照（原子操作）。"""
+        from agents.core.rewind_service import get_rewind_service
+        svc = get_rewind_service()
+        plan = await svc.stage(
+            self.session_id, turns=n, session=self.session, workspace=str(self.workspace)
+        )
+        result = await svc.commit(plan.id, session=self.session)
+        msg = (
+            f"Rewound {n} turn(s): removed {result['removed_user_messages']} user messages, "
+            f"{result['removed_events']} events"
+        )
+        if result["restored_files"]:
+            msg += f", restored {len(result['restored_files'])} files"
+        return msg
 
     def fork_session(self) -> str:
         return self._session_manager.fork_session()
@@ -1058,14 +1096,64 @@ class Agent:
     def _persist_large_result(self, tool_name: str, result: str) -> str:
         return persist_large_result(tool_name, result)
 
+    def _format_plan_tasks_block(self, exec_result: dict) -> str:
+        """把 start_plan_execution 结果格式化为注入对话的任务清单+执行指令（含策略插件）。"""
+        msg = "\n\n## Plan Tasks Ready\n"
+        msg += f"Status: {exec_result.get('status', 'unknown')}\n"
+        msg += f"Total tasks: {exec_result.get('total_tasks', 0)}\n"
+        msg += f"Pending tasks: {exec_result.get('pending_tasks', 0)}\n\n"
+
+        tasks = exec_result.get("tasks", [])
+        if not tasks:
+            return msg + "No pending tasks found."
+
+        msg += "## Task List\n\n"
+        for task in tasks:
+            msg += f"### Task {task['id']}: {task['title']}\n"
+            msg += f"- **File**: `{task.get('file', 'N/A')}`\n"
+            msg += f"- **Acceptance**: {task.get('acceptance', 'N/A')}\n"
+            msg += f"- **Status**: {task['status']}\n\n"
+
+        msg += "\n## Instructions\n\n"
+        msg += "Please execute these tasks one by one. For each task:\n"
+        msg += "1. Call `plan_task_start(slug, task_id)` before starting\n"
+        msg += "2. Implement the task (write code, create files, etc.)\n"
+        msg += "3. Verify the implementation (run the acceptance command, check output)\n"
+        msg += "4. Call `plan_task_done(slug, task_id, commit, verification)` after success — verification is REQUIRED: a JSON object with the verify `command` and its `exit_code`\n"
+        msg += "5. If failed, call `plan_task_failed(slug, task_id, error)`\n"
+        msg += "6. After all tasks are done, call `plan_complete(slug)`\n"
+
+        slug = exec_result.get("slug", "")
+        if slug:
+            try:
+                from agents.plan.plan_executor import PlanExecutor
+                executor = PlanExecutor.for_plan(slug)
+                execute_guide = executor.build_execute_instructions()
+                if execute_guide:
+                    msg += f"\n## Execution Strategy: {executor.strategy_config.get('execute', 'direct')}\n\n{execute_guide}\n"
+                converge_guide = executor.build_converge_guidance()
+                if converge_guide:
+                    msg += f"\n## Pre-Completion Converge Check（调用 plan_complete 前必须完成）\n\n{converge_guide}\n"
+            except Exception as e:
+                print(f"[WARN] plan strategy injection failed: {e!r}")
+
+        return msg
+
     async def _execute_plan_mode_tool(self, name):
-        from .observability.trace import trace_span
+        from .observability.trace import trace_event
 
         if name == "enter_plan_mode":
             if self.permission_mode == "plan":
                 return "Already in plan mode."
             self._enter_plan_mode_internal()
-            return f"Entered plan mode. You are now in read-only mode.\n\nYour plan directory: {self._plan_mode_manager.plan_dir}\nWrite your plan files under this directory (spec.md, tasks.md, design.md).\n\nWhen your plan is complete, call exit_plan_mode."
+            return (
+                f"Entered plan mode. You are now in read-only mode.\n\n"
+                f"Your plan directory: {self._plan_mode_manager.plan_dir}\n"
+                f"双轨规划（二选一）：\n"
+                f"- 轻量轨（默认）：只写 plan.md（## 背景 / ## 方案 / ## 任务清单（checkbox：- [ ] 1. 描述）/ ## 验收）\n"
+                f"- 重量轨（复杂任务）：写 spec.md（含验收标准）+ design.md + tasks.md\n\n"
+                f"When your plan is complete, call exit_plan_mode."
+            )
 
         if name == "exit_plan_mode":
             if self.permission_mode != "plan":
@@ -1077,49 +1165,38 @@ class Agent:
                 errors = "\n".join(f"- {e}" for e in validation["errors"])
                 return f"Plan artifacts validation failed:\n{errors}\n\nPlease complete your plan before exiting."
             
-            # 读取产物内容
-            plan_dir = self._plan_mode_manager.plan_dir
-            spec_content = ""
-            plan_content = ""
-            tasks_content = ""
-            
-            if plan_dir:
-                spec_path = plan_dir / "spec.md"
-                if spec_path.exists():
-                    spec_content = spec_path.read_text()
-                
-                design_path = plan_dir / "design.md"
-                if design_path.exists():
-                    plan_content = design_path.read_text()
-                
-                tasks_path = plan_dir / "tasks.md"
-                if tasks_path.exists():
-                    tasks_content = tasks_path.read_text()
-            
-            # 向后兼容：如果没有 plan_dir，尝试读取 plan_file_path
-            if not spec_content and not tasks_content:
-                plan_file_path = self._plan_mode_manager.plan_file_path
-                if plan_file_path and Path(plan_file_path).exists():
-                    try:
-                        old_plan_content = Path(plan_file_path).read_text()
-                        spec_content = self._plan_mode_manager.extract_plan_section(old_plan_content, "SPEC")
-                        plan_content = self._plan_mode_manager.extract_plan_section(old_plan_content, "PLAN")
-                        tasks_content = self._plan_mode_manager.extract_plan_section(old_plan_content, "TASKS")
-                    except Exception:
-                        pass
+            # 读取产物内容（自动判定轻量轨/重量轨）
+            draft = self._plan_mode_manager.read_draft_artifacts()
+            granularity = validation.get("granularity", draft["granularity"])
+            spec_content = draft["spec"]
+            plan_content = draft["design"]
+            tasks_content = draft["tasks"]
+            plan_md = draft["plan"]
+            if granularity == "minimal" and not tasks_content:
+                from agents.plan.plan_mode import PlanModeManager
+                tasks_content = PlanModeManager.checkbox_tasks_to_structured(plan_md)
+
+            full_plan = "\n\n".join(
+                part for part in (
+                    plan_md.strip() if granularity == "minimal" and plan_md.strip() else "",
+                    f"## Spec\n{spec_content}" if spec_content.strip() else "",
+                    f"## Design\n{plan_content}" if plan_content.strip() else "",
+                    f"## Tasks\n{tasks_content}" if granularity != "minimal" and tasks_content.strip() else "",
+                ) if part
+            ) or "(empty plan)"
 
             if self._plan_mode_manager.plan_approval_fn:
-                result = self._plan_mode_manager.plan_approval_fn(plan_content)
+                result = await self._plan_mode_manager.plan_approval_fn(full_plan)
                 choice = result.get("choice", "manual-execute")
 
                 if choice == "keep-planning":
                     feedback = result.get("feedback") or "Please revise the plan."
 
-                    with trace_span("plan_mode.rejected",
-                        langfuse_observation_type="chain",
-                        feedback=feedback[:500] if feedback else "",
-                    ):
-                        pass
+                    trace_event(
+                        "plan_mode.rejected",
+                        input=feedback[:2000] if feedback else "",
+                        metadata={"feedback": feedback[:2000] if feedback else ""},
+                    )
 
                     return (
                         f"User rejected the plan and wants to keep planning.\n\n"
@@ -1129,7 +1206,8 @@ class Agent:
 
                 if choice in ("clear-and-execute", "execute"):
                     plan_result = self._plan_mode_manager.handle_plan_system_integration(
-                        spec_content, plan_content, tasks_content, self.session
+                        spec_content, plan_content, tasks_content, self.session,
+                        granularity=granularity, plan_md=plan_md,
                     )
                     target_mode = "acceptEdits"
                 else:
@@ -1142,14 +1220,16 @@ class Agent:
                 self._plan_mode_manager.plan_dir = None
                 self._system_prompt = self._base_system_prompt
                 self.session.system_prompt = self._system_prompt
+                self._emit_permission_mode_event()
 
-                with trace_span("plan_mode.approved",
-                    langfuse_observation_type="chain",
-                    target_mode=target_mode,
-                    context_cleared=str(choice == "clear-and-execute"),
-                    plan_slug=plan_result.get("slug", "") if plan_result else "",
-                ):
-                    pass
+                trace_event(
+                    "plan_mode.approved",
+                    metadata={
+                        "target_mode": target_mode,
+                        "context_cleared": choice == "clear-and-execute",
+                        "plan_slug": plan_result.get("slug", "") if plan_result else "",
+                    },
+                )
 
                 if choice == "clear-and-execute":
                     self._context_manager.clear_history_keep_system()
@@ -1160,7 +1240,7 @@ class Agent:
                     if plan_result:
                         result_msg += f"Plan system entry created: {plan_result.get('slug', '')}\n\n"
                     result_msg += f"Plan directory: {saved_plan_dir}\n\n"
-                    result_msg += f"## Approved Plan:\n{spec_content}\n\n{plan_content}\n\n"
+                    result_msg += f"## Approved Plan:\n{full_plan}\n\n"
 
                     if plan_result and plan_result.get("slug"):
                         from agents.plan.plan_manager import start_plan_execution
@@ -1168,40 +1248,16 @@ class Agent:
                         print_info(f"Starting plan execution: {plan_slug}")
 
                         exec_result = start_plan_execution(plan_slug)
-
-                        result_msg += f"\n\n## Plan Tasks Ready\n"
-                        result_msg += f"Status: {exec_result.get('status', 'unknown')}\n"
-                        result_msg += f"Total tasks: {exec_result.get('total_tasks', 0)}\n"
-                        result_msg += f"Pending tasks: {exec_result.get('pending_tasks', 0)}\n\n"
-
-                        tasks = exec_result.get("tasks", [])
-                        if tasks:
-                            result_msg += "## Task List\n\n"
-                            for t in tasks:
-                                result_msg += f"### Task {t['id']}: {t['title']}\n"
-                                result_msg += f"- **File**: `{t.get('file', 'N/A')}`\n"
-                                result_msg += f"- **Acceptance**: {t.get('acceptance', 'N/A')}\n"
-                                result_msg += f"- **Status**: {t['status']}\n\n"
-
-                            result_msg += "\n## Instructions\n\n"
-                            result_msg += "Please execute these tasks one by one. For each task:\n"
-                            result_msg += "1. Call `mark_task_in_progress(slug, task_id)` before starting\n"
-                            result_msg += "2. Implement the task (write code, create files, etc.)\n"
-                            result_msg += "3. Verify the implementation (run tests, check output)\n"
-                            result_msg += "4. Call `mark_task_done(slug, task_id, commit, verification)` after success\n"
-                            result_msg += "5. If failed, call `mark_task_failed(slug, task_id, reason)`\n"
-                            result_msg += "6. After all tasks done, call `complete_plan(slug)`\n"
-                        else:
-                            result_msg += "No pending tasks found."
+                        result_msg += self._format_plan_tasks_block(exec_result)
                     else:
-                        result_msg += f"Proceed with implementation."
+                        result_msg += "Proceed with implementation."
 
                     return result_msg
 
                 print_info(f"Plan approved. Executing in {target_mode} mode.")
                 result_msg = (
                     f"User approved the plan. Permission mode: {target_mode}\n\n"
-                    f"## Approved Plan:\n{plan_content}\n\n"
+                    f"## Approved Plan:\n{full_plan}\n\n"
                 )
 
                 if plan_result and plan_result.get("slug"):
@@ -1210,79 +1266,74 @@ class Agent:
                     print_info(f"Starting plan execution: {plan_slug}")
 
                     exec_result = start_plan_execution(plan_slug)
-
-                    result_msg += f"\n\n## Plan Tasks Ready\n"
-                    result_msg += f"Status: {exec_result.get('status', 'unknown')}\n"
-                    result_msg += f"Total tasks: {exec_result.get('total_tasks', 0)}\n"
-                    result_msg += f"Pending tasks: {exec_result.get('pending_tasks', 0)}\n\n"
-
-                    tasks = exec_result.get("tasks", [])
-                    if tasks:
-                        result_msg += "## Task List\n\n"
-                        for t in tasks:
-                            result_msg += f"### Task {t['id']}: {t['title']}\n"
-                            result_msg += f"- **File**: `{t.get('file', 'N/A')}`\n"
-                            result_msg += f"- **Acceptance**: {t.get('acceptance', 'N/A')}\n"
-                            result_msg += f"- **Status**: {t['status']}\n\n"
-
-                        result_msg += "\n## Instructions\n\n"
-                        result_msg += "Please execute these tasks one by one. For each task:\n"
-                        result_msg += "1. Call `mark_task_in_progress(slug, task_id)` before starting\n"
-                        result_msg += "2. Implement the task (write code, create files, etc.)\n"
-                        result_msg += "3. Verify the implementation (run tests, check output)\n"
-                        result_msg += "4. Call `mark_task_done(slug, task_id, commit, verification)` after success\n"
-                        result_msg += "5. If failed, call `mark_task_failed(slug, task_id, reason)`\n"
-                        result_msg += "6. After all tasks done, call `complete_plan(slug)`\n"
-                    else:
-                        result_msg += "No pending tasks found."
+                    result_msg += self._format_plan_tasks_block(exec_result)
                 else:
-                    result_msg += f"Proceed with implementation."
+                    result_msg += "Proceed with implementation."
 
                 return result_msg
 
             confirmed = await self._confirm_dangerous(
-                f"Plan completed. Exit plan mode?\n\n## Plan:\n{plan_content}",
-                extra_data={"plan_file_path": self._plan_mode_manager.plan_file_path} if self._plan_mode_manager.plan_file_path else None,
+                f"Plan completed. Exit plan mode?\n\n{full_plan}",
+                extra_data={"plan_dir": str(self._plan_mode_manager.plan_dir)} if self._plan_mode_manager.plan_dir else None,
                 tool_name="exit_plan_mode",
             )
 
             if not confirmed:
-                with trace_span("plan_mode.rejected",
-                    langfuse_observation_type="chain",
-                    feedback="User rejected the plan.",
-                ):
-                    pass
+                feedback = self._permission_gate.last_feedback or "User rejected the plan without comments."
+                trace_event(
+                    "plan_mode.rejected",
+                    input=feedback[:2000],
+                    metadata={"feedback": feedback[:2000]},
+                )
 
                 return (
                     "User rejected the plan and wants to keep planning.\n\n"
-                    "Please revise your plan based on user feedback. When done, call exit_plan_mode again."
+                    f"User feedback: {feedback}\n\n"
+                    "Please revise your plan based on this feedback. When done, call exit_plan_mode again."
                 )
 
+            choice = self._permission_gate.last_choice or "execute"
             plan_result = self._plan_mode_manager.handle_plan_system_integration(
-                spec_content, plan_section, tasks_content, self.session
+                spec_content, plan_content, tasks_content, self.session,
+                granularity=granularity, plan_md=plan_md,
             )
 
-            target_mode = self._plan_mode_manager.pre_plan_mode or "default"
+            saved_plan_dir = self._plan_mode_manager.plan_dir
+            if choice == "manual-execute":
+                target_mode = self._plan_mode_manager.pre_plan_mode or "default"
+            else:  # execute / clear-and-execute → 自动执行
+                target_mode = "acceptEdits"
             self.permission_mode = target_mode
             self._plan_mode_manager.pre_plan_mode = None
-            saved_plan_path = self._plan_mode_manager.plan_file_path
-            self._plan_mode_manager.plan_file_path = None
+            self._plan_mode_manager.plan_dir = None
             self._system_prompt = self._base_system_prompt
             self.session.system_prompt = self._system_prompt
+            self._emit_permission_mode_event()
 
-            with trace_span("plan_mode.approved",
-                langfuse_observation_type="chain",
-                target_mode=target_mode,
-                plan_slug=plan_result.get("slug", "") if plan_result else "",
-            ):
-                pass
+            trace_event(
+                "plan_mode.approved",
+                metadata={
+                    "target_mode": target_mode,
+                    "choice": choice,
+                    "context_cleared": choice == "clear-and-execute",
+                    "plan_slug": plan_result.get("slug", "") if plan_result else "",
+                },
+            )
 
-            print_info(f"Plan approved. Executing in {target_mode} mode.")
-
-            result_msg = f"User approved the plan. Permission mode: {target_mode}\n\n"
-            if plan_result:
-                result_msg += f"Plan system entry created: {plan_result.get('slug', '')}\n\n"
-            result_msg += f"## Approved Plan:\n{plan_content}\n\n"
+            if choice == "clear-and-execute":
+                self._context_manager.clear_history_keep_system()
+                self._context_cleared = True
+                print_info(f"Plan approved. Context cleared, executing in {target_mode} mode.")
+                result_msg = f"User approved the plan. Context was cleared. Permission mode: {target_mode}\n\n"
+                if plan_result:
+                    result_msg += f"Plan system entry created: {plan_result.get('slug', '')}\n\n"
+                result_msg += f"Plan directory: {saved_plan_dir}\n\n"
+            else:
+                print_info(f"Plan approved. Executing in {target_mode} mode.")
+                result_msg = f"User approved the plan. Permission mode: {target_mode}\n\n"
+                if plan_result:
+                    result_msg += f"Plan system entry created: {plan_result.get('slug', '')}\n\n"
+            result_msg += f"## Approved Plan:\n{full_plan}\n\n"
 
             if plan_result and plan_result.get("slug"):
                 from agents.plan.plan_manager import start_plan_execution
@@ -1290,33 +1341,9 @@ class Agent:
                 print_info(f"Starting plan execution: {plan_slug}")
 
                 exec_result = start_plan_execution(plan_slug)
-
-                result_msg += f"\n\n## Plan Tasks Ready\n"
-                result_msg += f"Status: {exec_result.get('status', 'unknown')}\n"
-                result_msg += f"Total tasks: {exec_result.get('total_tasks', 0)}\n"
-                result_msg += f"Pending tasks: {exec_result.get('pending_tasks', 0)}\n\n"
-
-                tasks = exec_result.get("tasks", [])
-                if tasks:
-                    result_msg += "## Task List\n\n"
-                    for t in tasks:
-                        result_msg += f"### Task {t['id']}: {t['title']}\n"
-                        result_msg += f"- **File**: `{t.get('file', 'N/A')}`\n"
-                        result_msg += f"- **Acceptance**: {t.get('acceptance', 'N/A')}\n"
-                        result_msg += f"- **Status**: {t['status']}\n\n"
-
-                    result_msg += "\n## Instructions\n\n"
-                    result_msg += "Please execute these tasks one by one. For each task:\n"
-                    result_msg += "1. Call `mark_task_in_progress(slug, task_id)` before starting\n"
-                    result_msg += "2. Implement the task (write code, create files, etc.)\n"
-                    result_msg += "3. Verify the implementation (run tests, check output)\n"
-                    result_msg += "4. Call `mark_task_done(slug, task_id, commit, verification)` after success\n"
-                    result_msg += "5. If failed, call `mark_task_failed(slug, task_id, reason)`\n"
-                    result_msg += "6. After all tasks done, call `complete_plan(slug)`\n"
-                else:
-                    result_msg += "No pending tasks found."
+                result_msg += self._format_plan_tasks_block(exec_result)
             else:
-                result_msg += f"Proceed with implementation."
+                result_msg += "Proceed with implementation."
 
             return result_msg
 
@@ -1374,5 +1401,5 @@ class Agent:
         future.set_result({"allowed": allowed})
         return True
 
-    def set_permission_response(self, request_id: str, allowed: bool) -> None:
-        self._permission_gate.set_response(request_id, allowed)
+    def set_permission_response(self, request_id: str, allowed: bool, feedback: str = "", choice: str = "") -> None:
+        self._permission_gate.set_response(request_id, allowed, feedback, choice)

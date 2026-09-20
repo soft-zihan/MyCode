@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from typing import Any, Callable, Iterator
@@ -56,64 +55,12 @@ def set_session_backend(backend: SessionBackend) -> None:
     _backend = backend
 
 
-# ============================================================
-# Tree-based Session Storage
-# ============================================================
-
-
-@dataclass
-class SessionEntry:
-    """Session 条目（树形结构节点）。
-    
-    Attributes:
-        id: 条目 ID
-        parent_id: 父条目 ID
-        role: 角色 ("user" | "assistant" | "tool" | "system")
-        content: 内容
-        metadata: 元数据
-            - tool_calls: list[{call_id, name, input}]
-            - tool_results: list[{call_id, name, result, status}]
-            - injected: bool (是否为 steering/follow-up 注入)
-            - turn: int (轮次号)
-    """
-    
-    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
-    parent_id: str | None = None
-    role: str = ""
-    content: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
-    
-    def to_dict(self) -> dict[str, Any]:
-        """转换为字典。"""
-        return {
-            "id": self.id,
-            "parent_id": self.parent_id,
-            "role": self.role,
-            "content": self.content,
-            "metadata": self.metadata,
-        }
-    
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> SessionEntry:
-        """从字典创建。"""
-        return cls(
-            id=data.get("id", str(uuid.uuid4())[:8]),
-            parent_id=data.get("parent_id"),
-            role=data.get("role", ""),
-            content=data.get("content", ""),
-            metadata=data.get("metadata", {}),
-        )
-
-
 class Session:
-    """Session 存储。
-    
-    支持：
-    - 树形结构：添加条目到当前分支、分支（fork）
-    - 事件日志：append/subscribe/replay（用于 SSE 和持久化）
-    - 消息派生：get_messages_for_llm（从事件日志提取 LLM 消息历史）
-    - 统一标记方案：删除、工具折叠、会话折叠都使用标记事件
-    - 持久化到文件
+    """Event-sourced Session 存储。
+
+    - 事件日志是唯一数据源：append/subscribe/replay 驱动 SSE 与持久化
+    - LLM 消息通过 get_messages_for_llm 从可见事件增量派生
+    - 删除、工具折叠、会话折叠都使用标记事件，保持 append-only
     """
     
     def __init__(
@@ -124,14 +71,11 @@ class Session:
         agent_type: str | None = None,
     ) -> None:
         self.id = session_id or uuid.uuid4().hex[:8]
-        self.parent_session = parent_session  # 父 session ID（用于子智能体）
-        self.origin = origin  # 来源标记：'sub_agent' 表示子智能体
-        self.agent_type = agent_type  # 智能体类型（用于子智能体）
-        self.entries: dict[str, SessionEntry] = {}
-        self.children: dict[str | None, list[str]] = {}  # parent_id -> [entry_ids]
-        self.current_branch: list[str] = []  # 当前分支的 entry_id 列表
+        self.parent_session = parent_session
+        self.origin = origin
+        self.agent_type = agent_type
         self.summary: str | None = None
-        self.system_prompt: str | None = None  # 系统提示词（单独存储）
+        self.system_prompt: str | None = None
         
         self._log: list[dict[str, Any]] = []
         self._subscribers: set[Callable[[dict], None]] = set()
@@ -156,7 +100,8 @@ class Session:
         try:
             from .session_projection_cache import get_projection_registry
             self._projections: dict[str, Any] = get_projection_registry().init_state()
-        except Exception:
+        except Exception as e:
+            print(f"[session] 投影注册表初始化失败，使用空投影: {e!r}")
             self._projections: dict[str, Any] = {}
         
         # ask_user 工具响应存储
@@ -211,8 +156,8 @@ class Session:
             for sub in list(self._subscribers):
                 try:
                     sub(event)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[session] 事件订阅者异常: type={type} err={e!r}")
         else:
             # 聚合事件：持久化 + 推送
             event["seq"] = self._next_seq
@@ -229,8 +174,8 @@ class Session:
                 try:
                     backend = get_session_backend()
                     backend.append(self.id, event)
-                except Exception:
-                    pass  # Fallback: in-memory only
+                except Exception as e:
+                    print(f"[session] backend.append 失败（事件仅在内存，存在丢失风险）: type={type} seq={event.get('seq')} err={e!r}")
             
             # Update projections
             try:
@@ -249,14 +194,14 @@ class Session:
                         rows = registry.checkpoint(self._projections, event["seq"])
                         checkpoint = ProjectionCheckpoint.from_session(self, rows)
                         cache.save_checkpoint(checkpoint)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[session] 投影缓存更新失败: type={type} err={e!r}")
             
             for sub in list(self._subscribers):
                 try:
                     sub(event)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[session] 事件订阅者异常: type={type} err={e!r}")
         
         # Broadcast to WebSocket subscribers
         try:
@@ -324,41 +269,9 @@ class Session:
     
     def _derive_messages(self, event: dict[str, Any]) -> list[dict[str, Any]]:
         """从单个事件派生 LLM 消息列表。"""
-        t = event.get("type")
-        
-        if t == "tool_folded":
-            return [
-                {
-                    "role": "tool",
-                    "tool_call_id": abstract["call_id"],
-                    "content": abstract["abstract"],
-                }
-                for abstract in event.get("abstracts", [])
-            ]
-        
-        if t == "session_folded":
-            return [{"role": "assistant", "content": event.get("summary", "")}]
-        
-        if t in ("user_message", "memory_injection"):
-            return [{"role": "user", "content": event.get("content", "")}]
-        
-        if t == "assistant_message":
-            msg: dict[str, Any] = {"role": "assistant", "content": event.get("content", "")}
-            if event.get("thinking"):
-                msg["thinking"] = event["thinking"]
-            if event.get("tool_calls"):
-                msg["tool_calls"] = event["tool_calls"]
-            return [msg]
-        
-        if t == "tool_result_msg":
-            return [{
-                "role": "tool",
-                "tool_call_id": event["call_id"],
-                "content": event["content"],
-            }]
-        
-        return []
-    
+        return derive_messages_from_event(event)
+
+
     def hide_events(self, seqs: list[int]) -> None:
         """隐藏指定 seq 的事件。
         
@@ -377,161 +290,19 @@ class Session:
         seq_set = set(seqs)
         self._visible_seqs = [s for s in self._visible_seqs if s not in seq_set]
     
-    # ── 三阶段恢复 ──
-    
-    def _find_snapshot_at_seq(self, target_seq: int) -> dict | None:
-        """找到指定 seq 之前的最近的 snapshot/end 事件。"""
-        for event in reversed(self._log[:target_seq]):
-            if event.get("type") == "snapshot/end":
-                return event
-        return None
-    
-    def _capture_current_file_states(self) -> list[dict]:
-        """捕获当前文件状态（路径 + hash）。"""
-        import hashlib
+    def truncate_events_to(self, keep_seq: int) -> None:
+        """截断内存事件日志：保留 seq < keep_seq 的事件。
 
-        cwd = get_workspace()
-        files = []
-        ignore_dirs = {".git", ".venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache"}
-        try:
-            for file_path in cwd.rglob("*"):
-                try:
-                    if not file_path.is_file():
-                        continue
-                    # 隐藏/忽略目录判断基于相对工作区的路径（工作区本身可能位于隐藏路径下）
-                    rel = file_path.relative_to(cwd)
-                    if any(part.startswith(".") or part in ignore_dirs for part in rel.parts):
-                        continue
-                    content = file_path.read_bytes()
-                    files.append({
-                        "path": str(rel),
-                        "hash": hashlib.md5(content).hexdigest()[:8],
-                        "size": len(content),
-                    })
-                except OSError:
-                    continue
-        except OSError as e:
-            from agents.observability.trace import trace_event
-            trace_event("snapshot.capture_failed", error=str(e), workspace=str(cwd))
-        return files
-    
-    def stage_revert(self, target_seq: int) -> dict:
-        """Stage：计算恢复计划，预览变更。
-        
-        Returns:
-            dict: 恢复计划，包含 current_snapshot, restore_plan, files_to_change
+        与 backend.truncate(session_id, keep_seq) 的物理截断配套使用
+        （见 agents/core/rewind_service.py）。截断后 _next_seq 重置为
+        keep_seq，保证后续事件 seq 与 jsonl 连续；_surface_generation
+        递增使消息投影全量重建。
         """
-        # 1. 捕获当前状态（用于取消）
-        current_snapshot = self._capture_current_file_states()
-        
-        # 2. 从事件日志读取目标快照
-        target_snapshot = self._find_snapshot_at_seq(target_seq)
-        if not target_snapshot:
-            return {
-                "error": f"No snapshot found before seq {target_seq}",
-                "current_snapshot": current_snapshot,
-                "restore_plan": {},
-                "files_to_change": [],
-            }
-        
-        target_files = target_snapshot.get("files", [])
-        
-        # 3. 计算恢复计划
-        restore_plan = {}
-        files_to_change = []
-        for file_info in target_files:
-            path = file_info["path"]
-            current_file = next((f for f in current_snapshot if f["path"] == path), None)
-            if not current_file or current_file["hash"] != file_info["hash"]:
-                files_to_change.append(path)
-                restore_plan[path] = file_info
-        
-        # 4. 返回预览（不执行）
-        return {
-            "current_snapshot": current_snapshot,
-            "target_seq": target_seq,
-            "restore_plan": restore_plan,
-            "files_to_change": files_to_change,
-        }
-    
-    def clear_revert(self, current_snapshot: list[dict]) -> dict:
-        """Clear：取消恢复，恢复到原始状态。
-        
-        Args:
-            current_snapshot: stage_revert 返回的 current_snapshot
-        
-        Returns:
-            dict: 恢复结果
-        """
-        # 恢复到原始状态
-        restored_files = []
-        for file_info in current_snapshot:
-            path = Path(file_info["path"])
-            if path.exists():
-                # 文件存在，检查是否需要恢复
-                import hashlib
-                try:
-                    current_hash = hashlib.md5(path.read_bytes()).hexdigest()[:8]
-                    if current_hash != file_info["hash"]:
-                        # 文件已被修改，需要恢复
-                        # 注意：这里假设我们有文件内容的备份
-                        # 实际实现中，我们需要从 snapshot 事件中获取文件内容
-                        restored_files.append(file_info["path"])
-                except (OSError, PermissionError):
-                    pass
-        
-        # 记录取消事件
-        self.append("revert/clear", {
-            "restored_files": len(restored_files),
-        })
-        
-        return {
-            "restored_files": restored_files,
-            "status": "cleared",
-        }
-    
-    def commit_revert(self, target_seq: int) -> dict:
-        """Commit：确认恢复。
-        
-        Args:
-            target_seq: 目标 seq
-        
-        Returns:
-            dict: 恢复结果
-        """
-        # 1. 从事件日志读取目标快照
-        target_snapshot = self._find_snapshot_at_seq(target_seq)
-        if not target_snapshot:
-            return {
-                "error": f"No snapshot found before seq {target_seq}",
-                "status": "failed",
-            }
-        
-        target_files = target_snapshot.get("files", [])
-        
-        # 2. 执行恢复（这里只是记录，实际文件恢复需要实现）
-        restored_files = []
-        for file_info in target_files:
-            restored_files.append(file_info["path"])
-        
-        # 3. 截断事件列表
-        self._log = self._log[:target_seq]
-        
-        # 同步更新 _visible_seqs
-        self._visible_seqs = [s for s in self._visible_seqs if s < target_seq]
+        self._log = [e for e in self._log if e.get("seq", 0) < keep_seq]
+        self._visible_seqs = [s for s in self._visible_seqs if s < keep_seq]
+        self._next_seq = keep_seq
         self._surface_generation += 1
-        
-        # 4. 记录恢复事件
-        self.append("revert/commit", {
-            "target_seq": target_seq,
-            "restored_files": len(restored_files),
-        })
-        
-        return {
-            "restored_files": restored_files,
-            "status": "committed",
-        }
-    
+
     @classmethod
     def load_from_events(cls, session_id: str) -> Session | None:
         """从后端加载事件日志，验证 seq 连续性，应用崩溃恢复和投影缓存。
@@ -547,240 +318,98 @@ class Session:
                 rows = projcache.get("rows", {})
                 if rows.get("cwd") and rows["cwd"].get("val"):
                     metadata["cwd"] = rows["cwd"]["val"]
-                if rows.get("parent_session") and rows["parent_session"].get("val"):
-                    metadata["parent_session"] = rows["parent_session"]["val"]
-                if rows.get("origin") and rows["origin"].get("val"):
-                    metadata["origin"] = rows["origin"]["val"]
-                if rows.get("agent_type") and rows["agent_type"].get("val"):
-                    metadata["agent_type"] = rows["agent_type"]["val"]
                 if rows.get("plan_slug") and rows["plan_slug"].get("val"):
                     metadata["plan_slug"] = rows["plan_slug"]["val"]
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[session] projcache 读取失败 {projcache_path}: {e!r}")
         
-        session = cls(
-            session_id=session_id,
-            parent_session=metadata.get("parent_session"),
-            origin=metadata.get("origin"),
-            agent_type=metadata.get("agent_type"),
-        )
+        session = cls(session_id=session_id)
         
         session.cwd = metadata.get("cwd")
         session.plan_slug = metadata.get("plan_slug")
         
-        # Load events from backend
-        try:
-            backend = get_session_backend()
-            events = backend.load_all_events(session_id)
-        except Exception:
-            # Fallback: try loading from JSONL file directly
-            events = []
-            path = cls._jsonl_path(session_id)
-            if path.exists():
-                for line in path.read_text(encoding="utf-8").strip().splitlines():
-                    if not line.strip():
-                        continue
-                    try:
-                        event = json.loads(line)
-                        events.append(event)
-                    except json.JSONDecodeError:
-                        break
-        
+        backend = get_session_backend()
+        events = backend.load_all_events(session_id)
         if not events:
             return None
-        
-        # Apply crash recovery (torn tail detection + auto-repair)
+
         from .session_crash_recovery import validate_and_repair_events
         events = validate_and_repair_events(events, session_id)
-        
-        # Load all events, handling gaps and duplicates gracefully
-        # Group events by seq, keeping the first occurrence of each seq
+
         events_by_seq: dict[int, dict] = {}
         for event in events:
             seq = event.get("seq")
             if seq is not None and seq not in events_by_seq:
                 events_by_seq[seq] = event
-        
-        # Load events in seq order
+
         max_seq = -1
         for seq in sorted(events_by_seq.keys()):
             session._log.append(events_by_seq[seq])
             max_seq = max(max_seq, seq)
-        
-        # Set _next_seq to max_seq + 1 to prevent duplicate seq numbers
+
         session._next_seq = max_seq + 1
-        
-        # 重建 _visible_seqs
+
         hidden_seqs = set()
         for event in session._log:
             if event.get("type") == "events_hidden":
                 hidden_seqs.update(event.get("hidden_seqs", []))
-        
+
         session._visible_seqs = [
             e["seq"] for e in session._log
             if e.get("seq") not in hidden_seqs and e.get("type") != "events_hidden"
         ]
-        session._surface_generation = len(session._log)  # 初始 generation
-        
-        # Build projections from events (with checkpoint optimization)
-        try:
-            from .session_projection_cache import restore_projections, SessionHeader
-            header = SessionHeader(
-                id=session.id,
-                version=1,
-                created_at=session.created_at,
-                cwd=session.cwd,
-                is_seeded=session.is_seeded,
-                inherited_event_count=session.inherited_event_count,
-            )
-            session._projections = restore_projections(session_id, session._log, header)
-        except Exception:
-            pass
+        session._surface_generation = len(session._log)
+
+        from .session_projection_cache import restore_projections, SessionHeader
+        header = SessionHeader(
+            id=session.id,
+            version=1,
+            created_at=session.created_at,
+            cwd=session.cwd,
+            is_seeded=session.is_seeded,
+            inherited_event_count=session.inherited_event_count,
+        )
+        session._projections = restore_projections(session_id, session._log, header)
         
         return session if session._log else None
     
-    @staticmethod
-    def _jsonl_path(session_id: str) -> Path:
-        return session_dir() / f"{session_id}.events.jsonl"
-    
-    def add_entry(self, entry: SessionEntry) -> str:
-        """添加 entry 到当前分支。
-        
-        Args:
-            entry: 要添加的条目
-        
-        Returns:
-            str: 条目 ID
-        """
-        entry.parent_id = self.current_branch[-1] if self.current_branch else None
-        self.entries[entry.id] = entry
-        self.children.setdefault(entry.parent_id, []).append(entry.id)
-        self.current_branch.append(entry.id)
-        return entry.id
-    
-    def fork(self, entry_id: str) -> Session:
-        """从指定 entry 创建新分支。
-        
-        Args:
-            entry_id: 分支点条目 ID
-        
-        Returns:
-            Session: 新的 Session 实例
-        """
-        new_session = Session()
-        path = self._trace_path(entry_id)
-        for eid in path:
-            entry = self.entries[eid]
-            new_entry = SessionEntry(
-                id=entry.id,
-                parent_id=entry.parent_id,
-                role=entry.role,
-                content=entry.content,
-                metadata=entry.metadata.copy(),
-            )
-            new_session.entries[new_entry.id] = new_entry
-            new_session.children.setdefault(new_entry.parent_id, []).append(new_entry.id)
-            new_session.current_branch.append(new_entry.id)
-        
-        # 复制 Surface 索引
-        new_session._visible_seqs = self._visible_seqs.copy()
-        new_session._surface_generation = self._surface_generation
-        
-        return new_session
-    
-    def get_messages(self) -> list[dict[str, Any]]:
-        """获取当前分支的消息列表（用于 LLM 调用）。
-        
-        Returns:
-            list[dict]: 消息列表
-        """
-        return [
-            {"role": self.entries[eid].role, "content": self.entries[eid].content}
-            for eid in self.current_branch
-            if eid in self.entries
-        ]
-    
-    def get_entries(self) -> list[SessionEntry]:
-        """获取当前分支的所有条目。
-        
-        Returns:
-            list[SessionEntry]: 条目列表
-        """
-        return [self.entries[eid] for eid in self.current_branch if eid in self.entries]
-    
-    def _trace_path(self, entry_id: str) -> list[str]:
-        """从根到 entry_id 的路径。
-        
-        Args:
-            entry_id: 目标条目 ID
-        
-        Returns:
-            list[str]: 路径上的条目 ID 列表
-        """
-        path = []
-        current = entry_id
-        while current:
-            path.append(current)
-            if current not in self.entries:
-                break
-            current = self.entries[current].parent_id
-        return list(reversed(path))
-    
-    def get_branch_point(self) -> str | None:
-        """获取当前分支的分支点（最后一个有兄弟节点的条目）。
-        
-        Returns:
-            str | None: 分支点条目 ID
-        """
-        for parent_id, child_ids in self.children.items():
-            if len(child_ids) > 1:
-                return child_ids[-2] if len(child_ids) >= 2 else None
-        return None
-    
-    def list_branches(self) -> list[list[str]]:
-        """列出所有分支。
-        
-        Returns:
-            list[list[str]]: 分支列表，每个分支是条目 ID 列表
-        """
-        branches = []
-        for parent_id, child_ids in self.children.items():
-            if len(child_ids) > 1:
-                for child_id in child_ids:
-                    branch = self._trace_path(child_id)
-                    branches.append(branch)
-        if not branches:
-            branches.append(self.current_branch.copy())
-        return branches
-    
 
-    
-    def compact(self, summary: str) -> None:
-        """压缩会话，保留摘要。
-        
-        Args:
-            summary: 压缩后的摘要
-        """
-        if len(self.current_branch) <= 2:
-            return
-        
-        # 保留 system 和第一条用户消息
-        keep_entries = []
-        for eid in self.current_branch[:2]:
-            if eid in self.entries:
-                keep_entries.append(eid)
-        
-        # 添加摘要条目
-        summary_entry = SessionEntry(
-            role="user",
-            content=f"[Session compacted]\n\n{summary}",
-            metadata={"compacted": True},
-        )
-        keep_entries.append(summary_entry.id)
-        self.entries[summary_entry.id] = summary_entry
-        
-        # 更新当前分支
-        self.current_branch = keep_entries
+def derive_messages_from_event(event: dict[str, Any]) -> list[dict[str, Any]]:
+    """从单个事件派生 LLM 消息列表。"""
+    t = event.get("type")
+
+    if t == "tool_folded":
+        return [
+            {
+                "role": "tool",
+                "tool_call_id": abstract["call_id"],
+                "content": abstract["abstract"],
+            }
+            for abstract in event.get("abstracts", [])
+        ]
+
+    if t == "session_folded":
+        return [{"role": "assistant", "content": event.get("summary", "")}]
+
+    if t in ("user_message", "memory_injection"):
+        return [{"role": "user", "content": event.get("content", "")}]
+
+    if t == "assistant_message":
+        msg: dict[str, Any] = {"role": "assistant", "content": event.get("content", "")}
+        if event.get("thinking"):
+            msg["thinking"] = event["thinking"]
+        if event.get("tool_calls"):
+            msg["tool_calls"] = event["tool_calls"]
+        return [msg]
+
+    if t == "tool_result_msg":
+        return [{
+            "role": "tool",
+            "tool_call_id": event["call_id"],
+            "content": event["content"],
+        }]
+
+    return []
 
 
 def session_dir() -> Path:
@@ -842,8 +471,8 @@ def list_sessions() -> list[dict[str, Any]]:
             }
             results.append(metadata)
             seen_ids.add(session.id)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[session] session 元数据读取失败: {e!r}")
     
     # 2. 直接从 projcache 文件读取投影数据（不需要读 session 文件）
     import concurrent.futures
@@ -878,7 +507,8 @@ def list_sessions() -> list[dict[str, Any]]:
                 metadata["plan_slug"] = rows["plan_slug"]["val"]
             
             return metadata
-        except Exception:
+        except Exception as e:
+            print(f"[session] projcache 解析失败: {e!r}")
             return None
     
     projcache_files = list(session_dir().glob("*.projcache.json"))
@@ -893,28 +523,6 @@ def list_sessions() -> list[dict[str, Any]]:
     _elapsed = _time.time() - _t0
     if _elapsed > 0.5:
         print(f"[PERF] list_sessions: {_elapsed:.2f}s for {len(results)} sessions")
-    return results
-
-
-def list_child_sessions(parent_session_id: str) -> list[dict[str, Any]]:
-    """列出指定父 session 的所有子 session。从 projcache 读取。"""
-    _ensure_dir()
-    results = []
-    for f in session_dir().glob("*.projcache.json"):
-        try:
-            projcache = json.loads(f.read_text())
-            rows = projcache.get("rows", {})
-            if rows.get("parent_session") and rows["parent_session"].get("val") == parent_session_id:
-                session_id = f.name.replace(".projcache.json", "")
-                metadata = {
-                    "id": session_id,
-                    "parent_session": parent_session_id,
-                }
-                if rows.get("title") and rows["title"].get("val"):
-                    metadata["name"] = rows["title"]["val"]
-                results.append(metadata)
-        except Exception:
-            pass
     return results
 
 

@@ -1,117 +1,148 @@
 #!/usr/bin/env python3
-"""Langfuse 云端接入冒烟测试。
-
-流程：
-1. 加载 .env（Langfuse 密钥）
-2. 初始化 OTel tracer（OTLP/HTTP → Langfuse Cloud）
-3. 发送一棵模拟 span 树（turn → model_call → tool_call → compaction）
-4. flush 后通过 Langfuse REST API 查询验证 trace 到达
-
-运行：.venv/bin/python scripts/smoke_langfuse.py
-"""
+"""Langfuse SDK smoke test."""
 
 from __future__ import annotations
 
-import base64
-import json
 import os
 import sys
 import time
-import urllib.request
 import uuid
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# 1. 加载 .env
-env_file = PROJECT_ROOT / ".env"
-for line in env_file.read_text().splitlines():
-    line = line.strip()
-    if not line or line.startswith("#"):
-        continue
-    k, _, v = line.partition("=")
-    os.environ.setdefault(k.strip(), v.strip().strip('"'))
+from agents.observability.langfuse_api import load_langfuse_env
 
-os.environ["MYCODE_OTEL"] = "1"
+load_langfuse_env(PROJECT_ROOT)
+os.environ["MYCODE_TRACING"] = "1"
 
-BASE_URL = os.environ["LANGFUSE_BASE_URL"]
-PK = os.environ["LANGFUSE_PUBLIC_KEY"]
-SK = os.environ["LANGFUSE_SECRET_KEY"]
+from agents.observability import flush_tracing, init_tracing, shutdown_tracing
+from agents.observability.status import get_langfuse_status
+from agents.observability.trace import trace_context, trace_span
+from agents.observability.tracer import get_trace_client
 
-# 2. 初始化 tracer
-from agents.observability.tracer import (
-    init_tracer,
-    shutdown_tracer,
-    set_current_session_id,
-    tracer,
-)
+init_tracing()
+client = get_trace_client()
+if client is None:
+    print("[smoke] ❌ Langfuse client 初始化失败，请检查 MYCODE_TRACING 与 LANGFUSE_* 密钥")
+    sys.exit(1)
 
-init_tracer()
-
-# 3. 发送模拟 span 树
 smoke_id = f"smoke-{uuid.uuid4().hex[:8]}"
 session_id = f"smoke-session-{uuid.uuid4().hex[:8]}"
-set_current_session_id(session_id)
+trace_name = f"mycode-smoke-{smoke_id}"
+usage_details = {
+    "input": 80,
+    "input_cached_tokens": 20,
+    "output": 20,
+    "total": 120,
+}
 
 print(f"[smoke] trace 标记: {smoke_id}, session: {session_id}")
 
-with tracer.span("turn", {
-    "langfuse.observation.type": "chain",
-    "langfuse.trace.name": f"mycode-smoke-{smoke_id}",
-    "mycode.turn.id": smoke_id,
-    "langfuse.observation.input": "smoke test: 帮我读取 config.py",
-    "mycode.event_range.start_seq": 1,
-}) as turn_span_obj:
-    with tracer.span("llm.test-model", {
-        "langfuse.observation.type": "generation",
-        "langfuse.observation.model.name": "test-model",
-        "llm.token_count.prompt": 100,
-        "llm.token_count.completion": 20,
-    }):
-        time.sleep(0.05)
-    with tracer.span("tool.read_file", {
-        "langfuse.observation.type": "tool",
-        "tool.name": "read_file",
-        "langfuse.observation.input": '{"file_path": "config.py"}',
-    }):
-        time.sleep(0.05)
-    with tracer.span("context.compaction", {
-        "langfuse.observation.type": "chain",
-        "langfuse.observation.metadata.tokens_before": 5000,
-        "langfuse.observation.metadata.tokens_after": 3000,
-        "langfuse.observation.metadata.compression_ratio": 0.6,
-    }):
-        time.sleep(0.02)
-    turn_span_obj.set_attribute("mycode.event_range.end_seq", 42)
+with trace_context(
+    session_id=session_id,
+    trace_name=trace_name,
+    tags=["smoke-test"],
+    metadata={"smoke_id": smoke_id},
+):
+    with trace_span(
+        "turn",
+        input="smoke test: 帮我读取 config.py",
+        metadata={
+            "turn_id": smoke_id,
+            "event_range_start_seq": 1,
+        },
+    ) as turn_span:
+        with trace_span("model_call", model="test-model") as model_span:
+            model_span.update(
+                input={"messages": [{"role": "user", "content": "smoke"}]},
+                output={"content": "ok"},
+                usage_details=usage_details,
+            )
+            time.sleep(0.05)
 
-# 4. flush
-shutdown_tracer()
+        with trace_span(
+            "tool_call",
+            name="tool.read_file",
+            input={"file_path": "config.py"},
+            output="config content",
+            metadata={"tool_name": "read_file"},
+        ):
+            time.sleep(0.05)
+
+        with trace_span(
+            "compact",
+            metadata={
+                "tokens_before": 5000,
+                "tokens_after": 3000,
+                "compression_ratio": 0.6,
+            },
+        ):
+            time.sleep(0.02)
+
+        turn_span.update(
+            output="smoke completed",
+            metadata={"event_range_end_seq": 42},
+        )
+
+flush_tracing()
 print("[smoke] span 已 flush，等待 Langfuse 摄取...")
 
-# 5. 通过 REST API 验证
-auth = base64.b64encode(f"{PK}:{SK}".encode()).decode()
-deadline = time.time() + 60
+deadline = time.time() + 90
 found = None
 while time.time() < deadline:
-    req = urllib.request.Request(
-        f"{BASE_URL}/api/public/traces?limit=20",
-        headers={"Authorization": f"Basic {auth}"},
-    )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        data = json.loads(resp.read())
-    for t in data.get("data", []):
-        if smoke_id in (t.get("name") or ""):
-            found = t
-            break
+    try:
+        traces = client.api.trace.list(name=trace_name, limit=50).data
+        found = next((trace for trace in traces if trace.name == trace_name), None)
+    except Exception as exc:
+        print(f"[smoke] trace list failed: {type(exc).__name__}: {exc}")
     if found:
         break
     time.sleep(5)
 
-if found:
-    print(f"[smoke] ✅ trace 已到达 Langfuse: id={found['id']} name={found['name']}")
-    print(f"[smoke]    sessionId={found.get('sessionId')} observations={len(found.get('observations', []))}")
-    print(f"[smoke]    UI: {BASE_URL}/project/*/traces/{found['id']}")
-else:
-    print(f"[smoke] ❌ 60 秒内未查询到 trace（标记 {smoke_id}），请检查密钥/网络")
+if not found:
+    shutdown_tracing()
+    print(f"[smoke] ❌ 90 秒内未查询到 trace（标记 {smoke_id}），请检查密钥/网络")
     sys.exit(1)
+
+detail = client.api.trace.get(found.id)
+observations = detail.observations or []
+observation_types = {str(observation.type).upper() for observation in observations}
+generation = next(
+    (observation for observation in observations if str(observation.type).upper() == "GENERATION"),
+    None,
+)
+
+errors: list[str] = []
+if detail.session_id != session_id:
+    errors.append(f"sessionId={detail.session_id!r}, expected={session_id!r}")
+if not {"CHAIN", "GENERATION", "TOOL"} <= observation_types:
+    errors.append(f"missing observation types: {observation_types}")
+if not generation:
+    errors.append("missing GENERATION observation")
+else:
+    generation_usage = generation.usage_details or {}
+    if generation_usage.get("total") != usage_details["total"]:
+        errors.append(f"usageDetails={generation_usage}, expected total={usage_details['total']}")
+    if generation_usage.get("input") != usage_details["input"]:
+        errors.append(f"usageDetails={generation_usage}, expected input={usage_details['input']}")
+    if generation_usage.get("input_cached_tokens") != usage_details["input_cached_tokens"]:
+        errors.append(
+            f"usageDetails={generation_usage}, expected input_cached_tokens={usage_details['input_cached_tokens']}"
+        )
+
+status = get_langfuse_status(force=True)
+project_id = status.get("project_id") or "*"
+print(f"[smoke] ✅ trace 已到达 Langfuse: id={detail.id} name={detail.name}")
+print(f"[smoke]    sessionId={detail.session_id} observations={len(observations)}")
+print(f"[smoke]    UI: {status.get('endpoint', '')}/project/{project_id}/traces/{detail.id}")
+
+shutdown_tracing()
+
+if errors:
+    for error in errors:
+        print(f"[smoke] ❌ {error}")
+    sys.exit(1)
+
+print("[smoke] ✅ trace 结构、session 和 usage 校验通过")

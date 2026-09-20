@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { Clock, Zap, Bot, Wrench, MessageSquare, ChevronDown, ChevronRight, AlertCircle, Shield, DollarSign, Layers, Radio, BarChart3 } from 'lucide-react';
+import { Clock, Zap, Bot, Wrench, MessageSquare, ChevronDown, ChevronRight, AlertCircle, Shield, DollarSign, Layers, Radio, BarChart3, ExternalLink } from 'lucide-react';
 import { OverviewBar } from '../trace/OverviewBar';
 import './TrajectoryTimeline.css';
 
@@ -11,6 +11,7 @@ interface TrajectoryEvent {
   content?: string;
   metadata?: Record<string, unknown>;
   kind?: string;
+  traceUrl?: string;
 }
 
 interface TrajectoryTimelineProps {
@@ -349,6 +350,19 @@ export const TrajectoryTimeline: React.FC<TrajectoryTimelineProps> = ({ events, 
                     </span>
                   </div>
                   <div className="flex items-center gap-1.5">
+                    {event.traceUrl && (
+                      <a
+                        href={event.traceUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        className="text-xs px-1.5 py-0.5 bg-white border border-blue-200 text-blue-600 rounded hover:bg-blue-50 flex items-center gap-1"
+                        title="Open Langfuse trace"
+                      >
+                        <ExternalLink className="w-2.5 h-2.5" />
+                        Langfuse
+                      </a>
+                    )}
                     {event.duration && (
                       <span className="text-xs text-gray-500 flex items-center gap-0.5">
                         <Zap className="w-2.5 h-2.5" />

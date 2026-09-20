@@ -2,9 +2,11 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   fetchConfig, AppConfig,
   compactSession, updatePermissionMode,
-  forkSession, respondToPermission, respondToQuestion, truncateSession,
+  forkSession, respondToPermission, respondToQuestion,
+  stageRewind, commitRewind,
   fetchSessionSummary,
 } from '../../../api/client';
+import type { RewindPlan } from '../../../api/client';
 import { useChatNodes } from '../../../components/chat/nodes';
 import type { UserNode } from '../../../components/chat/nodes/types';
 import { sessionStore, wsManager, eventRouter, useSessionStore } from '../../../store';
@@ -15,11 +17,95 @@ const EMPTY_FILE_SNAPSHOTS: FileSnapshot[] = [];
 const EMPTY_TODOS: TodoItem[] = [];
 const EMPTY_STATS = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
 
+const CHARS_PER_TOKEN = 4;
+
+function computeBreakdownFromStats(event: Record<string, any>): Record<string, any> | null {
+  const actualInputTokens = event.last_input_token_count || 0;
+  const systemChars = event.system_chars || 0;
+  const userChars = event.user_chars || 0;
+  const assistantChars = event.assistant_chars || 0;
+  const toolResultChars = event.tool_result_chars || 0;
+  
+  if (systemChars === 0 && toolResultChars === 0 && userChars === 0 && assistantChars === 0) {
+    return null;
+  }
+  
+  const systemBaseChars = event.system_base_chars || 0;
+  const systemClaudeMdChars = event.system_claude_md_chars || 0;
+  const systemSkillsChars = event.system_skills_chars || 0;
+  const systemMemoryChars = event.system_memory_chars || 0;
+  const systemWikiChars = event.system_wiki_chars || 0;
+  const systemAgentsChars = event.system_agents_chars || 0;
+  const systemWorkspaceChars = event.system_workspace_chars || 0;
+  const planModeChars = event.plan_mode_chars || 0;
+  
+  const totalChars = systemChars + userChars + assistantChars + toolResultChars;
+  
+  let userTokens: number, assistantTokens: number, toolTokens: number;
+  let basePromptTokens: number, claudeMdTokens: number, skillsTokens: number;
+  let memoryTokens: number, wikiTokens: number, agentsTokens: number, planModeTokens: number;
+  
+  if (actualInputTokens > 0 && totalChars > 0) {
+    const scale = actualInputTokens / (totalChars / CHARS_PER_TOKEN);
+    userTokens = Math.round((userChars / CHARS_PER_TOKEN) * scale);
+    assistantTokens = Math.round((assistantChars / CHARS_PER_TOKEN) * scale);
+    toolTokens = Math.round((toolResultChars / CHARS_PER_TOKEN) * scale);
+    basePromptTokens = Math.round(((systemBaseChars + systemWorkspaceChars) / CHARS_PER_TOKEN) * scale);
+    claudeMdTokens = Math.round((systemClaudeMdChars / CHARS_PER_TOKEN) * scale);
+    skillsTokens = Math.round((systemSkillsChars / CHARS_PER_TOKEN) * scale);
+    memoryTokens = Math.round((systemMemoryChars / CHARS_PER_TOKEN) * scale);
+    wikiTokens = Math.round((systemWikiChars / CHARS_PER_TOKEN) * scale);
+    agentsTokens = Math.round((systemAgentsChars / CHARS_PER_TOKEN) * scale);
+    planModeTokens = Math.round((planModeChars / CHARS_PER_TOKEN) * scale);
+  } else {
+    userTokens = Math.round(userChars / CHARS_PER_TOKEN);
+    assistantTokens = Math.round(assistantChars / CHARS_PER_TOKEN);
+    toolTokens = Math.round(toolResultChars / CHARS_PER_TOKEN);
+    basePromptTokens = Math.round((systemBaseChars + systemWorkspaceChars) / CHARS_PER_TOKEN);
+    claudeMdTokens = Math.round(systemClaudeMdChars / CHARS_PER_TOKEN);
+    skillsTokens = Math.round(systemSkillsChars / CHARS_PER_TOKEN);
+    memoryTokens = Math.round(systemMemoryChars / CHARS_PER_TOKEN);
+    wikiTokens = Math.round(systemWikiChars / CHARS_PER_TOKEN);
+    agentsTokens = Math.round(systemAgentsChars / CHARS_PER_TOKEN);
+    planModeTokens = Math.round(planModeChars / CHARS_PER_TOKEN);
+  }
+  
+  const messagesTokens = userTokens + assistantTokens + toolTokens;
+  
+  const toolResultByNameChars: Record<string, number> = event.tool_result_by_name || {};
+  const toolResultByName: Record<string, number> = {};
+  if (toolResultByNameChars && toolTokens > 0) {
+    const totalToolChars = Object.values(toolResultByNameChars).reduce((sum, c) => sum + c, 0);
+    if (totalToolChars > 0) {
+      for (const [toolName, chars] of Object.entries(toolResultByNameChars)) {
+        toolResultByName[toolName] = Math.round(toolTokens * (chars as number / totalToolChars));
+      }
+    }
+  }
+  
+  return {
+    base_prompt_tokens: basePromptTokens,
+    claude_md_tokens: claudeMdTokens,
+    skills_tokens: skillsTokens,
+    memory_tokens: memoryTokens,
+    wiki_tokens: wikiTokens,
+    agents_tokens: agentsTokens,
+    tools_tokens: toolTokens,
+    messages_tokens: messagesTokens,
+    user_tokens: userTokens,
+    assistant_tokens: assistantTokens,
+    tool_tokens: toolTokens,
+    tool_result_by_name: toolResultByName,
+    total_tokens: actualInputTokens || Math.round(totalChars / CHARS_PER_TOKEN),
+    is_plan_mode: event.is_plan_mode || false,
+    plan_mode_tokens: planModeTokens,
+  };
+}
+
 export function useChat() {
   const [inputValue, setInputValue] = useState('');
   const [contextFiles, setContextFiles] = useState<string[]>([]);
   const [config, setConfig] = useState<AppConfig | null>(null);
-  const [selectedAgent, setSelectedAgent] = useState<string>('build');
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const currentSessionIdRef = useRef<string | null>(null);
@@ -30,7 +116,7 @@ export function useChat() {
   const [fileTreeRefreshTrigger, setFileTreeRefreshTrigger] = useState(0);
   const pendingSessionNameRef = useRef<string | null>(null);
   
-  const [permissionMode, setPermissionMode] = useState<'default' | 'acceptEdits' | 'bypassPermissions'>('bypassPermissions');
+  const [permissionMode, setPermissionMode] = useState<'default' | 'acceptEdits' | 'plan' | 'bypassPermissions'>('bypassPermissions');
   const [contextTotal, setContextTotal] = useState(128000);
   
   const [sessionRefreshTrigger, setSessionRefreshTrigger] = useState(0);
@@ -51,13 +137,6 @@ export function useChat() {
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
   }, [currentSessionId]);
-  
-  // Sync selectedAgent with permissionMode
-  useEffect(() => {
-    if (selectedAgent === 'plan') {
-      setPermissionMode('default');
-    }
-  }, [selectedAgent]);
   
   const { snapshot: chatSnapshot, handleSSEEvent: handleNodeEvent, addUserMessage, resetNodes, loadSessionEvents, prependSessionEvents } = useChatNodes();
   
@@ -142,6 +221,11 @@ export function useChat() {
           event.output_tokens || 0,
           event.cached_tokens || 0
         );
+        // 计算实时 breakdown
+        const breakdown = computeBreakdownFromStats(event);
+        if (breakdown) {
+          sessionStore.setBreakdown(targetSessionId, breakdown);
+        }
       }
       if (eventType === 'context/compacted') {
         // 更新 token 计数
@@ -188,7 +272,6 @@ export function useChat() {
           tool_name: event.tool_name,
           message: event.message || '',
           sub_agent_id: event.sub_agent_id,
-          plan_file_path: event.plan_file_path,
         };
         sessionStore.setPendingPermission(eventSessionId, permReq);
       }
@@ -209,6 +292,20 @@ export function useChat() {
       
       if (eventType === 'todo/updated') {
         fetchTodos(eventSessionId);
+      }
+      
+      if (eventType === 'plan/updated') {
+        sessionStore.bumpPlanRevision(eventSessionId);
+      }
+      
+      if (eventType === 'permission/mode_changed') {
+        const mode = event.mode as 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions' | undefined;
+        if (mode) {
+          sessionStore.setPermissionMode(eventSessionId, mode);
+          if (eventSessionId === currentSessionIdRef.current) {
+            setPermissionMode(mode);
+          }
+        }
       }
       
       if (eventType === 'goal/criteria') {
@@ -298,11 +395,20 @@ export function useChat() {
       setCurrentProject(lastCwd.split('/').pop() || lastCwd);
     }
     
-    // 恢复上次的 session
+    // 恢复上次的 session（先探测：session 已被删除时清理陈旧引用，回到空状态）
     const lastSessionId = localStorage.getItem('lastSessionId');
     if (lastSessionId) {
       logger.info('[INIT] restoring session:', lastSessionId);
-      handleSessionSelect(lastSessionId);
+      fetchSessionSummary(lastSessionId)
+        .then(() => handleSessionSelect(lastSessionId))
+        .catch((err: unknown) => {
+          if ((err as { status?: number } | undefined)?.status === 404) {
+            logger.info('[INIT] stale lastSessionId removed:', lastSessionId);
+            localStorage.removeItem('lastSessionId');
+          } else {
+            handleSessionSelect(lastSessionId);
+          }
+        });
     }
   }, []);
 
@@ -385,7 +491,7 @@ export function useChat() {
         
         if (summary.permission_mode) {
           sessionStore.setPermissionMode(sessionId, summary.permission_mode);
-          setPermissionMode(summary.permission_mode as 'default' | 'acceptEdits' | 'bypassPermissions');
+          setPermissionMode(summary.permission_mode as 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions');
         }
       }
       
@@ -542,7 +648,6 @@ export function useChat() {
           message: userMessageContent,
           session_id: currentSessionIdRef.current === '__pending__' ? null : currentSessionIdRef.current,
           context_files: contextFiles.length > 0 ? contextFiles : undefined,
-          agent: selectedAgent,
           model: selectedModel || undefined,
           permission_mode: permissionMode,
           cwd: currentCwd!,
@@ -645,7 +750,7 @@ export function useChat() {
   }, [currentSessionId, isCompacting]);
 
   const handleCyclePermissionMode = useCallback(async () => {
-    const modes: Array<'default' | 'acceptEdits' | 'bypassPermissions'> = ['default', 'acceptEdits', 'bypassPermissions'];
+    const modes: Array<'default' | 'acceptEdits' | 'plan' | 'bypassPermissions'> = ['default', 'acceptEdits', 'plan', 'bypassPermissions'];
     const currentIndex = modes.indexOf(permissionMode);
     const nextMode = modes[(currentIndex + 1) % modes.length];
     setPermissionMode(nextMode);
@@ -659,7 +764,7 @@ export function useChat() {
     }
   }, [currentSessionId, permissionMode]);
 
-  const handleSetPermissionMode = useCallback(async (mode: 'default' | 'acceptEdits' | 'bypassPermissions') => {
+  const handleSetPermissionMode = useCallback(async (mode: 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions') => {
     setPermissionMode(mode);
     if (currentSessionId) {
       try {
@@ -709,50 +814,67 @@ export function useChat() {
     }
   }, [currentSessionId, userNodes, handleSessionSelect]);
 
-  const handleEditMessage = useCallback(async (node: UserNode, restoreFiles: boolean) => {
-    logger.info('[EDIT] node:', { key: node.key, content: node.content.slice(0, 30) });
-    logger.info('[EDIT] userNodes:', userNodes.map((n, i) => ({ index: i, key: n.key, content: n.content.slice(0, 30) })));
-    
+  // ── 统一回退（对话 + 文件原子回退） ──
+
+  const [pendingRewind, setPendingRewind] = useState<{ plan: RewindPlan; mode: 'rewind' | 'edit' } | null>(null);
+
+  const handleRewindRequest = useCallback(async (userMessageIndex: number) => {
+    if (!currentSessionId) return;
+    try {
+      const plan = await stageRewind(currentSessionId, { keepUserMessages: userMessageIndex });
+      setPendingRewind({ plan, mode: 'rewind' });
+    } catch (err) {
+      console.error('Failed to stage rewind:', err);
+    }
+  }, [currentSessionId]);
+
+  const handleEditMessage = useCallback(async (node: UserNode) => {
     setInputValue(node.content);
     setContextFiles(node.contextFiles || []);
     setSelectedModel(node.model || '');
-    
+
     const nodeIndex = userNodes.findIndex(n => n.key === node.key);
-    logger.info('[EDIT] nodeIndex:', nodeIndex);
-    
-    if (currentSessionId) {
-      try {
-        // Always use truncate, keeping messages before nodeIndex
-        logger.info('[EDIT] truncate to:', nodeIndex, 'restoreFiles:', restoreFiles);
-        await truncateSession(currentSessionId, nodeIndex);
-        
-        // If file restore is needed, call rewind (but this may not be accurate)
-        if (restoreFiles) {
-          logger.info('[EDIT] restoreFiles requested, but using truncate only');
-        }
-        
-        // Reload session after truncate to rebuild all nodes
+    if (!currentSessionId || nodeIndex < 0) return;
+    try {
+      // 编辑 = 回退到该消息之前 + 填充输入框；对话与文件原子回退
+      const plan = await stageRewind(currentSessionId, { keepUserMessages: nodeIndex });
+      if (plan.file_changes.length === 0) {
+        await commitRewind(currentSessionId, plan.plan_id);
         await handleSessionSelect(currentSessionId);
-      } catch (err) {
-        console.error('Failed to edit session:', err);
+      } else {
+        // 有文件变更：交给 RewindDialog 预览确认
+        setPendingRewind({ plan, mode: 'edit' });
       }
+    } catch (err) {
+      console.error('Failed to rewind for edit:', err);
     }
   }, [userNodes, currentSessionId, handleSessionSelect]);
 
-  const handlePermissionApprove = useCallback(async () => {
+  const handleRewindCommitted = useCallback(async () => {
+    setPendingRewind(null);
+    if (currentSessionId) {
+      await handleSessionSelect(currentSessionId);
+    }
+  }, [currentSessionId, handleSessionSelect]);
+
+  const handleRewindClose = useCallback(() => {
+    setPendingRewind(null);
+  }, []);
+
+  const handlePermissionApprove = useCallback(async (choice?: string) => {
     if (!pendingPermission || !currentSessionId) return;
     try {
-      await respondToPermission(currentSessionId, pendingPermission.request_id, true);
+      await respondToPermission(currentSessionId, pendingPermission.request_id, true, undefined, choice);
       sessionStore.setPendingPermission(currentSessionId, undefined);
     } catch (err) {
       console.error('Failed to approve permission:', err);
     }
   }, [pendingPermission, currentSessionId]);
 
-  const handlePermissionDeny = useCallback(async () => {
+  const handlePermissionDeny = useCallback(async (feedback?: string) => {
     if (!pendingPermission || !currentSessionId) return;
     try {
-      await respondToPermission(currentSessionId, pendingPermission.request_id, false);
+      await respondToPermission(currentSessionId, pendingPermission.request_id, false, feedback);
     } catch (err) {
       console.error('Failed to deny permission:', err);
     } finally {
@@ -864,8 +986,6 @@ export function useChat() {
     setInputValue,
     contextFiles,
     config,
-    selectedAgent,
-    setSelectedAgent,
     selectedModel,
     setSelectedModel,
     currentSessionId,
@@ -904,6 +1024,10 @@ export function useChat() {
     handleForkSession,
     handleForkAtPoint,
     handleEditMessage,
+    pendingRewind,
+    handleRewindRequest,
+    handleRewindCommitted,
+    handleRewindClose,
     handlePermissionApprove,
     handlePermissionDeny,
     handleQuestionRespond,

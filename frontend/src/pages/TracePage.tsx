@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Clock, RefreshCw, Power, Filter, Activity, Cpu, HardDrive, Zap, ExternalLink } from 'lucide-react';
-import { fetchTraceEvents, fetchTraceFiles, toggleTrace, fetchTraceStatus, TraceEvent, TraceFile, TraceStatus } from '../api/client';
+import { Clock, RefreshCw, Filter, Activity, Cpu, HardDrive, Zap, ExternalLink } from 'lucide-react';
+import { fetchTraceEvents, fetchTraceFiles, fetchTraceStatus, TraceEvent, TraceFile, TraceStatus } from '../api/client';
 import { TrajectoryTimeline } from '../components/chat/TrajectoryTimeline';
 import { PageLayout } from '../components/PageLayout';
 
@@ -12,6 +12,7 @@ interface TimelineEvent {
   content?: string;
   metadata?: Record<string, unknown>;
   kind?: string;
+  traceUrl?: string;
 }
 
 interface TraceStats {
@@ -26,8 +27,6 @@ interface TraceStats {
 
 export default function TracePage() {
   const [events, setEvents] = useState<TraceEvent[]>([]);
-  const [enabled, setEnabled] = useState(false);
-  const [tracePath, setTracePath] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [eventCount, setEventCount] = useState(500);
@@ -59,6 +58,14 @@ export default function TracePage() {
     }
   }, [selectedSession]);
 
+  const loadTraceStatus = useCallback(async (force = false) => {
+    try {
+      setTraceStatus(await fetchTraceStatus(force));
+    } catch (err) {
+      console.error('Failed to load Langfuse status:', err);
+    }
+  }, []);
+
   const loadTrace = useCallback(async (isRefresh = false) => {
     if (!isRefresh) {
       setLoading(true);
@@ -73,9 +80,6 @@ export default function TracePage() {
         lastEventCountRef.current = newEvents.length;
         isInitialLoadRef.current = false;
       }
-      
-      setEnabled(data.enabled);
-      setTracePath(data.path || '');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load trace');
     } finally {
@@ -86,7 +90,7 @@ export default function TracePage() {
   useEffect(() => {
     loadTraceFiles();
     loadTrace();
-    fetchTraceStatus().then(setTraceStatus).catch(() => {});
+    loadTraceStatus();
   }, []);
 
   useEffect(() => {
@@ -102,15 +106,6 @@ export default function TracePage() {
     const interval = setInterval(() => loadTrace(true), 2000);
     return () => clearInterval(interval);
   }, [autoRefresh, loadTrace]);
-
-  const handleToggle = async () => {
-    try {
-      await toggleTrace(!enabled);
-      setEnabled(!enabled);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to toggle trace');
-    }
-  };
 
   const computeStats = (events: TraceEvent[]): TraceStats => {
     const stats: TraceStats = {
@@ -215,6 +210,7 @@ export default function TracePage() {
         content,
         metadata: rest,
         kind,
+        traceUrl: buildTraceUrl(rest.trace_id),
       };
     });
 
@@ -286,35 +282,19 @@ export default function TracePage() {
     </div>
   );
 
-  const otelEnabled = traceStatus?.otel_enabled ?? enabled;
-  const phoenixEndpoint = traceStatus?.phoenix_endpoint || tracePath;
-  const phoenixReachable = traceStatus?.phoenix_reachable ?? false;
+  const tracingEnabled = traceStatus?.tracing_enabled ?? false;
+  const langfuseEndpoint = traceStatus?.endpoint || '';
+  const langfuseReachable = traceStatus?.reachable ?? false;
+  const langfuseProjectId = traceStatus?.project_id || null;
+  const langfuseError = traceStatus?.error || null;
+  const langfuseSessionUrl = langfuseProjectId && selectedSession
+    ? `${langfuseEndpoint}/project/${langfuseProjectId}/sessions/${encodeURIComponent(selectedSession)}`
+    : null;
 
-  if (otelEnabled && phoenixReachable) {
-    return (
-      <div className="h-full flex flex-col bg-white">
-        <div className="flex items-center gap-3 px-4 py-2 border-b bg-green-50 border-green-200">
-          <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-          <span className="text-sm font-medium text-green-800">OTel Active</span>
-          <span className="text-sm text-gray-500">
-            Phoenix: <a href={phoenixEndpoint} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">{phoenixEndpoint}</a>
-          </span>
-          <button
-            onClick={() => window.open(phoenixEndpoint, '_blank')}
-            className="ml-auto flex items-center gap-1 text-sm px-3 py-1 bg-white border border-green-300 rounded hover:bg-green-50 transition-colors"
-          >
-            <ExternalLink className="w-3 h-3" />
-            Open in new tab
-          </button>
-        </div>
-        <iframe
-          src={phoenixEndpoint}
-          className="flex-1 w-full border-0"
-          title="Phoenix Trace Viewer"
-        />
-      </div>
-    );
-  }
+  const buildTraceUrl = (traceId: unknown): string | undefined => {
+    if (!langfuseProjectId || typeof traceId !== 'string' || !traceId) return undefined;
+    return `${langfuseEndpoint}/project/${langfuseProjectId}/traces/${encodeURIComponent(traceId)}`;
+  };
 
   return (
     <PageLayout sidebarContent={sidebarContent}>
@@ -328,20 +308,37 @@ export default function TracePage() {
               </h1>
               <p className="text-xs text-gray-500 mt-1">
                 {timelineEvents.length} events •
-                Status: <span className={otelEnabled ? 'text-green-600 font-medium' : 'text-gray-400'}>
-                  {otelEnabled ? 'ON' : 'OFF'}
+                Tracing: <span className={tracingEnabled ? 'text-green-600 font-medium' : 'text-gray-400'}>
+                  {tracingEnabled ? 'ON' : 'OFF'}
                 </span>
-                {otelEnabled && !phoenixReachable && phoenixEndpoint && (
-                  <span className="ml-2 text-yellow-600">
-                    Phoenix unreachable — showing fallback view
+                {langfuseProjectId && (
+                  <span className="ml-2">
+                    Project: <span className="text-gray-700">{traceStatus?.project_name || langfuseProjectId}</span>
                   </span>
                 )}
-                {phoenixEndpoint && (
+                {langfuseSessionUrl && (
                   <span className="ml-2">
-                    <a href={phoenixEndpoint} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline">
-                      Open Phoenix ↗
+                    <a href={langfuseSessionUrl} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline inline-flex items-center gap-1">
+                      Langfuse session
+                      <ExternalLink className="w-3 h-3" />
                     </a>
                   </span>
+                )}
+                {!langfuseProjectId && langfuseEndpoint && (
+                  <span className="ml-2">
+                    <a href={langfuseEndpoint} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline inline-flex items-center gap-1">
+                      Open Langfuse
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                  </span>
+                )}
+                {tracingEnabled && !langfuseReachable && (
+                  <span className="ml-2 text-yellow-600">
+                    Langfuse unreachable — showing local event timeline
+                  </span>
+                )}
+                {langfuseError && (
+                  <span className="ml-2 text-red-500">{langfuseError}</span>
                 )}
               </p>
             </div>
@@ -366,22 +363,14 @@ export default function TracePage() {
                 <option value={5000}>5000</option>
               </select>
               <button
-                onClick={() => loadTrace(true)}
+                onClick={() => {
+                  loadTrace(true);
+                  loadTraceStatus(true);
+                }}
                 className="flex items-center px-3 py-1.5 bg-blue-500 text-white rounded text-xs hover:bg-blue-600 transition-colors"
               >
                 <RefreshCw className="w-3 h-3 mr-1" />
                 Refresh
-              </button>
-              <button
-                onClick={handleToggle}
-                className={`flex items-center px-3 py-1.5 rounded text-xs transition-colors ${
-                  enabled
-                    ? 'bg-red-500 text-white hover:bg-red-600'
-                    : 'bg-green-500 text-white hover:bg-green-600'
-                }`}
-              >
-                <Power className="w-3 h-3 mr-1" />
-                {enabled ? 'Disable' : 'Enable'}
               </button>
             </div>
           </div>
@@ -453,7 +442,7 @@ export default function TracePage() {
           </div>
 
           <div className="text-xs text-gray-400 font-mono mt-2 truncate">
-            {tracePath}
+            {langfuseEndpoint}
           </div>
         </div>
 
@@ -464,12 +453,12 @@ export default function TracePage() {
                 <Clock className="w-10 h-10 mx-auto mb-3 opacity-50" />
                 <p className="text-sm">No events to display</p>
                 <p className="text-xs mt-1">
-                  {enabled ? 'Events will appear here as they occur' : 'Enable trace to start recording events'}
+                  {selectedSession ? 'Events will appear here as they occur' : 'Select a session to load events'}
                 </p>
               </div>
             </div>
           ) : (
-            <TrajectoryTimeline events={timelineEvents} />
+            <TrajectoryTimeline events={timelineEvents} sessionId={selectedSession || undefined} />
           )}
         </div>
       </div>

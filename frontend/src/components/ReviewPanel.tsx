@@ -28,9 +28,12 @@ export function ReviewPanel({ snapshots, onAccept, onReject, onAcceptAll, onOpen
   return (
     <div className="border-t border-gray-200 bg-white">
       {/* Header */}
-      <button
+      <div
+        role="button"
+        tabIndex={0}
         onClick={() => setIsCollapsed(!isCollapsed)}
-        className="w-full flex items-center justify-between px-4 py-2.5 hover:bg-gray-50 transition-colors"
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIsCollapsed(!isCollapsed); } }}
+        className="w-full flex items-center justify-between px-4 py-2.5 hover:bg-gray-50 transition-colors cursor-pointer"
       >
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium text-gray-700">
@@ -63,7 +66,7 @@ export function ReviewPanel({ snapshots, onAccept, onReject, onAcceptAll, onOpen
             ▲
           </span>
         </div>
-      </button>
+      </div>
 
       {/* File list */}
       {!isCollapsed && (

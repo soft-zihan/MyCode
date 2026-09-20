@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from agents.observability.trace import trace_event
+from agents.observability.trace import trace_span
 
 
 # ── 配置 ───────────────────────────────────────────────────────────────────────
@@ -81,18 +81,24 @@ def ensure_venv() -> bool:
     if venv_path.is_dir() and Path(python_exe).is_file():
         return True
 
-    try:
-        venv_path.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            [sys.executable, "-m", "venv", str(venv_path)],
-            check=True,
-            capture_output=True,
-        )
-        trace_event("skill_venv.created", path=str(venv_path))
-        return True
-    except subprocess.CalledProcessError as e:
-        trace_event("skill_venv.create_failed", error=str(e))
-        return False
+    with trace_span(
+        "skill.venv",
+        input=str(venv_path),
+        metadata={"path": str(venv_path)},
+    ) as span:
+        try:
+            venv_path.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                [sys.executable, "-m", "venv", str(venv_path)],
+                check=True,
+                capture_output=True,
+            )
+            span.add_metadata(success=True)
+            return True
+        except subprocess.CalledProcessError as e:
+            span.update(output=str(e)[:2000], metadata={"success": False})
+            span.record_error(e)
+            return False
 
 
 def install_skill_package(skill_dir: Path) -> dict[str, Any]:
@@ -117,34 +123,32 @@ def install_skill_package(skill_dir: Path) -> dict[str, Any]:
 
     pip_exe = get_pip_executable()
 
-    try:
-        # editable install
-        subprocess.run(
-            [pip_exe, "install", "-e", str(skill_dir)],
-            check=True,
-            capture_output=True,
-            timeout=120,
-        )
-        result["success"] = True
-        trace_event(
-            "skill.install",
-            skill_name=skill_name,
-            import_name=import_name,
-            path=str(skill_dir),
-        )
-    except subprocess.CalledProcessError as e:
-        result["error"] = f"pip install failed: {e.stderr.decode()[:500]}"
-        trace_event(
-            "skill.install_failed",
-            skill_name=skill_name,
-            error=result["error"],
-        )
-    except subprocess.TimeoutExpired:
-        result["error"] = "pip install timed out"
-        trace_event(
-            "skill.install_timeout",
-            skill_name=skill_name,
-        )
+    with trace_span(
+        "skill.install",
+        input=str(skill_dir),
+        metadata={
+            "skill_name": skill_name,
+            "import_name": import_name,
+            "path": str(skill_dir),
+        },
+    ) as span:
+        try:
+            subprocess.run(
+                [pip_exe, "install", "-e", str(skill_dir)],
+                check=True,
+                capture_output=True,
+                timeout=120,
+            )
+            result["success"] = True
+            span.add_metadata(success=True)
+        except subprocess.CalledProcessError as e:
+            result["error"] = f"pip install failed: {e.stderr.decode()[:500]}"
+            span.update(output=result["error"][:2000], metadata={"success": False})
+            span.record_error(e)
+        except subprocess.TimeoutExpired as e:
+            result["error"] = "pip install timed out"
+            span.update(output=result["error"], metadata={"success": False})
+            span.record_error(e)
 
     return result
 
@@ -179,39 +183,32 @@ def inject_skill_to_namespace(
         "error": None,
     }
 
-    try:
-        mod = importlib.import_module(import_name)
+    with trace_span(
+        "skill.inject",
+        input=import_name,
+        metadata={"import_name": import_name},
+    ) as span:
+        try:
+            mod = importlib.import_module(import_name)
 
-        # 如果定义了 run()，注入 run 函数
-        if hasattr(mod, "run"):
-            namespace[import_name] = mod.run
-            result["callable"] = mod.run
-        else:
-            # 否则注入整个模块
-            namespace[import_name] = mod
-            result["callable"] = mod
+            if hasattr(mod, "run"):
+                namespace[import_name] = mod.run
+                result["callable"] = mod.run
+            else:
+                namespace[import_name] = mod
+                result["callable"] = mod
 
-        result["success"] = True
-        trace_event(
-            "skill.inject",
-            import_name=import_name,
-            has_run=hasattr(mod, "run"),
-        )
+            result["success"] = True
+            span.add_metadata(success=True, has_run=hasattr(mod, "run"))
 
-    except ImportError as e:
-        result["error"] = f"Import failed: {e}"
-        trace_event(
-            "skill.inject_failed",
-            import_name=import_name,
-            error=str(e),
-        )
-    except Exception as e:
-        result["error"] = f"Unexpected error: {e}"
-        trace_event(
-            "skill.inject_error",
-            import_name=import_name,
-            error=str(e),
-        )
+        except ImportError as e:
+            result["error"] = f"Import failed: {e}"
+            span.update(output=result["error"][:2000], metadata={"success": False})
+            span.record_error(e)
+        except Exception as e:
+            result["error"] = f"Unexpected error: {e}"
+            span.update(output=result["error"][:2000], metadata={"success": False})
+            span.record_error(e)
 
     return result
 

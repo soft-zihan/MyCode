@@ -1,51 +1,41 @@
-"""Path Utilities - 路径解析工具。
-
-提供工具路径解析和工作区守卫功能。
-"""
+"""Path Utilities - 路径解析工具。"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from agents.core.workspace import get_workspace
 
-def resolve_tool_path(raw_path: str, *, must_exist: bool = True) -> Path:
-    """解析工具路径。
-    
-    如果路径存在或不是绝对路径，直接返回。
-    否则尝试从当前工作区解析。
-    
-    Args:
-        raw_path: 原始路径字符串
-        must_exist: 是否要求路径必须存在
-    
-    Returns:
-        解析后的 Path 对象
-    """
-    path = Path(raw_path)
-    if path.exists() or not path.is_absolute():
-        return path
 
-    parts = path.parts
-    # 使用工作区而不是 CWD
-    from agents.core.workspace import get_workspace
-    workspace = get_workspace()
+def _absolute(path: Path | str) -> Path:
+    return Path(str(path)).expanduser().resolve(strict=False)
+
+
+def resolve_tool_path(raw_path: str | Path, *, must_exist: bool = True) -> Path:
+    """把工具路径锚定到当前会话工作区。"""
+    workspace = _absolute(get_workspace())
+    path = Path(str(raw_path or "")).expanduser()
+
+    if not path.is_absolute():
+        return _absolute(workspace / path)
+
+    absolute = _absolute(path)
+    if absolute.exists() or not must_exist:
+        return absolute
+
+    parts = absolute.parts
     for i in range(1, len(parts)):
-        candidate = workspace.joinpath(*parts[i:])
-        if must_exist and candidate.exists():
-            return candidate
-        if not must_exist and candidate.parent.exists():
+        candidate = _absolute(workspace.joinpath(*parts[i:]))
+        if candidate.exists():
             return candidate
 
-    return path
+    return absolute
 
 
-def workspace_guard_error(path: str) -> str:
-    """工作区守卫错误消息。
-    
-    Args:
-        path: 尝试访问的路径
-    
-    Returns:
-        错误消息字符串
-    """
-    return f"Error: path '{path}' is outside workspace"
+def workspace_guard_error(path: Path | str) -> str | None:
+    """递归搜索/列目录工具的工作区边界守卫。"""
+    workspace = _absolute(get_workspace())
+    target = _absolute(path)
+    if target == workspace or workspace in target.parents:
+        return None
+    return f"Error: path '{path}' is outside the workspace"

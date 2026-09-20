@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-import shutil
 import time
 import hashlib
 from pathlib import Path
@@ -11,13 +9,13 @@ from typing import Any
 
 from agents.core.workspace import get_workspace
 from agents.memory.frontmatter import format_frontmatter, parse_frontmatter
+from agents.observability.trace import trace_event
 from agents._utils import safe_skill_slug as _safe_skill_slug, utc_now as _utc_now, read_json as _read_json, write_json as _write_json
 
 
 USAGE_LOG = "usage.jsonl"
 ONLINE_PROVENANCE_LOG = "online_provenance.jsonl"
 ONLINE_PROVENANCE_INDEX = "online_skill_provenance.json"
-SKILL_USAGE_STATS = "skill_usage_stats.json"
 HISTORY_DIR = "history"
 
 
@@ -316,6 +314,16 @@ def create_skill_file(
         "evidence": _preview(evidence, 1200),
     }
     _append_jsonl(get_evolution_dir() / USAGE_LOG, event)
+    trace_event(
+        "skill.write",
+        metadata={
+            "action": "create",
+            "skill_name": resolved_name,
+            "file": str(skill_file),
+            "target": event["target"],
+            "success": True,
+        },
+    )
     return {"ok": True, **event}
 
 
@@ -414,96 +422,17 @@ def evolve_skill_file(
         "history": str(history_path),
     }
     _append_jsonl(get_evolution_dir() / USAGE_LOG, event)
+    trace_event(
+        "skill.write",
+        metadata={
+            "action": "evolve",
+            "skill_name": resolved_name,
+            "file": str(skill_file),
+            "version": meta["version"],
+            "success": True,
+        },
+    )
     return {"ok": True, **event}
-
-
-def record_skill_usage_judgments(judgments: list[dict[str, Any]]) -> dict[str, Any]:
-    stats_path = get_evolution_dir() / SKILL_USAGE_STATS
-    stats = _read_json(stats_path, {})
-    pruned: list[str] = []
-    for judgment in judgments:
-        skill = str(judgment.get("name") or judgment.get("skill") or "").strip()
-        if not skill:
-            continue
-        item = stats.setdefault(
-            skill,
-            {
-                "retrieved": 0,
-                "relevant": 0,
-                "used": 0,
-                "last_retrieved": "",
-                "last_used": "",
-                "source": judgment.get("source", ""),
-                "skill_dir": judgment.get("skill_dir", ""),
-            },
-        )
-        item["retrieved"] = int(item.get("retrieved", 0)) + 1
-        item["last_retrieved"] = _utc_now()
-        item["source"] = judgment.get("source", item.get("source", ""))
-        item["skill_dir"] = judgment.get("skill_dir", item.get("skill_dir", ""))
-        if judgment.get("relevant"):
-            item["relevant"] = int(item.get("relevant", 0)) + 1
-        if judgment.get("used"):
-            item["used"] = int(item.get("used", 0)) + 1
-            item["last_used"] = _utc_now()
-        item["last_reason"] = _preview(judgment.get("reason", ""), 500)
-        item["last_score"] = judgment.get("score", 0)
-        if _maybe_prune_stale_skill(skill, item):
-            pruned.append(skill)
-    _write_json(stats_path, stats)
-    _sync_usage_into_provenance(stats)
-    return {"ok": True, "judgments": len(judgments), "pruned": pruned}
-
-
-def _maybe_prune_stale_skill(skill_name: str, stats: dict[str, Any]) -> bool:
-    min_retrieved = _parse_int(os.environ.get("MYCODE_SKILL_USAGE_PRUNE_MIN_RETRIEVED"), 40)
-    max_used = _parse_int(os.environ.get("MYCODE_SKILL_USAGE_PRUNE_MAX_USED"), 0)
-    source = str(stats.get("source") or "").strip().lower()
-    if source != "user" and os.environ.get("MYCODE_SKILL_PRUNE_PROJECT", "").strip().lower() not in {"1", "true", "yes", "on"}:
-        return False
-    if int(stats.get("retrieved", 0)) < min_retrieved:
-        return False
-    if int(stats.get("used", 0)) > max_used:
-        return False
-    skill_dir = Path(str(stats.get("skill_dir") or ""))
-    if not skill_dir.is_dir():
-        return False
-    if skill_dir.name.startswith("."):
-        return False
-    archive_root = get_evolution_dir() / "pruned"
-    archive_root.mkdir(parents=True, exist_ok=True)
-    destination = archive_root / f"{_safe_skill_slug(skill_name)}-{int(time.time())}"
-    try:
-        shutil.move(str(skill_dir), str(destination))
-    except Exception:
-        return False
-    event = {
-        "event": "prune",
-        "time": _utc_now(),
-        "skill": skill_name,
-        "from": str(skill_dir),
-        "to": str(destination),
-        "retrieved": stats.get("retrieved", 0),
-        "used": stats.get("used", 0),
-    }
-    _append_jsonl(get_evolution_dir() / USAGE_LOG, event)
-    stats["pruned"] = True
-    stats["pruned_to"] = str(destination)
-    return True
-
-
-def _sync_usage_into_provenance(stats: dict[str, Any]) -> None:
-    path = get_evolution_dir() / ONLINE_PROVENANCE_INDEX
-    index = _read_json(path, {})
-    if not isinstance(index, dict):
-        return
-    changed = False
-    for skill, usage in stats.items():
-        if skill in index:
-            index[skill]["usage"] = usage
-            changed = True
-    if changed:
-        _write_json(path, index)
 
 
 def _parse_usage_line(line: str) -> dict[str, Any] | None:
@@ -556,18 +485,6 @@ def load_skill_stats() -> dict[str, dict[str, Any]]:
             skill = path.stem
             item = stats.setdefault(skill, {"created": 0, "invocations": 0, "feedback": 0, "evolutions": 0})
             item["snapshots"] = count
-    usage_stats = _read_json(get_evolution_dir() / SKILL_USAGE_STATS, {})
-    if isinstance(usage_stats, dict):
-        for skill, usage in usage_stats.items():
-            if not isinstance(usage, dict):
-                continue
-            item = stats.setdefault(str(skill), {"created": 0, "invocations": 0, "feedback": 0, "evolutions": 0})
-            item["retrieved"] = usage.get("retrieved", 0)
-            item["relevant"] = usage.get("relevant", 0)
-            item["used"] = usage.get("used", 0)
-            item["last_retrieved"] = usage.get("last_retrieved", "")
-            item["last_used"] = usage.get("last_used", "")
-            item["pruned"] = usage.get("pruned", False)
     return stats
 
 
@@ -585,8 +502,6 @@ def format_skill_stats() -> str:
             f"feedback={item.get('feedback', 0)}",
             f"evolved={item.get('evolutions', 0)}",
             f"snapshots={item.get('snapshots', 0)}",
-            f"retrieved={item.get('retrieved', 0)}",
-            f"used={item.get('used', 0)}",
         ]
         if item.get("created_at"):
             parts.append(f"created_at={item['created_at']}")
@@ -594,9 +509,5 @@ def format_skill_stats() -> str:
             parts.append(f"version={item['version']}")
         if item.get("last_invoked"):
             parts.append(f"last_invoked={item['last_invoked']}")
-        if item.get("last_used"):
-            parts.append(f"last_used={item['last_used']}")
-        if item.get("pruned"):
-            parts.append("pruned=true")
         lines.append(f"  {name}: " + ", ".join(parts))
     return "\n".join(lines)

@@ -5,7 +5,6 @@ import re
 from typing import Any, Awaitable, Callable
 
 from agents._utils import (
-    ratio as _ratio,
     pct as _pct,
 )
 
@@ -396,34 +395,21 @@ def _skill_status(
     *,
     replay_count: int,
     promotion_test_count: int,
-    retrieved: int,
-    relevant: int,
-    used: int,
-    pruned: bool,
     rule_summary: dict[str, Any],
     min_replay_samples: int,
     min_promotion_tests: int,
-    min_retrieved: int,
-    min_used_rate: float,
-    min_relevance_rate: float,
     min_rule_pass_rate: float,
 ) -> tuple[str, list[str]]:
     reasons: list[str] = []
-    if pruned:
-        return "pruned", ["skill has been archived by usage pruning"]
-    if replay_count <= 0 and retrieved <= 0:
-        return "unobserved", ["no online replay or usage signal yet"]
+    if replay_count <= 0:
+        return "unobserved", ["no online replay signal yet"]
     if replay_count < min_replay_samples:
         reasons.append(f"only {replay_count} replay sample(s)")
     if promotion_test_count < min_promotion_tests:
         reasons.append(f"only {promotion_test_count} promotion-test sample(s)")
-    if retrieved < min_retrieved:
-        reasons.append(f"only {retrieved} retrieval judgment(s)")
     if reasons:
         return "incubating", reasons
 
-    relevance_rate = _ratio(relevant, retrieved)
-    used_rate = _ratio(used, retrieved)
     pass_rate = float(rule_summary.get("pass_rate", 0.0) or 0.0)
     test_hard_failures = int(rule_summary.get("promotion_test_hard_failures", 0) or 0)
     hard_failures = int(rule_summary.get("hard_failures", 0) or 0)
@@ -434,10 +420,6 @@ def _skill_status(
         reasons.append(f"{hard_failures} hard rule failure(s)")
     if pass_rate < min_rule_pass_rate:
         reasons.append(f"low replay rule pass rate {_pct(pass_rate)}")
-    if relevance_rate < min_relevance_rate:
-        reasons.append(f"low relevance rate {_pct(relevance_rate)}")
-    if used_rate < min_used_rate:
-        reasons.append(f"low used rate {_pct(used_rate)}")
     if reasons:
         return "watch", reasons
-    return "healthy", ["passes replay rules and usage gates"]
+    return "healthy", ["passes replay rules"]

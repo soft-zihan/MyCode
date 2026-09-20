@@ -1,17 +1,18 @@
 import { memo, useState, useRef, useEffect } from 'react';
-import { File, RotateCcw, ChevronDown } from 'lucide-react';
+import { File, RotateCcw, ChevronDown, Pencil } from 'lucide-react';
 import type { UserNode } from './types';
-import { RewindDialog } from '../RewindDialog';
 
 interface UserNodeViewProps {
   node: UserNode;
   sessionId?: string;
-  onEdit?: (node: UserNode, restoreFiles: boolean) => void;
+  /** 该消息在用户消息序列中的索引（回退锚点：keep_user_messages） */
+  userMessageIndex?: number;
+  onEdit?: (node: UserNode) => void;
+  onRewind?: (userMessageIndex: number) => void;
 }
 
-export const UserNodeView = memo(function UserNodeView({ node, sessionId, onEdit }: UserNodeViewProps) {
+export const UserNodeView = memo(function UserNodeView({ node, sessionId, userMessageIndex, onEdit, onRewind }: UserNodeViewProps) {
   const [showMenu, setShowMenu] = useState(false);
-  const [showRewindDialog, setShowRewindDialog] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -25,24 +26,6 @@ export const UserNodeView = memo(function UserNodeView({ node, sessionId, onEdit
     }
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showMenu]);
-
-  const handleRewindWithFiles = () => {
-    setShowMenu(false);
-    if (sessionId && node.snapshotId) {
-      setShowRewindDialog(true);
-    } else if (onEdit) {
-      onEdit(node, true);
-    }
-  };
-
-  const handleRewindDialogClose = () => {
-    setShowRewindDialog(false);
-  };
-
-  const handleRewindDialogConfirm = () => {
-    setShowRewindDialog(false);
-    window.location.reload();
-  };
 
   return (
     <div className="flex justify-end group">
@@ -69,7 +52,7 @@ export const UserNodeView = memo(function UserNodeView({ node, sessionId, onEdit
             {node.model && <span>• Model: {node.model}</span>}
           </div>
         </div>
-        {(onEdit || sessionId) && (
+        {(onEdit || onRewind) && (
           <div className="relative opacity-0 group-hover:opacity-100 transition-opacity" ref={menuRef}>
             <button
               onClick={() => setShowMenu(!showMenu)}
@@ -81,36 +64,27 @@ export const UserNodeView = memo(function UserNodeView({ node, sessionId, onEdit
             </button>
             {showMenu && (
               <div className="fixed left-auto top-auto mt-1 bg-white border border-gray-200 rounded shadow-lg z-[9999] min-w-[180px]" style={{ position: 'absolute' }}>
-                {sessionId && node.snapshotId && (
+                {onRewind && sessionId && userMessageIndex !== undefined && (
                   <button
-                    onClick={handleRewindWithFiles}
+                    onClick={() => { setShowMenu(false); onRewind(userMessageIndex); }}
                     className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
                   >
                     <RotateCcw className="w-3.5 h-3.5 text-blue-500" />
-                    回退并恢复文件
+                    回退到此消息（含文件）
                   </button>
                 )}
                 {onEdit && (
                   <button
-                    onClick={() => { onEdit(node, false); setShowMenu(false); }}
+                    onClick={() => { setShowMenu(false); onEdit(node); }}
                     className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
                   >
-                    <RotateCcw className="w-3.5 h-3.5 text-gray-400" />
-                    仅截断对话
+                    <Pencil className="w-3.5 h-3.5 text-gray-400" />
+                    编辑并重发
                   </button>
                 )}
               </div>
             )}
           </div>
-        )}
-        {showRewindDialog && sessionId && node.snapshotId && (
-          <RewindDialog
-            sessionId={sessionId}
-            snapshotId={node.snapshotId}
-            messageId={node.messageId}
-            onClose={handleRewindDialogClose}
-            onConfirm={handleRewindDialogConfirm}
-          />
         )}
       </div>
     </div>

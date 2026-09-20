@@ -34,22 +34,6 @@ class SessionManager:
         self.agent._session_lifecycle.restore(state, data, self.agent.session)
         print_info(f"Session restored ({self._get_message_count()} messages).")
 
-    def rewind(self, n: int = 1) -> str:
-        """回退对话 N 轮。"""
-        return self.agent._session_lifecycle.rewind(self.agent.session, n)
-
-    def stage_revert(self, target_seq: int) -> dict:
-        """Stage：计算恢复计划，预览变更。"""
-        return self.agent.session.stage_revert(target_seq)
-
-    def clear_revert(self, current_snapshot: list[dict]) -> dict:
-        """Clear：取消恢复，恢复到原始状态。"""
-        return self.agent.session.clear_revert(current_snapshot)
-
-    def commit_revert(self, target_seq: int) -> dict:
-        """Commit：确认恢复。"""
-        return self.agent.session.commit_revert(target_seq)
-
     def fork_session(self) -> str:
         """从当前会话创建一个完全相同的分支。"""
         from agents.core.session_lifecycle import SessionState

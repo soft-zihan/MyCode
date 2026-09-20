@@ -3,16 +3,13 @@
 设计：
 - 使用 SQLite 存储 bad case 记录
 - 支持用户反馈（踩按钮）和自动检测两种来源
-- 支持 Rewind 诊断结果存储
-- 支持偶发 vs 可复现验证
 """
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -63,14 +60,6 @@ class BadCase:
     # 用户反馈（踩按钮）
     expected_tool: str | None = None  # 用户期望的工具名
     
-    # Rewind 诊断
-    rewind_session_id: str | None = None
-    diagnosis: dict[str, Any] = field(default_factory=dict)
-    
-    # 可复现性验证
-    reproducible: bool | None = None  # None=未验证, True=可复现, False=偶发
-    verification_diff: dict[str, Any] = field(default_factory=dict)
-    
     # 时间戳
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -108,10 +97,6 @@ def _init_db() -> None:
                 reason TEXT,
                 comment TEXT,
                 expected_tool TEXT,
-                rewind_session_id TEXT,
-                diagnosis TEXT,
-                reproducible INTEGER,
-                verification_diff TEXT,
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL
             )
@@ -148,10 +133,6 @@ def _row_to_bad_case(row: sqlite3.Row) -> BadCase:
         reason=row["reason"] or "",
         comment=row["comment"] or "",
         expected_tool=row["expected_tool"],
-        rewind_session_id=row["rewind_session_id"],
-        diagnosis=json.loads(row["diagnosis"]) if row["diagnosis"] else {},
-        reproducible=bool(row["reproducible"]) if row["reproducible"] is not None else None,
-        verification_diff=json.loads(row["verification_diff"]) if row["verification_diff"] else {},
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -168,9 +149,8 @@ def create_bad_case(bad_case: BadCase) -> BadCase:
                 id, session_id, source, status, severity,
                 turn_number, step_number, tool_name,
                 signal_type, reason, comment, expected_tool,
-                rewind_session_id, diagnosis, reproducible, verification_diff,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 bad_case.id,
@@ -185,10 +165,6 @@ def create_bad_case(bad_case: BadCase) -> BadCase:
                 bad_case.reason,
                 bad_case.comment,
                 bad_case.expected_tool,
-                bad_case.rewind_session_id,
-                json.dumps(bad_case.diagnosis) if bad_case.diagnosis else None,
-                bad_case.reproducible,
-                json.dumps(bad_case.verification_diff) if bad_case.verification_diff else None,
                 bad_case.created_at,
                 bad_case.updated_at,
             ),
@@ -249,10 +225,6 @@ def update_bad_case(
     bad_case_id: str,
     status: BadCaseStatus | None = None,
     severity: BadCaseSeverity | None = None,
-    rewind_session_id: str | None = None,
-    diagnosis: dict[str, Any] | None = None,
-    reproducible: bool | None = None,
-    verification_diff: dict[str, Any] | None = None,
 ) -> BadCase | None:
     """更新 bad case。"""
     _init_db()
@@ -267,18 +239,6 @@ def update_bad_case(
         if severity is not None:
             updates.append("severity = ?")
             params.append(severity.value)
-        if rewind_session_id is not None:
-            updates.append("rewind_session_id = ?")
-            params.append(rewind_session_id)
-        if diagnosis is not None:
-            updates.append("diagnosis = ?")
-            params.append(json.dumps(diagnosis))
-        if reproducible is not None:
-            updates.append("reproducible = ?")
-            params.append(1 if reproducible else 0)
-        if verification_diff is not None:
-            updates.append("verification_diff = ?")
-            params.append(json.dumps(verification_diff))
         
         params.append(bad_case_id)
         conn.execute(

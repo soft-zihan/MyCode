@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Shield, ShieldCheck, ShieldAlert, ChevronDown } from 'lucide-react';
+import { Shield, ShieldCheck, ShieldAlert, Compass, ChevronDown } from 'lucide-react';
 
-type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions';
+type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
 
 interface PermissionSelectProps {
   mode: PermissionMode;
@@ -23,6 +23,13 @@ const MODES: { value: PermissionMode; label: string; description: string; icon: 
     description: 'Edit tools auto-approved, dangerous commands need confirmation',
     icon: ShieldAlert,
     color: 'yellow',
+  },
+  { 
+    value: 'plan', 
+    label: 'Plan', 
+    description: '只读研究并制定计划，审批通过后执行',
+    icon: Compass,
+    color: 'blue',
   },
   { 
     value: 'bypassPermissions', 
@@ -70,6 +77,11 @@ export const PermissionSelect: React.FC<PermissionSelectProps> = ({
       hover: 'hover:bg-green-50',
       badge: 'bg-green-100 text-green-700',
     },
+    blue: {
+      active: 'text-blue-700 bg-blue-50 border-blue-300',
+      hover: 'hover:bg-blue-50',
+      badge: 'bg-blue-100 text-blue-700',
+    },
   };
 
   return (
@@ -104,7 +116,8 @@ export const PermissionSelect: React.FC<PermissionSelectProps> = ({
               >
                 <MIcon className={`w-4 h-4 mt-0.5 flex-shrink-0 ${
                   m.color === 'green' ? 'text-green-600' :
-                  m.color === 'yellow' ? 'text-yellow-600' : 'text-gray-500'
+                  m.color === 'yellow' ? 'text-yellow-600' :
+                  m.color === 'blue' ? 'text-blue-600' : 'text-gray-500'
                 }`} />
                 <div className="flex-1 min-w-0">
                   <div className={`text-xs font-medium ${isActive ? 'text-blue-700' : 'text-gray-700'}`}>

@@ -13,6 +13,8 @@ import json
 import time
 from typing import Any
 
+from agents.tools.registry import EDIT_TOOLS
+
 
 class ToolDispatcher:
     """工具调度管理器。"""
@@ -38,28 +40,30 @@ class ToolDispatcher:
 
     async def execute_tool_call(self, name: str, inp: dict) -> str:
         """执行工具调用（带超时和 trace）。"""
+        from contextlib import nullcontext
+
         from agents.observability.trace import trace_span
         from agents.logging import print_info, print_error
 
         _tool_t0 = time.time()
         try:
-            _inp_preview = json.dumps(inp, ensure_ascii=False, default=str)[:1000]
+            _inp_preview = json.dumps(inp, ensure_ascii=False, default=str)[:4000]
         except (TypeError, ValueError):
-            _inp_preview = str(inp)[:1000]
+            _inp_preview = str(inp)[:4000]
 
-        trace_attrs = {
-            "langfuse.observation.type": "tool",
-            "tool": name,
-            "tool.name": name,
-            "langfuse.observation.input": _inp_preview,
-        }
+        trace_metadata: dict[str, Any] = {"tool_name": name}
         if self.agent.current_sub_agent_id:
-            trace_attrs["sub_agent_id"] = self.agent.current_sub_agent_id
+            trace_metadata["sub_agent_id"] = self.agent.current_sub_agent_id
 
         timeout = self.get_tool_timeout(name)
         print_info(f"[DEBUG] execute_tool_call: {name}, timeout={timeout}s")
 
-        with trace_span("tool_call", **trace_attrs) as span:
+        span_cm = (
+            nullcontext(None)
+            if name == "agent"
+            else trace_span("tool_call", name=f"tool.{name}", input=_inp_preview, metadata=trace_metadata)
+        )
+        with span_cm as span:
             try:
                 print_info(f"[DEBUG] execute_tool_call: calling asyncio.wait_for for {name}")
                 result = await asyncio.wait_for(
@@ -67,22 +71,32 @@ class ToolDispatcher:
                     timeout=timeout,
                 )
                 print_info(f"[DEBUG] execute_tool_call: {name} done, took {time.time()-_tool_t0:.2f}s")
-                span.set_attribute("success", True)
-                span.set_attribute("duration_s", round(time.time() - _tool_t0, 2))
-                span.set_attribute("langfuse.observation.output", str(result)[:2000])
-                span.set_attribute("mycode.tool.result_chars", len(result))
-                from agents.observability.cost_tracker import record_tool_result
-                record_tool_result(name, len(result))
+                if span:
+                    span.update(
+                        output=str(result)[:4000],
+                        metadata={
+                            "success": True,
+                            "duration_s": round(time.time() - _tool_t0, 2),
+                            "result_chars": len(result),
+                        },
+                    )
             except asyncio.TimeoutError:
-                span.record_error(TimeoutError(f"Tool '{name}' timed out after {timeout}s"))
+                error = TimeoutError(f"Tool '{name}' timed out after {timeout}s")
+                if span:
+                    span.record_error(error)
+                    span.add_metadata(timeout_s=timeout, duration_s=round(time.time() - _tool_t0, 2))
                 print_error(f"[ERROR] Tool '{name}' timed out after {timeout}s")
                 return f"Error: tool '{name}' timed out after {timeout}s"
             except TimeoutError as e:
-                span.record_error(e)
+                if span:
+                    span.record_error(e)
+                    span.add_metadata(timeout_s=timeout, duration_s=round(time.time() - _tool_t0, 2))
                 print_error(f"[ERROR] Tool '{name}' timed out: {e}")
                 return f"Error: tool '{name}' timed out: {e}"
             except Exception as e:
-                span.record_error(e)
+                if span:
+                    span.record_error(e)
+                    span.add_metadata(duration_s=round(time.time() - _tool_t0, 2))
                 print_error(f"[ERROR] Tool '{name}' failed: {type(e).__name__}: {e}")
                 raise
         return result
@@ -123,6 +137,33 @@ class ToolDispatcher:
         print_info(f"[DEBUG] execute_tool_call_inner: calling execute_tool for {name}")
         result = await execute_tool(name, inp, self.agent._read_file_state)
         print_info(f"[DEBUG] execute_tool_call_inner: execute_tool done for {name}")
+
+        if (
+            name.startswith("plan_")
+            and name in EDIT_TOOLS
+            and isinstance(result, str)
+            and not result.startswith("Error")
+        ):
+            self.agent.session.append("plan/updated", {
+                "session_id": self.agent.session.id,
+                "tool": name,
+                "slug": inp.get("slug", ""),
+            })
+
+        if (
+            name in ("write_file", "edit_file")
+            and isinstance(result, str)
+            and not result.startswith("Error")
+            and self.agent.permission_mode == "plan"
+            and self.agent._plan_mode_manager.plan_dir
+        ):
+            _draft_dir = str(self.agent._plan_mode_manager.plan_dir)
+            if str(inp.get("file_path", "")).startswith(_draft_dir):
+                self.agent.session.append("plan/updated", {
+                    "session_id": self.agent.session.id,
+                    "tool": name,
+                    "slug": "",
+                })
 
         if name == "skill_create":
             try:
@@ -367,11 +408,10 @@ class ToolDispatcher:
 
     async def _execute_agent_tool(self, inp: dict) -> str:
         """执行 agent 工具（子 Agent）。"""
-        from agents.observability.tracer import tracer
+        from agents.observability.trace import trace_span
         from agents.logging import print_sub_agent_start, print_sub_agent_end
         from agents.core.subagent import get_sub_agent_config
         from agents.core.session import Session
-        from agents.observability.trace import trace_event
         import uuid
 
         agent_type = inp.get("type", "general")
@@ -381,13 +421,17 @@ class ToolDispatcher:
 
         sub_agent_id = str(uuid.uuid4())[:8]
 
-        with tracer.span("sub_agent.execute", {
-            "langfuse.observation.type": "agent",
-            "mycode.agent.type": agent_type,
-            "mycode.agent.id": sub_agent_id,
-            "mycode.agent.description": description[:200],
-            "mycode.agent.prompt": prompt[:500],
-        }) as span:
+        with trace_span(
+            "sub_agent",
+            name=f"agent.{agent_type}",
+            input=prompt[:4000],
+            metadata={
+                "agent_id": sub_agent_id,
+                "agent_type": agent_type,
+                "description": description[:500],
+                "parent_session_id": self.agent.session_id,
+            },
+        ) as span:
             sub_session = Session(
                 session_id=sub_agent_id,
                 parent_session=self.agent.session_id,
@@ -401,7 +445,6 @@ class ToolDispatcher:
                 "description": description,
                 "sub_session_id": sub_session.id,
             })
-            trace_event("stream.sub_agent_start", agent_id=sub_agent_id, agent_type=agent_type, description=description)
 
             config = get_sub_agent_config(agent_type)
 
@@ -416,13 +459,9 @@ class ToolDispatcher:
             sub_agent.session_id = sub_session.id
             sub_agent._current_sub_agent_id = sub_agent_id
 
-            from agents.observability.tracer import set_current_session_id
-            parent_session_id = self.agent.session_id
-            set_current_session_id(parent_session_id)
-
             start_time = time.time()
             try:
-                result = await sub_agent.run_once(prompt)
+                result = await asyncio.create_task(sub_agent.run_once(prompt))
                 duration_s = round(time.time() - start_time, 2)
                 self.agent.total_input_tokens += result["tokens"]["input"]
                 self.agent.total_output_tokens += result["tokens"]["output"]
@@ -434,16 +473,17 @@ class ToolDispatcher:
                     "duration_ms": int(duration_s * 1000),
                     "sub_session_id": sub_session.id,
                 })
-                trace_event("stream.sub_agent_end", agent_id=sub_agent_id, agent_type=agent_type, status="completed")
-                if span:
-                    span.set_attribute("mycode.agent.status", "completed")
-                    span.set_attribute("mycode.agent.duration_s", duration_s)
-                    span.set_attribute("mycode.agent.input_tokens", result["tokens"]["input"])
-                    span.set_attribute("mycode.agent.output_tokens", result["tokens"]["output"])
-                    span.set_attribute("mycode.agent.summary", (result["text"] or "")[:500])
+                span.update(
+                    output=(result["text"] or "")[:4000],
+                    metadata={
+                        "status": "aborted" if sub_agent._aborted else "completed",
+                        "duration_s": duration_s,
+                        "input_tokens": result["tokens"]["input"],
+                        "output_tokens": result["tokens"]["output"],
+                        "summary": (result["text"] or "")[:500],
+                    },
+                )
                 if sub_agent._aborted:
-                    if span:
-                        span.set_attribute("mycode.agent.status", "aborted")
                     return "(Sub-agent aborted)"
                 return result["text"] or "(Sub-agent produced no output)"
             except Exception as e:
@@ -456,9 +496,9 @@ class ToolDispatcher:
                     "duration_ms": int(duration_s * 1000),
                     "sub_session_id": sub_session.id,
                 })
-                trace_event("stream.sub_agent_end", agent_id=sub_agent_id, agent_type=agent_type, status="error", error=str(e))
-                if span:
-                    span.set_attribute("mycode.agent.status", "error")
-                    span.set_attribute("mycode.agent.duration_s", duration_s)
-                    span.record_error(e)
+                span.update(
+                    output=str(e)[:4000],
+                    metadata={"status": "error", "duration_s": duration_s},
+                )
+                span.record_error(e)
                 return f"Sub-agent error: {e}"

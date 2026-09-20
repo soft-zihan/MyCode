@@ -121,32 +121,20 @@ async def cmd_skill_stats(agent: "Agent", args: str) -> None:
     category="inspect",
 )
 async def cmd_skill_eval(agent: "Agent", args: str) -> None:
-    from ..online_skill_eval import format_online_skill_eval_async
+    from ...skills.eval_report import format_online_skill_eval_async
     side_query = agent._build_side_query(max_tokens=2400)
     print_info(await format_online_skill_eval_async(side_query=side_query))
 
 
 @command(
     name="trace",
-    description="View or toggle trace logging",
-    usage="[on|off|<n>]",
+    description="View trace logging status",
+    usage="",
     category="inspect",
 )
 async def cmd_trace(agent: "Agent", args: str) -> None:
-    from ..trace import set_trace_enabled, trace_enabled, recent_events, trace_path
+    from ...observability.trace import tracing_enabled
 
-    arg = args.strip()
-    if arg == "on":
-        set_trace_enabled(True)
-        print_info("Trace logging: ON")
-    elif arg == "off":
-        set_trace_enabled(False)
-        print_info("Trace logging: OFF")
-    else:
-        n = 20
-        if arg.isdigit():
-            n = max(1, int(arg))
-        events = recent_events(n)
-        print_info(f"Trace ({len(events)} events, logging={'ON' if trace_enabled() else 'OFF'}): {trace_path()}")
-        for e in events:
-            print_info(f"  {e}")
+    print_info(f"Trace: Langfuse={'ON' if tracing_enabled() else 'OFF'}")
+    print_info("Traces are exported with the official Langfuse SDK.")
+    print_info("Set MYCODE_TRACING=1 to enable, MYCODE_TRACING=0 to disable.")

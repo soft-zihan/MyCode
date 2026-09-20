@@ -36,6 +36,8 @@ class PermissionGate:
         self._confirmed_paths: set[str] = set()
         self._permission_responses: dict[str, dict[str, Any]] = {}
         self._current_tool_name: str = "unknown"
+        self.last_feedback: str = ""
+        self.last_choice: str = ""
 
     @property
     def confirmed_paths(self) -> set[str]:
@@ -57,6 +59,8 @@ class PermissionGate:
         self._current_tool_name = name
 
     async def confirm(self, command: str, extra_data: dict | None = None) -> bool:
+        self.last_feedback = ""
+        self.last_choice = ""
         print_confirmation(command)
 
         if self._confirm_fn:
@@ -89,14 +93,16 @@ class PermissionGate:
             await asyncio.sleep(0.1)
             if request_id in self._permission_responses:
                 response = self._permission_responses.pop(request_id)
+                self.last_feedback = response.get("feedback", "") or ""
+                self.last_choice = response.get("choice", "") or ""
                 return response.get("allowed", False)
             if self._abort_fn and self._abort_fn():
                 return False
 
         return False
 
-    def set_response(self, request_id: str, allowed: bool) -> None:
-        self._permission_responses[request_id] = {"allowed": allowed}
+    def set_response(self, request_id: str, allowed: bool, feedback: str = "", choice: str = "") -> None:
+        self._permission_responses[request_id] = {"allowed": allowed, "feedback": feedback, "choice": choice}
 
     def clear(self) -> None:
         self._confirmed_paths.clear()

@@ -12,7 +12,8 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from agents.core.session import list_sessions, list_child_sessions, delete_session
+from agents.core.workspace import workspace_scope
+from agents.core.session import list_sessions, delete_session, session_dir
 
 router = APIRouter(tags=["sessions"])
 
@@ -52,20 +53,18 @@ class RewindRequest(BaseModel):
     turns: int = 1
 
 
-class RevertStageRequest(BaseModel):
-    target_seq: int
+class RewindStageRequest(BaseModel):
+    """统一回退 stage：turns 与 keep_user_messages 二选一。"""
+    turns: Optional[int] = None
+    keep_user_messages: Optional[int] = None
 
 
-class RevertClearRequest(BaseModel):
-    current_snapshot: list[dict]
+class RewindCommitRequest(BaseModel):
+    plan_id: str
 
 
-class RevertCommitRequest(BaseModel):
-    target_seq: int
-
-
-class TruncateRequest(BaseModel):
-    keep_user_messages: int
+class RewindClearRequest(BaseModel):
+    plan_id: str
 
 
 class ForkRequest(BaseModel):
@@ -76,11 +75,6 @@ class ForkRequest(BaseModel):
 
 class PermissionModeRequest(BaseModel):
     mode: str
-
-
-class PermissionResponseRequest(BaseModel):
-    request_id: str
-    allowed: bool
 
 
 @router.get("/api/sessions")
@@ -98,16 +92,6 @@ def api_list_sessions() -> list[dict[str, Any]]:
     for s in sessions[:5]:
         print(f"[LIST]   {s.get('id')}: name={s.get('name', 'N/A')}, cwd={s.get('cwd', 'N/A')[:30]}")
     return sessions
-
-
-@router.get("/api/sessions/{session_id}/children")
-def api_list_child_sessions(session_id: str) -> list[dict[str, Any]]:
-    """列出指定 session 的所有子 session（子智能体）。"""
-    print(f"[LIST CHILDREN] parent_session_id={session_id}")
-    children = list_child_sessions(session_id)
-    children.sort(key=lambda s: s.get("startTime", ""), reverse=True)
-    print(f"[LIST CHILDREN] found {len(children)} children")
-    return children
 
 
 @router.get("/api/sessions/{session_id}")
@@ -212,8 +196,7 @@ def api_session_summary(session_id: str) -> dict[str, Any]:
         else:
             result["breakdown"] = _compute_breakdown_from_agent(agent)
     else:
-        from pathlib import Path
-        sessions_dir = Path.home() / ".mycode" / "sessions"
+        sessions_dir = session_dir()
         events_file = sessions_dir / f"{session_id}.events.jsonl"
         if not events_file.exists():
             raise HTTPException(status_code=404, detail="Session not found")
@@ -629,36 +612,37 @@ async def generate_session_title(message: str) -> str:
             return fallback_name
         
         for endpoint in candidates:
+            async def _run_title_agent(endpoint=endpoint) -> str:
+                from agents.observability.trace import trace_context
+
+                with trace_context(
+                    trace_name="session-title",
+                    tags=["session-title", "side-query"],
+                    metadata={"model": endpoint.model},
+                ):
+                    agent = Agent(
+                        model=endpoint.model,
+                        api_key=endpoint.api_key,
+                        api_base=endpoint.base_url,
+                        custom_system_prompt=title_config.system_prompt,
+                        custom_tools=[],
+                        is_sub_agent=True,
+                    )
+                    svc = AgentService(agent)
+                    await svc.run_once(message)
+                    return svc.last_response.strip()
+
             try:
-                from agents.observability.trace import get_trace_session, set_trace_session
-                saved_session_id = get_trace_session()
-                
-                # 使用特殊的 session_id，避免创建用户可见的 session
-                agent = Agent(
-                    model=endpoint.model,
-                    api_key=endpoint.api_key,
-                    api_base=endpoint.base_url,
-                    custom_system_prompt=title_config.system_prompt,
-                    custom_tools=[],  # 禁用工具，避免模型调用工具
-                    is_sub_agent=True,  # 避免保存 session 文件
-                )
-                svc = AgentService(agent)
-                await asyncio.wait_for(svc.run_once(message), timeout=30.0)
-                name = svc.last_response.strip()
+                name = await asyncio.wait_for(asyncio.create_task(_run_title_agent()), timeout=30.0)
                 print(f"[TITLE] Generated name: '{name}' (len={len(name)})")
-                
-                if saved_session_id:
-                    set_trace_session(saved_session_id)
-                
+
                 if name:
                     name = name.replace('"', '').replace("'", "").strip()
                     return name[:30] if len(name) > 30 else name
-            except (asyncio.TimeoutError, Exception) as e:
+            except Exception as e:
                 import traceback
                 print(f"[TITLE] Endpoint {endpoint.model} failed: {e}")
                 print(f"[TITLE] Traceback: {traceback.format_exc()}")
-                if saved_session_id:
-                    set_trace_session(saved_session_id)
                 continue
         
         print(f"[TITLE] All endpoints failed, returning fallback: {fallback_name}")
@@ -739,171 +723,74 @@ async def api_compact_session(session_id: str) -> dict[str, Any]:
     return {"success": False, "message": "Session not active"}
 
 
-@router.post("/api/sessions/{session_id}/truncate")
-async def api_truncate_session(session_id: str, data: TruncateRequest) -> dict[str, Any]:
-    """原子 Truncate：保留前 N 条用户消息
-    
-    直接使用 JsonlSessionBackend 操作事件日志。
-    """
-    print(f"[TRUNCATE] session_id={session_id}, keep_user_messages={data.keep_user_messages}")
-    
-    from agents.core.session_backend_jsonl import JsonlSessionBackend
-    backend = JsonlSessionBackend()
-    
-    events = backend.load_all_events(session_id)
-    if not events:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    print(f"[TRUNCATE] before: {len(events)} events")
-    
-    user_count = 0
-    truncate_at_seq = None
-    
-    for event in events:
-        if event.get("type") == "user_message":
-            if user_count >= data.keep_user_messages:
-                truncate_at_seq = event.get("seq")
-                break
-            user_count += 1
-    
-    if truncate_at_seq is None:
-        print(f"[TRUNCATE] no truncation needed, keep all {user_count} user messages")
-        return {"success": True, "message": f"Truncated to {data.keep_user_messages} user messages"}
-    
-    print(f"[TRUNCATE] truncate at seq={truncate_at_seq}")
-    backend.truncate(session_id, truncate_at_seq)
-    print(f"[TRUNCATE] truncated events.jsonl")
-    
-    session_info = _active_sessions.get(session_id)
-    if session_info and session_info.get("svc"):
-        svc = session_info["svc"]
-        messages = svc.get_messages()
-        user_count = 0
-        truncate_at = len(messages)
-        for i, msg in enumerate(messages):
-            if msg.get("role") == "user":
-                if user_count >= data.keep_user_messages:
-                    truncate_at = i
-                    break
-                user_count += 1
-        svc.truncate_messages_to(truncate_at)
-    
-    return {"success": True, "message": f"Truncated to {data.keep_user_messages} user messages"}
+# ── 统一回退 API（对话 + 文件原子回退，三阶段） ──
+
+
+@router.post("/api/sessions/{session_id}/rewind/stage")
+async def api_rewind_stage(session_id: str, data: RewindStageRequest) -> dict[str, Any]:
+    """Stage：生成回退计划（文件 diff + 对话截断预览），不修改任何状态。"""
+    from agents.core.rewind_service import get_rewind_service
+    try:
+        session_info = _active_sessions.get(session_id)
+        if session_info and session_info.get("svc"):
+            plan = await session_info["svc"].rewind_stage(
+                turns=data.turns, keep_user_messages=data.keep_user_messages
+            )
+        else:
+            plan_obj = await get_rewind_service().stage(
+                session_id, turns=data.turns, keep_user_messages=data.keep_user_messages
+            )
+            plan = plan_obj.to_dict()
+        return {"success": True, "plan": plan}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/api/sessions/{session_id}/rewind/commit")
+async def api_rewind_commit(session_id: str, data: RewindCommitRequest) -> dict[str, Any]:
+    """Commit：执行回退（恢复文件 → 截断事件日志 → 追加 rewind 标记事件）。"""
+    from agents.core.rewind_service import get_rewind_service
+    try:
+        session_info = _active_sessions.get(session_id)
+        if session_info and session_info.get("svc"):
+            result = await session_info["svc"].rewind_commit(data.plan_id)
+        else:
+            result = await get_rewind_service().commit(data.plan_id)
+        return {"success": True, **result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/api/sessions/{session_id}/rewind/clear")
+async def api_rewind_clear(session_id: str, data: RewindClearRequest) -> dict[str, Any]:
+    """Clear：取消回退计划（stage 未修改文件，直接丢弃）。"""
+    from agents.core.rewind_service import get_rewind_service
+    try:
+        result = await get_rewind_service().clear(data.plan_id)
+        return {"success": True, **result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/api/sessions/{session_id}/rewind")
 async def api_rewind_session(session_id: str, data: RewindRequest) -> dict[str, Any]:
-    print(f"[REWIND] session_id={session_id}, turns={data.turns}")
-    
-    from agents.core.session_backend_jsonl import JsonlSessionBackend
-    backend = JsonlSessionBackend()
-    
-    events = backend.load_all_events(session_id)
-    if not events:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    turn_boundaries = [e for e in events if e.get("type") == "turn_boundary"]
-    print(f"[REWIND] turnBoundaries: {len(turn_boundaries)}")
-    
-    if not turn_boundaries:
-        return {"success": False, "message": "No turn boundaries found"}
-    
-    current_turn = len(turn_boundaries)
-    target_turn = max(1, current_turn - data.turns)
-    
-    target_boundary = None
-    for boundary in turn_boundaries:
-        if boundary.get("turn") == target_turn:
-            target_boundary = boundary
-            break
-    
-    if not target_boundary:
-        return {"success": False, "message": "Target turn not found"}
-    
-    truncate_at_seq = target_boundary.get("seq")
-    print(f"[REWIND] target_turn={target_turn}, truncate_at_seq={truncate_at_seq}")
-    backend.truncate(session_id, truncate_at_seq)
-    
-    session_info = _active_sessions.get(session_id)
-    if session_info and session_info.get("svc"):
-        svc = session_info["svc"]
-        messages = svc.get_messages()
-        user_count = 0
-        for i, msg in enumerate(messages):
-            if msg.get("role") == "user":
-                user_count += 1
-        target_user_count = target_boundary.get("user_message_count", 0)
-        if target_user_count < user_count:
-            truncate_at = len(messages)
-            user_count = 0
-            for i, msg in enumerate(messages):
-                if msg.get("role") == "user":
-                    if user_count >= target_user_count:
-                        truncate_at = i
-                        break
-                    user_count += 1
-            svc.truncate_messages_to(truncate_at)
-    
-    print(f"[REWIND] truncated to turn {target_turn}")
-    return {
-        "success": True, 
-        "message": f"Rewound to turn {target_turn}",
-        "turn": target_turn
-    }
-
-
-# ── 三阶段恢复 API ──
-
-
-@router.post("/api/sessions/{session_id}/revert/stage")
-async def api_revert_stage(session_id: str, data: RevertStageRequest) -> dict[str, Any]:
-    """Stage：计算恢复计划，预览变更。"""
-    print(f"[REVERT/STAGE] session_id={session_id}, target_seq={data.target_seq}")
-    
-    session_info = _active_sessions.get(session_id)
-    if session_info and session_info.get("svc"):
-        svc = session_info["svc"]
-        try:
-            plan = svc.stage_revert(data.target_seq)
-            return {"success": True, "plan": plan}
-        except Exception as e:
-            return {"success": False, "message": str(e)}
-    
-    return {"success": False, "message": "Session not active"}
-
-
-@router.post("/api/sessions/{session_id}/revert/clear")
-async def api_revert_clear(session_id: str, data: RevertClearRequest) -> dict[str, Any]:
-    """Clear：取消恢复，恢复到原始状态。"""
-    print(f"[REVERT/CLEAR] session_id={session_id}")
-    
-    session_info = _active_sessions.get(session_id)
-    if session_info and session_info.get("svc"):
-        svc = session_info["svc"]
-        try:
-            result = svc.clear_revert(data.current_snapshot)
-            return {"success": True, "result": result}
-        except Exception as e:
-            return {"success": False, "message": str(e)}
-    
-    return {"success": False, "message": "Session not active"}
-
-
-@router.post("/api/sessions/{session_id}/revert/commit")
-async def api_revert_commit(session_id: str, data: RevertCommitRequest) -> dict[str, Any]:
-    """Commit：确认恢复。"""
-    print(f"[REVERT/COMMIT] session_id={session_id}, target_seq={data.target_seq}")
-    
-    session_info = _active_sessions.get(session_id)
-    if session_info and session_info.get("svc"):
-        svc = session_info["svc"]
-        try:
-            result = svc.commit_revert(data.target_seq)
-            return {"success": True, "result": result}
-        except Exception as e:
-            return {"success": False, "message": str(e)}
-    
-    return {"success": False, "message": "Session not active"}
+    """原子回退 N 轮（对话 + 文件），用于 CLI / composer 等非交互场景。"""
+    from agents.core.rewind_service import get_rewind_service
+    try:
+        session_info = _active_sessions.get(session_id)
+        if session_info and session_info.get("svc"):
+            message = await session_info["svc"].rewind(data.turns)
+            return {"success": True, "message": message}
+        svc = get_rewind_service()
+        plan = await svc.stage(session_id, turns=data.turns)
+        result = await svc.commit(plan.id)
+        return {
+            "success": True,
+            "message": f"Rewound {data.turns} turn(s), restored {len(result['restored_files'])} files",
+            **result,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/api/sessions/{session_id}/permission-mode")
@@ -1178,8 +1065,7 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
             }
     
     # Fallback: 从 JSONL 事件恢复
-    from pathlib import Path
-    sessions_dir = Path.home() / ".mycode" / "sessions"
+    sessions_dir = session_dir()
     events_file = sessions_dir / f"{session_id}.events.jsonl"
     
     if not events_file.exists():
@@ -1395,6 +1281,7 @@ async def api_fork_session(session_id: str, data: Optional[ForkRequest] = None) 
         raise HTTPException(status_code=404, detail="Session not found")
     
     original_title = None
+    loaded = None
     if session is not None:
         original_title = session.projections.get("title")
     if not original_title:
@@ -1441,20 +1328,26 @@ async def api_fork_session(session_id: str, data: Optional[ForkRequest] = None) 
         truncated_events = truncated_events[:keep_until]
         print(f"[FORK] truncating events to keep {data.keep_user_messages} user messages, kept={len(truncated_events)}")
     
+    copied_events = []
+    for event in truncated_events:
+        copied_event = dict(event)
+        copied_event["session_id"] = new_session_id
+        copied_events.append(copied_event)
+
     title_event = {
         "type": "session/title",
         "time": int(time.time() * 1000),
         "session_id": new_session_id,
         "title": fork_name,
-        "seq": len(truncated_events),
+        "seq": len(copied_events),
     }
-    truncated_events.append(title_event)
+    copied_events.append(title_event)
     
     from agents.core.session_backend_jsonl import JsonlSessionBackend
     new_backend = JsonlSessionBackend()
-    for event in truncated_events:
+    for event in copied_events:
         new_backend.append(new_session_id, event)
-    print(f"[FORK] wrote {len(truncated_events)} events to {new_session_id}")
+    print(f"[FORK] wrote {len(copied_events)} events to {new_session_id}")
     
     try:
         from agents.core.session_projection_cache import (
@@ -1471,30 +1364,12 @@ async def api_fork_session(session_id: str, data: Optional[ForkRequest] = None) 
             created_at=int(time.time() * 1000),
             cwd=cwd,
             is_seeded=False,
-            inherited_event_count=len(truncated_events),
+            inherited_event_count=len(copied_events),
         )
-        projections = restore_projections(new_session_id, truncated_events, header)
+        projections = restore_projections(new_session_id, copied_events, header)
         print(f"[FORK] projcache built for {new_session_id}: title={projections.get('title')}")
     except Exception as e:
         print(f"[FORK] failed to build projcache: {e}")
-    
-    # 复制 trace 文件
-    try:
-        from agents.observability.trace import trace_dir
-        import shutil
-        source_trace = trace_dir() / f"{session_id}.jsonl"
-        if source_trace.exists():
-            target_trace = trace_dir() / f"{new_session_id}.jsonl"
-            shutil.copy2(source_trace, target_trace)
-            print(f"[FORK] copied trace: {source_trace} -> {target_trace}")
-        else:
-            for f in trace_dir().glob(f"*_{session_id}.jsonl"):
-                target_trace = trace_dir() / f.name.replace(session_id, new_session_id)
-                shutil.copy2(f, target_trace)
-                print(f"[FORK] copied trace: {f} -> {target_trace}")
-                break
-    except Exception as e:
-        print(f"[FORK] failed to copy trace: {e}")
     
     return {
         "success": True,
@@ -1504,92 +1379,84 @@ async def api_fork_session(session_id: str, data: Optional[ForkRequest] = None) 
     }
 
 
-@router.post("/api/sessions/{session_id}/permission-response")
-async def api_permission_response(session_id: str, data: PermissionResponseRequest) -> dict[str, Any]:
-    session_info = _active_sessions.get(session_id)
-    if session_info and session_info.get("svc"):
-        svc = session_info["svc"]
-        svc.respond_permission(data.request_id, data.allowed)
-        return {"success": True}
-    
-    return {"success": False, "message": "Session not active"}
-
-
-class UpdatePlanRequest(BaseModel):
-    plan_file_path: str
-    content: str
-
-
-@router.post("/api/sessions/{session_id}/plan/update")
-async def api_plan_update(session_id: str, data: UpdatePlanRequest) -> dict[str, Any]:
-    """Update the plan file content."""
+def _session_workspace(session_id: str) -> Path:
+    """解析会话的 workspace：活跃会话取 agent.workspace，否则读 projcache 的 cwd。"""
+    info = _active_sessions.get(session_id)
+    svc = info.get("svc") if info else None
+    if svc is not None:
+        return Path(svc.workspace)
     try:
-        plan_path = Path(data.plan_file_path)
-        if not plan_path.exists():
-            return {"success": False, "message": "Plan file not found"}
-        plan_path.write_text(data.content, encoding="utf-8")
-        return {"success": True}
-    except Exception as e:
-        return {"success": False, "message": str(e)}
+        projcache = session_dir() / f"{session_id}.projcache.json"
+        if projcache.exists():
+            rows = json.loads(projcache.read_text()).get("rows", {})
+            cwd = rows.get("cwd", {}).get("val")
+            if cwd:
+                return Path(cwd)
+    except Exception:
+        pass
+    return Path.cwd()
 
 
 @router.get("/api/sessions/{session_id}/plan/{slug}/status")
 async def api_plan_status(session_id: str, slug: str) -> dict[str, Any]:
     """Get plan status and tasks."""
-    try:
-        from agents.plan.plan_manager import get_plan, get_tasks
-        plan = get_plan(slug)
-        if not plan:
-            return {"success": False, "message": f"Plan '{slug}' not found"}
+    with workspace_scope(_session_workspace(session_id)):
+        try:
+            from agents.plan.plan_manager import get_plan, get_tasks
+            plan = get_plan(slug)
+            if not plan:
+                return {"success": False, "message": f"Plan '{slug}' not found"}
         
-        tasks = get_tasks(slug)
-        done = sum(1 for t in tasks if t.status == "done")
-        failed = sum(1 for t in tasks if t.status == "failed")
-        pending = sum(1 for t in tasks if t.status == "pending")
+            tasks = get_tasks(slug)
+            done = sum(1 for t in tasks if t.status == "done")
+            failed = sum(1 for t in tasks if t.status == "failed")
+            pending = sum(1 for t in tasks if t.status == "pending")
         
-        return {
-            "success": True,
-            "data": {
-                "slug": plan.slug,
-                "status": plan.status.value,
-                "tasks": {
-                    "total": len(tasks),
-                    "done": done,
-                    "failed": failed,
-                    "pending": pending,
-                },
-                "task_list": [
-                    {"id": t.id, "description": t.description, "status": t.status}
-                    for t in tasks
-                ],
+            return {
+                "success": True,
+                "data": {
+                    "slug": plan.slug,
+                    "status": plan.status.value,
+                    "tasks": {
+                        "total": len(tasks),
+                        "done": done,
+                        "failed": failed,
+                        "pending": pending,
+                    },
+                    "task_list": [
+                        {"id": t.id, "description": t.description, "status": t.status}
+                        for t in tasks
+                    ],
+                }
             }
-        }
-    except Exception as e:
-        return {"success": False, "message": str(e)}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
 
 
 @router.post("/api/sessions/{session_id}/plan/{slug}/pause")
 async def api_plan_pause(session_id: str, slug: str) -> dict[str, Any]:
     """Pause plan execution."""
-    try:
-        from agents.plan.plan_manager import pause_plan
-        if pause_plan(slug):
-            return {"success": True}
-        return {"success": False, "message": "Cannot pause plan"}
-    except Exception as e:
-        return {"success": False, "message": str(e)}
+    with workspace_scope(_session_workspace(session_id)):
+        try:
+            from agents.plan.plan_manager import pause_plan
+            if pause_plan(slug):
+                return {"success": True}
+            return {"success": False, "message": "Cannot pause plan"}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
 
 
 @router.post("/api/sessions/{session_id}/plan/{slug}/resume")
 async def api_plan_resume(session_id: str, slug: str) -> dict[str, Any]:
     """Resume plan execution."""
-    try:
-        from agents.plan.plan_manager import resume_plan
-        if resume_plan(slug):
-            return {"success": True}
-        return {"success": False, "message": "Cannot resume plan"}
-    except Exception as e:
-        return {"success": False, "message": str(e)}
+    with workspace_scope(_session_workspace(session_id)):
+        try:
+            from agents.plan.plan_manager import resume_plan
+            if resume_plan(slug):
+                return {"success": True}
+            return {"success": False, "message": "Cannot resume plan"}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
 
 
 class SkipTaskRequest(BaseModel):
@@ -1599,56 +1466,120 @@ class SkipTaskRequest(BaseModel):
 @router.post("/api/sessions/{session_id}/plan/{slug}/skip-task")
 async def api_plan_skip_task(session_id: str, slug: str, data: SkipTaskRequest) -> dict[str, Any]:
     """Skip a task in plan."""
-    try:
-        from agents.plan.plan_manager import skip_task
-        if skip_task(slug, data.task_id):
-            return {"success": True}
-        return {"success": False, "message": "Cannot skip task"}
-    except Exception as e:
-        return {"success": False, "message": str(e)}
+    with workspace_scope(_session_workspace(session_id)):
+        try:
+            from agents.plan.plan_manager import skip_task
+            if skip_task(slug, data.task_id):
+                return {"success": True}
+            return {"success": False, "message": "Cannot skip task"}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+
+class RedoTaskRequest(BaseModel):
+    task_id: int
+
+
+@router.post("/api/sessions/{session_id}/plan/{slug}/redo-task")
+async def api_plan_redo_task(session_id: str, slug: str, data: RedoTaskRequest) -> dict[str, Any]:
+    """Redo a done/skipped task (reset to pending)."""
+    with workspace_scope(_session_workspace(session_id)):
+        try:
+            from agents.plan.plan_manager import redo_task
+            if redo_task(slug, data.task_id):
+                return {"success": True}
+            return {"success": False, "message": "Cannot redo task"}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
 
 
 @router.post("/api/sessions/{session_id}/plan/{slug}/abandon")
 async def api_plan_abandon(session_id: str, slug: str) -> dict[str, Any]:
     """Abandon plan."""
-    try:
-        from agents.plan.plan_manager import abandon_plan
-        if abandon_plan(slug):
-            return {"success": True}
-        return {"success": False, "message": "Cannot abandon plan"}
-    except Exception as e:
-        return {"success": False, "message": str(e)}
+    with workspace_scope(_session_workspace(session_id)):
+        try:
+            from agents.plan.plan_manager import abandon_plan
+            if abandon_plan(slug):
+                return {"success": True}
+            return {"success": False, "message": "Cannot abandon plan"}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
 
 
 @router.get("/api/sessions/{session_id}/plan/{slug}/artifacts")
 async def api_plan_artifacts(session_id: str, slug: str) -> dict[str, Any]:
     """Get plan artifacts (spec.md, tasks.md, design.md)."""
-    try:
-        from agents.plan.plan_manager import get_plan, read_artifact
-        plan = get_plan(slug)
-        if not plan:
-            return {"success": False, "message": f"Plan '{slug}' not found"}
+    with workspace_scope(_session_workspace(session_id)):
+        try:
+            from agents.plan.plan_manager import get_plan, read_artifact
+            plan = get_plan(slug)
+            if not plan:
+                return {"success": False, "message": f"Plan '{slug}' not found"}
         
-        artifacts = {}
-        for filename in ["spec.md", "tasks.md", "design.md"]:
-            content = read_artifact(slug, filename)
-            if content:
-                artifacts[filename] = content
+            artifacts = {}
+            for filename in ["spec.md", "tasks.md", "design.md"]:
+                content = read_artifact(slug, filename)
+                if content:
+                    artifacts[filename] = content
         
-        return {"success": True, "data": artifacts}
-    except Exception as e:
-        return {"success": False, "message": str(e)}
+            return {"success": True, "data": artifacts}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
 
 
 @router.get("/api/sessions/{session_id}/plan/{slug}/ledger")
 async def api_plan_ledger(session_id: str, slug: str) -> dict[str, Any]:
     """Get plan ledger (execution history)."""
-    try:
-        from agents.plan.plan_manager import read_ledger
-        entries = read_ledger(slug)
-        return {"success": True, "data": entries}
-    except Exception as e:
-        return {"success": False, "message": str(e)}
+    with workspace_scope(_session_workspace(session_id)):
+        try:
+            from agents.plan.plan_manager import read_ledger
+            entries = read_ledger(slug)
+            return {"success": True, "data": entries}
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+
+_DRAFT_ARTIFACT_NAMES = {"spec.md", "design.md", "tasks.md", "plan.md", "proposal.md"}
+
+
+class DraftArtifactRequest(BaseModel):
+    filename: str
+    content: str
+
+
+def _plan_draft_dir(session_id: str) -> Path:
+    from agents.core.workspace import get_workspace
+    return get_workspace() / ".mycode" / "plans" / f"plan-{session_id}"
+
+
+@router.get("/api/sessions/{session_id}/plan-draft/artifacts")
+async def api_plan_draft_artifacts(session_id: str) -> dict[str, Any]:
+    """读取规划草稿目录（plan-{session_id}）中的 artifacts。"""
+    with workspace_scope(_session_workspace(session_id)):
+        draft_dir = _plan_draft_dir(session_id)
+        if not draft_dir.exists():
+            return {"success": False, "message": "No plan draft found"}
+        artifacts = {}
+        for filename in sorted(_DRAFT_ARTIFACT_NAMES):
+            f = draft_dir / filename
+            if f.exists():
+                artifacts[filename] = f.read_text(encoding="utf-8")
+        return {"success": True, "data": {"draft_dir": str(draft_dir), "artifacts": artifacts}}
+
+
+@router.put("/api/sessions/{session_id}/plan-draft/artifacts")
+async def api_plan_draft_artifact_update(session_id: str, data: DraftArtifactRequest) -> dict[str, Any]:
+    """编辑规划草稿 artifact（仅允许白名单文件名，限定草稿目录内）。"""
+    if data.filename not in _DRAFT_ARTIFACT_NAMES:
+        return {"success": False, "message": f"Invalid artifact filename: {data.filename}"}
+    with workspace_scope(_session_workspace(session_id)):
+        draft_dir = _plan_draft_dir(session_id).resolve()
+        target = (draft_dir / data.filename).resolve()
+        if not target.is_relative_to(draft_dir):
+            return {"success": False, "message": "Invalid artifact path"}
+        draft_dir.mkdir(parents=True, exist_ok=True)
+        target.write_text(data.content, encoding="utf-8")
+        return {"success": True}
 
 
 @router.get("/api/sessions/{session_id}/stats")
@@ -1668,8 +1599,7 @@ def api_session_stats(session_id: str) -> dict[str, Any]:
             "last_input_token_count": agent.last_input_token_count,
         }
     # Check if session exists by checking events file
-    from pathlib import Path
-    sessions_dir = Path.home() / ".mycode" / "sessions"
+    sessions_dir = session_dir()
     events_file = sessions_dir / f"{session_id}.events.jsonl"
     if events_file.exists():
         cached_tokens = 0
@@ -1729,8 +1659,7 @@ def api_compression_stats(session_id: str) -> dict[str, Any]:
             "folded_memories": folded_memories,
         }
     # Fallback: compute from JSONL events for inactive sessions
-    from pathlib import Path
-    sessions_dir = Path.home() / ".mycode" / "sessions"
+    sessions_dir = session_dir()
     events_file = sessions_dir / f"{session_id}.events.jsonl"
 
     if not events_file.exists():
@@ -1811,8 +1740,7 @@ def api_context_store(session_id: str) -> dict[str, Any]:
             "active_entries": len([e for e in entries if e.get("type") == "tool_result_msg"]),
         }
     # Check if session exists by checking events file
-    from pathlib import Path
-    sessions_dir = Path.home() / ".mycode" / "sessions"
+    sessions_dir = session_dir()
     events_file = sessions_dir / f"{session_id}.events.jsonl"
     if events_file.exists():
         return {

@@ -8,7 +8,6 @@ export interface PermissionRequest {
   tool_name: string;
   message?: string;
   sub_agent_id?: string;
-  plan_file_path?: string;
 }
 
 export interface QuestionRequest {
@@ -111,6 +110,7 @@ class SessionStore {
   private _projectionsVersion = 0;
   private _projectionsSnapshot: Map<string, SessionState['projections']> | null = null;
   private listeners = new Set<() => void>();
+  private planRevisions = new Map<string, number>();
 
   private notify(): void {
     this.version++;
@@ -123,6 +123,15 @@ class SessionStore {
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };
+  }
+
+  getPlanRevision(sessionId: string): number {
+    return this.planRevisions.get(sessionId) ?? 0;
+  }
+
+  bumpPlanRevision(sessionId: string): void {
+    this.planRevisions.set(sessionId, (this.planRevisions.get(sessionId) ?? 0) + 1);
+    this.notify();
   }
 
   getOrCreate(sessionId: string): SessionState {

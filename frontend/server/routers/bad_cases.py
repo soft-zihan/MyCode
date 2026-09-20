@@ -56,10 +56,6 @@ class BadCaseResponse(BaseModel):
     reason: str
     comment: str
     expected_tool: Optional[str]
-    rewind_session_id: Optional[str]
-    diagnosis: dict[str, Any]
-    reproducible: Optional[bool]
-    verification_diff: dict[str, Any]
     created_at: float
     updated_at: float
 
@@ -68,28 +64,12 @@ class UpdateBadCaseRequest(BaseModel):
     """更新 bad case 请求。"""
     status: Optional[str] = None
     severity: Optional[str] = None
-    rewind_session_id: Optional[str] = None
-    diagnosis: Optional[dict[str, Any]] = None
-    reproducible: Optional[bool] = None
-    verification_diff: Optional[dict[str, Any]] = None
 
 
 class BadCaseListResponse(BaseModel):
     """Bad case 列表响应。"""
     items: list[BadCaseResponse]
     total: int
-
-
-class VerifyRequest(BaseModel):
-    """验证 bad case 可复现性请求。"""
-    bad_case_id: str
-
-
-class VerifyResponse(BaseModel):
-    """验证结果响应。"""
-    reproducible: bool
-    severity: str
-    message: str
 
 
 # ── 用户反馈 API ──
@@ -170,10 +150,6 @@ def api_update_bad_case(bad_case_id: str, request: UpdateBadCaseRequest) -> BadC
         bad_case_id=bad_case_id,
         status=status_enum,
         severity=severity_enum,
-        rewind_session_id=request.rewind_session_id,
-        diagnosis=request.diagnosis,
-        reproducible=request.reproducible,
-        verification_diff=request.verification_diff,
     )
     
     if not updated:
@@ -189,85 +165,6 @@ def api_delete_bad_case(bad_case_id: str) -> dict[str, bool]:
     if not success:
         raise HTTPException(status_code=404, detail="Bad case not found")
     return {"success": True}
-
-
-# ── Rewind 集成 API ──
-
-
-@router.post("/{bad_case_id}/verify", response_model=VerifyResponse)
-async def api_verify_bad_case(bad_case_id: str) -> VerifyResponse:
-    """验证 bad case 是否可复现。
-    
-    使用 Rewind 回放，对比结果判断是否偶发。
-    """
-    bad_case = get_bad_case(bad_case_id)
-    if not bad_case:
-        raise HTTPException(status_code=404, detail="Bad case not found")
-    
-    # 检查 Rewind 是否启用
-    from agents.observability.rewind import is_enabled, get_session_id, diagnose_failure, init_rewind
-    if not is_enabled():
-        return VerifyResponse(
-            reproducible=False,
-            severity="unknown",
-            message="Rewind 未启用，无法验证可复现性",
-        )
-    
-    # 初始化 Rewind（如果尚未初始化）
-    init_rewind()
-    
-    # 获取当前 Rewind session
-    rewind_session_id = get_session_id()
-    
-    # 诊断失败原因
-    diagnosis = diagnose_failure(rewind_session_id)
-    
-    # 简化判断：如果有诊断结果，认为可复现
-    reproducible = diagnosis is not None
-    severity = "high" if reproducible else "low"
-    
-    # 更新 bad case
-    update_bad_case(
-        bad_case_id=bad_case_id,
-        rewind_session_id=rewind_session_id,
-        diagnosis=diagnosis or {},
-        reproducible=reproducible,
-        status=BadCaseStatus.VERIFIED if reproducible else BadCaseStatus.FLAKY,
-    )
-    
-    return VerifyResponse(
-        reproducible=reproducible,
-        severity=severity,
-        message="已验证" if reproducible else "偶发问题或无法诊断",
-    )
-
-
-@router.post("/{bad_case_id}/export-rewind")
-def api_export_rewind(bad_case_id: str) -> dict[str, Any]:
-    """导出 bad case 的 Rewind session。"""
-    bad_case = get_bad_case(bad_case_id)
-    if not bad_case:
-        raise HTTPException(status_code=404, detail="Bad case not found")
-    
-    from agents.observability.rewind import is_enabled, export_session
-    if not is_enabled():
-        raise HTTPException(status_code=400, detail="Rewind 未启用")
-    
-    from pathlib import Path
-    export_dir = Path.home() / ".mycode" / "bad-cases" / bad_case_id
-    export_dir.mkdir(parents=True, exist_ok=True)
-    
-    success = export_session(output_dir=str(export_dir))
-    if not success:
-        raise HTTPException(status_code=500, detail="导出失败")
-    
-    # 更新 bad case
-    update_bad_case(
-        bad_case_id=bad_case_id,
-        rewind_session_id=bad_case.session_id,
-    )
-    
-    return {"success": True, "export_dir": str(export_dir)}
 
 
 # ── 统计 API ──
@@ -309,10 +206,6 @@ def _to_response(bad_case: BadCase) -> BadCaseResponse:
         reason=bad_case.reason,
         comment=bad_case.comment,
         expected_tool=bad_case.expected_tool,
-        rewind_session_id=bad_case.rewind_session_id,
-        diagnosis=bad_case.diagnosis,
-        reproducible=bad_case.reproducible,
-        verification_diff=bad_case.verification_diff,
         created_at=bad_case.created_at,
         updated_at=bad_case.updated_at,
     )

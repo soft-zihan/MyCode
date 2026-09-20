@@ -197,8 +197,6 @@ async def cmd_status(agent: "Agent", args: str) -> None:
     category="config",
 )
 async def cmd_permission(agent: "Agent", args: str) -> None:
-    from ...permissions import get_permission_set_from_legacy_mode
-
     mode = args.strip().lower()
     valid_modes = ["default", "acceptEdits", "bypassPermissions", "plan", "dontAsk"]
 
@@ -210,10 +208,19 @@ async def cmd_permission(agent: "Agent", args: str) -> None:
         print_error(f"Invalid mode: {mode}\n\nValid modes: {', '.join(valid_modes)}")
         return
 
-    agent.permission_mode = mode
-    agent._permission_set = get_permission_set_from_legacy_mode(mode)
-    agent._tool_executor.permission_set = agent._permission_set
-    print_info(f"Permission mode switched to: {mode}")
+    if mode == agent.permission_mode:
+        print_info(f"Already in {mode} mode.")
+        return
+
+    if mode == "plan":
+        # 进入 plan 模式：走内部入口，正确设置 pre_plan_mode/plan_dir/system prompt
+        agent._enter_plan_mode_internal()
+    else:
+        if agent.permission_mode == "plan":
+            # 离开 plan 模式：恢复 system prompt、清理 plan_dir
+            agent.toggle_plan_mode()
+        agent.permission_mode = mode
+    print_info(f"Permission mode switched to: {agent.permission_mode}")
 
 
 @command(
@@ -223,19 +230,17 @@ async def cmd_permission(agent: "Agent", args: str) -> None:
     category="config",
 )
 async def cmd_yolo(agent: "Agent", args: str) -> None:
-    from ...permissions import get_permission_set_from_legacy_mode
-
     arg = args.strip().lower()
 
     if arg == "on":
+        if agent.permission_mode == "plan":
+            agent.toggle_plan_mode()
         agent.permission_mode = "bypassPermissions"
-        agent._permission_set = get_permission_set_from_legacy_mode("bypassPermissions")
-        agent._tool_executor.permission_set = agent._permission_set
         print_info("YOLO mode: ON - all permissions bypassed")
     elif arg == "off":
+        if agent.permission_mode == "plan":
+            agent.toggle_plan_mode()
         agent.permission_mode = "default"
-        agent._permission_set = get_permission_set_from_legacy_mode("default")
-        agent._tool_executor.permission_set = agent._permission_set
         print_info("YOLO mode: OFF - default permissions restored")
     else:
         status = "ON" if agent.permission_mode == "bypassPermissions" else "OFF"

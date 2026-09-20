@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { fetchSkills, fetchSkillEvolutionStatus, fetchReplayPool, fetchChampion, fetchSkillProvenance, deleteSkill, Skill, SkillEvolutionStatus, ReplayPoolData, ChampionData } from '../api/client';
-import { Wrench, RefreshCw, Activity, Edit3, Save, X, User, Folder, Trash2, Power, Star, CheckCircle, AlertTriangle, Eye, EyeOff, Circle } from 'lucide-react';
+import { Wrench, RefreshCw, Activity, Edit3, Save, X, User, Folder, Trash2, Power, Star, CheckCircle, AlertTriangle, EyeOff, Circle } from 'lucide-react';
 import { PageLayout } from '../components/PageLayout';
 
 interface SkillDetail extends Skill {
@@ -24,8 +24,6 @@ function SkillEvolutionDetail({
   getStatusBadge: (s: string) => React.ReactNode;
 }) {
   const [expandedProv, setExpandedProv] = useState<number | null>(null);
-  const usage = status.usage_stats;
-  const maxUsage = Math.max(usage.retrieved, usage.relevant, usage.used, 1);
 
   return (
     <div className="space-y-4 border border-gray-200 rounded-lg p-4 bg-white">
@@ -47,27 +45,12 @@ function SkillEvolutionDetail({
 
       <div className="grid grid-cols-2 gap-4">
         <div>
-          <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Usage Stats</h4>
-          <div className="space-y-1.5">
-            {[
-              { label: 'Retrieved', value: usage.retrieved, color: 'bg-blue-500' },
-              { label: 'Relevant', value: usage.relevant, color: 'bg-green-500' },
-              { label: 'Used', value: usage.used, color: 'bg-purple-500' },
-            ].map(item => (
-              <div key={item.label} className="flex items-center gap-2 text-xs">
-                <span className="text-gray-500 w-16">{item.label}</span>
-                <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
-                  <div className={`h-full ${item.color} rounded-full`} style={{ width: `${(item.value / maxUsage) * 100}%` }} />
-                </div>
-                <span className="font-mono text-gray-700 w-8 text-right">{item.value}</span>
-              </div>
-            ))}
-            <div className="flex items-center justify-between text-xs pt-1 border-t border-gray-100">
-              <span className="text-gray-500">Pass rate</span>
-              <span className="font-mono font-medium text-gray-700">
-                {((status.rule_summary?.pass_rate || 0) * 100).toFixed(0)}%
-              </span>
-            </div>
+          <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Pass Rate</h4>
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-gray-500">Replay pass rate</span>
+            <span className="font-mono font-medium text-gray-700">
+              {((status.rule_summary?.pass_rate || 0) * 100).toFixed(0)}%
+            </span>
           </div>
         </div>
 
@@ -329,7 +312,6 @@ export default function SkillsPage() {
     watch: { color: 'text-yellow-600 bg-yellow-50 border-yellow-200', icon: <AlertTriangle className="w-3 h-3" />, label: 'Watch' },
     incubating: { color: 'text-blue-600 bg-blue-50 border-blue-200', icon: <Circle className="w-3 h-3" />, label: 'Incubating' },
     unobserved: { color: 'text-gray-500 bg-gray-50 border-gray-200', icon: <EyeOff className="w-3 h-3" />, label: 'Unobserved' },
-    pruned: { color: 'text-red-600 bg-red-50 border-red-200', icon: <Eye className="w-3 h-3" />, label: 'Pruned' },
   };
 
   const getStatusBadge = (status: string) => {
@@ -584,8 +566,6 @@ export default function SkillsPage() {
                     <tr className="bg-gray-100 border-b border-gray-200">
                       <th className="text-left px-3 py-2 font-medium text-gray-600">Skill</th>
                       <th className="text-left px-3 py-2 font-medium text-gray-600">Status</th>
-                      <th className="text-right px-3 py-2 font-medium text-gray-600">Retrieved</th>
-                      <th className="text-right px-3 py-2 font-medium text-gray-600">Used</th>
                       <th className="text-right px-3 py-2 font-medium text-gray-600">Replay</th>
                       <th className="text-left px-3 py-2 font-medium text-gray-600">Champion</th>
                     </tr>
@@ -608,12 +588,6 @@ export default function SkillsPage() {
                             {evoStatus ? getStatusBadge(evoStatus.status) : (
                               <span className="text-gray-400">—</span>
                             )}
-                          </td>
-                          <td className="px-3 py-2 text-right font-mono text-gray-700">
-                            {evoStatus?.usage_stats?.retrieved ?? '—'}
-                          </td>
-                          <td className="px-3 py-2 text-right font-mono text-gray-700">
-                            {evoStatus?.usage_stats?.used ?? '—'}
                           </td>
                           <td className="px-3 py-2 text-right font-mono text-gray-700">
                             {evoStatus?.replay_pool_size ?? '—'}

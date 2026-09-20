@@ -41,7 +41,6 @@ class SkillOrchestrator:
 
         # Skill 检索状态
         self._last_retrieved_skill_reference: dict[str, Any] | None = None
-        self._last_retrieved_skill_hits: list[dict[str, Any]] = []
 
         # Skill 进化状态
         self._pending_skill_extraction_window: dict[str, Any] | None = None
@@ -58,10 +57,6 @@ class SkillOrchestrator:
     @last_retrieved_skill_reference.setter
     def last_retrieved_skill_reference(self, value: dict[str, Any] | None) -> None:
         self._last_retrieved_skill_reference = value
-
-    @property
-    def last_retrieved_skill_hits(self) -> list[dict[str, Any]]:
-        return self._last_retrieved_skill_hits
 
     @property
     def pending_skill_extraction_window(self) -> dict[str, Any] | None:
@@ -293,40 +288,30 @@ class SkillOrchestrator:
                 if self._refresh_system_prompt:
                     self._refresh_system_prompt()
                 print_info(f"Online skill {result.get('action')}: {result.get('skill')}")
+                await self._run_promotion_gate(side_query)
         elif result.get("action") not in {"add_denied", "merge_denied"}:
             print_error(f"Online skill evolution failed: {result.get('error') or result}")
 
         return result
 
-    # ── 使用追踪 ──
+    # ── 验证门禁 ──
 
-    async def run_skill_usage_tracking(self, original_user_message: str, assistant_text: str) -> dict[str, Any]:
-        """追踪 Skill 使用情况。"""
-        if not self._online_evolution_enabled() or self._permission_mode == "plan":
-            return {"ok": False, "action": "disabled"}
+    async def _run_promotion_gate(self, side_query: SideQueryFn) -> None:
+        """Skill 变体变更后运行在线评测门禁。
 
-        hits = list(self._last_retrieved_skill_hits or [])
-        if not hits or not assistant_text.strip():
-            return {"ok": False, "action": "no_hits"}
-
-        side_query = self._side_query_fn(700)
+        回放在线 provenance 样本 → 确定性规则 + LLM judge 评分 →
+        仅当严格优于历史最佳（分差 >= 0.01 且无新增硬失败）才晋升 champion。
+        评测失败只记日志，不影响主进化流程。
+        """
         try:
-            from agents.skills.skill_extractor import judge_retrieved_skill_usage
-            from agents.skills.skills import record_usage_judgments
+            from agents.skills.skill_evaluator import evaluate_online_skill_evolution_async
 
-            judgments = await judge_retrieved_skill_usage(
-                hits=hits,
-                user_message=original_user_message,
-                assistant_text=assistant_text,
-                side_query=side_query,
-            )
-            result = record_usage_judgments(judgments)
-            if result.get("pruned"):
-                if self._refresh_system_prompt:
-                    self._refresh_system_prompt()
-            return result
-        except Exception:
-            return {"ok": False, "action": "error"}
+            report = await evaluate_online_skill_evolution_async(side_query=side_query)
+            aggregate = report.get("aggregate") if isinstance(report, dict) else {}
+            champion_statuses = aggregate.get("champion_statuses") if isinstance(aggregate, dict) else {}
+            print_info(f"[skill_gate] Online evaluation done: {champion_statuses or 'no promotable samples'}")
+        except Exception as e:
+            print_error(f"[skill_gate] Online evaluation failed: {type(e).__name__}: {e}")
 
     # ── 即时提取 ──
 
@@ -346,7 +331,6 @@ class SkillOrchestrator:
     def reset(self) -> None:
         """重置所有状态。"""
         self._last_retrieved_skill_reference = None
-        self._last_retrieved_skill_hits = []
         self._pending_skill_extraction_window = None
         self._turns_since_last_evolution = 0
         self._last_evolution_time = time.time()

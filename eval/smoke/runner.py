@@ -29,8 +29,10 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+import httpx  # noqa: E402
 import requests  # noqa: E402
 import websockets  # noqa: E402
+from langfuse.api.core import ApiError  # noqa: E402
 
 from eval.common.runner_base import REPORTS_DIR  # noqa: E402
 
@@ -352,11 +354,12 @@ def check_assertions(task: dict, workspace: Path, events: list[dict], turn_event
 
 
 def _trace_structure_ok(bundle: dict[str, Any]) -> bool:
-    """trace 是否同时具备 turn span（CHAIN + mycode.turn.id）与带 usage 的 GENERATION。"""
+    """trace 是否同时具备 turn span（CHAIN + turn_id）与带 usage 的 GENERATION。"""
     obs = bundle.get("observations", [])
     has_turn = any(
         o.get("type") == "CHAIN"
-        and ((o.get("metadata") or {}).get("attributes") or {}).get("mycode.turn.id")
+        and o.get("name") == "turn"
+        and (o.get("metadata") or {}).get("turn_id")
         for o in obs
     )
     has_gen_usage = any(
@@ -371,11 +374,11 @@ def verify_langfuse(session_id: str, expected_turns: int) -> dict[str, Any]:
 
     trace 先于 observations 到达云端，结构校验纳入轮询（最长 90s）。
     """
-    from agents.observability.evals import LangfuseClient, load_langfuse_env
+    from agents.observability.langfuse_api import LangfuseApiClient, load_langfuse_env
     from eval.langfuse.code_evaluators import evaluate_bundle
 
     load_langfuse_env(PROJECT_ROOT)
-    client = LangfuseClient()
+    client = LangfuseApiClient()
 
     result: dict[str, Any] = {"ok": False, "traces": 0, "checks": [], "scores": {}, "trace_ids": []}
 
@@ -386,8 +389,8 @@ def verify_langfuse(session_id: str, expected_turns: int) -> dict[str, Any]:
     while time.time() < deadline:
         try:
             traces = client.fetch_traces(limit=20, session_id=session_id)
-        except (requests.ConnectionError, requests.exceptions.ChunkedEncodingError) as e:
-            # 网络瞬断，重试
+        except (httpx.HTTPError, ApiError) as exc:
+            print(f"[smoke] Langfuse trace list failed, retrying: {type(exc).__name__}: {exc}", file=sys.stderr)
             time.sleep(3)
             continue
         result["traces"] = len(traces)
@@ -395,13 +398,14 @@ def verify_langfuse(session_id: str, expected_turns: int) -> dict[str, Any]:
         if len(traces) >= expected_turns:
             try:
                 bundles = [client.fetch_trace(t["id"]) for t in traces]
-            except requests.HTTPError as e:
-                # Langfuse Cloud 最终一致性：trace 先出现在列表，详情短暂 404
-                if e.response is not None and e.response.status_code == 404:
+            except ApiError as exc:
+                if exc.status_code == 404:
+                    print(f"[smoke] Langfuse trace detail not ready, retrying: {exc}", file=sys.stderr)
                     time.sleep(5)
                     continue
                 raise
-            except (requests.ConnectionError, requests.exceptions.ChunkedEncodingError):
+            except httpx.HTTPError as exc:
+                print(f"[smoke] Langfuse trace detail failed, retrying: {type(exc).__name__}: {exc}", file=sys.stderr)
                 time.sleep(3)
                 continue
             structure_ok = any(_trace_structure_ok(b) for b in bundles)
@@ -424,8 +428,10 @@ def verify_langfuse(session_id: str, expected_turns: int) -> dict[str, Any]:
                     trace_id=t["id"], name=s["name"], value=s["value"],
                     data_type=s["data_type"], comment=s.get("comment"),
                 )
-            except (requests.ConnectionError, requests.exceptions.ChunkedEncodingError):
-                pass  # score 提交失败不影响整体结果
+            except (httpx.HTTPError, ApiError) as exc:
+                result["checks"].append(
+                    f"score 提交失败 {s['name']}: {type(exc).__name__}: {exc}"
+                )
             scores_all[s["name"]] = s["value"]
     result["scores"] = scores_all
     if scores_all.get("event_range_complete") is False:
@@ -568,10 +574,10 @@ async def run_task(listener: EventListener, task: dict, base_url: str, skip_lang
         if phases and len(phases) >= 2 and "responses" in record:
             try:
                 from eval.langfuse.wiki_memory_evaluators import upload_eval_to_langfuse
-                from agents.observability.evals import LangfuseClient, load_langfuse_env
+                from agents.observability.langfuse_api import LangfuseApiClient, load_langfuse_env
                 
                 load_langfuse_env(PROJECT_ROOT)
-                client = LangfuseClient()
+                client = LangfuseApiClient()
                 
                 trace_ids = record.get("langfuse", {}).get("trace_ids", [])
                 eval_result = await asyncio.to_thread(
@@ -588,21 +594,9 @@ async def run_task(listener: EventListener, task: dict, base_url: str, skip_lang
                 record["eval_upload"] = {"error": str(e)}
 
     record["passed"] = not record["failures"]
-    
-    # 失败用例自动导出 Rewind session（如果启用）
+
+    # 失败用例自动标记为 bad case
     if not record["passed"] and record.get("session_id"):
-        try:
-            from agents.observability.rewind import is_enabled, export_session
-            if is_enabled():
-                export_dir = Path(__file__).parent.parent / "cassettes" / task["id"]
-                export_dir.mkdir(parents=True, exist_ok=True)
-                if export_session(output_dir=str(export_dir)):
-                    record["rewind_export"] = str(export_dir)
-                    print(f"[smoke] 失败用例 {task['id']} 已导出 Rewind session: {export_dir}")
-        except Exception as e:
-            record["rewind_export"] = {"error": str(e)}
-        
-        # 自动标记为 bad case
         try:
             import uuid
             from agents.observability.bad_cases import (

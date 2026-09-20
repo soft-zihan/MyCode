@@ -430,7 +430,7 @@ export function useChatNodes(): UseChatNodesReturn {
     }
   }, []);
 
-  const addUserMessage = useCallback((sessionId: string, content: string, contextFiles?: string[], agent?: string, model?: string, snapshotId?: string, messageId?: string) => {
+  const addUserMessage = useCallback((sessionId: string, content: string, contextFiles?: string[], agent?: string, model?: string) => {
     const key = nextKey('user');
     const node: ChatNode = {
       key,
@@ -441,8 +441,6 @@ export function useChatNodes(): UseChatNodesReturn {
       agent,
       model,
       timestamp: new Date().toISOString(),
-      snapshotId,
-      messageId,
     };
     sessionStore.updateSnapshot(sessionId, prev => {
       const newNodes = new Map(prev.nodes);
@@ -484,10 +482,8 @@ export function useChatNodes(): UseChatNodesReturn {
       switch (type) {
         case 'user_message': {
           const content = event.content as string;
-          const snapshotId = event.snapshot_id as string | undefined;
-          const messageId = event.message_id as string | undefined;
           if (content && content.trim()) {
-            addUserMessage(sessionId, content, undefined, undefined, undefined, snapshotId, messageId);
+            addUserMessage(sessionId, content);
           }
           break;
         }
@@ -595,8 +591,6 @@ export function useChatNodes(): UseChatNodesReturn {
       switch (type) {
         case 'user_message': {
           const content = event.content as string;
-          const snapshotId = event.snapshot_id as string | undefined;
-          const messageId = event.message_id as string | undefined;
           if (content && content.trim()) {
             newNodes.push({
               key: nextKey('user'),
@@ -604,8 +598,6 @@ export function useChatNodes(): UseChatNodesReturn {
               seq: nextSeq(),
               content,
               timestamp: new Date(event.time as number).toISOString(),
-              snapshotId,
-              messageId,
             });
           }
           break;

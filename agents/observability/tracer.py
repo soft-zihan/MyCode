@@ -1,229 +1,226 @@
-"""OTel Tracer — 直接在各处创建 span，导出到 Langfuse（OTLP/HTTP）。
-
-设计：
-- 直接在各处使用 tracer.span() 创建 span
-- 不依赖事件日志订阅者模式
-- 支持上下文管理器自动管理 span 生命周期
-- OTel 未启用时优雅降级
-
-Langfuse 接入规范（官方文档 langfuse.com/docs/opentelemetry/get-started）：
-- 端点：{LANGFUSE_BASE_URL}/api/public/otel/v1/traces（仅支持 OTLP/HTTP，不支持 gRPC）
-- 认证：Authorization: Basic base64(public_key:secret_key)
-- 实时摄取：x-langfuse-ingestion-version: 4（否则延迟最多 10 分钟）
-- observation 类型：langfuse.observation.type =
-    generation(LLM) / tool(工具) / agent(子智能体) / guardrail(审计) / chain(编排)
-- 会话关联：langfuse.session.id 需传播到 trace 内所有 span
-- 可过滤元数据：langfuse.observation.metadata.* 前缀（否则落入 catch-all 不可过滤）
-"""
+"""Langfuse SDK tracer adapter."""
 
 from __future__ import annotations
 
-import base64
-import contextvars
+import getpass
 import json
 import os
+import re
 from contextlib import contextmanager
 from typing import Any, Iterator
 
-try:
-    from opentelemetry.trace import StatusCode
-except ImportError:
-    StatusCode = None
+from agents.version import __version__
 
-_provider = None
-_tracer = None
+_client: Any | None = None
 
-# session_id 上下文变量：turn 开始时设置，所有子 span 自动携带
-_current_session_id: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "mycode_session_id", default=""
+_DEFAULT_BASE_URL = "https://cloud.langfuse.com"
+_INVALID_ENVIRONMENT_CHARS = re.compile(r"[^a-z0-9_-]+")
+_FALSE_VALUES = ("", "0", "false", "no", "off")
+_TRUE_VALUES = ("1", "true", "yes", "on")
+
+_OBSERVATION_FIELDS = (
+    "input",
+    "output",
+    "metadata",
+    "model",
+    "model_parameters",
+    "usage_details",
+    "cost_details",
+    "level",
+    "status_message",
+    "version",
+    "completion_start_time",
 )
 
 
-def set_current_session_id(session_id: str) -> None:
-    _current_session_id.set(session_id)
+def _env_flag(name: str, default: str = "") -> bool:
+    return os.environ.get(name, default).strip().lower() in _TRUE_VALUES
 
 
-def _session_attrs() -> dict[str, Any]:
-    sid = _current_session_id.get()
-    return {"langfuse.session.id": sid} if sid else {}
+def tracing_enabled() -> bool:
+    if os.environ.get("LANGFUSE_TRACING_ENABLED", "true").strip().lower() == "false":
+        return False
+    return _env_flag("MYCODE_TRACING")
 
 
-def init_tracer() -> None:
-    """初始化 OTel TracerProvider，通过 OTLP/HTTP 导出到 Langfuse。"""
-    global _provider, _tracer
+def get_langfuse_base_url() -> str:
+    return (os.environ.get("LANGFUSE_BASE_URL", "").strip() or _DEFAULT_BASE_URL).rstrip("/")
 
-    from opentelemetry import trace
-    from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor
-    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
-    public_key = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
-    secret_key = os.environ.get("LANGFUSE_SECRET_KEY", "")
+def get_trace_client() -> Any | None:
+    return _client if tracing_enabled() else None
+
+
+def _environment() -> str | None:
+    raw = (
+        os.environ.get("LANGFUSE_TRACING_ENVIRONMENT", "").strip()
+        or os.environ.get("ENVIRONMENT", "").strip()
+        or "development"
+    )
+    value = _INVALID_ENVIRONMENT_CHARS.sub("-", raw.lower()).strip("-_")[:40]
+    if not value or value.startswith("langfuse"):
+        return None
+    return value
+
+
+def _release() -> str:
+    return os.environ.get("LANGFUSE_RELEASE", "").strip() or __version__
+
+
+def _user_id() -> str | None:
+    raw = os.environ.get("LANGFUSE_USER_ID", "").strip() or getpass.getuser()
+    return _propagated_string(raw)
+
+
+def _propagated_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        text = "true" if value else "false"
+    elif isinstance(value, str):
+        text = value.strip()
+    elif isinstance(value, (int, float)):
+        text = str(value)
+    else:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    if not text or not text.isascii():
+        return None
+    return text[:200]
+
+
+def _propagated_tags(tags: list[str] | tuple[str, ...] | None) -> list[str] | None:
+    if not tags:
+        return None
+    sanitized: list[str] = []
+    for tag in tags:
+        text = _propagated_string(tag)
+        if text and text not in sanitized:
+            sanitized.append(text)
+    return sanitized or None
+
+
+def _propagated_metadata(metadata: dict[str, Any] | None) -> dict[str, str] | None:
+    if not metadata:
+        return None
+    sanitized: dict[str, str] = {}
+    for key, value in metadata.items():
+        key_text = _propagated_string(key)
+        value_text = _propagated_string(value)
+        if key_text and value_text is not None:
+            sanitized[key_text] = value_text
+    return sanitized or None
+
+
+def _has_active_span() -> bool:
+    try:
+        from opentelemetry import trace
+
+        span_context = trace.get_current_span().get_span_context()
+        return bool(span_context and span_context.is_valid)
+    except Exception:
+        return False
+
+
+@contextmanager
+def trace_context(
+    *,
+    session_id: str | None = None,
+    trace_name: str | None = None,
+    tags: list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
+    user_id: str | None = None,
+    version: str | None = None,
+    force: bool = False,
+) -> Iterator[None]:
+    client = get_trace_client()
+    if client is None or (_has_active_span() and not force):
+        yield
+        return
+
+    from langfuse import propagate_attributes
+
+    environment = _environment()
+    propagated_version = _propagated_string(version)
+    propagated_user = _propagated_string(user_id if user_id is not None else _user_id())
+    attributes: dict[str, Any] = {
+        "session_id": _propagated_string(session_id),
+        "trace_name": _propagated_string(trace_name),
+        "tags": _propagated_tags(tags),
+        "metadata": _propagated_metadata(metadata),
+        "user_id": propagated_user,
+        "version": propagated_version,
+        "environment": environment,
+    }
+    kwargs = {key: value for key, value in attributes.items() if value}
+
+    if not kwargs:
+        yield
+        return
+
+    with propagate_attributes(**kwargs):
+        yield
+
+
+def _observation_kwargs(fields: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in fields.items() if key in _OBSERVATION_FIELDS and value is not None}
+
+
+def start_current_observation(*, name: str, as_type: str = "span", **fields: Any) -> Any | None:
+    client = get_trace_client()
+    if client is None:
+        return None
+    return client.start_as_current_observation(name=name, as_type=as_type, **_observation_kwargs(fields))
+
+
+def start_observation(*, name: str, as_type: str = "span", **fields: Any) -> Any | None:
+    client = get_trace_client()
+    if client is None:
+        return None
+    return client.start_observation(name=name, as_type=as_type, **_observation_kwargs(fields))
+
+
+def create_event(*, name: str, **fields: Any) -> Any | None:
+    client = get_trace_client()
+    if client is None:
+        return None
+    return client.create_event(name=name, **_observation_kwargs(fields))
+
+
+def init_trace_client(*, span_exporter: Any | None = None, tracer_provider: Any | None = None) -> None:
+    global _client
+
+    if _client is not None or not tracing_enabled():
+        return
+
+    public_key = os.environ.get("LANGFUSE_PUBLIC_KEY", "").strip()
+    secret_key = os.environ.get("LANGFUSE_SECRET_KEY", "").strip()
     if not public_key or not secret_key:
         raise RuntimeError(
-            "LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY 未配置，无法初始化 OTel（请检查 .env）"
+            "LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY 未配置，无法初始化 Langfuse tracing（请检查 .env）"
         )
 
-    auth = base64.b64encode(f"{public_key}:{secret_key}".encode()).decode()
-    endpoint = os.environ.get(
-        "MYCODE_OTEL_ENDPOINT",
-        f"{os.environ.get('LANGFUSE_BASE_URL', 'https://us.cloud.langfuse.com')}/api/public/otel/v1/traces",
+    from langfuse import Langfuse
+
+    _client = Langfuse(
+        public_key=public_key,
+        secret_key=secret_key,
+        base_url=get_langfuse_base_url(),
+        environment=_environment(),
+        release=_release(),
+        tracing_enabled=True,
+        additional_headers={"x-langfuse-ingestion-version": "4"},
+        span_exporter=span_exporter,
+        tracer_provider=tracer_provider,
     )
 
-    resource = Resource.create({"service.name": "mycode"})
-    _provider = TracerProvider(resource=resource)
-    exporter = OTLPSpanExporter(
-        endpoint=endpoint,
-        headers={
-            "Authorization": f"Basic {auth}",
-            "x-langfuse-ingestion-version": "4",
-        },
-    )
-    _provider.add_span_processor(BatchSpanProcessor(exporter))
-    trace.set_tracer_provider(_provider)
-    _tracer = _provider.get_tracer("mycode")
+
+def flush_trace_client() -> None:
+    if _client is not None:
+        _client.flush()
 
 
-def flush_tracer() -> None:
-    """强制导出当前批次的所有 span（不关闭 provider）。
-
-    评测 runner 逐任务 flush 后立即回查 Langfuse 时使用。
-    """
-    if _provider is not None:
-        _provider.force_flush()
-
-
-def shutdown_tracer() -> None:
-    """进程退出前 flush 所有未发送的 span（脚本场景必须调用，否则 trace 丢失）。"""
-    if _provider is not None:
-        _provider.force_flush()
-        _provider.shutdown()
-
-
-def tracer_enabled() -> bool:
-    """检查 Tracer 是否已启用。"""
-    return _tracer is not None
-
-
-class _SpanWrapper:
-    """OTel Span 包装器，添加 record_error 别名以兼容业务代码。"""
-
-    def __init__(self, span: Any) -> None:
-        self._span = span
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._span, name)
-
-    def record_error(self, error: Exception) -> None:
-        self._span.record_exception(error)
-        if StatusCode is not None:
-            self._span.set_status(StatusCode.ERROR, str(error)[:300])
-
-
-class Tracer:
-    """OTel Tracer 封装类（动态读取全局 _tracer，init 顺序无关）。"""
-
-    def is_enabled(self) -> bool:
-        """检查 Tracer 是否已启用。"""
-        return _tracer is not None
-
-    @contextmanager
-    def span(self, name: str, attributes: dict[str, Any] | None = None) -> Iterator[Any]:
-        """创建 span 的上下文管理器。
-
-        OTel 未启用时 yield None。
-        session_id 自动附加到所有 span（Langfuse 要求 trace 级属性传播到每个 span）。
-        """
-        if _tracer is None:
-            yield None
-            return
-
-        attrs = {**_session_attrs(), **(attributes or {})}
-        with _tracer.start_as_current_span(name, attributes=attrs) as span:
-            wrapped = _SpanWrapper(span)
-            try:
-                yield wrapped
-            except Exception as e:
-                wrapped.record_error(e)
-                raise
-
-    def start_span(self, name: str, attributes: dict[str, Any] | None = None) -> Any:
-        """手动创建 span（需要手动调用 end()）。"""
-        if _tracer is None:
-            return None
-
-        attrs = {**_session_attrs(), **(attributes or {})}
-        return _SpanWrapper(_tracer.start_span(name, attributes=attrs))
-
-
-# 全局 Tracer 实例
-tracer = Tracer()
-
-
-# 便捷函数
-
-def turn_span(turn_id: str, user_message: str):
-    """Turn 级别 Span（chain 类型，trace 根节点）。"""
-    return tracer.span("turn", {
-        "langfuse.observation.type": "chain",
-        "langfuse.trace.name": "mycode-turn",
-        "mycode.turn.id": turn_id,
-        "langfuse.observation.input": user_message[:2000],
-        "langfuse.observation.metadata.turn_user_message": user_message[:500],
-    })
-
-
-def model_call_span(model: str, input_tokens: int = 0, output_tokens: int = 0, cached_tokens: int = 0):
-    """LLM 调用 Span（generation 类型）。
-
-    llm.token_count.* 为 Langfuse 官方支持的 usage 映射属性（OpenInference 兼容）。
-    """
-    attrs: dict[str, Any] = {
-        "langfuse.observation.type": "generation",
-        "langfuse.observation.model.name": model,
-        "llm.token_count.prompt": input_tokens,
-        "llm.token_count.completion": output_tokens,
-    }
-    if cached_tokens > 0:
-        attrs["mycode.tokens.cached"] = cached_tokens
-    return tracer.span(f"llm.{model}", attrs)
-
-
-def tool_call_span(tool_name: str, tool_input: str = ""):
-    """工具调用 Span（tool 类型）。"""
-    return tracer.span(f"tool.{tool_name}", {
-        "langfuse.observation.type": "tool",
-        "tool.name": tool_name,
-        "langfuse.observation.input": tool_input[:1000],
-    })
-
-
-def sub_agent_span(agent_type: str, agent_name: str):
-    """子智能体 Span（agent 类型，Langfuse Agent Graph 节点）。"""
-    return tracer.span(f"sub_agent.{agent_name or agent_type}", {
-        "langfuse.observation.type": "agent",
-        "mycode.agent.type": agent_type,
-        "mycode.agent.name": agent_name,
-    })
-
-
-def audit_span(decision: str, tool: str, risk_level: str = "low"):
-    """审计 Span（guardrail 类型）。"""
-    return tracer.span(f"audit.{tool}", {
-        "langfuse.observation.type": "guardrail",
-        "langfuse.observation.metadata.audit_decision": decision,
-        "langfuse.observation.metadata.audit_risk_level": risk_level,
-    })
-
-
-def compaction_span(before_tokens: int, after_tokens: int):
-    """上下文压缩 Span（chain 类型）。"""
-    ratio = after_tokens / before_tokens if before_tokens > 0 else 0
-    return tracer.span("context.compaction", {
-        "langfuse.observation.type": "chain",
-        "langfuse.observation.metadata.tokens_before": before_tokens,
-        "langfuse.observation.metadata.tokens_after": after_tokens,
-        "langfuse.observation.metadata.compression_ratio": round(ratio, 4),
-        "langfuse.observation.metadata.tokens_saved": before_tokens - after_tokens,
-    })
+def shutdown_trace_client() -> None:
+    global _client
+    if _client is not None:
+        _client.shutdown()
+        _client = None

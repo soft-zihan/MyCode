@@ -13,8 +13,6 @@ export interface UserNode extends BaseNode {
   agent?: string;
   model?: string;
   timestamp: string;
-  snapshotId?: string;
-  messageId?: string;
 }
 
 export interface AssistantNode extends BaseNode {

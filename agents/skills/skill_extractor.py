@@ -283,65 +283,86 @@ async def online_ingest(
     target: str = "project",
 ) -> dict[str, Any]:
     from .skills import record_online_provenance
+    from agents.observability.trace import trace_span
 
-    try:
-        candidate = await extract_online_skill_candidate(
-            messages=messages,
-            side_query=side_query,
-            retrieved_reference=retrieved_reference,
-            hint=hint,
-        )
-    except Exception as exc:
-        result = {"ok": False, "action": "failed", "error": str(exc)}
-        record_online_provenance(
-            action="failed",
-            result=result,
-            messages=messages,
-            retrieved_reference=retrieved_reference,
-            error=str(exc),
-        )
-        return result
-
-    if candidate is None:
-        result = {"ok": True, "action": "none"}
-        record_online_provenance(
-            action="none",
-            result=result,
-            messages=messages,
-            retrieved_reference=retrieved_reference,
-        )
-        return result
-
-    if candidate.kind == "rule":
+    with trace_span("skill.extract") as span:
         try:
-            result = await _maintain_rule_candidate(
-                candidate=candidate,
-                confirm_write=confirm_write,
-            )
-        except Exception as exc:
-            result = {"ok": False, "action": "failed", "skill": candidate.name, "error": str(exc)}
-    else:
-        try:
-            result = await maintain_online_skill_candidate(
-                candidate=candidate,
+            candidate = await extract_online_skill_candidate(
+                messages=messages,
                 side_query=side_query,
                 retrieved_reference=retrieved_reference,
-                confirm_write=confirm_write,
-                target=target,
+                hint=hint,
             )
         except Exception as exc:
-            result = {"ok": False, "action": "failed", "skill": candidate.name, "error": str(exc)}
+            result = {"ok": False, "action": "failed", "error": str(exc)}
+            span.add_metadata(action="failed", error=str(exc))
+            span.record_error(exc)
+            record_online_provenance(
+                action="failed",
+                result=result,
+                messages=messages,
+                retrieved_reference=retrieved_reference,
+                error=str(exc),
+            )
+            return result
 
-    record_online_provenance(
-        action=str(result.get("action") or "none"),
-        skill_name=str(result.get("skill") or candidate.name),
-        result=result,
-        messages=messages,
-        retrieved_reference=retrieved_reference,
-        decision=result.get("decision") if isinstance(result.get("decision"), dict) else None,
-        error="" if result.get("ok") else str(result.get("error") or ""),
-    )
-    return result
+        if candidate is None:
+            result = {"ok": True, "action": "none"}
+            span.add_metadata(action="none")
+            record_online_provenance(
+                action="none",
+                result=result,
+                messages=messages,
+                retrieved_reference=retrieved_reference,
+            )
+            return result
+
+        span.add_metadata(candidate_kind=candidate.kind, candidate_name=candidate.name)
+
+        if candidate.kind == "rule":
+            try:
+                result = await _maintain_rule_candidate(
+                    candidate=candidate,
+                    confirm_write=confirm_write,
+                )
+            except Exception as exc:
+                result = {"ok": False, "action": "failed", "skill": candidate.name, "error": str(exc)}
+                span.record_error(exc)
+        else:
+            try:
+                result = await maintain_online_skill_candidate(
+                    candidate=candidate,
+                    side_query=side_query,
+                    retrieved_reference=retrieved_reference,
+                    confirm_write=confirm_write,
+                    target=target,
+                )
+            except Exception as exc:
+                result = {"ok": False, "action": "failed", "skill": candidate.name, "error": str(exc)}
+                span.record_error(exc)
+
+        decision = result.get("decision")
+        metadata: dict[str, Any] = {
+            "action": str(result.get("action") or "none"),
+            "skill_name": str(result.get("skill") or candidate.name),
+            "success": bool(result.get("ok")),
+        }
+        if isinstance(decision, dict) and decision.get("action"):
+            metadata["decision_action"] = str(decision["action"])
+        if not result.get("ok") and result.get("error"):
+            metadata["error"] = str(result["error"])
+        span.add_metadata(**metadata)
+
+        record_online_provenance(
+            action=str(result.get("action") or "none"),
+            skill_name=str(result.get("skill") or candidate.name),
+            result=result,
+            messages=messages,
+            retrieved_reference=retrieved_reference,
+            decision=decision if isinstance(decision, dict) else None,
+            error="" if result.get("ok") else str(result.get("error") or ""),
+        )
+        return result
 
 
 async def _maintain_rule_candidate(
@@ -402,59 +423,6 @@ def _infer_category(candidate: OnlineSkillCandidate) -> str:
     if any(t in tags_lower for t in ["test", "testing"]):
         return "testing"
     return "general"
-
-
-async def judge_retrieved_skill_usage(
-    *,
-    hits: list[dict[str, Any]],
-    user_message: str,
-    assistant_text: str,
-    side_query: SideQuery | None = None,
-) -> list[dict[str, Any]]:
-    if not hits:
-        return []
-    if side_query is None:
-        assistant_lower = assistant_text.lower()
-        return [
-            {
-                "name": hit.get("name", ""),
-                "source": hit.get("source", ""),
-                "skill_dir": hit.get("skill_dir", ""),
-                "retrieved": True,
-                "relevant": False,
-                "used": str(hit.get("name", "")).lower() in assistant_lower,
-                "score": float(hit.get("score", 0.0)),
-                "reason": "heuristic fallback",
-            }
-            for hit in hits
-        ]
-
-    system = (
-        "Judge whether retrieved skills were relevant to the user request and actually used in the assistant reply.\n"
-        "Output ONLY strict JSON: {\"judgments\":[{\"name\":\"...\",\"relevant\":true|false,\"used\":true|false,\"reason\":\"short\"}]}.\n"
-        "A skill is used only if the reply follows its distinctive workflow or policy, not merely because it was retrieved."
-    )
-    payload = {"user_message": user_message, "assistant_reply": assistant_text, "retrieved_skills": hits}
-    parsed = _parse_json_object(await side_query(system, json.dumps(payload, ensure_ascii=False)))
-    raw_judgments = parsed.get("judgments") if isinstance(parsed.get("judgments"), list) else []
-    by_name = {str(item.get("name") or ""): item for item in raw_judgments if isinstance(item, dict)}
-    judgments: list[dict[str, Any]] = []
-    for hit in hits:
-        name = str(hit.get("name") or "")
-        raw = by_name.get(name, {})
-        judgments.append(
-            {
-                "name": name,
-                "source": hit.get("source", ""),
-                "skill_dir": hit.get("skill_dir", ""),
-                "retrieved": True,
-                "relevant": bool(raw.get("relevant")),
-                "used": bool(raw.get("used")),
-                "score": float(hit.get("score", 0.0)),
-                "reason": str(raw.get("reason") or ""),
-            }
-        )
-    return judgments
 
 
 async def run_memory_maintenance() -> dict[str, Any]:

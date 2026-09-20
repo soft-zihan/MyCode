@@ -327,16 +327,18 @@ class ProjectionCache:
     """投影缓存管理器。"""
 
     def __init__(self, cache_dir: Path | None = None):
-        if cache_dir is None:
-            cache_dir = session_dir()
-        self.cache_dir = cache_dir
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-
+        self._cache_dir_override = cache_dir
         self._pending_writes: dict[str, int] = {}
         self._last_write_time: dict[str, float] = {}
 
         self.write_count_threshold = 10
         self.write_interval_threshold = 5.0
+
+    @property
+    def cache_dir(self) -> Path:
+        d = Path(self._cache_dir_override) if self._cache_dir_override is not None else session_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        return d
 
     def _cache_path(self, session_id: str) -> Path:
         return self.cache_dir / f"{session_id}.projcache.json"

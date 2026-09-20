@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 import re
@@ -78,6 +77,93 @@ def _to_openai_tools(tools: list[dict]) -> list[dict]:
     ]
 
 
+_TRACE_TEXT_LIMIT = int(os.environ.get("MYCODE_TRACE_TEXT_LIMIT", "2000"))
+_TRACE_MESSAGE_LIMIT = int(os.environ.get("MYCODE_TRACE_MESSAGE_LIMIT", "50"))
+_TRACE_PAYLOAD_LIMIT = int(os.environ.get("MYCODE_TRACE_PAYLOAD_LIMIT", "100000"))
+
+
+def _truncate_trace_text(value: Any, limit: int = _TRACE_TEXT_LIMIT) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        value = json.dumps(value, ensure_ascii=False, default=str)
+    return value[:limit]
+
+
+def _compact_message_for_trace(message: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {"role": message.get("role")}
+    content = message.get("content")
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(_truncate_trace_text(item.get("text") or item, 500))
+            else:
+                parts.append(_truncate_trace_text(item, 500))
+        compact["content"] = "\n".join(parts)[:_TRACE_TEXT_LIMIT]
+    else:
+        compact["content"] = _truncate_trace_text(content)
+
+    if message.get("tool_calls"):
+        compact["tool_calls"] = [
+            {
+                "id": tc.get("id"),
+                "name": (tc.get("function") or {}).get("name"),
+                "arguments": _truncate_trace_text((tc.get("function") or {}).get("arguments"), 500),
+            }
+            for tc in message["tool_calls"]
+            if isinstance(tc, dict)
+        ]
+    if message.get("tool_call_id"):
+        compact["tool_call_id"] = message.get("tool_call_id")
+    return compact
+
+
+def _model_input_for_trace(messages: list[dict[str, Any]], tool_defs: list[dict[str, Any]]) -> str:
+    recent = messages[-_TRACE_MESSAGE_LIMIT:]
+    payload = {
+        "message_count": len(messages),
+        "omitted_message_count": max(0, len(messages) - len(recent)),
+        "messages": [_compact_message_for_trace(msg) for msg in recent if isinstance(msg, dict)],
+        "tools": [tool.get("name") for tool in tool_defs],
+    }
+    return json.dumps(payload, ensure_ascii=False, default=str)[:_TRACE_PAYLOAD_LIMIT]
+
+
+def _model_output_for_trace(result: dict[str, Any]) -> str:
+    choice = (result.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+    tool_calls = message.get("tool_calls") or []
+    payload = {
+        "finish_reason": choice.get("finish_reason"),
+        "content": _truncate_trace_text(message.get("content"), 4000),
+        "thinking": _truncate_trace_text(message.get("thinking"), 2000),
+        "tool_calls": [
+            {
+                "id": tc.get("id"),
+                "name": (tc.get("function") or {}).get("name"),
+                "arguments": _truncate_trace_text((tc.get("function") or {}).get("arguments"), 1000),
+            }
+            for tc in tool_calls
+            if isinstance(tc, dict)
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False, default=str)[:_TRACE_PAYLOAD_LIMIT]
+
+
+def _usage_details_for_trace(usage: dict[str, Any]) -> dict[str, int]:
+    input_tokens = int(usage.get("prompt_tokens") or 0)
+    output_tokens = int(usage.get("completion_tokens") or 0)
+    cached_tokens = int(usage.get("cached_tokens") or 0)
+    cached_tokens = min(cached_tokens, input_tokens)
+    return {
+        "input": input_tokens - cached_tokens,
+        "input_cached_tokens": cached_tokens,
+        "output": output_tokens,
+        "total": input_tokens + output_tokens,
+    }
+
+
 class AgentLoop:
     """Agent 推理循环。
 
@@ -92,50 +178,41 @@ class AgentLoop:
         self._agent = agent
         self._tool_tracker = ToolCallTracker()
 
-    def _auto_mark_bad_case(self, signal_type: str, diagnosis: dict) -> None:
-        """自动标记 bad case（走歪路或 trace 信号异常）。"""
+    def _auto_mark_bad_case(self, signal_type: str, diagnosis: dict, tool_name: str | None = None) -> None:
+        import json
+        import uuid
+        from agents.logging import print_error
+        from agents.observability.bad_cases import (
+            BadCase,
+            BadCaseSeverity,
+            BadCaseSource,
+            BadCaseStatus,
+            create_bad_case,
+        )
+
+        diagnosis_with_context = dict(diagnosis)
+        diagnosis_with_context["trace_id"] = getattr(self._agent, "_current_trace_id", None)
+        diagnosis_with_context["session_id"] = self._agent.session_id
+        reason = signal_type
+        if tool_name:
+            reason = f"{signal_type}:{tool_name}"
+
         try:
-            from agents.observability.bad_cases import BadCaseDB, BadCaseSource, Severity
-            db = BadCaseDB()
-            session_id = self._agent.session.session_id or "unknown"
-            db.create(
-                session_id=session_id,
+            create_bad_case(BadCase(
+                id=uuid.uuid4().hex,
+                session_id=self._agent.session_id,
                 source=BadCaseSource.AUTO_DETECT,
-                status="pending",
-                severity=Severity.MEDIUM,
+                status=BadCaseStatus.PENDING,
+                severity=BadCaseSeverity.MEDIUM,
                 turn_number=self._agent._current_turn,
                 step_number=self._agent._current_step,
+                tool_name=tool_name,
                 signal_type=signal_type,
-                diagnosis=diagnosis,
-            )
-        except Exception:
-            pass  # 静默失败，不影响主流程
-
-    def _check_trace_signals(self) -> None:
-        """Turn 结束时检测 trace 信号异常，自动创建 bad case。"""
-        try:
-            from agents.observability.trace_signals import detect_span_errors, detect_high_tool_failure_rate
-            trace_id = getattr(self._agent.session, "langfuse_trace_id", None)
-            if not trace_id:
-                return
-            
-            # 检测 span 错误
-            errors = detect_span_errors(trace_id)
-            if errors:
-                self._auto_mark_bad_case(
-                    signal_type="span_error",
-                    diagnosis={"errors": errors[:3], "count": len(errors)}
-                )
-            
-            # 检测工具失败率过高
-            failure_info = detect_high_tool_failure_rate(trace_id)
-            if failure_info.get("is_high"):
-                self._auto_mark_bad_case(
-                    signal_type="高工具失败率",
-                    diagnosis=failure_info
-                )
-        except Exception:
-            pass  # 静默失败，不影响主流程
+                reason=reason,
+                comment=json.dumps(diagnosis_with_context, ensure_ascii=False, default=str),
+            ))
+        except Exception as exc:
+            print_error(f"[bad_case] auto mark failed: {type(exc).__name__}: {exc}")
 
     async def run(self, user_message: str) -> None:
         """主推理循环入口。"""
@@ -155,15 +232,6 @@ class AgentLoop:
             })
             self._agent._current_step += 1
 
-            # 步骤开始前拍快照
-            start_snapshot = self._capture_file_states()
-            self._agent.session.append("snapshot/start", {
-                "turn": self._agent._current_turn,
-                "step": self._agent._current_step,
-                "phase": "start",
-                "files": start_snapshot,
-            })
-
             response = await self.call_model_stream()
 
             self._update_token_stats(response)
@@ -175,8 +243,6 @@ class AgentLoop:
             content = message.get("content") or ""
             tool_calls = message.get("tool_calls")
             
-            # 总是写入 assistant_message（包含 turn 和 step 信息）
-            # 即使有 tool_calls 也要写入，否则工具调用信息会丢失
             self._agent.session.append("assistant_message", {
                 "turn": self._agent._current_turn,
                 "step": self._agent._current_step,
@@ -184,37 +250,14 @@ class AgentLoop:
                 "content": content,
                 "tool_calls": tool_calls,
             })
-            
-            # 记录 assistant_message 到 Langfuse trace（不含 thinking）
-            from agents.observability.trace import trace_span
-            assistant_attrs = {
-                "langfuse.observation.type": "generation",
-                "langfuse.observation.output": content[:2000] if content else "",
-            }
-            if tool_calls:
-                tool_names = [tc.get("function", {}).get("name", "") for tc in tool_calls if tc.get("type") == "function"]
-                assistant_attrs["tool_calls"] = ",".join(tool_names)
-                assistant_attrs["langfuse.observation.metadata.tool_calls"] = ",".join(tool_names)
-            with trace_span("assistant_message", **assistant_attrs):
-                pass
-            
+
             self._agent.session.append("step/end", {
                 "turn": self._agent._current_turn,
                 "step": self._agent._current_step,
             })
 
             if not tool_calls:
-                # 步骤完成后拍快照
-                end_snapshot = self._capture_file_states()
-                self._agent.session.append("snapshot/end", {
-                    "turn": self._agent._current_turn,
-                    "step": self._agent._current_step,
-                    "phase": "end",
-                    "files": end_snapshot,
-                })
                 await self._finalize_text_response()
-                # Turn 结束，检测 trace 信号异常
-                self._check_trace_signals()
                 break
 
             self._agent.increment_turns()
@@ -222,64 +265,12 @@ class AgentLoop:
             if budget["exceeded"]:
                 from agents.logging import print_info
                 print_info(f"Budget exceeded: {budget['reason']}")
-                # 异常时也拍快照
-                error_snapshot = self._capture_file_states()
-                self._agent.session.append("snapshot/end", {
-                    "turn": self._agent._current_turn,
-                    "step": self._agent._current_step,
-                    "phase": "error",
-                    "files": error_snapshot,
-                    "error": "budget_exceeded",
-                })
-                # Turn 结束，检测 trace 信号异常
-                self._check_trace_signals()
                 break
 
             await self._handle_tool_calls(tool_calls)
             
-            # 工具执行后拍快照
-            tool_snapshot = self._capture_file_states()
-            self._agent.session.append("snapshot/end", {
-                "turn": self._agent._current_turn,
-                "step": self._agent._current_step,
-                "phase": "after_tools",
-                "files": tool_snapshot,
-            })
-            
             self._agent.clear_context_flag()
             self._agent.refresh_runtime_system_prompt()
-            await self._agent.check_and_compact()
-
-    def _capture_file_states(self) -> list[dict]:
-        """捕获当前文件状态（路径 + hash）。
-
-        只扫描会话工作区（agent.workspace）下的文件，返回文件路径和哈希值的列表。
-        """
-        cwd = self._agent.workspace
-        files = []
-        # 扫描工作区下的文件（排除隐藏目录和常见忽略目录）
-        ignore_dirs = {".git", ".venv", "node_modules", "__pycache__", ".mypy_cache", ".pytest_cache"}
-        try:
-            for file_path in cwd.rglob("*"):
-                try:
-                    if not file_path.is_file():
-                        continue
-                    # 隐藏/忽略目录判断基于相对工作区的路径（工作区本身可能位于隐藏路径下）
-                    rel = file_path.relative_to(cwd)
-                    if any(part.startswith(".") or part in ignore_dirs for part in rel.parts):
-                        continue
-                    content = file_path.read_bytes()
-                    files.append({
-                        "path": str(rel),
-                        "hash": hashlib.md5(content).hexdigest()[:8],
-                        "size": len(content),
-                    })
-                except OSError:
-                    continue
-        except OSError as e:
-            from agents.observability.trace import trace_event
-            trace_event("snapshot.capture_failed", error=str(e), workspace=str(cwd))
-        return files
 
     async def _prepare_turn(self, user_message: str) -> None:
         """准备轮次：清理消息、重置状态、创建快照。"""
@@ -417,7 +408,6 @@ class AgentLoop:
     async def _handle_tool_calls(self, tool_calls: list[dict]) -> None:
         """处理工具调用：权限检查、执行、结果收集。"""
         from agents.tools.permissions import check_permission
-        from agents.observability.trace import trace_event
         from agents.logging import print_info
 
         print_info(f"[DEBUG] _handle_tool_calls: start, {len(tool_calls)} tools")
@@ -451,7 +441,6 @@ class AgentLoop:
                 fn_name,
                 inp,
                 a.permission_mode,
-                plan_file_path=a.plan_file_path,
                 plan_dir=str(a._plan_mode_manager.plan_dir) if a._plan_mode_manager and a._plan_mode_manager.plan_dir else None,
             )
 
@@ -483,7 +472,6 @@ class AgentLoop:
 
     async def _execute_tool_batches(self, oai_checked: list[dict]) -> None:
         """执行工具批次：并发安全工具并行执行，其他顺序执行。"""
-        from agents.observability.trace import trace_event
         from agents.logging import print_info
 
         print_info(f"[DEBUG] _execute_tool_batches: start, {len(oai_checked)} tools")
@@ -523,8 +511,6 @@ class AgentLoop:
 
     async def _execute_concurrent_batch(self, items: list[dict]) -> None:
         """并发执行工具批次。"""
-        from agents.observability.trace import trace_event
-
         a = self._agent
 
         async def _run_oai_safe(ct_item: dict) -> tuple[dict, str, dict | None]:
@@ -561,28 +547,28 @@ class AgentLoop:
             if warning_result["warnings"]:
                 res = res + "\n\n" + "\n".join(warning_result["warnings"])
             
-            # 走歪路检测：警告后仍重复调用，自动创建 bad case
             if warning_result["going_off_track"]:
                 self._auto_mark_bad_case(
                     signal_type="tool_repeat",
-                    diagnosis={"tool": ct_item["fn"], "args": ct_item["inp"], "reason": "警告后仍重复调用"}
+                    diagnosis={"tool": ct_item["fn"], "args": ct_item["inp"], "reason": "警告后仍重复调用"},
+                    tool_name=ct_item["fn"],
                 )
             
-            # 循环 bad case 检测：警告后仍循环，自动创建 bad case
             if warning_result["cycle_bad_case"]:
                 self._auto_mark_bad_case(
                     signal_type="tool_cycle",
-                    diagnosis={"tool": ct_item["fn"], "args": ct_item["inp"], "reason": "警告后仍循环"}
+                    diagnosis={"tool": ct_item["fn"], "args": ct_item["inp"], "reason": "警告后仍循环"},
+                    tool_name=ct_item["fn"],
                 )
             
-            # 硬兜底：达到10次强行停止
             if warning_result["force_stop"]:
                 stop_info = warning_result["force_stop_info"]
                 force_stop_msg = f"\n\n⚠️ 硬兜底：工具 {stop_info['tool']} 已调用 {stop_info['count']} 次，强行停止。请检查任务是否合理，或提供更多上下文。"
                 res = res + force_stop_msg
                 self._auto_mark_bad_case(
                     signal_type="force_stop",
-                    diagnosis={"tool": stop_info["tool"], "count": stop_info["count"], "args": stop_info["args"]}
+                    diagnosis={"tool": stop_info["tool"], "count": stop_info["count"], "args": stop_info["args"]},
+                    tool_name=stop_info["tool"],
                 )
             
             repeat_warning = a.check_repeat_guard(ct_item["fn"], ct_item["inp"])
@@ -592,7 +578,6 @@ class AgentLoop:
 
     async def _execute_sequential_batch(self, items: list[dict]) -> bool:
         """顺序执行工具批次。返回是否触发上下文清理。"""
-        from agents.observability.trace import trace_event
         from agents.logging import print_info
         import time
 
@@ -647,28 +632,28 @@ class AgentLoop:
             if warning_result["warnings"]:
                 res = res + "\n\n" + "\n".join(warning_result["warnings"])
 
-            # 走歪路检测：警告后仍重复调用，自动创建 bad case
             if warning_result["going_off_track"]:
                 self._auto_mark_bad_case(
                     signal_type="tool_repeat",
-                    diagnosis={"tool": ct["fn"], "args": ct["inp"], "reason": "警告后仍重复调用"}
+                    diagnosis={"tool": ct["fn"], "args": ct["inp"], "reason": "警告后仍重复调用"},
+                    tool_name=ct["fn"],
                 )
 
-            # 循环 bad case 检测：警告后仍循环，自动创建 bad case
             if warning_result["cycle_bad_case"]:
                 self._auto_mark_bad_case(
                     signal_type="tool_cycle",
-                    diagnosis={"tool": ct["fn"], "args": ct["inp"], "reason": "警告后仍循环"}
+                    diagnosis={"tool": ct["fn"], "args": ct["inp"], "reason": "警告后仍循环"},
+                    tool_name=ct["fn"],
                 )
 
-            # 硬兜底：达到10次强行停止
             if warning_result["force_stop"]:
                 stop_info = warning_result["force_stop_info"]
                 force_stop_msg = f"\n\n⚠️ 硬兜底：工具 {stop_info['tool']} 已调用 {stop_info['count']} 次，强行停止。请检查任务是否合理，或提供更多上下文。"
                 res = res + force_stop_msg
                 self._auto_mark_bad_case(
                     signal_type="force_stop",
-                    diagnosis={"tool": stop_info["tool"], "count": stop_info["count"], "args": stop_info["args"]}
+                    diagnosis={"tool": stop_info["tool"], "count": stop_info["count"], "args": stop_info["args"]},
+                    tool_name=stop_info["tool"],
                 )
 
             repeat_warning = a.check_repeat_guard(ct["fn"], ct["inp"])
@@ -681,15 +666,26 @@ class AgentLoop:
 
     async def call_model_stream(self) -> dict:
         """流式模型调用。"""
-        from agents.observability.trace import trace_event, trace_span
+        from agents.observability.trace import trace_span
         from agents.agent import _with_retry, ContentLevelError
 
         a = self._agent
         _model_t0 = time.time()
 
-        with trace_span("model_call", model=a.model, provider="openai") as span:
+        with trace_span(
+            "model_call",
+            model=a.model,
+            metadata={
+                "provider": "openai",
+                "turn_number": a._current_turn,
+                "step_number": a._current_step,
+                "is_sub_agent": a.is_sub_agent,
+            },
+        ) as span:
 
             async def _do():
+                await a.check_and_compact()
+
                 _asm_t0 = time.perf_counter()
 
                 _t1 = time.perf_counter()
@@ -727,6 +723,16 @@ class AgentLoop:
                 _msg_count = len(raw_messages)
                 _msg_chars = sum(len(str(m.get("content", ""))) for m in raw_messages)
                 _tool_count = len(tool_defs)
+
+                span.update(
+                    input=_model_input_for_trace(sanitized_messages, tool_defs),
+                    model_parameters={
+                        "model": a.model,
+                        "stream": True,
+                        "message_count": _msg_count,
+                        "tool_count": _tool_count,
+                    },
+                )
 
                 # 计算 token breakdown（细粒度）
                 _system_chars = 0
@@ -926,57 +932,30 @@ class AgentLoop:
                 output_tokens = usage.get("completion_tokens", 0)
                 cached_tokens = usage.get("cached_tokens", 0)
                 duration_s = round(time.time() - _model_t0, 2)
-                # Langfuse 官方 usage 映射（llm.token_count.*），驱动 UI 成本/Token 统计
-                span.set_attribute("llm.token_count.prompt", input_tokens)
-                span.set_attribute("llm.token_count.completion", output_tokens)
-                span.set_attribute("llm.token_count.total", input_tokens + output_tokens)
-                span.set_attribute("langfuse.observation.metadata.cached_tokens", cached_tokens)
-                span.set_attribute(
-                    "langfuse.observation.metadata.cache_hit_rate",
-                    round(cached_tokens / input_tokens, 3) if input_tokens else 0.0,
+                span.update(
+                    output=_model_output_for_trace(result),
+                    usage_details=_usage_details_for_trace(usage),
+                    metadata={
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "cached_tokens": cached_tokens,
+                        "cache_hit_rate": round(cached_tokens / input_tokens, 3) if input_tokens else 0.0,
+                        "duration_s": duration_s,
+                        "success": True,
+                    },
                 )
-                span.set_attribute("duration_s", duration_s)
-                span.set_attribute("success", True)
 
-                asm = result.pop("_assembly_metrics", None) if isinstance(result, dict) else None
+                asm = result.get("_assembly_metrics", None) if isinstance(result, dict) else None
                 if asm:
-                    span.set_attribute("assembly.total_ms", asm["assembly_ms"])
-                    span.set_attribute("assembly.tool_defs_ms", asm["tool_defs_ms"])
-                    span.set_attribute("assembly.msg_history_ms", asm["msg_history_ms"])
-                    span.set_attribute("assembly.sanitize_msgs_ms", asm["sanitize_msgs_ms"])
-                    span.set_attribute("assembly.convert_tools_ms", asm["convert_tools_ms"])
-                    span.set_attribute("assembly.sanitize_tools_ms", asm["sanitize_tools_ms"])
-                    span.set_attribute("assembly.msg_count", asm["msg_count"])
-                    span.set_attribute("assembly.msg_chars", asm["msg_chars"])
-                    span.set_attribute("assembly.tool_count", asm["tool_count"])
-                    # Token breakdown
-                    span.set_attribute("assembly.system_chars", asm["system_chars"])
-                    span.set_attribute("assembly.user_chars", asm["user_chars"])
-                    span.set_attribute("assembly.assistant_chars", asm["assistant_chars"])
-                    span.set_attribute("assembly.tool_result_chars", asm["tool_result_chars"])
-                    # System prompt 细粒度
-                    span.set_attribute("assembly.system_base_chars", asm.get("system_base_chars", 0))
-                    span.set_attribute("assembly.system_claude_md_chars", asm.get("system_claude_md_chars", 0))
-                    span.set_attribute("assembly.system_agents_md_chars", asm.get("system_agents_md_chars", 0))
-                    span.set_attribute("assembly.system_skills_chars", asm.get("system_skills_chars", 0))
-                    span.set_attribute("assembly.system_memory_chars", asm.get("system_memory_chars", 0))
-                    span.set_attribute("assembly.system_wiki_chars", asm.get("system_wiki_chars", 0))
-                    span.set_attribute("assembly.system_agents_chars", asm.get("system_agents_chars", 0))
-                    span.set_attribute("assembly.system_workspace_chars", asm.get("system_workspace_chars", 0))
-                    # Plan mode
-                    span.set_attribute("assembly.is_plan_mode", asm.get("is_plan_mode", False))
-                    span.set_attribute("assembly.plan_mode_chars", asm.get("plan_mode_chars", 0))
-                
-                from agents.observability.cost_tracker import record_tokens
-                record_tokens(a.model, input_tokens, output_tokens, cached_tokens)
-                
+                    span.add_metadata(assembly_metrics=asm)
+
                 return result
             except asyncio.TimeoutError:
                 duration_s = round(time.time() - _model_t0, 2)
-                span.set_attribute("timeout_s", model_timeout)
-                span.set_attribute("duration_s", duration_s)
+                span.add_metadata(timeout_s=model_timeout, duration_s=duration_s)
                 span.record_error(TimeoutError(f"Model call timed out after {model_timeout}s"))
                 raise TimeoutError(f"Model call timed out after {model_timeout}s")
             except Exception as e:
+                span.add_metadata(duration_s=round(time.time() - _model_t0, 2))
                 span.record_error(e)
                 raise

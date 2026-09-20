@@ -10,6 +10,7 @@ from typing import Any
 
 from agents._utils import utc_now as _utc_now
 from agents.core.workspace import get_workspace
+from agents.observability.trace import trace_event
 
 
 RULES_FILE_NAME = "RULES.md"
@@ -93,6 +94,15 @@ def create_rule(
         "file": str(rules_file),
     }
     _append_jsonl(get_rules_evolution_dir() / RULES_PROVENANCE_LOG, event)
+    trace_event(
+        "rule.write",
+        metadata={
+            "action": "create",
+            "category": category,
+            "file": str(rules_file),
+            "success": True,
+        },
+    )
 
     return {"ok": True, **event}
 
@@ -155,6 +165,15 @@ def evolve_rule(
         "file": str(rules_file),
     }
     _append_jsonl(get_rules_evolution_dir() / RULES_PROVENANCE_LOG, event)
+    trace_event(
+        "rule.write",
+        metadata={
+            "action": "evolve",
+            "category": category,
+            "file": str(rules_file),
+            "success": True,
+        },
+    )
 
     return {"ok": True, **event}
 
@@ -203,5 +222,14 @@ def delete_rule(
         "file": str(rules_file),
     }
     _append_jsonl(get_rules_evolution_dir() / RULES_PROVENANCE_LOG, event)
+    trace_event(
+        "rule.write",
+        metadata={
+            "action": "delete",
+            "category": category,
+            "file": str(rules_file),
+            "success": True,
+        },
+    )
 
     return {"ok": True, **event}

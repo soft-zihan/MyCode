@@ -15,10 +15,6 @@ interface BadCase {
   reason: string;
   comment: string;
   expected_tool: string | null;
-  rewind_session_id: string | null;
-  diagnosis: Record<string, unknown>;
-  reproducible: boolean | null;
-  verification_diff: Record<string, unknown>;
   created_at: number;
   updated_at: number;
 }
@@ -88,19 +84,6 @@ export default function BadCasesPage() {
   useEffect(() => {
     loadBadCases();
   }, [filter, statusFilter]);
-
-  const handleVerify = async (badCaseId: string) => {
-    try {
-      const response = await fetch(`/api/bad-cases/${badCaseId}/verify`, {
-        method: 'POST',
-      });
-      const result = await response.json();
-      console.log('Verify result:', result);
-      loadBadCases();
-    } catch (error) {
-      console.error('Failed to verify:', error);
-    }
-  };
 
   const handleUpdateStatus = async (badCaseId: string, status: string) => {
     try {
@@ -280,24 +263,9 @@ export default function BadCasesPage() {
                       </div>
                     )}
                     
-                    {badCase.reproducible !== null && (
-                      <div className="text-xs mt-2">
-                        <span className={badCase.reproducible ? 'text-red-600' : 'text-gray-500'}>
-                          {badCase.reproducible ? '可复现' : '偶发'}
-                        </span>
-                      </div>
-                    )}
                   </div>
                   
                   <div className="flex gap-1 ml-4">
-                    <button
-                      onClick={() => handleVerify(badCase.id)}
-                      className="px-2 py-1 text-xs rounded bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 hover:bg-blue-200 dark:hover:bg-blue-900/50"
-                      title="验证可复现性"
-                    >
-                      验证
-                    </button>
-                    
                     {badCase.status === 'pending' && (
                       <>
                         <button

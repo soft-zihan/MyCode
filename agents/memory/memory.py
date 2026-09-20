@@ -695,9 +695,12 @@ def maybe_promote_or_archive_memory(
                 _set_memory_status(filename, "archived")
                 from agents.observability.trace import trace_event
                 trace_event(
-                    "memory.archive",
-                    filename=filename,
-                    days_since_last_recalled=days_since,
+                    "memory.action",
+                    metadata={
+                        "action": "archive",
+                        "filename": filename,
+                        "days_since_last_recalled": days_since,
+                    },
                 )
                 return {"action": "archive", "reason": f"not recalled for {days_since} days"}
         except Exception:
@@ -710,10 +713,13 @@ def maybe_promote_or_archive_memory(
             _set_memory_priority(filename, "high")
             from agents.observability.trace import trace_event
             trace_event(
-                "memory.promote",
-                filename=filename,
-                recall_count=recall_count,
-                success_rate=success_rate,
+                "memory.action",
+                metadata={
+                    "action": "promote",
+                    "filename": filename,
+                    "recall_count": recall_count,
+                    "success_rate": success_rate,
+                },
             )
             return {"action": "promote", "reason": f"high usage ({recall_count} recalls, {success_rate:.0%} success)"}
 
@@ -764,8 +770,10 @@ def maintenance_all_memories() -> dict[str, Any]:
     from agents.observability.trace import trace_event
     trace_event(
         "memory.maintenance",
-        total_checked=len(list(d.glob("*.md"))) - 1,
-        actions_taken=len(results),
+        metadata={
+            "total_checked": len(list(d.glob("*.md"))) - 1,
+            "actions_taken": len(results),
+        },
     )
 
     return {"checked": len(list(d.glob("*.md"))) - 1, "actions": results}

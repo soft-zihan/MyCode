@@ -21,7 +21,7 @@ const SESSION_NOTES_CATEGORY = {
   description: '会话笔记（临时但持久保存）',
 };
 
-// Category 2: Long-term Memory (knowledge, workflow_pattern, etc.)
+// Category 2: Long-term Memory (knowledge, workflow_pattern, self_improvement, user, reference)
 const MEMORY_CATEGORIES = [
   {
     name: 'Knowledge',
@@ -38,6 +38,30 @@ const MEMORY_CATEGORIES = [
     bgColor: 'bg-orange-50',
     path: '.mycode/wiki/workflow_pattern',
     description: '工作流模式（可编译为 Skill）',
+  },
+  {
+    name: 'Self Improvement',
+    icon: RefreshCw,
+    color: 'text-green-500',
+    bgColor: 'bg-green-50',
+    path: '.mycode/wiki/self_improvement',
+    description: '自我改进与调试经验',
+  },
+  {
+    name: 'User',
+    icon: MessageSquare,
+    color: 'text-purple-500',
+    bgColor: 'bg-purple-50',
+    path: '.mycode/wiki/user',
+    description: '用户偏好与习惯',
+  },
+  {
+    name: 'Reference',
+    icon: FolderTree,
+    color: 'text-indigo-500',
+    bgColor: 'bg-indigo-50',
+    path: '.mycode/wiki/reference',
+    description: '参考资料',
   },
 ];
 
@@ -98,15 +122,16 @@ function filterTreeByPath(tree: WorkspaceNode | null, targetPath: string): FileN
   function walk(node: WorkspaceNode, currentPath: string) {
     const nodePath = currentPath ? `${currentPath}/${node.name}` : node.name;
     
-    // If this node matches the target path exactly, add it and STOP recursing
-    // (the TreeNode component will handle expanding its children)
+    // If this node matches the target path exactly, return its children (not the node itself)
     if (nodePath === targetPath) {
-      result.push(convertToFileNode(node));
+      if (node.type === 'directory' && node.children) {
+        result.push(...node.children.map(convertToFileNode));
+      }
       return;
     }
     
     // If this node is a parent of the target, recurse into children
-    if (targetPath.startsWith(nodePath + '/') || nodePath.startsWith(targetPath + '/')) {
+    if (targetPath.startsWith(nodePath + '/')) {
       if (node.children) {
         for (const child of node.children) {
           walk(child, nodePath);
@@ -222,8 +247,6 @@ function CategorySection({
 }) {
   const Icon = category.icon;
   
-  if (files.length === 0) return null;
-  
   return (
     <div className="border-b border-gray-100">
       <div
@@ -240,20 +263,26 @@ function CategorySection({
       
       {expanded && (
         <div className="pb-1">
-          {files
-            .sort((a, b) => {
-              if (a.type === b.type) return a.name.localeCompare(b.name);
-              return a.type === 'directory' ? -1 : 1;
-            })
-            .map(file => (
-              <TreeNode
-                key={file.path}
-                node={file}
-                level={0}
-                onFileSelect={onFileSelect}
-                selectedPath={selectedFile}
-              />
-            ))}
+          {files.length > 0 ? (
+            files
+              .sort((a, b) => {
+                if (a.type === b.type) return a.name.localeCompare(b.name);
+                return a.type === 'directory' ? -1 : 1;
+              })
+              .map(file => (
+                <TreeNode
+                  key={file.path}
+                  node={file}
+                  level={0}
+                  onFileSelect={onFileSelect}
+                  selectedPath={selectedFile}
+                />
+              ))
+          ) : (
+            <div className="px-3 py-2 text-xs text-gray-400 italic">
+              暂无内容
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -350,87 +379,70 @@ export function WikiPanel({ cwd, onFileSelect, selectedFile }: WikiPanelProps) {
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
         {/* Category 1: Session Notes */}
-        {totalSessionNotes > 0 && (
-          <div className="border-b border-gray-200">
-            <div className="px-3 py-1.5 bg-cyan-50 text-[10px] font-medium text-cyan-700 uppercase tracking-wide">
-              会话笔记
-            </div>
-            <CategorySection
-              category={SESSION_NOTES_CATEGORY}
-              files={sessionNotesFiles}
-              expanded={expandedCategories.has(SESSION_NOTES_CATEGORY.name)}
-              onToggle={() => toggleCategory(SESSION_NOTES_CATEGORY.name)}
-              onFileSelect={onFileSelect}
-              selectedFile={selectedFile}
-            />
+        <div className="border-b border-gray-200">
+          <div className="px-3 py-1.5 bg-cyan-50 text-[10px] font-medium text-cyan-700 uppercase tracking-wide">
+            会话笔记
           </div>
-        )}
+          <CategorySection
+            category={SESSION_NOTES_CATEGORY}
+            files={sessionNotesFiles}
+            expanded={expandedCategories.has(SESSION_NOTES_CATEGORY.name)}
+            onToggle={() => toggleCategory(SESSION_NOTES_CATEGORY.name)}
+            onFileSelect={onFileSelect}
+            selectedFile={selectedFile}
+          />
+        </div>
         
         {/* Category 2: Long-term Memory */}
-        {totalMemoryFiles > 0 && (
-          <div className="border-b border-gray-200">
-            <div className="px-3 py-1.5 bg-blue-50 text-[10px] font-medium text-blue-700 uppercase tracking-wide">
-              长期记忆
-            </div>
-            {memoryFiles.map(({ category, files }) => (
-              <CategorySection
-                key={category.name}
-                category={category}
-                files={files}
-                expanded={expandedCategories.has(category.name)}
-                onToggle={() => toggleCategory(category.name)}
-                onFileSelect={onFileSelect}
-                selectedFile={selectedFile}
-              />
-            ))}
+        <div className="border-b border-gray-200">
+          <div className="px-3 py-1.5 bg-blue-50 text-[10px] font-medium text-blue-700 uppercase tracking-wide">
+            长期记忆
           </div>
-        )}
-        
-        {/* Category 3: Project Documentation */}
-        {totalProjectDocs > 0 && (
-          <div className="border-b border-gray-200">
-            <div className="px-3 py-1.5 bg-green-50 text-[10px] font-medium text-green-700 uppercase tracking-wide">
-              项目文档
-            </div>
+          {memoryFiles.map(({ category, files }) => (
             <CategorySection
-              category={PROJECT_DOCS_CATEGORY}
-              files={projectDocsFiles}
-              expanded={expandedCategories.has(PROJECT_DOCS_CATEGORY.name)}
-              onToggle={() => toggleCategory(PROJECT_DOCS_CATEGORY.name)}
+              key={category.name}
+              category={category}
+              files={files}
+              expanded={expandedCategories.has(category.name)}
+              onToggle={() => toggleCategory(category.name)}
               onFileSelect={onFileSelect}
               selectedFile={selectedFile}
             />
+          ))}
+        </div>
+        
+        {/* Category 3: Project Documentation */}
+        <div className="border-b border-gray-200">
+          <div className="px-3 py-1.5 bg-green-50 text-[10px] font-medium text-green-700 uppercase tracking-wide">
+            项目文档
           </div>
-        )}
+          <CategorySection
+            category={PROJECT_DOCS_CATEGORY}
+            files={projectDocsFiles}
+            expanded={expandedCategories.has(PROJECT_DOCS_CATEGORY.name)}
+            onToggle={() => toggleCategory(PROJECT_DOCS_CATEGORY.name)}
+            onFileSelect={onFileSelect}
+            selectedFile={selectedFile}
+          />
+        </div>
         
         {/* Config */}
-        {totalConfigFiles > 0 && (
-          <div>
-            <div className="px-3 py-1.5 bg-gray-50 text-[10px] font-medium text-gray-500 uppercase tracking-wide">
-              配置
-            </div>
-            {configFiles.map(({ category, files }) => (
-              <CategorySection
-                key={category.name}
-                category={category}
-                files={files}
-                expanded={expandedCategories.has(category.name)}
-                onToggle={() => toggleCategory(category.name)}
-                onFileSelect={onFileSelect}
-                selectedFile={selectedFile}
-              />
-            ))}
+        <div>
+          <div className="px-3 py-1.5 bg-gray-50 text-[10px] font-medium text-gray-500 uppercase tracking-wide">
+            配置
           </div>
-        )}
-        
-        {/* 空状态 */}
-        {totalSessionNotes === 0 && totalMemoryFiles === 0 && totalProjectDocs === 0 && totalConfigFiles === 0 && (
-          <div className="p-8 text-center text-sm text-gray-400">
-            <BookOpen className="w-8 h-8 mx-auto mb-2 opacity-30" />
-            <div>暂无文档</div>
-            <div className="text-xs mt-1">与 Agent 对话以创建文档</div>
-          </div>
-        )}
+          {configFiles.map(({ category, files }) => (
+            <CategorySection
+              key={category.name}
+              category={category}
+              files={files}
+              expanded={expandedCategories.has(category.name)}
+              onToggle={() => toggleCategory(category.name)}
+              onFileSelect={onFileSelect}
+              selectedFile={selectedFile}
+            />
+          ))}
+        </div>
       </div>
     </div>
   );

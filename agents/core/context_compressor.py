@@ -2,7 +2,7 @@
 
 职责：
 - 策略 A：工具调用折叠（上下文 > 80% 或空闲 > 5 分钟）
-- 策略 B：会话折叠（工具折叠后仍 > 50%）
+- 策略 B：会话折叠（工具折叠后仍 >= 40%）
 
 折叠通过追加 events_hidden 事件实现，原始内容保留在事件中。
 摘要作为独立事件（tool_folded / session_folded）插入。
@@ -31,7 +31,7 @@ from agents.logging import print_info
 logger = logging.getLogger(__name__)
 
 TOOL_FOLD_THRESHOLD = 0.80
-SESSION_FOLD_THRESHOLD = 0.50
+SESSION_FOLD_THRESHOLD = 0.40
 KEEP_RECENT_TOOL_ROUNDS = 3
 KEEP_RECENT_DIALOG_ROUNDS = 2
 IDLE_TIMEOUT_S = 5 * 60
@@ -76,15 +76,15 @@ def _finish_compaction_span(
     hidden_after = _count_hidden_seqs(session)
     seqs_hidden = hidden_after - hidden_before
     total = len(session._log)
-    span.set_attribute("langfuse.observation.metadata.folded", folded)
-    span.set_attribute("langfuse.observation.metadata.session_fold", session_folded)
-    span.set_attribute("langfuse.observation.metadata.seqs_hidden", seqs_hidden)
-    span.set_attribute("langfuse.observation.metadata.hidden_total", hidden_after)
+    metadata: dict[str, Any] = {
+        "folded": folded,
+        "session_fold": session_folded,
+        "seqs_hidden": seqs_hidden,
+        "hidden_total": hidden_after,
+    }
     if total:
-        span.set_attribute(
-            "langfuse.observation.metadata.retention_ratio",
-            round((total - hidden_after) / total, 3),
-        )
+        metadata["retention_ratio"] = round((total - hidden_after) / total, 3)
+    span.add_metadata(**metadata)
 
 
 class ContextCompressor:
@@ -126,7 +126,7 @@ class ContextCompressor:
         新流程：
         1. >80% 或空闲 >5 分钟：开始压缩
         2. 先做工具折叠（可恢复）
-        3. 估算折叠后 token 数，<50% 则停止
+        3. 估算折叠后 token 数，<40% 则停止
         4. 否则做会话折叠（side query 同时编译任务笔记和项目知识）
         
         Returns:
@@ -143,6 +143,8 @@ class ContextCompressor:
             or idle_seconds > self.idle_timeout_seconds
         )
 
+        print(f"[compressor] check: utilization={utilization:.2%}, idle={idle_seconds:.0f}s, threshold={self.tool_fold_threshold:.0%}, should_compress={should_compress}")
+
         if not should_compress:
             return False
 
@@ -151,10 +153,10 @@ class ContextCompressor:
         trigger = "utilization" if utilization > self.tool_fold_threshold else "idle"
         with trace_span(
             "compact",
-            **{
-                "langfuse.observation.metadata.trigger": trigger,
-                "langfuse.observation.metadata.utilization_before": round(utilization, 3),
-                "langfuse.observation.metadata.idle_seconds": round(idle_seconds, 1),
+            metadata={
+                "trigger": trigger,
+                "utilization_before": round(utilization, 3),
+                "idle_seconds": round(idle_seconds, 1),
             },
         ) as span:
             hidden_before = _count_hidden_seqs(session)
@@ -162,18 +164,15 @@ class ContextCompressor:
             # 第一步：工具折叠（可恢复）
             folded = await self._fold_tool_results(session, side_query)
             if span:
-                span.set_attribute("langfuse.observation.metadata.tool_fold", folded)
+                span.add_metadata(tool_fold=folded)
 
-            # 第二步：估算折叠后 token 数，可能 <50% 则停止
+            # 第二步：估算折叠后 token 数，<40% 则停止（跳过会话折叠）
             if folded and side_query:
                 estimated_utilization = self._estimate_utilization_after_tool_fold(
                     session, utilization
                 )
                 if span:
-                    span.set_attribute(
-                        "langfuse.observation.metadata.utilization_after_tool_fold",
-                        round(estimated_utilization, 3),
-                    )
+                    span.add_metadata(utilization_after_tool_fold=round(estimated_utilization, 3))
                 if estimated_utilization < self.session_fold_threshold:
                     _finish_compaction_span(span, session, hidden_before, folded, False)
                     return folded
@@ -184,7 +183,7 @@ class ContextCompressor:
             )
             folded = session_folded or folded
             if span:
-                span.set_attribute("langfuse.observation.metadata.session_fold", session_folded)
+                span.add_metadata(session_fold=session_folded)
             _finish_compaction_span(span, session, hidden_before, folded, session_folded)
 
         return folded
@@ -239,10 +238,7 @@ class ContextCompressor:
 
         from agents.observability.trace import trace_span
 
-        with trace_span(
-            "compact",
-            **{"langfuse.observation.metadata.trigger": "manual"},
-        ) as span:
+        with trace_span("compact", metadata={"trigger": "manual"}) as span:
             hidden_before = _count_hidden_seqs(session)
             folded = await self._fold_session(session, side_query, session_id, folded_memories)
             _finish_compaction_span(span, session, hidden_before, folded, folded)
@@ -504,6 +500,7 @@ class ContextCompressor:
                     name=f"session_{session_id}",
                     content=session_notes,
                     description=f"Session notes for session {session_id}",
+                    session_id=session_id,
                 )
                 print(f"[wiki_write] session_notes written for session={session_id}")
 

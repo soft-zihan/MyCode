@@ -204,11 +204,6 @@ export async function fetchSkillEvolutionProvenance(): Promise<any[]> {
   return res.json();
 }
 
-export async function fetchSkillEvolutionUsage(): Promise<any> {
-  const res = await fetch(`${API_BASE}/skill-evolution/usage`);
-  if (!res.ok) throw new Error('Failed to fetch evolution usage');
-  return res.json();
-}
 export async function deleteSkill(name: string): Promise<void> {
   const res = await fetch(`${API_BASE}/skills/${name}`, { method: 'DELETE' });
   if (!res.ok) throw new Error('Failed to delete skill');
@@ -237,7 +232,7 @@ export async function fetchDirectories(path?: string): Promise<DirectoryList> {
   if (!res.ok) throw new Error('Failed to fetch directories');
   return res.json();
 }
-export async function fetchTraceEvents(n: number = 50, session?: string): Promise<{ enabled: boolean; path: string; session?: string; events: TraceEvent[] }> {
+export async function fetchTraceEvents(n: number = 50, session?: string): Promise<{ session?: string; events: TraceEvent[] }> {
   const params = new URLSearchParams({ n: String(n) });
   if (session) params.set('session', session);
   const res = await fetch(`${API_BASE}/trace?${params}`);
@@ -258,15 +253,6 @@ export async function fetchTraceFiles(): Promise<{ files: TraceFile[] }> {
   const res = await fetch(`${API_BASE}/trace/files`);
   if (!res.ok) throw new Error('Failed to fetch trace files');
   return res.json();
-}
-
-export async function toggleTrace(enabled: boolean): Promise<void> {
-  const res = await fetch(`${API_BASE}/trace/toggle`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ enabled }),
-  });
-  if (!res.ok) throw new Error('Failed to toggle trace');
 }
 
 export async function fetchWorkspaceTree(cwd?: string): Promise<WorkspaceNode> {
@@ -523,19 +509,6 @@ export async function compactSession(sessionId: string): Promise<{ success: bool
   return res.json();
 }
 
-export async function rewindSession(sessionId: string, turns: number): Promise<{ message: string }> {
-  console.log('[API] rewindSession:', { sessionId, turns });
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/rewind`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId, turns }),
-  });
-  if (!res.ok) throw new Error('Failed to rewind session');
-  const data = await res.json();
-  console.log('[API] rewindSession result:', data);
-  return data;
-}
-
 export interface SessionStats {
   input_tokens: number;
   output_tokens: number;
@@ -561,17 +534,11 @@ export interface SessionSummary {
 
 export async function fetchSessionSummary(sessionId: string): Promise<SessionSummary> {
   const res = await fetch(`${API_BASE}/sessions/${sessionId}/summary`);
-  if (!res.ok) throw new Error('Failed to fetch session summary');
-  return res.json();
-}
-
-export async function togglePlanMode(sessionId: string, enabled: boolean): Promise<{ mode: string }> {
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan-mode`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId, enabled }),
-  });
-  if (!res.ok) throw new Error('Failed to toggle plan mode');
+  if (!res.ok) {
+    const err = new Error(`Failed to fetch session summary: ${res.status}`) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
+  }
   return res.json();
 }
 
@@ -667,22 +634,28 @@ export interface PermissionRequest {
   sub_agent_id?: string;
 }
 
-export async function respondToPermission(sessionId: string, requestId: string, allowed: boolean): Promise<void> {
+export async function respondToPermission(sessionId: string, requestId: string, allowed: boolean, feedback?: string, choice?: string): Promise<void> {
   const res = await fetch(`${API_BASE}/events/respond`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ rpc_id: requestId, allowed, session_id: sessionId }),
+    body: JSON.stringify({ rpc_id: requestId, allowed, session_id: sessionId, feedback: feedback || '', choice: choice || '' }),
   });
   if (!res.ok) throw new Error('Failed to respond to permission');
 }
 
-export async function updatePlanFile(sessionId: string, planFilePath: string, content: string): Promise<{ success: boolean; message?: string }> {
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan/update`, {
-    method: 'POST',
+export async function getPlanDraftArtifacts(sessionId: string): Promise<{ success: boolean; message?: string; data?: { draft_dir: string; artifacts: Record<string, string> } }> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan-draft/artifacts`);
+  if (!res.ok) throw new Error('Failed to fetch plan draft artifacts');
+  return res.json();
+}
+
+export async function updatePlanDraftArtifact(sessionId: string, filename: string, content: string): Promise<{ success: boolean; message?: string }> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan-draft/artifacts`, {
+    method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ plan_file_path: planFilePath, content }),
+    body: JSON.stringify({ filename, content }),
   });
-  if (!res.ok) throw new Error('Failed to update plan file');
+  if (!res.ok) throw new Error('Failed to update plan draft artifact');
   return res.json();
 }
 
@@ -695,27 +668,9 @@ export async function respondToQuestion(sessionId: string, requestId: string, an
   if (!res.ok) throw new Error('Failed to respond to question');
 }
 
-export async function truncateSession(sessionId: string, keepUserMessages: number): Promise<void> {
-  console.log('[API] truncateSession:', { sessionId, keepUserMessages });
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/truncate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ keep_user_messages: keepUserMessages }),
-  });
-  if (!res.ok) throw new Error('Failed to truncate session');
-  console.log('[API] truncateSession done');
-}
+// ── 统一回退（对话 + 文件原子回退，三阶段 stage/commit/clear） ──
 
-export interface Snapshot {
-  id: string;
-  tree_hash: string;
-  file_count: number;
-  created_at: number;
-  label?: string;
-  message_id?: string;
-}
-
-export interface FileDiff {
+export interface RewindFileChange {
   path: string;
   status: 'added' | 'modified' | 'deleted';
   patch: string;
@@ -723,107 +678,57 @@ export interface FileDiff {
   deletions: number;
 }
 
-export interface SnapshotInspection {
-  id: string;
-  tree_hash: string;
-  created_at: number;
-  label?: string;
-  files: FileDiff[];
-}
-
-export interface RevertPlan {
-  id: string;
-  session_id: string;
-  snapshot_id: string;
-  original_snapshot_id: string;
-  changes: FileDiff[];
-  created_at: number;
-  expires_at: number;
-  message_id?: string;
-}
-
-export interface RevertResult {
+export interface RewindPlan {
   plan_id: string;
+  session_id: string;
+  truncate_at_seq: number;
+  target_message: { seq: number; content: string };
+  removed_user_messages: number;
+  removed_events: number;
+  has_snapshot: boolean;
+  file_changes: RewindFileChange[];
+  expires_at: number;
+}
+
+export interface RewindResult {
+  plan_id: string;
+  truncate_at_seq: number;
+  removed_events: number;
+  removed_user_messages: number;
   restored_files: string[];
-  action: 'committed' | 'cleared';
 }
 
-export async function createSnapshot(
+export async function stageRewind(
   sessionId: string,
-  label?: string,
-  messageId?: string
-): Promise<Snapshot> {
-  const res = await fetch(`${API_BASE}/snapshots`, {
+  target: { turns?: number; keepUserMessages?: number }
+): Promise<RewindPlan> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/rewind/stage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId, label, message_id: messageId }),
+    body: JSON.stringify({ turns: target.turns, keep_user_messages: target.keepUserMessages }),
   });
-  if (!res.ok) throw new Error('Failed to create snapshot');
-  const data = await res.json();
-  return data.snapshot;
-}
-
-export async function listSnapshots(sessionId?: string): Promise<Snapshot[]> {
-  const params = sessionId ? `?session_id=${sessionId}` : '';
-  const res = await fetch(`${API_BASE}/snapshots${params}`);
-  if (!res.ok) throw new Error('Failed to list snapshots');
-  const data = await res.json();
-  return data.snapshots;
-}
-
-export async function inspectSnapshot(snapshotId: string): Promise<SnapshotInspection> {
-  const res = await fetch(`${API_BASE}/snapshots/${snapshotId}`);
-  if (!res.ok) throw new Error('Failed to inspect snapshot');
-  const data = await res.json();
-  return data.inspection;
-}
-
-export async function restoreSnapshot(snapshotId: string, files?: string[]): Promise<string[]> {
-  const res = await fetch(`${API_BASE}/snapshots/${snapshotId}/restore`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ snapshot_id: snapshotId, files }),
-  });
-  if (!res.ok) throw new Error('Failed to restore snapshot');
-  const data = await res.json();
-  return data.restored_files;
-}
-
-export async function stageRevert(
-  sessionId: string,
-  snapshotId: string,
-  messageId?: string
-): Promise<RevertPlan> {
-  const res = await fetch(`${API_BASE}/revert/stage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId, snapshot_id: snapshotId, message_id: messageId }),
-  });
-  if (!res.ok) throw new Error('Failed to stage revert');
+  if (!res.ok) throw new Error('Failed to stage rewind');
   const data = await res.json();
   return data.plan;
 }
 
-export async function commitRevert(planId: string): Promise<RevertResult> {
-  const res = await fetch(`${API_BASE}/revert/commit`, {
+export async function commitRewind(sessionId: string, planId: string): Promise<RewindResult> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/rewind/commit`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ plan_id: planId }),
   });
-  if (!res.ok) throw new Error('Failed to commit revert');
-  const data = await res.json();
-  return data.result;
+  if (!res.ok) throw new Error('Failed to commit rewind');
+  return res.json();
 }
 
-export async function clearRevert(planId: string): Promise<RevertResult> {
-  const res = await fetch(`${API_BASE}/revert/clear`, {
+export async function clearRewind(sessionId: string, planId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/rewind/clear`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ plan_id: planId }),
   });
-  if (!res.ok) throw new Error('Failed to clear revert');
-  const data = await res.json();
-  return data.result;
+  if (!res.ok) throw new Error('Failed to clear rewind');
 }
 
 export interface CompressionStats {
@@ -902,7 +807,6 @@ export interface SkillEvolutionStatus {
   status: string;
   reasons: string[];
   rule_summary: any;
-  usage_stats: { retrieved: number; relevant: number; used: number; relevance_rate: number; used_rate: number };
   replay_pool_size: number;
   replay: any;
   champion: any;
@@ -966,16 +870,19 @@ export async function fetchSkillProvenance(skillName: string): Promise<any[]> {
 }
 
 export interface TraceStatus {
-  enabled: boolean;
-  otel_enabled: boolean;
-  phoenix_endpoint: string;
-  phoenix_reachable: boolean;
-  path: string;
-  events: any[];
+  endpoint: string;
+  tracing_enabled: boolean;
+  reachable: boolean;
+  project_id: string | null;
+  project_name: string | null;
+  error: string | null;
+  checked_at: number;
+  trace_url_template?: string;
+  session_url_template?: string;
 }
 
-export async function fetchTraceStatus(): Promise<TraceStatus> {
-  const res = await fetch(`${API_BASE}/trace`);
+export async function fetchTraceStatus(force = false): Promise<TraceStatus> {
+  const res = await fetch(`${API_BASE}/trace/status?force=${force}`);
   if (!res.ok) throw new Error('Failed to fetch trace status');
   return res.json();
 }
@@ -999,6 +906,15 @@ export async function planResume(sessionId: string, slug: string): Promise<{ suc
 
 export async function planSkipTask(sessionId: string, slug: string, taskId: number): Promise<{ success: boolean }> {
   const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan/${slug}/skip-task`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ task_id: taskId }),
+  });
+  return res.json();
+}
+
+export async function planRedoTask(sessionId: string, slug: string, taskId: number): Promise<{ success: boolean }> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan/${slug}/redo-task`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ task_id: taskId }),

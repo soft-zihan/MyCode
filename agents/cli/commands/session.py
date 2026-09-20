@@ -184,7 +184,7 @@ async def cmd_rewind(agent: "Agent", args: str) -> None:
         except ValueError:
             print_error("Usage: /rewind [N]  (N = number of turns to rewind)")
             return
-    print_info(agent.rewind(n))
+    print_info(await agent.rewind_turns(n))
 
 
 @command(
@@ -223,7 +223,7 @@ async def cmd_new(agent: "Agent", args: str) -> None:
     category="session",
 )
 async def cmd_undo(agent: "Agent", args: str) -> None:
-    print_info(agent.rewind(1))
+    print_info(await agent.rewind_turns(1))
 
 
 @command(

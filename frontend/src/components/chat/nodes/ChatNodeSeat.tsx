@@ -12,14 +12,24 @@ interface ChatNodeSeatProps {
   node: ChatNode;
   index: number;
   sessionId?: string;
-  onEditMessage?: (node: UserNode, restoreFiles: boolean) => void;
+  userMessageIndex?: number;
+  onEditMessage?: (node: UserNode) => void;
+  onRewind?: (userMessageIndex: number) => void;
   onFileClick?: (path: string) => void;
 }
 
-export const ChatNodeSeat = memo(function ChatNodeSeat({ node, sessionId, onEditMessage, onFileClick }: ChatNodeSeatProps) {
+export const ChatNodeSeat = memo(function ChatNodeSeat({ node, sessionId, userMessageIndex, onEditMessage, onRewind, onFileClick }: ChatNodeSeatProps) {
   switch (node.kind) {
     case 'user':
-      return <UserNodeView node={node} sessionId={sessionId} onEdit={onEditMessage} />;
+      return (
+        <UserNodeView
+          node={node}
+          sessionId={sessionId}
+          userMessageIndex={userMessageIndex}
+          onEdit={onEditMessage}
+          onRewind={onRewind}
+        />
+      );
     case 'assistant':
       return <AssistantNodeView node={node} sessionId={sessionId} onFileClick={onFileClick} />;
     case 'thinking':

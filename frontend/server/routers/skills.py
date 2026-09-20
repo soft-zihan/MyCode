@@ -114,6 +114,22 @@ def api_skill_evolution_report() -> dict[str, Any]:
         return {"status": "error", "error": str(e)}
 
 
+@router.post("/api/skill-evolution/evaluate")
+async def api_skill_evolution_evaluate() -> dict[str, Any]:
+    """手动触发验证门禁在线评测（仅确定性规则，不含 LLM judge）。
+
+    自动路径：skill 变体变更（online ingest / pattern 编译）后会带 side_query
+    触发含 LLM judge 的完整评测；此端点用于无活跃会话时的手动补评。
+    """
+    try:
+        from agents.skills.skill_evaluator import evaluate_online_skill_evolution_async
+
+        report = await evaluate_online_skill_evolution_async(side_query=None)
+        return {"status": "ok", "report": report}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"skill evolution evaluation failed: {e}")
+
+
 @router.get("/api/skill-evolution/provenance")
 def api_skill_evolution_provenance() -> list[dict[str, Any]]:
     provenance_path = project_root / ".mycode" / "skill-evolution" / "online_provenance.jsonl"
@@ -124,17 +140,6 @@ def api_skill_evolution_provenance() -> list[dict[str, Any]]:
         return [json.loads(line) for line in lines if line.strip()]
     except Exception:
         return []
-
-
-@router.get("/api/skill-evolution/usage")
-def api_skill_evolution_usage() -> dict[str, Any]:
-    usage_path = project_root / ".mycode" / "skill-evolution" / "skill_usage_stats.json"
-    if not usage_path.exists():
-        return {}
-    try:
-        return json.loads(usage_path.read_text())
-    except Exception:
-        return {}
 
 
 def _load_eval_report() -> dict[str, Any] | None:
@@ -168,13 +173,6 @@ def api_skill_evolution_status(skill_name: str) -> dict[str, Any]:
         "status": skill_data.get("status", "unknown"),
         "reasons": skill_data.get("reasons", []),
         "rule_summary": skill_data.get("eval", {}),
-        "usage_stats": {
-            "retrieved": skill_data.get("retrieved", 0),
-            "relevant": skill_data.get("relevant", 0),
-            "used": skill_data.get("used", 0),
-            "relevance_rate": skill_data.get("relevance_rate", 0),
-            "used_rate": skill_data.get("used_rate", 0),
-        },
         "replay_pool_size": skill_data.get("replay", {}).get("count", 0),
         "replay": skill_data.get("replay", {}),
         "champion": skill_data.get("artifacts", {}).get("promotion", {}),
@@ -190,7 +188,7 @@ def api_skill_evolution_replay_pool(skill_name: str) -> dict[str, Any]:
     from agents.skills.eval_rules import _compile_eval_rules
     from agents.skills.eval_champion import _lineage_id_for_skill
     from agents._utils import read_jsonl as _read_jsonl, read_json as _read_json
-    from agents.skills.skill_file_ops import ONLINE_PROVENANCE_LOG, SKILL_USAGE_STATS, get_evolution_dir
+    from agents.skills.skill_file_ops import ONLINE_PROVENANCE_LOG, get_evolution_dir
 
     root = get_evolution_dir()
     provenance_rows = _read_jsonl(root / ONLINE_PROVENANCE_LOG)

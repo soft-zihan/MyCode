@@ -153,10 +153,12 @@ def _activate_champion(skill_name: str, snapshot: dict[str, Any], lineage_id: st
 
     trace_event(
         "champion.activate",
-        skill=skill_name,
-        lineage_id=lineage_id,
-        path=str(active_path),
-        backup_path=str(backup_path),
+        metadata={
+            "skill": skill_name,
+            "lineage_id": lineage_id,
+            "path": str(active_path),
+            "backup_path": str(backup_path),
+        },
     )
 
     return {
@@ -222,11 +224,11 @@ def _promotion_decision(
     min_score_delta: float = DEFAULT_MIN_SCORE_DELTA,
     auto_activate: bool = False,
 ) -> dict[str, Any]:
-    if status in {"unobserved", "incubating", "pruned"}:
+    if status in {"unobserved", "incubating"}:
         return {
             "promoted": False,
             "status": status,
-            "reason": "not enough usable replay and usage signal for champion promotion",
+            "reason": "not enough usable replay signal for champion promotion",
             "champion_before": champion,
             "candidate": candidate,
             "min_score_delta": min_score_delta,

@@ -164,27 +164,43 @@ def check_permission(
     tool_name: str,
     inp: dict,
     mode: str = "default",
-    plan_file_path: str | None = None,
     plan_dir: str | None = None,
     sub_agent_type: str | None = None,
     allowed_commands: list[str] | None = None,
     plan_execution_active: bool = False,
 ) -> dict:
     """Returns {"action": "allow"|"deny"|"confirm", "message": ...}"""
-    from agents.observability.tracer import tracer
-    
-    with tracer.span("permission.check", {
-        "langfuse.observation.type": "guardrail",
-        "mycode.permission.tool_name": tool_name,
-        "mycode.permission.mode": mode,
-        "mycode.permission.sub_agent_type": sub_agent_type or "",
-        "mycode.permission.plan_execution_active": plan_execution_active,
-    }) as span:
-        result = _check_permission_inner(tool_name, inp, mode, plan_file_path, plan_dir, sub_agent_type, allowed_commands, plan_execution_active)
-        if span:
-            span.set_attribute("mycode.permission.action", result["action"])
-            if result.get("message"):
-                span.set_attribute("mycode.permission.message", result["message"][:200])
+    if mode == "bypassPermissions":
+        return _check_permission_inner(tool_name, inp, mode, plan_dir, sub_agent_type, allowed_commands, plan_execution_active)
+
+    from agents.observability.trace import trace_span
+
+    permission_input = {
+        "tool_name": tool_name,
+        "mode": mode,
+        "sub_agent_type": sub_agent_type,
+        "plan_execution_active": plan_execution_active,
+        "input": inp,
+    }
+    with trace_span(
+        "permission.check",
+        name=f"permission.{tool_name}",
+        input=json.dumps(permission_input, ensure_ascii=False, default=str)[:4000],
+        metadata={
+            "tool_name": tool_name,
+            "mode": mode,
+            "sub_agent_type": sub_agent_type or "",
+            "plan_execution_active": plan_execution_active,
+        },
+    ) as span:
+        result = _check_permission_inner(tool_name, inp, mode, plan_dir, sub_agent_type, allowed_commands, plan_execution_active)
+        metadata: dict[str, Any] = {"action": result["action"]}
+        if result.get("message"):
+            metadata["message"] = result["message"][:500]
+        span.update(
+            output=json.dumps(result, ensure_ascii=False, default=str)[:2000],
+            metadata=metadata,
+        )
         return result
 
 
@@ -192,7 +208,6 @@ def _check_permission_inner(
     tool_name: str,
     inp: dict,
     mode: str = "default",
-    plan_file_path: str | None = None,
     plan_dir: str | None = None,
     sub_agent_type: str | None = None,
     allowed_commands: list[str] | None = None,
@@ -247,9 +262,6 @@ def _check_permission_inner(
                         return {"action": "allow"}
                 except (ValueError, OSError):
                     pass
-            # 向后兼容：允许写 plan_file_path
-            if plan_file_path and file_path == plan_file_path:
-                return {"action": "allow"}
             return {"action": "deny", "message": f"Blocked in plan mode: {tool_name}"}
         if tool_name == "run_shell":
             command = inp.get("command", "")

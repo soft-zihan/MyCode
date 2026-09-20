@@ -204,6 +204,7 @@ async def execute_tool(
         "plan_save_explore": _plan_save_explore_tool,
         "plan_continue": _plan_continue_tool,
         "plan_retry": _plan_retry_tool,
+        "plan_recall": _plan_recall_tool,
         "plan_abandon": _plan_abandon_tool,
         "plan_reopen": _plan_reopen_tool,
         "plan_check_expired": _plan_check_expired_tool,

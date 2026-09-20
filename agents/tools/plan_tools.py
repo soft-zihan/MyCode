@@ -172,22 +172,40 @@ def plan_task_done(inp: dict) -> str:
     task_id = inp.get("task_id")
     commit = inp.get("commit", "")
     verification_str = inp.get("verification", "")
-    
+
     if not slug or task_id is None:
         return "Error: slug and task_id are required"
-    
+
     # Parse verification JSON if provided
     verification = None
     if verification_str:
         try:
-            import json
             verification = json.loads(verification_str)
         except json.JSONDecodeError:
             verification = {"raw": verification_str}
 
+    if get_plan(slug) is None:
+        return f"Error: plan '{slug}' not found"
+    if int(task_id) not in [t.id for t in get_tasks(slug)]:
+        return f"Error: task {task_id} not found in plan '{slug}'"
+    if not isinstance(verification, dict) or not verification.get("command") or verification.get("exit_code") is None:
+        return (
+            "Error: verification is required to mark a task done. "
+            'Pass verification as a JSON string, e.g. '
+            '\'{"command": "pytest tests/test_x.py", "exit_code": 0, "output_snippet": "12 passed"}\''
+        )
+
     if mark_task_done(slug, int(task_id), commit=commit, verification=verification):
-        return json.dumps({"status": "done", "slug": slug, "task_id": task_id, "commit": commit})
-    return f"Error: task {task_id} not found in plan '{slug}'"
+        result = json.dumps({"status": "done", "slug": slug, "task_id": task_id, "commit": commit})
+        try:
+            from agents.plan.plan_executor import PlanExecutor
+            guidance = PlanExecutor.for_plan(slug).build_review_guidance()
+        except Exception:
+            guidance = ""
+        if guidance:
+            result += f"\n\n## Review Guidance（继续下一任务前先自查）\n\n{guidance}"
+        return result
+    return f"Error: failed to update task {task_id} status in plan '{slug}'"
 
 
 def plan_task_failed(inp: dict) -> str:

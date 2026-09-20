@@ -23,7 +23,6 @@ class SessionManager:
     def create(
         self,
         model: str | None = None,
-        agent_type: str | None = None,
         permission_mode: str | None = None,
         cwd: str | None = None,
     ) -> tuple[Any, Session]:
@@ -36,12 +35,8 @@ class SessionManager:
         config = load_config()
         api_key, api_base, model_name = self._resolve_model(config, model)
         
-        # agent_type="plan" 时强制使用 plan permission mode
-        if agent_type == "plan":
-            permission_mode = "plan"
-        
         session = Session()
-        print(f"[DEBUG] session_manager.create: session.id = {session.id}, agent_type={agent_type}, permission_mode={permission_mode}")
+        print(f"[DEBUG] session_manager.create: session.id = {session.id}, permission_mode={permission_mode}")
         if cwd:
             # 工作区走事件流（单一数据源）：session/created → cwd 投影 → 快照/列表/重建
             session.append("session/created", {"cwd": cwd})

@@ -56,19 +56,6 @@ class SessionLifecycle:
         if data.get("plan_slug"):
             session.plan_slug = data["plan_slug"]
 
-    # ── Rewind ──
-
-    def rewind(self, session: Any, n: int = 1) -> str:
-        """回退 N 个轮次（纯事件回退；文件恢复由 RevertService 负责）。"""
-        turn_starts = [i for i, e in enumerate(session._log) if e.get("type") == "turn/start"]
-        if len(turn_starts) < n:
-            return f"Cannot rewind {n} turns; only {len(turn_starts)} turns recorded."
-        
-        target_idx = turn_starts[-n]
-        session._log = session._log[:target_idx]
-        
-        return f"Rewound {n} turn(s). Events now: {len(session._log)}."
-
     # ── Fork ──
 
     def fork(self, state: SessionState, session: Any) -> tuple[str, Any]:

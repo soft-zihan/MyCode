@@ -12,6 +12,7 @@ from pathlib import Path
 
 from agents.core.workspace import get_workspace
 from agents.memory.frontmatter import parse_frontmatter, format_frontmatter
+from agents.plan.task_models import normalize_status
 from agents.plan.plan_models import Plan, PlanStatus, PlanGranularity, Task
 
 
@@ -249,6 +250,14 @@ def get_tasks(slug: str) -> list[Task]:
     return _parse_simple_tasks(content)
 
 
+def count_tasks(content: str) -> int:
+    """统计 tasks 内容中的任务数（兼容结构化与 checkbox 两种格式）。"""
+    structured = len(re.findall(r"### Task \d+:", content))
+    if structured:
+        return structured
+    return len(re.findall(r"^\s*- \[[ x!~-]\]\s*\d+\.", content, re.M))
+
+
 def _parse_simple_tasks(content: str) -> list[Task]:
     """解析简单格式: - [ ] 1. task description"""
     tasks: list[Task] = []
@@ -258,7 +267,7 @@ def _parse_simple_tasks(content: str) -> list[Task]:
         if not line.startswith("- ["):
             continue
 
-        task_id_match = re.match(r"- \[([ x!])\]\s*(\d+)\.\s*(.+)", line)
+        task_id_match = re.match(r"- \[([ x!~-])\]\s*(\d+)\.\s*(.+)", line)
         if not task_id_match:
             continue
 
@@ -269,6 +278,10 @@ def _parse_simple_tasks(content: str) -> list[Task]:
             status = "done"
         elif marker == "!":
             status = "failed"
+        elif marker == "~":
+            status = "in-progress"
+        elif marker == "-":
+            status = "skipped"
         else:
             status = "pending"
 
@@ -299,7 +312,7 @@ def _parse_structured_tasks(content: str) -> list[Task]:
         function_match = re.search(r"\*\*函数\*\*:\s*`?([^`\n]+)`?", task_block)
         interface_match = re.search(r"\*\*接口\*\*:\s*`?([^`\n]+)`?", task_block)
         acceptance_match = re.search(r"\*\*验收\*\*:\s*`?([^`\n]+)`?", task_block)
-        status_match = re.search(r"\*\*状态\*\*:\s*\[[ x~!-]\]\s*(\w+)", task_block)
+        status_match = re.search(r"\*\*状态\*\*:\s*\[[ x~!-]\]\s*([\w-]+)", task_block)
         error_match = re.search(r'\*\*错误\*\*:\s*"([^"]+)"', task_block)
         retry_match = re.search(r"\*\*重试次数\*\*:\s*(\d+)", task_block)
         
@@ -310,7 +323,7 @@ def _parse_structured_tasks(content: str) -> list[Task]:
             function=function_match.group(1).strip() if function_match else "",
             interface=interface_match.group(1).strip() if interface_match else "",
             acceptance=acceptance_match.group(1).strip() if acceptance_match else "",
-            status=status_match.group(1).strip() if status_match else "pending",
+            status=normalize_status(status_match.group(1)) if status_match else "pending",
             error=error_match.group(1).strip() if error_match else "",
             retry_count=int(retry_match.group(1)) if retry_match else 0,
         )
@@ -330,67 +343,6 @@ def get_next_task(slug: str) -> Task | None:
 def has_failed_tasks(slug: str) -> bool:
     tasks = get_tasks(slug)
     return any(t.status == "failed" for t in tasks)
-
-
-def mark_task_done(slug: str, task_id: int) -> bool:
-    plans_dir = get_plans_dir()
-    tasks_path = plans_dir / slug / "tasks.md"
-    if not tasks_path.exists():
-        return False
-
-    content = tasks_path.read_text()
-    lines = content.split("\n")
-    new_lines = []
-    found = False
-
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("- ["):
-            match = re.match(r"- \[([ x!])\]\s*(\d+)\.", stripped)
-            if match and int(match.group(2)) == task_id:
-                new_line = re.sub(r"- \[[ x!]\]", "- [x]", line)
-                new_lines.append(new_line)
-                found = True
-                continue
-        new_lines.append(line)
-
-    if found:
-        tasks_path.write_text("\n".join(new_lines))
-        _git_commit(f"plan: {slug} task {task_id} done")
-        _check_plan_completion(slug)
-        return True
-    return False
-
-
-def mark_task_failed(slug: str, task_id: int, error: str) -> bool:
-    plans_dir = get_plans_dir()
-    tasks_path = plans_dir / slug / "tasks.md"
-    if not tasks_path.exists():
-        return False
-
-    content = tasks_path.read_text()
-    lines = content.split("\n")
-    new_lines = []
-    found = False
-
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("- ["):
-            match = re.match(r"- \[([ x!])\]\s*(\d+)\.", stripped)
-            if match and int(match.group(2)) == task_id:
-                new_line = re.sub(r"- \[[ x!]\]", "- [!]", line)
-                new_lines.append(new_line)
-                new_lines.append(f'      - error: "{error}"')
-                new_lines.append(f"      - retry_count: 0")
-                found = True
-                continue
-        new_lines.append(line)
-
-    if found:
-        tasks_path.write_text("\n".join(new_lines))
-        _git_commit(f"plan: {slug} task {task_id} failed")
-        return True
-    return False
 
 
 def _check_plan_completion(slug: str) -> None:
@@ -611,42 +563,6 @@ def get_last_task_commit(slug: str, task_id: int) -> str:
     return ""
 
 
-# ── Plan Lock (v2.0) ──
-
-def _get_lock_path(slug: str) -> Path:
-    plan_dir = get_plans_dir() / slug
-    return plan_dir / ".lock"
-
-
-def acquire_plan_lock(slug: str) -> bool:
-    """获取 plan lock。返回 True 表示成功。"""
-    import os
-    import time
-    
-    lock_path = _get_lock_path(slug)
-    
-    if lock_path.exists():
-        try:
-            content = lock_path.read_text()
-            lines = content.strip().split("\n")
-            if lines:
-                pid = int(lines[0])
-                os.kill(pid, 0)
-                return False
-        except (ProcessLookupError, ValueError, OSError):
-            pass
-    
-    lock_path.write_text(f"{os.getpid()}\n{time.time()}")
-    return True
-
-
-def release_plan_lock(slug: str) -> None:
-    """释放 plan lock。"""
-    lock_path = _get_lock_path(slug)
-    if lock_path.exists():
-        lock_path.unlink()
-
-
 # ── Structured Tasks (v2.0) ──
 
 def get_structured_tasks(slug: str) -> list:
@@ -749,21 +665,44 @@ def _auto_commit(plan_dir: Path, message: str, round_num: int = 1, allowed_files
 
 
 def _update_task_status_in_file(slug: str, task_id: int, status: str) -> bool:
-    """更新 tasks.md 中指定 task 的状态。"""
+    """更新 tasks.md 中指定 task 的状态（支持结构化与 checkbox 两种格式）。"""
     plan_dir = get_plans_dir() / slug
     tasks_path = plan_dir / "tasks.md"
     if not tasks_path.exists():
         return False
-    
+
     content = tasks_path.read_text()
-    
-    status_icon = {"pending": "[ ]", "in-progress": "[~]", "done": "[x]", "failed": "[!]"}.get(status, "[ ]")
-    
-    pattern = rf"(### Task {task_id}:.*?\n(?:.*?\n)*?)\*\*状态\*\*:\s*\[[ x~!]\]\s*\w+"
-    replacement = rf"\1**状态**: {status_icon} {status}"
-    new_content = re.sub(pattern, replacement, content, flags=re.DOTALL)
-    
-    if new_content != content:
+    status_icon = {"pending": "[ ]", "in-progress": "[~]", "done": "[x]", "failed": "[!]", "skipped": "[-]"}.get(status, "[ ]")
+    new_content = None
+
+    # 结构化格式：定位 "### Task N:" 块，块内替换 **状态** 行（不跨块）
+    marker = f"### Task {task_id}:"
+    start = content.find(marker)
+    if start >= 0:
+        nxt = content.find("### Task ", start + len(marker))
+        end = nxt if nxt >= 0 else len(content)
+        block = content[start:end]
+        new_block, n = re.subn(
+            r"(\*\*状态\*\*:\s*)\[[ x~!-]\]\s*[\w-]+",
+            lambda m: f"{m.group(1)}{status_icon} {status}",
+            block,
+            count=1,
+        )
+        if n:
+            new_content = content[:start] + new_block + content[end:]
+
+    if new_content is None:
+        # 简单格式：- [ ] N. description
+        ch = {"pending": " ", "in-progress": "~", "done": "x", "failed": "!", "skipped": "-"}.get(status, " ")
+        new_content = re.sub(
+            rf"(- \[)[ x!~-](\]\s*{task_id}\.)",
+            lambda m: f"{m.group(1)}{ch}{m.group(2)}",
+            content,
+            count=1,
+            flags=re.M,
+        )
+
+    if new_content is not None and new_content != content:
         tasks_path.write_text(new_content)
         _git_commit(f"plan({slug}): update task {task_id} status to {status}")
         return True
@@ -843,7 +782,10 @@ def mark_task_done(slug: str, task_id: int, commit: str = "", verification: dict
     }
     append_ledger(slug, ledger_entry)
     
-    return _update_task_status_in_file(slug, task_id, "done")
+    ok = _update_task_status_in_file(slug, task_id, "done")
+    if ok:
+        _check_plan_completion(slug)
+    return ok
 
 
 def mark_task_failed(slug: str, task_id: int, reason: str = "") -> bool:
@@ -893,45 +835,47 @@ def resume_plan(slug: str) -> bool:
 
 
 def skip_task(slug: str, task_id: int) -> bool:
-    """跳过指定 task。"""
-    plan_dir = get_plans_dir() / slug
-    tasks_path = plan_dir / "tasks.md"
-    if not tasks_path.exists():
+    """跳过指定 task（pending/in-progress/failed → skipped）。"""
+    from datetime import datetime, timezone
+
+    task = next((x for x in get_tasks(slug) if x.id == task_id), None)
+    if task is None:
         return False
-    
-    content = tasks_path.read_text()
-    # 查找并更新 task 状态
-    import re
-    pattern = rf"(### Task {task_id}:.*?\n.*?\n.*?\n.*?\n.*?\n)\*\*状态\*\*: \[ \] pending"
-    replacement = rf"\1**状态**: [-] skipped"
-    new_content = re.sub(pattern, replacement, content, flags=re.DOTALL)
-    
-    if new_content != content:
-        tasks_path.write_text(new_content)
-        _git_commit(f"plan({slug}): skip task {task_id}")
-        return True
-    return False
+    if task.status not in ("pending", "in-progress", "failed"):
+        return False
+
+    append_ledger(slug, {
+        "task_id": task_id,
+        "status": "skipped",
+        "started": "",
+        "finished": datetime.now(timezone.utc).isoformat(),
+        "commit": "",
+        "review_rounds": 0,
+        "verification": {},
+    })
+    return _update_task_status_in_file(slug, task_id, "skipped")
 
 
 def redo_task(slug: str, task_id: int) -> bool:
-    """重做指定 task（done -> pending）。"""
-    plan_dir = get_plans_dir() / slug
-    tasks_path = plan_dir / "tasks.md"
-    if not tasks_path.exists():
+    """重做指定 task（done/skipped → pending）。failed 任务走 retry 流程。"""
+    from datetime import datetime, timezone
+
+    task = next((x for x in get_tasks(slug) if x.id == task_id), None)
+    if task is None:
         return False
-    
-    content = tasks_path.read_text()
-    # 查找并更新 task 状态
-    import re
-    pattern = rf"(### Task {task_id}:.*?\n.*?\n.*?\n.*?\n.*?\n)\*\*状态\*\*: \[x\] done"
-    replacement = rf"\1**状态**: [ ] pending"
-    new_content = re.sub(pattern, replacement, content, flags=re.DOTALL)
-    
-    if new_content != content:
-        tasks_path.write_text(new_content)
-        _git_commit(f"plan({slug}): redo task {task_id}")
-        return True
-    return False
+    if task.status not in ("done", "skipped"):
+        return False
+
+    append_ledger(slug, {
+        "task_id": task_id,
+        "status": "redo",
+        "started": "",
+        "finished": datetime.now(timezone.utc).isoformat(),
+        "commit": "",
+        "review_rounds": 0,
+        "verification": {},
+    })
+    return _update_task_status_in_file(slug, task_id, "pending")
 
 
 def rollback_plan(slug: str, to_task_id: int) -> dict:

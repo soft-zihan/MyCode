@@ -95,9 +95,6 @@ class AgentService:
     def set_permission_mode(self, mode: str) -> None:
         self._agent.set_permission_mode(mode)
 
-    def respond_permission(self, request_id: str, allowed: bool) -> None:
-        self._agent.set_permission_response(request_id, allowed)
-
     def respond_question(self, request_id: str, answer: str) -> None:
         self._agent.session.question_responses[request_id] = {"answer": answer}
 
@@ -112,22 +109,26 @@ class AgentService:
     def restore(self, session_data: dict) -> None:
         self._agent.restore_session(session_data)
 
-    def rewind(self, n: int = 1) -> str:
-        return self._agent.rewind(n)
+    async def rewind(self, n: int = 1) -> str:
+        """统一回退：对话回退 N 轮 + 文件恢复到快照（原子操作）。"""
+        return await self._agent.rewind_turns(n)
 
-    # ── 三阶段恢复 ──
-    
-    def stage_revert(self, target_seq: int) -> dict:
-        """Stage：计算恢复计划，预览变更。"""
-        return self._agent.stage_revert(target_seq)
-    
-    def clear_revert(self, current_snapshot: list[dict]) -> dict:
-        """Clear：取消恢复，恢复到原始状态。"""
-        return self._agent.clear_revert(current_snapshot)
-    
-    def commit_revert(self, target_seq: int) -> dict:
-        """Commit：确认恢复。"""
-        return self._agent.commit_revert(target_seq)
+    async def rewind_stage(self, *, turns: int | None = None, keep_user_messages: int | None = None) -> dict:
+        """生成回退计划预览（活跃 session：使用内存事件 + 当前 workspace）。"""
+        from agents.core.rewind_service import get_rewind_service
+        plan = await get_rewind_service().stage(
+            self._agent.session_id,
+            turns=turns,
+            keep_user_messages=keep_user_messages,
+            session=self._agent.session,
+            workspace=str(self._agent.workspace),
+        )
+        return plan.to_dict()
+
+    async def rewind_commit(self, plan_id: str) -> dict:
+        """执行回退计划（活跃 session：同步截断内存事件日志）。"""
+        from agents.core.rewind_service import get_rewind_service
+        return await get_rewind_service().commit(plan_id, session=self._agent.session)
 
     def fork(self) -> str:
         return self._agent.fork_session()
@@ -146,9 +147,6 @@ class AgentService:
     def keep_messages(self, indexes: list[int]) -> str:
         return self._agent.keep_context_messages(indexes)
 
-    def truncate_messages_to(self, index: int) -> None:
-        self._agent.truncate_messages_to(index)
-
     # ── 查询 ──
 
     def get_messages(self) -> list[dict]:
@@ -164,6 +162,14 @@ class AgentService:
     @property
     def session_id(self) -> str:
         return self._agent.session_id
+
+    @property
+    def permission_mode(self) -> str:
+        return self._agent.permission_mode
+
+    @property
+    def workspace(self) -> Any:
+        return self._agent.workspace
 
     def set_session_id(self, session_id: str) -> None:
         self._agent.session_id = session_id

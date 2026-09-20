@@ -21,9 +21,12 @@ from agents.wiki.wiki_manager import (
     update_wiki_index,
 )
 from agents.wiki.wiki_capture import (
-    list_uncompiled_session,
     mark_session_compiled,
-    record_compile_time,
+    find_sessions_needing_compilation,
+    get_session_events_from_seq,
+    capture_session_to_session,
+    set_last_extract_pos,
+    list_uncompiled_segments,
 )
 
 
@@ -92,116 +95,112 @@ _PROMPTS_DIR = Path(__file__).parent.parent / "prompts" / "side_query"
 EXTRACT_PROMPT = (_PROMPTS_DIR / "extract_knowledge.txt").read_text(encoding="utf-8")
 
 
-async def compile_pending_session(side_query: Any) -> dict[str, int]:
-    """编译未处理的 session 笔记。
-
-    增强：compile lock、state tracking、dedup、分段编译。
+async def compile_single_session(session_path: Path, side_query: Any) -> dict[str, int] | None:
+    """编译单个 session 文件。
+    
+    Args:
+        session_path: session 文件路径
+        side_query: side query 函数
+    
+    Returns:
+        提取统计信息，或 None（如果编译锁被占用）
     """
     if not _acquire_compile_lock():
-        return {"error": "compile already running"}
-
+        return None
+    
     try:
-        state = _load_compile_state()
-        state["last_attempted_date"] = datetime.now(timezone.utc).isoformat()
-        _save_compile_state(state)
-
-        uncompiled = list_uncompiled_session()
-        if not uncompiled:
-            return {}
-
         stats: dict[str, int] = {
             "knowledge": 0, "self_improvement": 0, "user": 0,
             "reference": 0, "workflow_pattern": 0,
             "deduped": 0,
         }
-
-        for session_path in uncompiled:
-            try:
-                from agents.memory.frontmatter import parse_frontmatter
-                result = parse_frontmatter(session_path.read_text())
-                content = result.body
-
-                if not content.strip() or content.strip() == "(empty session)":
-                    mark_session_compiled(session_path)
+        
+        from agents.memory.frontmatter import parse_frontmatter
+        result = parse_frontmatter(session_path.read_text())
+        content = result.body
+        
+        if not content.strip() or content.strip() == "(empty session)":
+            mark_session_compiled(session_path)
+            return stats
+        
+        # 按对话轮次分段
+        segments = _split_into_segments(content)
+        
+        for segment in segments:
+            extractions = await _extract_from_session(segment, side_query)
+            
+            for item in extractions:
+                item_type = item.get("type", "")
+                if item_type not in stats:
                     continue
-
-                # 分段编译：按 session 分段
-                segments = _split_into_segments(content)
                 
-                for segment in segments:
-                    extractions = await _extract_from_session(segment, side_query)
-
-                    for item in extractions:
-                        item_type = item.get("type", "")
-                        if item_type not in stats:
-                            continue
-
-                        name = item.get("name", "untitled")
-                        description = item.get("description", "")
-
-                        if _dedup_check(item_type, name):
-                            stats["deduped"] += 1
-                            continue
-
-                        if item_type == "workflow_pattern":
-                            write_workflow_pattern(
-                                name=name,
-                                symptom=item.get("symptom", ""),
-                                root_cause=item.get("root_cause", ""),
-                                workaround=item.get("workaround", ""),
-                                description=description,
-                            )
-                        elif item_type in ("knowledge_pattern", "plan"):
-                            write_wiki_entry(
-                                wiki_type="knowledge",
-                                name=name,
-                                content=item.get("content", ""),
-                                description=description,
-                            )
-                            stats["knowledge"] += 1
-                        elif item_type == "self_improvement":
-                            write_wiki_entry(
-                                wiki_type="self_improvement",
-                                name=name,
-                                content=item.get("content", ""),
-                                description=description,
-                                extra_meta={"pending_confirm": "true"},
-                            )
-                        else:
-                            write_wiki_entry(
-                                wiki_type=item_type,
-                                name=name,
-                                content=item.get("content", ""),
-                                description=description,
-                            )
-
-                        stats[item_type] += 1
-
-                mark_session_compiled(session_path)
-
-            except Exception:
-                retry_key = str(session_path)
-                state["metadata_retry_counts"][retry_key] = \
-                    state["metadata_retry_counts"].get(retry_key, 0) + 1
-                _save_compile_state(state)
-
-        record_compile_time()
-        _git_commit(f"wiki: compile {sum(stats.values())} entries from session")
+                name = item.get("name", "untitled")
+                description = item.get("description", "")
+                
+                if _dedup_check(item_type, name):
+                    stats["deduped"] += 1
+                    continue
+                
+                if item_type == "workflow_pattern":
+                    write_workflow_pattern(
+                        name=name,
+                        symptom=item.get("symptom", ""),
+                        root_cause=item.get("root_cause", ""),
+                        workaround=item.get("workaround", ""),
+                        description=description,
+                    )
+                elif item_type in ("knowledge_pattern", "plan"):
+                    write_wiki_entry(
+                        wiki_type="knowledge",
+                        name=name,
+                        content=item.get("content", ""),
+                        description=description,
+                    )
+                    stats["knowledge"] += 1
+                elif item_type == "self_improvement":
+                    write_wiki_entry(
+                        wiki_type="self_improvement",
+                        name=name,
+                        content=item.get("content", ""),
+                        description=description,
+                        extra_meta={"pending_confirm": "true"},
+                    )
+                else:
+                    write_wiki_entry(
+                        wiki_type=item_type,
+                        name=name,
+                        content=item.get("content", ""),
+                        description=description,
+                    )
+                
+                stats[item_type] += 1
+        
+        mark_session_compiled(session_path)
+        _git_commit(f"wiki: compile {sum(stats.values())} entries from {session_path.name}")
         update_wiki_index()
+        
         return stats
-
+    
     finally:
         _release_compile_lock()
 
 
 def _split_into_segments(content: str) -> list[str]:
-    """将内容按 session 分段。
+    """将内容按对话轮次分段。
 
-    每个 session 以 "--- Session X started at ..." 开头。
+    新格式以 ## User 开头，按 ## User 分割为多段。
+    旧格式以 --- Session X started at 开头，按该标记分割。
     """
     import re
     
-    # 按 session 分割
+    # 新格式：按 ## User 分割
+    if "## User" in content:
+        parts = re.split(r"(?=## User\n)", content)
+        segments = [p.strip() for p in parts if p.strip()]
+        if segments:
+            return segments
+    
+    # 旧格式：按 --- Session 分割
     session_pattern = r"(--- Session \d+ started at .*? ---)"
     parts = re.split(session_pattern, content)
     
@@ -210,18 +209,15 @@ def _split_into_segments(content: str) -> list[str]:
     
     for part in parts:
         if re.match(session_pattern, part):
-            # 新的 session 开始
             if current_segment:
                 segments.append("\n".join(current_segment))
             current_segment = [part]
         else:
             current_segment.append(part)
     
-    # 添加最后一个 segment
     if current_segment:
         segments.append("\n".join(current_segment))
     
-    # 如果没有找到 session 标记，返回整个内容
     if not segments:
         segments = [content]
     
@@ -229,27 +225,30 @@ def _split_into_segments(content: str) -> list[str]:
 
 
 async def _extract_from_session(content: str, side_query: Any) -> list[dict]:
-    try:
-        text = await side_query(
-            EXTRACT_PROMPT,
-            f"Session notes:\n{content[:8000]}",
-        )
+    """LLM 提取结构化知识。失败时抛异常（不标记 compiled，等待重试）。"""
+    text = await side_query(
+        EXTRACT_PROMPT,
+        f"Session events:\n{content}",
+    )
 
-        match = re.search(r"\[[\s\S]*\]", text)
-        if not match:
-            return []
+    match = re.search(r"\[[\s\S]*\]", text)
+    if not match:
+        raise ValueError(f"extract response has no JSON array: {text[:200]!r}")
 
-        items = json.loads(match.group(0))
-        if not isinstance(items, list):
-            return []
+    items = json.loads(match.group(0))
+    if not isinstance(items, list):
+        raise ValueError(f"extract response JSON is not a list: {type(items).__name__}")
 
-        return [item for item in items if isinstance(item, dict) and item.get("type")]
-    except Exception:
-        return []
+    return [item for item in items if isinstance(item, dict) and item.get("type")]
 
 
 async def compile_to_skill(pattern_rel_path: str, side_query: Any) -> str | None:
-    from agents.wiki.wiki_manager import read_wiki_entry, mark_pattern_compiled
+    from agents.wiki.wiki_manager import (
+        read_wiki_entry,
+        mark_pattern_compiled,
+        pattern_content_hash,
+        is_skill_stale,
+    )
 
     entry = read_wiki_entry(pattern_rel_path)
     if not entry:
@@ -262,6 +261,11 @@ async def compile_to_skill(pattern_rel_path: str, side_query: Any) -> str | None
     if applied_count < 2:
         return None
 
+    # 二次检查：内容未变更则无需重新编译（避免并发召回重复触发）
+    if not is_skill_stale(entry):
+        return None
+
+    content_hash = pattern_content_hash(entry.content)
     skill_content = await _generate_skill_from_pattern(entry, side_query)
     if not skill_content:
         return None
@@ -273,8 +277,17 @@ async def compile_to_skill(pattern_rel_path: str, side_query: Any) -> str | None
     skill_path = skills_dir / "SKILL.md"
     skill_path.write_text(skill_content)
 
-    mark_pattern_compiled(pattern_rel_path)
+    mark_pattern_compiled(pattern_rel_path, content_hash)
     _git_commit(f"skill: compile from pattern {entry.name}")
+
+    # 验证门禁：新 skill 变体落盘后运行在线评测，
+    # 仅当严格优于历史最佳（分差 >= 0.01 且无新增硬失败）才晋升 champion
+    try:
+        from agents.skills.skill_evaluator import evaluate_online_skill_evolution_async
+
+        await evaluate_online_skill_evolution_async(side_query=side_query)
+    except Exception as e:
+        print(f"[skill_compile] 验证门禁评测失败: {type(e).__name__}: {e}")
 
     return str(skill_path)
 
@@ -293,3 +306,103 @@ async def _generate_skill_from_pattern(entry: Any, side_query: Any) -> str | Non
     except Exception as e:
         print(f"[skill_generate] error: {type(e).__name__}: {e}")
         return None
+
+
+async def check_and_compile_pending_sessions(side_query: Any, threshold: int = 20) -> dict[str, int]:
+    """补编译：重试未编译 segment + 扫描落后 session。
+
+    两个来源：
+    1. 未编译的 segment 文件（编译失败/中断残留）→ 直接重试编译
+    2. 水位线落后 max_seq 超过 threshold 的 session（未触发过压缩）→ 从 events.jsonl 补捕获再编译
+
+    水位线只在编译成功后推进，失败留待下次重试。
+
+    Args:
+        side_query: side query 函数
+        threshold: 未提取事件数阈值，超过此值才触发补捕获
+
+    Returns:
+        总提取统计信息
+    """
+    from agents.memory.frontmatter import parse_frontmatter
+
+    total_stats: dict[str, int] = {
+        "knowledge": 0, "self_improvement": 0, "user": 0,
+        "reference": 0, "workflow_pattern": 0,
+        "deduped": 0,
+    }
+
+    def _merge(stats: dict[str, int]) -> None:
+        for k, v in stats.items():
+            if isinstance(v, int):
+                total_stats[k] = total_stats.get(k, 0) + v
+
+    # 阶段 1：重试未编译的 segment（失败/中断残留）
+    uncompiled = list_uncompiled_segments()
+    sessions_with_pending_segment: set[str] = set()
+    for seg_path in uncompiled:
+        try:
+            meta = parse_frontmatter(seg_path.read_text()).meta
+            session_id = meta.get("session_id", "")
+            if session_id:
+                sessions_with_pending_segment.add(session_id)
+
+            stats = await compile_single_session(seg_path, side_query)
+            if stats is None:
+                print(f"[wiki_backfill] compile lock busy, will retry later: {seg_path.name}")
+                continue
+
+            _merge(stats)
+            # 编译成功后才推进水位线
+            if session_id:
+                seg_max_seq = int(meta.get("max_seq", "0"))
+                if seg_max_seq > 0:
+                    from agents.wiki.wiki_capture import get_last_extract_pos
+                    if seg_max_seq > get_last_extract_pos(session_id):
+                        set_last_extract_pos(session_id, seg_max_seq)
+            print(f"[wiki_backfill] retried segment {seg_path.name}: {sum(v for v in stats.values() if isinstance(v, int))} entries")
+        except Exception as e:
+            print(f"[wiki_backfill] retry segment failed {seg_path.name}: {type(e).__name__}: {e}")
+            continue
+
+    # 阶段 2：扫描水位线落后的 session（未触发过压缩）
+    sessions_needing = find_sessions_needing_compilation(threshold)
+    # 已有待重试 segment 的 session 跳过，避免重复捕获同一段事件
+    sessions_needing = [s for s in sessions_needing if s[0] not in sessions_with_pending_segment]
+
+    if sessions_needing:
+        print(f"[wiki_backfill] found {len(sessions_needing)} sessions needing capture")
+
+    for session_id, last_pos, max_seq in sessions_needing:
+        try:
+            events = get_session_events_from_seq(session_id, last_pos)
+            if not events:
+                continue
+
+            from agents.wiki.wiki_manager import get_wiki_dir
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            session_dir = get_wiki_dir() / "session" / now.strftime("%Y/%m/%d")
+            slug = session_id.replace("/", "_").replace("\\", "_")[:40]
+            existing_segments = list(session_dir.glob(f"{slug}_seg*.md")) if session_dir.exists() else []
+            segment_index = len(existing_segments) + 1
+
+            captured_path = capture_session_to_session(session_id, events, segment_index)
+            if not captured_path:
+                continue
+
+            stats = await compile_single_session(captured_path, side_query)
+            if stats is None:
+                print(f"[wiki_backfill] compile lock busy, segment left for retry: {captured_path.name}")
+                continue
+
+            _merge(stats)
+            # 编译成功后才推进水位线
+            max_event_seq = max(e.get("seq", 0) for e in events)
+            set_last_extract_pos(session_id, max_event_seq)
+            print(f"[wiki_backfill] compiled session {session_id}: {sum(v for v in stats.values() if isinstance(v, int))} entries")
+        except Exception as e:
+            print(f"[wiki_backfill] error compiling session {session_id}: {type(e).__name__}: {e}")
+            continue
+
+    return total_stats

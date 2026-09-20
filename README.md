@@ -346,7 +346,6 @@ agents/agent.py
 agents/skills/skill_extractor.py
 agents/skills/skills.py
 agents/skills/skill_file_ops.py
-agents/evolution/evolution.py
 ```
 
 审计产物：
@@ -355,7 +354,6 @@ agents/evolution/evolution.py
 .mycode/skill-evolution/usage.jsonl
 .mycode/skill-evolution/online_provenance.jsonl
 .mycode/skill-evolution/online_skill_provenance.json
-.mycode/skill-evolution/skill_usage_stats.json
 .mycode/skill-evolution/history/
 .mycode/skill-evolution/pruned/
 ```

@@ -10,6 +10,20 @@ from datetime import datetime, timezone
 from typing import Any
 
 
+_STATUS_ALIASES = {
+    "completed": "done", "complete": "done", "finished": "done",
+    "in_progress": "in-progress", "inprogress": "in-progress", "progress": "in-progress",
+    "error": "failed", "skip": "skipped",
+}
+_VALID = {"pending", "in-progress", "done", "failed", "skipped"}
+
+
+def normalize_status(raw: str) -> str:
+    s = (raw or "").strip().lower()
+    s = _STATUS_ALIASES.get(s, s)
+    return s if s in _VALID else "pending"
+
+
 @dataclass
 class StructuredTask:
     """结构化任务定义。"""
@@ -134,7 +148,7 @@ def parse_tasks_from_markdown(content: str) -> list[StructuredTask]:
         function_match = re.search(r"\*\*函数\*\*:\s*`?([^`\n]+)`?", task_block)
         interface_match = re.search(r"\*\*接口\*\*:\s*`?([^`\n]+)`?", task_block)
         acceptance_match = re.search(r"\*\*验收\*\*:\s*`?([^`\n]+)`?", task_block)
-        status_match = re.search(r"\*\*状态\*\*:\s*\[[ x~!]\]\s*(\w+)", task_block)
+        status_match = re.search(r"\*\*状态\*\*:\s*\[[ x~!-]\]\s*([\w-]+)", task_block)
         
         task = StructuredTask(
             id=task_id,
@@ -143,7 +157,7 @@ def parse_tasks_from_markdown(content: str) -> list[StructuredTask]:
             function=function_match.group(1).strip() if function_match else "",
             interface=interface_match.group(1).strip() if interface_match else "",
             acceptance=acceptance_match.group(1).strip() if acceptance_match else "",
-            status=status_match.group(1).strip() if status_match else "pending",
+            status=normalize_status(status_match.group(1)) if status_match else "pending",
         )
         tasks.append(task)
     
