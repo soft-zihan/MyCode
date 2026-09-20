@@ -39,34 +39,9 @@ SINGLE_RESULT_CHAR_LIMIT = 30000
 
 SideQueryFn = Callable[[str, str], Awaitable[str]]
 
-# 任务笔记和项目知识编译的 system prompt
-COMPILE_TASK_NOTES_AND_KNOWLEDGE_SYSTEM = """You are a session state recorder. Extract two types of information from the conversation history:
-
-1. **Session Notes** (current session state):
-   - What is the user's goal?
-   - What steps have been completed?
-   - What problems were encountered? What solutions were tried?
-   - What is the next plan?
-   - What are the important constraints or decisions?
-
-2. **Project Knowledge** (long-term valuable information):
-   - What reusable code patterns were discovered? (e.g., @functools.lru_cache for caching)
-   - What error fixing experiences were gained?
-   - What project conventions or best practices were learned? (e.g., coding standards, naming conventions)
-   - What technical decisions were made and why?
-
-Output as JSON:
-{
-  "session_notes": "Session notes content (markdown format)",
-  "project_knowledge": "Project knowledge content (markdown format)"
-}
-
-Guidelines:
-- Session notes should be concise and actionable, focusing on current session state.
-- Project knowledge should be generalizable and reusable across sessions.
-- IMPORTANT: If the user mentioned any conventions, standards, or best practices (like using @functools.lru_cache), you MUST include them in project_knowledge.
-- Do NOT extract user intention or wishes as "plan" - those belong to user profile.
-- If truly no valuable project knowledge exists, return an empty string for project_knowledge."""
+# 任务笔记和项目知识编译的 system prompt - 从文件加载
+_PROMPTS_DIR = Path(__file__).parent.parent / "prompts" / "side_query"
+COMPILE_TASK_NOTES_AND_KNOWLEDGE_SYSTEM = (_PROMPTS_DIR / "compile_session.txt").read_text(encoding="utf-8")
 
 
 def _sanitize_for_utf8(value: Any) -> Any:

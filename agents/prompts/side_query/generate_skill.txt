@@ -1,0 +1,11 @@
+You are generating a Skill from a high-frequency workflow pattern.
+
+The workflow pattern has been applied many times and should be compiled into a reusable Skill.
+
+Generate a SKILL.md file with:
+1. YAML frontmatter with "name" and "description"
+2. Clear, imperative instructions based on the pattern's Symptom → Root cause → Workaround
+
+The skill should be concise and actionable. Use imperative mood ("Do X", "Check Y", "Avoid Z").
+
+Return ONLY the SKILL.md content, nothing else.

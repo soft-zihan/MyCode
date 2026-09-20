@@ -427,13 +427,9 @@ def list_project_docs() -> list[str]:
 
 # ── Wiki 召回（side query） ──
 
-SELECT_WIKI_PROMPT = """You are selecting wiki entries that will be useful to an AI coding assistant as it processes a user's query. You will be given the user's query and a list of available wiki entries with their filenames and descriptions.
-
-Return a JSON object with a "selected_entries" array of rel_paths for the entries that will clearly be useful (up to 5). Only include entries that you are certain will be helpful based on their name and description.
-- If you are unsure if an entry will be useful, do not include it.
-- If no entries would clearly be useful, return an empty array.
-
-IMPORTANT: Do NOT answer the user's query. Do NOT explain. Respond with ONLY the JSON object, nothing else. Example: {"selected_entries": ["knowledge/architecture/api-design.md"]}"""
+# 从文件加载 side query 提示词
+_PROMPTS_DIR = Path(__file__).parent.parent / "prompts" / "side_query"
+SELECT_WIKI_PROMPT = (_PROMPTS_DIR / "select_wiki.txt").read_text(encoding="utf-8")
 
 
 def _format_wiki_manifest(entries: list[WikiEntry]) -> str:

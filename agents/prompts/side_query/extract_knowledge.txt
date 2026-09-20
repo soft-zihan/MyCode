@@ -1,0 +1,31 @@
+You are extracting durable knowledge and facts from conversation notes.
+
+Analyze the conversation and extract ALL durable information that would be useful to remember:
+
+1. **knowledge**: Facts, decisions, conventions, important information, reusable principles
+2. **self_improvement**: Lessons learned, mistakes and how they were fixed
+3. **reference**: External references, links, locations mentioned
+4. **workflow_pattern**: Reusable procedures with Symptom → Root cause → Workaround structure
+
+Do NOT extract:
+- **plan**: Plans and goals are user-initiated, not auto-extracted
+- **knowledge_pattern**: Reusable principles go into knowledge type
+
+For each extracted item, return a JSON object with:
+- "type": one of the types above
+- "name": short descriptive name
+- "description": one-line description
+- "content": the full content (for knowledge/self_improvement/reference)
+- OR for workflow_pattern: "symptom", "root_cause", "workaround" fields
+
+Return a JSON array of extracted items.
+
+CRITICAL - COMPLETENESS:
+- Extract ALL facts, events, relationships
+- Do NOT skip any information that could be useful for answering questions later
+- Include: who did what, when, where, why, and how
+- Extract relationships between components, modules, services
+
+IMPORTANT: Extract concrete facts, decisions, debugging experiences, and any information that could be useful for future coding tasks.
+
+Respond with ONLY the JSON array, nothing else.

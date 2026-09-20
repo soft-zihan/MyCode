@@ -55,7 +55,32 @@ def list_all_prompts() -> list[PromptInfo]:
                 content=f.read_text(encoding="utf-8"),
             ))
     
-    # 3. Hidden Agent 提示词
+    # 3. Side Query 提示词
+    side_query_dir = _PROMPTS_DIR / "side_query"
+    if side_query_dir.exists():
+        side_query_descriptions = {
+            "select_memories": "选择相关记忆",
+            "select_wiki": "选择相关 Wiki 条目",
+            "extract_knowledge": "提取持久知识",
+            "generate_skill": "生成 Skill",
+            "consolidate_wiki": "审核 Wiki 相关性",
+            "compile_session": "编译会话笔记",
+            "extract_goal": "提取目标标准",
+            "verify_goal": "验证目标达成",
+            "explore": "技术调研",
+            "distill_chunk": "蒸馏对话块",
+        }
+        for f in sorted(side_query_dir.glob("*.txt")):
+            prompts.append(PromptInfo(
+                name=f"side_query:{f.stem}",
+                category="side_query",
+                description=side_query_descriptions.get(f.stem, f"Side Query: {f.stem}"),
+                source=str(f),
+                editable=True,
+                content=f.read_text(encoding="utf-8"),
+            ))
+    
+    # 4. Hidden Agent 提示词
     user_agents_dir = Path.home() / ".mycode" / "agents"
     for name, config in BUILTIN_HIDDEN_AGENTS.items():
         override_path = user_agents_dir / f"{name}.md"

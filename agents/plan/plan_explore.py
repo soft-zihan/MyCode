@@ -47,27 +47,10 @@ def list_explorations() -> list[Path]:
     return list(explorations_dir.glob("*.md"))
 
 
-EXPLORE_PROMPT = """你是一个技术调研助手。用户想要探索一个主题，但不确定具体要做什么。
-
-请帮助用户：
-1. 分析现有代码结构
-2. 识别设计空间和可能的方案
-3. 评估可行性和风险
-4. 建议合适的 plan 粒度（minimal/standard/full）
-
-用户主题：{topic}
-
-请提供：
-- 关键发现（3-5 点）
-- 建议的 plan slug
-- 建议的粒度及理由
-- 简短总结
-
-格式要求：
-1. 先列出发现
-2. 然后给出建议
-3. 保持简洁
-"""
+# 从文件加载 side query 提示词
+from pathlib import Path
+_PROMPTS_DIR = Path(__file__).parent.parent / "prompts" / "side_query"
+EXPLORE_PROMPT = (_PROMPTS_DIR / "explore.txt").read_text(encoding="utf-8")
 
 
 def build_explore_prompt(topic: str) -> str:

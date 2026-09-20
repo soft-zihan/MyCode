@@ -87,37 +87,9 @@ def _dedup_check(wiki_type: str, name: str) -> bool:
     return False
 
 
-EXTRACT_PROMPT = """You are extracting durable knowledge and facts from conversation notes.
-
-Analyze the conversation and extract ALL durable information that would be useful to remember:
-
-1. **knowledge**: Facts, decisions, conventions, important information, reusable principles
-2. **self_improvement**: Lessons learned, mistakes and how they were fixed
-3. **reference**: External references, links, locations mentioned
-4. **workflow_pattern**: Reusable procedures with Symptom → Root cause → Workaround structure
-
-Do NOT extract:
-- **plan**: Plans and goals are user-initiated, not auto-extracted
-- **knowledge_pattern**: Reusable principles go into knowledge type
-
-For each extracted item, return a JSON object with:
-- "type": one of the types above
-- "name": short descriptive name
-- "description": one-line description
-- "content": the full content (for knowledge/self_improvement/reference)
-- OR for workflow_pattern: "symptom", "root_cause", "workaround" fields
-
-Return a JSON array of extracted items.
-
-CRITICAL - COMPLETENESS:
-- Extract ALL facts, events, relationships
-- Do NOT skip any information that could be useful for answering questions later
-- Include: who did what, when, where, why, and how
-- Extract relationships between components, modules, services
-
-IMPORTANT: Extract concrete facts, decisions, debugging experiences, and any information that could be useful for future coding tasks.
-
-Respond with ONLY the JSON array, nothing else."""
+# 从文件加载 side query 提示词
+_PROMPTS_DIR = Path(__file__).parent.parent / "prompts" / "side_query"
+EXTRACT_PROMPT = (_PROMPTS_DIR / "extract_knowledge.txt").read_text(encoding="utf-8")
 
 
 async def compile_pending_session(side_query: Any) -> dict[str, int]:
@@ -307,17 +279,7 @@ async def compile_to_skill(pattern_rel_path: str, side_query: Any) -> str | None
     return str(skill_path)
 
 
-SKILL_GENERATION_PROMPT = """You are generating a Skill from a high-frequency workflow pattern.
-
-The workflow pattern has been applied many times and should be compiled into a reusable Skill.
-
-Generate a SKILL.md file with:
-1. YAML frontmatter with "name" and "description"
-2. Clear, imperative instructions based on the pattern's Symptom → Root cause → Workaround
-
-The skill should be concise and actionable. Use imperative mood ("Do X", "Check Y", "Avoid Z").
-
-Return ONLY the SKILL.md content, nothing else."""
+SKILL_GENERATION_PROMPT = (_PROMPTS_DIR / "generate_skill.txt").read_text(encoding="utf-8")
 
 
 async def _generate_skill_from_pattern(entry: Any, side_query: Any) -> str | None:

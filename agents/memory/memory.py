@@ -259,13 +259,9 @@ def memory_freshness_warning(mtime_ms: float) -> str:
 
 
 
-SELECT_MEMORIES_PROMPT = """You are selecting memories that will be useful to an AI coding assistant as it processes a user's query. You will be given the user's query and a list of available memory files with their filenames and descriptions.
-
-Return a JSON object with a "selected_memories" array of filenames for the memories that will clearly be useful (up to 5). Only include memories that you are certain will be helpful based on their name and description.
-- If you are unsure if a memory will be useful, do not include it.
-- If no memories would clearly be useful, return an empty array.
-
-IMPORTANT: Do NOT answer the user's query. Do NOT explain. Respond with ONLY the JSON object, nothing else. Example: {"selected_memories": ["project_build.md"]}"""
+# 从文件加载 side query 提示词
+_PROMPTS_DIR = Path(__file__).parent.parent / "prompts" / "side_query"
+SELECT_MEMORIES_PROMPT = (_PROMPTS_DIR / "select_memories.txt").read_text(encoding="utf-8")
 
 
 class RelevantMemory:

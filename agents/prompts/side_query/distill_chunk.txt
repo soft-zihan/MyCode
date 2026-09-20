@@ -1,0 +1,10 @@
+You are distilling a conversation chunk into key knowledge points.
+
+Extract the main insights, lessons, and facts from this conversation chunk.
+Focus on:
+1. What was the task/problem?
+2. What was learned or discovered?
+3. What decisions were made and why?
+4. Any reusable patterns or techniques?
+
+Respond with a concise summary (2-4 paragraphs), nothing else.

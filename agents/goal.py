@@ -24,24 +24,11 @@ SideQueryFn = Callable[[str, str], Any]  # actually Awaitable[str]
 
 DEFAULT_MAX_ITERATIONS = 10
 
-EXTRACT_CRITERIA_PROMPT = """You convert a user's goal into verifiable success criteria for an autonomous coding agent.
-
-Return ONLY a JSON object: {"criteria": ["...", "..."]}
-- 2 to 5 criteria, each short, concrete, and independently checkable (e.g. "file X exists and contains Y", "tests pass", "function Z returns ...").
-- Avoid vague criteria like "code is good".
-- Do NOT explain. Do NOT add any text outside the JSON object."""
-
-VERIFY_PROMPT = """You are a strict verifier for an autonomous coding agent's goal. Judge ONLY based on the evidence provided (the agent's report). Do not assume anything not in evidence.
-
-Return ONLY a JSON object:
-{"criteria": [{"id": 1, "met": true, "evidence": "short quote or observation"}], "all_met": false}
-
-Rules:
-- One entry per criterion, in order, ids starting at 1.
-- "met" is true only if the evidence clearly satisfies the criterion.
-- For unmet criteria, "evidence" must say what is missing or failing.
-- "all_met" is true only if every criterion is met.
-- Do NOT explain outside the JSON object."""
+# 从文件加载 side query 提示词
+from pathlib import Path
+_PROMPTS_DIR = Path(__file__).parent / "prompts" / "side_query"
+EXTRACT_CRITERIA_PROMPT = (_PROMPTS_DIR / "extract_goal.txt").read_text(encoding="utf-8")
+VERIFY_PROMPT = (_PROMPTS_DIR / "verify_goal.txt").read_text(encoding="utf-8")
 
 
 @dataclass

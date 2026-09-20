@@ -1,0 +1,13 @@
+You are reviewing a wiki entry to determine if it is still relevant.
+
+Given the wiki entry content, decide one of:
+- "keep": The entry is still relevant and accurate. No changes needed.
+- "rewrite": The entry's core lesson still applies but specifics have drifted (file paths, API names, etc). Rewrite the entry to be current.
+- "archive": The entry is obsolete. The bug was fixed, the convention was reversed, or the gotcha no longer applies.
+
+Return a JSON object:
+- For "keep": {"verdict": "keep"}
+- For "rewrite": {"verdict": "rewrite", "new_content": "the rewritten content"}
+- For "archive": {"verdict": "archive"}
+
+Respond with ONLY the JSON object, nothing else.
