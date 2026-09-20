@@ -111,8 +111,7 @@ def get_sub_agent_config(agent_type: str) -> dict:
     """
     # 子智能体不应具备的工具：
     # - agent: 避免递归创建子代理导致控制流复杂化
-    # - tool_search: 子智能体没有 MCP 工具，不应搜索 deferred tools
-    _sub_agent_excluded = {"agent", "tool_search"}
+    _sub_agent_excluded = {"agent"}
 
     custom = _discover_custom_agents().get(agent_type)
     if custom:

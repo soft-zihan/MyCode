@@ -94,8 +94,6 @@ class ToolDispatcher:
             return self._execute_search_history_tool(inp)
         if name == "list_session_notes":
             return self._execute_list_session_notes_tool(inp)
-        if name == "read_session_notes":
-            return self._execute_read_session_notes_tool(inp)
         if name == "git_diff_before_last_compress":
             return await self._execute_git_diff_before_last_compress_tool(inp)
         if name == "git_diff_session":
@@ -283,35 +281,6 @@ class ToolDispatcher:
             result_lines.append(latest['content'])
 
         return "\n".join(result_lines)
-
-    def _execute_read_session_notes_tool(self, inp: dict) -> str:
-        """执行 read_session_notes 工具。"""
-        session_id = str(inp.get("session_id") or "").strip()
-
-        from agents.wiki.wiki_manager import get_wiki_dir
-        wiki_dir = get_wiki_dir() / "session_notes"
-
-        if not wiki_dir.exists():
-            return "No session notes found."
-
-        if session_id:
-            filepath = wiki_dir / f"session_{session_id}.md"
-            if not filepath.exists():
-                return f"Error: session note for session '{session_id}' not found."
-
-            content = filepath.read_text()
-            from agents.memory.frontmatter import parse_frontmatter
-            meta, body = parse_frontmatter(content)
-            return body
-
-        filepath = wiki_dir / f"session_{self.agent.session_id}.md"
-        if not filepath.exists():
-            return f"No session notes found for current session '{self.agent.session_id}'."
-
-        content = filepath.read_text()
-        from agents.memory.frontmatter import parse_frontmatter
-        meta, body = parse_frontmatter(content)
-        return body
 
     async def _execute_git_diff_before_last_compress_tool(self, inp: dict) -> str:
         """执行 git_diff_before_last_compress 工具。"""

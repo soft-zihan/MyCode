@@ -13,7 +13,6 @@ from agents.memory.memory import build_memory_prompt_section
 from agents.wiki.wiki_manager import build_wiki_prompt_section, init_wiki_git
 from agents.skills.skills import build_skill_descriptions
 from .subagent import build_agent_descriptions
-from agents.tools import get_deferred_tool_names
 
 # ─── System prompt template (from file) ──────────────────────
 
@@ -187,12 +186,6 @@ def build_system_prompt() -> str:
 
     init_wiki_git()
 
-    deferred_names = get_deferred_tool_names()
-    deferred_section = (
-        f"\n\nThe following deferred tools are available via tool_search: {', '.join(deferred_names)}. Use tool_search to fetch their full schemas when needed."
-        if deferred_names else ""
-    )
-
     replacements = {
         "{{cwd}}": str(get_workspace()),
         "{{date}}": today,
@@ -204,7 +197,7 @@ def build_system_prompt() -> str:
         "{{wiki}}": wiki_section,
         "{{skills}}": skills_section,
         "{{agents}}": agent_section,
-        "{{deferred_tools}}": deferred_section,
+        "{{deferred_tools}}": "",
     }
     result = _load_system_prompt_template()
     for key, value in replacements.items():

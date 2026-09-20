@@ -764,7 +764,7 @@ class AgentLoop:
                     from agents.core.prompt import (
                         load_claude_md, build_skill_descriptions,
                         build_memory_prompt_section, build_wiki_prompt_section,
-                        build_agent_descriptions, build_workspace_structure, get_deferred_tool_names
+                        build_agent_descriptions, build_workspace_structure
                     )
                     _system_claude_md_chars = len(load_claude_md())
                     _system_skills_chars = len(build_skill_descriptions())
@@ -772,9 +772,7 @@ class AgentLoop:
                     _system_wiki_chars = len(build_wiki_prompt_section())
                     _system_agents_chars = len(build_agent_descriptions())
                     _system_workspace_chars = len(build_workspace_structure())
-                    deferred = get_deferred_tool_names()
-                    deferred_section = f"\n\nThe following deferred tools are available via tool_search: {', '.join(deferred)}." if deferred else ""
-                    _system_base_chars = _system_chars - _system_claude_md_chars - _system_skills_chars - _system_memory_chars - _system_wiki_chars - _system_agents_chars - _system_workspace_chars - len(deferred_section)
+                    _system_base_chars = _system_chars - _system_claude_md_chars - _system_skills_chars - _system_memory_chars - _system_wiki_chars - _system_agents_chars - _system_workspace_chars
                 except Exception:
                     _system_base_chars = _system_chars
                 

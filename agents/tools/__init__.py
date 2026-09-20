@@ -164,24 +164,6 @@ async def execute_tool(
                     verb = "writing" if name == "write_file" else "editing"
                     return f"Warning: {inp['file_path']} was modified externally since your last read. Please read_file again before {verb}."
 
-    if name == "tool_search":
-        query = (inp.get("query") or "").lower()
-        deferred = [t for t in tool_definitions if t.get("deferred")]
-        matches = [
-            t for t in deferred
-            if query in t["name"].lower() or query in (t.get("description") or "").lower()
-        ]
-        if not matches:
-            return "No matching deferred tools found."
-
-        for m in matches:
-            activate_tool(m["name"])
-
-        return json.dumps(
-            [{"name": t["name"], "description": t.get("description", ""), "input_schema": t["input_schema"]} for t in matches],
-            indent=2,
-        )
-
     if name == "skill_create":
         from agents.skills.skills import create_skill
         result = create_skill(

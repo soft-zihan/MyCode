@@ -98,7 +98,6 @@ TOOL_EXECUTION_MODES: dict[str, str] = {
     "enter_plan_mode": "sequential",
     "exit_plan_mode": "sequential",
     "agent": "sequential",
-    "tool_search": "sequential",
     "plan_propose": "sequential",
     "plan_update": "sequential",
     "plan_task_start": "sequential",
@@ -269,17 +268,6 @@ tool_definitions: list[ToolDef] = [
         },
     },
     {
-        "name": "read_session_notes",
-        "description": "Read the full content of a specific session note by session ID. Use this to get detailed context from a past session.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "session_id": {"type": "string", "description": "The session ID to read session notes for. If omitted, reads the current session's notes."},
-            },
-        },
-        "deferred": True,
-    },
-    {
         "name": "git_diff_before_last_compress",
         "description": "Get the list of files changed before the last context compression. Returns file paths, status (added/modified/deleted), and line counts. Use this to understand what was modified before compression.",
         "input_schema": {
@@ -292,7 +280,6 @@ tool_definitions: list[ToolDef] = [
                 },
             },
         },
-        "deferred": True,
     },
     {
         "name": "git_diff_session",
@@ -312,7 +299,6 @@ tool_definitions: list[ToolDef] = [
             },
             "required": ["session_id"],
         },
-        "deferred": True,
     },
     {
         "name": "skill_create",
@@ -345,13 +331,11 @@ tool_definitions: list[ToolDef] = [
         "name": "enter_plan_mode",
         "description": "Enter plan mode to switch to a read-only planning phase. In plan mode, you can only read files and write to the plan file.",
         "input_schema": {"type": "object", "properties": {}},
-        "deferred": True,
     },
     {
         "name": "exit_plan_mode",
         "description": "Exit plan mode after you have finished writing your plan to the plan file.",
         "input_schema": {"type": "object", "properties": {}},
-        "deferred": True,
     },
     {
         "name": "ask_user",
@@ -420,17 +404,6 @@ tool_definitions: list[ToolDef] = [
                 "type": {"type": "string", "enum": ["explore", "plan", "general"], "description": "Agent type. Default: general"},
             },
             "required": ["description", "prompt"],
-        },
-    },
-    {
-        "name": "tool_search",
-        "description": "Search for available tools by name or keyword. Returns full schema definitions for matching deferred tools so you can use them.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Tool name or search keywords"},
-            },
-            "required": ["query"],
         },
     },
     {
