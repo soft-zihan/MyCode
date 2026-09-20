@@ -103,6 +103,9 @@ class ContextManager:
         )
         if folded:
             self.agent.last_input_token_count = 0
+            # 激活 git_diff_before_last_compress 工具
+            from agents.tools.registry import activate_tool
+            activate_tool("git_diff_before_last_compress")
 
     async def _compact_conversation(self, *, trigger: str = "manual") -> bool:
         """压缩会话。"""
@@ -123,6 +126,9 @@ class ContextManager:
             from agents.logging import print_info
             print_info("Conversation compacted.")
             self.agent.last_input_token_count = 0
+            # 激活 git_diff_before_last_compress 工具
+            from agents.tools.registry import activate_tool
+            activate_tool("git_diff_before_last_compress")
         return compacted
 
     async def _compact_openai(self, *, trigger: str) -> bool:

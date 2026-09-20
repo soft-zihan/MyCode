@@ -145,8 +145,7 @@ class ToolDispatcher:
         return (
             "Context compacted into structured session memory. "
             "Continue from the folded memory now present in the conversation context."
-            f"{suffix}\n\n"
-            "Tip: Use `git_diff_before_last_compress` to see what files were modified before this compression."
+            f"{suffix}"
         )
 
     def _execute_context_restore_tool(self, inp: dict) -> str:
