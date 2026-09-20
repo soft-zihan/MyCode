@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { ChevronDown, ChevronRight, FileText, ExternalLink } from 'lucide-react';
+import { FileText } from 'lucide-react';
 
 interface PromptSummary {
   name: string;
@@ -30,7 +30,6 @@ interface PromptsPanelProps {
 
 export function PromptsPanel({ onFileSelect }: PromptsPanelProps) {
   const [prompts, setPrompts] = useState<PromptSummary[]>([]);
-  const [expandedPrompt, setExpandedPrompt] = useState<string | null>(null);
 
   useEffect(() => {
     fetch('/api/prompts')
@@ -39,15 +38,7 @@ export function PromptsPanel({ onFileSelect }: PromptsPanelProps) {
       .catch(console.error);
   }, []);
 
-  const handleExpand = (name: string) => {
-    if (expandedPrompt === name) {
-      setExpandedPrompt(null);
-      return;
-    }
-    setExpandedPrompt(name);
-  };
-
-  const handleOpenFile = (prompt: PromptSummary) => {
+  const handleClick = (prompt: PromptSummary) => {
     if (onFileSelect && prompt.source && prompt.source !== 'builtin') {
       onFileSelect(prompt.source);
     }
@@ -71,36 +62,16 @@ export function PromptsPanel({ onFileSelect }: PromptsPanelProps) {
             <span className="text-[10px] text-gray-400">{items.length}</span>
           </div>
           {items.map(prompt => (
-            <div key={prompt.name} className="border-b border-gray-50 last:border-0">
-              <button
-                onClick={() => handleExpand(prompt.name)}
-                className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-gray-50 text-left"
-              >
-                {expandedPrompt === prompt.name ? (
-                  <ChevronDown className="w-3 h-3 text-gray-400" />
-                ) : (
-                  <ChevronRight className="w-3 h-3 text-gray-400" />
-                )}
-                <FileText className="w-3 h-3 text-gray-400" />
-                <span className="text-xs text-gray-700 flex-1 truncate">{prompt.name}</span>
-                <span className="text-[10px] text-gray-400">{prompt.content_length} chars</span>
-              </button>
-              {expandedPrompt === prompt.name && (
-                <div className="px-3 pb-2">
-                  <p className="text-[10px] text-gray-500 mb-1">{prompt.description}</p>
-                  <p className="text-[10px] text-gray-400 truncate mb-1">{prompt.source}</p>
-                  {prompt.editable && prompt.source !== 'builtin' && onFileSelect && (
-                    <button
-                      onClick={() => handleOpenFile(prompt)}
-                      className="flex items-center gap-1 mt-1 px-2 py-0.5 text-[10px] text-blue-600 hover:bg-blue-50 rounded"
-                    >
-                      <ExternalLink className="w-2.5 h-2.5" />
-                      在编辑器中打开
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
+            <button
+              key={prompt.name}
+              onClick={() => handleClick(prompt)}
+              className="w-full px-3 py-1.5 flex items-center gap-2 hover:bg-gray-50 text-left border-b border-gray-50 last:border-0"
+              title={prompt.description}
+            >
+              <FileText className="w-3 h-3 text-gray-400" />
+              <span className="text-xs text-gray-700 flex-1 truncate">{prompt.name}</span>
+              <span className="text-[10px] text-gray-400">{prompt.content_length} chars</span>
+            </button>
           ))}
         </div>
       ))}
