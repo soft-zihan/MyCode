@@ -118,6 +118,28 @@ def load_claude_md() -> str:
     return claude_md + rules + rules_md
 
 
+def load_agents_md() -> str:
+    """Walk up from the workspace collecting all AGENTS.md files, resolving @includes."""
+    parts: list[str] = []
+    d = get_workspace().resolve()
+    while True:
+        f = d / "AGENTS.md"
+        if f.is_file():
+            try:
+                content = f.read_text()
+                content = _resolve_includes(content, d)
+                parts.insert(0, content)
+            except Exception:
+                pass
+        parent = d.parent
+        if parent == d:
+            break
+        d = parent
+    if parts:
+        return "\n\n# Agent Instructions (AGENTS.md)\n" + "\n\n---\n\n".join(parts)
+    return ""
+
+
 def _load_rules_md(directory: Path) -> str:
     """Load .mycode/RULES.md — always-on project rules."""
     rules_file = directory / ".mycode" / "RULES.md"
@@ -166,6 +188,10 @@ def build_system_prompt() -> str:
     claude_md = load_claude_md()
     _claude_md_ms = (time.perf_counter() - _t2) * 1000
 
+    _t2b = time.perf_counter()
+    agents_md = load_agents_md()
+    _agents_md_ms = (time.perf_counter() - _t2b) * 1000
+
     _t3 = time.perf_counter()
     memory_section = build_memory_prompt_section()
     _memory_ms = (time.perf_counter() - _t3) * 1000
@@ -193,6 +219,7 @@ def build_system_prompt() -> str:
         "{{shell}}": shell,
         "{{workspace_structure}}": workspace_structure,
         "{{claude_md}}": claude_md,
+        "{{agents_md}}": agents_md,
         "{{memory}}": memory_section,
         "{{wiki}}": wiki_section,
         "{{skills}}": skills_section,
@@ -207,7 +234,7 @@ def build_system_prompt() -> str:
     if _total_ms > 50:
         print(
             f"[perf] build_system_prompt: {_total_ms:.1f}ms "
-            f"(claude_md={_claude_md_ms:.1f} "
+            f"(claude_md={_claude_md_ms:.1f} agents_md={_agents_md_ms:.1f} "
             f"memory={_memory_ms:.1f} wiki={_wiki_ms:.1f} "
             f"skills={_skills_ms:.1f} agents={_agents_ms:.1f})",
             file=sys.stderr,

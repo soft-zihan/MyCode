@@ -399,6 +399,7 @@ class AgentLoop:
                     # System prompt 细粒度 (chars)
                     "system_base_chars": asm.get("system_base_chars", 0),
                     "system_claude_md_chars": asm.get("system_claude_md_chars", 0),
+                    "system_agents_md_chars": asm.get("system_agents_md_chars", 0),
                     "system_skills_chars": asm.get("system_skills_chars", 0),
                     "system_memory_chars": asm.get("system_memory_chars", 0),
                     "system_wiki_chars": asm.get("system_wiki_chars", 0),
@@ -735,6 +736,7 @@ class AgentLoop:
                 # System prompt 各部分
                 _system_base_chars = 0
                 _system_claude_md_chars = 0
+                _system_agents_md_chars = 0
                 _system_skills_chars = 0
                 _system_memory_chars = 0
                 _system_wiki_chars = 0
@@ -762,17 +764,18 @@ class AgentLoop:
                 # 计算 system prompt 各部分（重新构建以获取各部分大小）
                 try:
                     from agents.core.prompt import (
-                        load_claude_md, build_skill_descriptions,
+                        load_claude_md, load_agents_md, build_skill_descriptions,
                         build_memory_prompt_section, build_wiki_prompt_section,
                         build_agent_descriptions, build_workspace_structure
                     )
                     _system_claude_md_chars = len(load_claude_md())
+                    _system_agents_md_chars = len(load_agents_md())
                     _system_skills_chars = len(build_skill_descriptions())
                     _system_memory_chars = len(build_memory_prompt_section())
                     _system_wiki_chars = len(build_wiki_prompt_section())
                     _system_agents_chars = len(build_agent_descriptions())
                     _system_workspace_chars = len(build_workspace_structure())
-                    _system_base_chars = _system_chars - _system_claude_md_chars - _system_skills_chars - _system_memory_chars - _system_wiki_chars - _system_agents_chars - _system_workspace_chars
+                    _system_base_chars = _system_chars - _system_claude_md_chars - _system_agents_md_chars - _system_skills_chars - _system_memory_chars - _system_wiki_chars - _system_agents_chars - _system_workspace_chars
                 except Exception:
                     _system_base_chars = _system_chars
                 
@@ -903,6 +906,7 @@ class AgentLoop:
                         # System prompt 细粒度
                         "system_base_chars": _system_base_chars,
                         "system_claude_md_chars": _system_claude_md_chars,
+                        "system_agents_md_chars": _system_agents_md_chars,
                         "system_skills_chars": _system_skills_chars,
                         "system_memory_chars": _system_memory_chars,
                         "system_wiki_chars": _system_wiki_chars,
@@ -953,6 +957,7 @@ class AgentLoop:
                     # System prompt 细粒度
                     span.set_attribute("assembly.system_base_chars", asm.get("system_base_chars", 0))
                     span.set_attribute("assembly.system_claude_md_chars", asm.get("system_claude_md_chars", 0))
+                    span.set_attribute("assembly.system_agents_md_chars", asm.get("system_agents_md_chars", 0))
                     span.set_attribute("assembly.system_skills_chars", asm.get("system_skills_chars", 0))
                     span.set_attribute("assembly.system_memory_chars", asm.get("system_memory_chars", 0))
                     span.set_attribute("assembly.system_wiki_chars", asm.get("system_wiki_chars", 0))

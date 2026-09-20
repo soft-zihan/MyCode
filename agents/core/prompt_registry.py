@@ -148,6 +148,29 @@ def list_all_prompts() -> list[PromptInfo]:
             content=content,
         ))
     
+    # 5. Plan Mode 策略文件
+    strategies_dir = Path(__file__).parent.parent / "plan" / "strategies"
+    if strategies_dir.exists():
+        strategy_descriptions = {
+            "grill-spec": "需求澄清策略",
+            "tasks": "任务拆分策略",
+            "execute": "执行策略",
+            "review": "审查策略",
+            "converge": "收敛策略",
+        }
+        for category_dir in sorted(strategies_dir.iterdir()):
+            if category_dir.is_dir():
+                category = category_dir.name
+                for f in sorted(category_dir.glob("*.md")):
+                    prompts.append(PromptInfo(
+                        name=f"plan_strategy:{category}/{f.stem}",
+                        category="plan",
+                        description=f"{strategy_descriptions.get(category, category)}: {f.stem}",
+                        source=str(f),
+                        editable=True,
+                        content=f.read_text(encoding="utf-8"),
+                    ))
+    
     return prompts
 
 

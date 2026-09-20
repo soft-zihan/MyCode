@@ -14,12 +14,14 @@ const categoryLabels: Record<string, string> = {
   main: '主提示词',
   subagent: '子 Agent',
   side_query: 'Side Query',
+  plan: 'Plan 模式',
 };
 
 const categoryColors: Record<string, string> = {
   main: 'bg-purple-100 text-purple-700',
   subagent: 'bg-blue-100 text-blue-700',
   side_query: 'bg-orange-100 text-orange-700',
+  plan: 'bg-green-100 text-green-700',
 };
 
 interface PromptsPanelProps {
@@ -61,7 +63,7 @@ export function PromptsPanel({ onFileSelect }: PromptsPanelProps) {
   }, {} as Record<string, PromptSummary[]>);
 
   // 定义显示顺序
-  const categoryOrder = ['main', 'subagent', 'side_query'];
+  const categoryOrder = ['main', 'subagent', 'side_query', 'plan'];
 
   return (
     <div className="divide-y divide-gray-100">
