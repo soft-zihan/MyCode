@@ -169,7 +169,8 @@ function findPlanFiles(tree: WorkspaceNode, planSlug: string): PlanFile[] {
   const planDirSuffix = `.mycode/plans/${planSlug}`;
   
   function walk(node: WorkspaceNode, currentPath: string) {
-    const nodePath = currentPath ? `${currentPath}/${node.name}` : node.name;
+    // Use the node's path directly from the tree (already relative to workspace)
+    const nodePath = node.path || (currentPath ? `${currentPath}/${node.name}` : node.name);
     
     // Match if path ends with .mycode/plans/{planSlug} or contains it
     if (node.type === 'file' && (nodePath.endsWith(planDirSuffix) || nodePath.includes(planDirSuffix + '/'))) {
@@ -195,7 +196,8 @@ function findPlanWithFiles(tree: WorkspaceNode): { slug: string; files: PlanFile
   let bestCount = 0;
   
   function walk(node: WorkspaceNode, currentPath: string) {
-    const nodePath = currentPath ? `${currentPath}/${node.name}` : node.name;
+    // Use the node's path directly from the tree (already relative to workspace)
+    const nodePath = node.path || (currentPath ? `${currentPath}/${node.name}` : node.name);
     
     // Check if this is a plan directory (path ends with .mycode/plans/{dirName})
     if (node.type === 'directory' && nodePath.includes(plansDirSuffix + '/') && nodePath !== plansDirSuffix) {
