@@ -433,14 +433,16 @@ class McpManager:
 
         # 合并全局、项目和 .mcp.json 配置。后读取的配置会覆盖同名 Server。
         configs = self._load_configs()
+        print_info(f"MCP configs found: {list(configs.keys())}")
         if not configs:
             return
 
-        # 每个 Server 的初始化和工具发现最多等待 15 秒，避免坏配置长期卡住启动。
+        # 每个 Server 的初始化和工具发现最多等待 15 秒，避免坏配置卡住启动。
         timeout = 15.0
 
         for name, cfg in configs.items():
             if name in disabled_servers:
+                print_info(f"MCP skipped (disabled): {name}")
                 continue
             if "url" in cfg:
                 conn: McpConnection | McpHttpConnection = McpHttpConnection(

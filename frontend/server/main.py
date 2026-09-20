@@ -67,6 +67,12 @@ async def startup_event():
     import json
     from pathlib import Path
 
+    # Set workspace to project root for MCP config loading
+    from agents.core.workspace import set_workspace, get_workspace
+    project_root = Path(__file__).parent.parent.parent  # frontend/server -> frontend -> project root
+    set_workspace(project_root)
+    print(f"[STARTUP] Workspace set to: {get_workspace()}")
+
     # 可观测性初始化（OTel → Langfuse，失败不阻塞主流程）
     try:
         from agents.observability import init_tracing
@@ -86,10 +92,18 @@ async def startup_event():
     
     try:
         # Connect only enabled servers
+        print(f"[STARTUP] Calling load_and_connect with disabled: {disabled_servers}")
         await asyncio.wait_for(global_mcp_manager.load_and_connect(disabled_servers), timeout=30.0)
         print(f"[STARTUP] MCP initialized: {len(global_mcp_manager._tools)} tools from {len(global_mcp_manager._connections)} servers")
+        for name in global_mcp_manager._connections:
+            tool_count = len([t for t in global_mcp_manager._tools if t["serverName"] == name])
+            print(f"[STARTUP]   - {name}: {tool_count} tools")
+    except asyncio.TimeoutError:
+        print(f"[STARTUP] MCP initialization timed out")
     except Exception as e:
         print(f"[STARTUP] MCP initialization failed: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 @app.on_event("shutdown")
