@@ -5,6 +5,7 @@ import { PromptsPanel } from './PromptsPanel';
 
 interface ContextPanelProps {
   sessionId: string | null;
+  onFileSelect?: (path: string) => void;
 }
 
 const formatTokens = (n: number): string => {
@@ -35,7 +36,7 @@ function BreakdownItem({ label, tokens, totalTokens, color, indent = 0, detail }
   );
 }
 
-export function ContextPanel({ sessionId }: ContextPanelProps) {
+export function ContextPanel({ sessionId, onFileSelect }: ContextPanelProps) {
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [breakdown, setBreakdown] = useState<TokenBreakdownData | null>(null);
   const [loading, setLoading] = useState(false);
@@ -290,7 +291,7 @@ export function ContextPanel({ sessionId }: ContextPanelProps) {
         <div className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-50 border-b border-gray-200">
           System Prompts
         </div>
-        <PromptsPanel />
+        <PromptsPanel onFileSelect={onFileSelect} />
       </div>
     </div>
   );

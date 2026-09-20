@@ -628,7 +628,7 @@ export default function ChatPage() {
                   {/* Sub-tab content */}
                   <div className="flex-1 overflow-auto">
                     {controlSubTab === 'context' ? (
-                      <ContextPanel sessionId={currentSessionId} />
+                      <ContextPanel sessionId={currentSessionId} onFileSelect={setSelectedFile} />
                     ) : (
                       <WikiPlanPanel
                         cwd={currentCwd}

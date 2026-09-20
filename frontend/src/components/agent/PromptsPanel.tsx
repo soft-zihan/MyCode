@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { ChevronDown, ChevronRight, Edit2, Save, X, FileText } from 'lucide-react';
+import { ChevronDown, ChevronRight, FileText, ExternalLink } from 'lucide-react';
 
 interface PromptSummary {
   name: string;
@@ -8,15 +8,6 @@ interface PromptSummary {
   source: string;
   editable: boolean;
   content_length: number;
-}
-
-interface PromptDetail {
-  name: string;
-  category: string;
-  description: string;
-  source: string;
-  editable: boolean;
-  content: string;
 }
 
 const categoryLabels: Record<string, string> = {
@@ -33,13 +24,13 @@ const categoryColors: Record<string, string> = {
   side_query: 'bg-orange-100 text-orange-700',
 };
 
-export function PromptsPanel() {
+interface PromptsPanelProps {
+  onFileSelect?: (path: string) => void;
+}
+
+export function PromptsPanel({ onFileSelect }: PromptsPanelProps) {
   const [prompts, setPrompts] = useState<PromptSummary[]>([]);
   const [expandedPrompt, setExpandedPrompt] = useState<string | null>(null);
-  const [promptDetail, setPromptDetail] = useState<PromptDetail | null>(null);
-  const [editContent, setEditContent] = useState('');
-  const [isEditing, setIsEditing] = useState(false);
-  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     fetch('/api/prompts')
@@ -48,42 +39,17 @@ export function PromptsPanel() {
       .catch(console.error);
   }, []);
 
-  const handleExpand = async (name: string) => {
+  const handleExpand = (name: string) => {
     if (expandedPrompt === name) {
       setExpandedPrompt(null);
-      setPromptDetail(null);
-      setIsEditing(false);
       return;
     }
     setExpandedPrompt(name);
-    setLoading(true);
-    try {
-      const res = await fetch(`/api/prompts/${encodeURIComponent(name)}`);
-      const detail = await res.json();
-      setPromptDetail(detail);
-      setEditContent(detail.content);
-      setIsEditing(false);
-    } catch (err) {
-      console.error('Failed to load prompt:', err);
-    } finally {
-      setLoading(false);
-    }
   };
 
-  const handleSave = async () => {
-    if (!promptDetail) return;
-    try {
-      const res = await fetch(`/api/prompts/${encodeURIComponent(promptDetail.name)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: editContent }),
-      });
-      if (res.ok) {
-        setPromptDetail({ ...promptDetail, content: editContent });
-        setIsEditing(false);
-      }
-    } catch (err) {
-      console.error('Failed to save prompt:', err);
+  const handleOpenFile = (prompt: PromptSummary) => {
+    if (onFileSelect && prompt.source && prompt.source !== 'builtin') {
+      onFileSelect(prompt.source);
     }
   };
 
@@ -122,53 +88,16 @@ export function PromptsPanel() {
               {expandedPrompt === prompt.name && (
                 <div className="px-3 pb-2">
                   <p className="text-[10px] text-gray-500 mb-1">{prompt.description}</p>
-                  {loading ? (
-                    <div className="text-xs text-gray-400 py-2">Loading...</div>
-                  ) : promptDetail ? (
-                    <>
-                      {isEditing ? (
-                        <>
-                          <textarea
-                            value={editContent}
-                            onChange={e => setEditContent(e.target.value)}
-                            className="w-full h-40 px-2 py-1 text-[10px] font-mono border border-gray-200 rounded resize-y bg-white"
-                          />
-                          <div className="flex gap-1 mt-1">
-                            <button
-                              onClick={handleSave}
-                              className="flex items-center gap-1 px-2 py-0.5 text-[10px] bg-green-500 text-white rounded hover:bg-green-600"
-                            >
-                              <Save className="w-2.5 h-2.5" />
-                              Save
-                            </button>
-                            <button
-                              onClick={() => { setIsEditing(false); setEditContent(promptDetail.content); }}
-                              className="flex items-center gap-1 px-2 py-0.5 text-[10px] bg-gray-500 text-white rounded hover:bg-gray-600"
-                            >
-                              <X className="w-2.5 h-2.5" />
-                              Cancel
-                            </button>
-                          </div>
-                        </>
-                      ) : (
-                        <>
-                          <pre className="text-[10px] font-mono text-gray-600 bg-gray-50 p-2 rounded max-h-32 overflow-auto whitespace-pre-wrap">
-                            {promptDetail.content.slice(0, 500)}
-                            {promptDetail.content.length > 500 && '...'}
-                          </pre>
-                          {promptDetail.editable && (
-                            <button
-                              onClick={() => setIsEditing(true)}
-                              className="flex items-center gap-1 mt-1 px-2 py-0.5 text-[10px] text-blue-600 hover:bg-blue-50 rounded"
-                            >
-                              <Edit2 className="w-2.5 h-2.5" />
-                              Edit
-                            </button>
-                          )}
-                        </>
-                      )}
-                    </>
-                  ) : null}
+                  <p className="text-[10px] text-gray-400 truncate mb-1">{prompt.source}</p>
+                  {prompt.editable && prompt.source !== 'builtin' && onFileSelect && (
+                    <button
+                      onClick={() => handleOpenFile(prompt)}
+                      className="flex items-center gap-1 mt-1 px-2 py-0.5 text-[10px] text-blue-600 hover:bg-blue-50 rounded"
+                    >
+                      <ExternalLink className="w-2.5 h-2.5" />
+                      在编辑器中打开
+                    </button>
+                  )}
                 </div>
               )}
             </div>
