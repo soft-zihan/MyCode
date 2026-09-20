@@ -72,6 +72,9 @@ export interface SessionState {
   statsInputTokens: number;
   statsOutputTokens: number;
   statsCachedTokens: number;
+  breakdown: Record<string, any> | null;
+  permissionMode: string;
+  _statsCache?: { inputTokens: number; outputTokens: number; cachedTokens: number };
 }
 
 export function createEmptySessionState(sessionId: string | null = null): SessionState {
@@ -91,21 +94,27 @@ export function createEmptySessionState(sessionId: string | null = null): Sessio
     statsInputTokens: 0,
     statsOutputTokens: 0,
     statsCachedTokens: 0,
+    breakdown: null,
+    permissionMode: 'default',
   };
 }
 
 const emptySnapshot: ChatSnapshot = { order: [], nodes: new Map() };
 const EMPTY_ARRAY: FileSnapshot[] = [];
 const EMPTY_TODO_ARRAY: TodoItem[] = [];
+const EMPTY_STATS = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
 
 class SessionStore {
   private sessions = new Map<string, SessionState>();
   private currentSessionId: string | null = null;
   private version = 0;
+  private _projectionsVersion = 0;
+  private _projectionsSnapshot: Map<string, SessionState['projections']> | null = null;
   private listeners = new Set<() => void>();
 
   private notify(): void {
     this.version++;
+    this._projectionsSnapshot = null;
     for (const listener of this.listeners) {
       listener();
     }
@@ -194,16 +203,28 @@ class SessionStore {
 
   updateProjections(sessionId: string, projections: Partial<SessionState['projections']>): void {
     const state = this.getOrCreate(sessionId);
+    let changed = false;
+    for (const [k, v] of Object.entries(projections)) {
+      if ((state.projections as any)[k] !== v) { changed = true; break; }
+    }
+    if (!changed) return;
     state.projections = { ...state.projections, ...projections };
+    this._projectionsVersion++;
     this.notify();
   }
 
   getAllProjections(): Map<string, SessionState['projections']> {
+    if (this._projectionsSnapshot) return this._projectionsSnapshot;
     const result = new Map<string, SessionState['projections']>();
     for (const [id, state] of this.sessions) {
       result.set(id, state.projections);
     }
+    this._projectionsSnapshot = result;
     return result;
+  }
+
+  getProjectionsVersion(): number {
+    return this._projectionsVersion;
   }
 
   destroy(sessionId: string): void {
@@ -211,8 +232,6 @@ class SessionStore {
     if (this.currentSessionId === sessionId) {
       this.currentSessionId = null;
     }
-    // 清理 localStorage 中的工具结果统计
-    localStorage.removeItem(`tool_result_chars:${sessionId}`);
     this.notify();
   }
 
@@ -334,16 +353,42 @@ class SessionStore {
     state.statsInputTokens = inputTokens;
     state.statsOutputTokens = outputTokens;
     state.statsCachedTokens = cachedTokens;
+    state._statsCache = { inputTokens, outputTokens, cachedTokens };
     this.notify();
+  }
+
+  setBreakdown(sessionId: string, breakdown: Record<string, any> | null): void {
+    const state = this.getOrCreate(sessionId);
+    state.breakdown = breakdown;
+    this.notify();
+  }
+
+  getBreakdown(sessionId: string): Record<string, any> | null {
+    return this.sessions.get(sessionId)?.breakdown ?? null;
+  }
+
+  setPermissionMode(sessionId: string, mode: string): void {
+    const state = this.getOrCreate(sessionId);
+    if (state.permissionMode === mode) return;
+    state.permissionMode = mode;
+    this.notify();
+  }
+
+  getPermissionMode(sessionId: string): string {
+    return this.sessions.get(sessionId)?.permissionMode ?? 'default';
   }
 
   getDetailedStats(sessionId: string): { inputTokens: number; outputTokens: number; cachedTokens: number } {
     const state = this.sessions.get(sessionId);
-    return {
-      inputTokens: state?.statsInputTokens ?? 0,
-      outputTokens: state?.statsOutputTokens ?? 0,
-      cachedTokens: state?.statsCachedTokens ?? 0,
-    };
+    if (!state) return EMPTY_STATS;
+    if (!state._statsCache) {
+      state._statsCache = {
+        inputTokens: state.statsInputTokens,
+        outputTokens: state.statsOutputTokens,
+        cachedTokens: state.statsCachedTokens,
+      };
+    }
+    return state._statsCache;
   }
 
   getVersion(): number {

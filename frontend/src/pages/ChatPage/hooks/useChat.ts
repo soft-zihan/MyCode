@@ -2,7 +2,8 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   fetchConfig, AppConfig,
   compactSession, updatePermissionMode,
-  forkSession, respondToPermission, respondToQuestion, truncateSession
+  forkSession, respondToPermission, respondToQuestion, truncateSession,
+  fetchSessionSummary,
 } from '../../../api/client';
 import { useChatNodes } from '../../../components/chat/nodes';
 import type { UserNode } from '../../../components/chat/nodes/types';
@@ -12,6 +13,7 @@ import { logger } from '../../../utils/logger';
 
 const EMPTY_FILE_SNAPSHOTS: FileSnapshot[] = [];
 const EMPTY_TODOS: TodoItem[] = [];
+const EMPTY_STATS = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
 
 export function useChat() {
   const [inputValue, setInputValue] = useState('');
@@ -44,10 +46,7 @@ export function useChat() {
   const planSlug = useSessionStore(() => sessionId ? sessionStore.getPlanSlug(sessionId) : undefined);
   const fileSnapshots = useSessionStore(() => sessionId ? sessionStore.getFileSnapshots(sessionId) : EMPTY_FILE_SNAPSHOTS);
   const contextUsed = useSessionStore(() => sessionId ? sessionStore.getContextUsed(sessionId) : 0);
-  const statsInputTokens = useSessionStore(() => sessionId ? sessionStore.getDetailedStats(sessionId).inputTokens : 0);
-  const statsOutputTokens = useSessionStore(() => sessionId ? sessionStore.getDetailedStats(sessionId).outputTokens : 0);
-  const statsCachedTokens = useSessionStore(() => sessionId ? sessionStore.getDetailedStats(sessionId).cachedTokens : 0);
-  const sessionStats = { inputTokens: statsInputTokens, outputTokens: statsOutputTokens, cachedTokens: statsCachedTokens };
+  const sessionStats = useSessionStore(() => sessionId ? sessionStore.getDetailedStats(sessionId) : EMPTY_STATS);
   
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
@@ -98,10 +97,6 @@ export function useChat() {
           sessionStore.setCurrentId(newSessionId);
           currentSessionIdRef.current = newSessionId;
           setCurrentSessionId(newSessionId);
-          setSessionRefreshTrigger(prev => prev + 1);
-          
-          // 清空新 session 的工具结果统计
-          localStorage.removeItem(`tool_result_chars:${newSessionId}`);
         }
         return;
       }
@@ -110,9 +105,7 @@ export function useChat() {
         const titleSessionId = event.session_id;
         const title = event.title;
         if (titleSessionId && title) {
-          // 后端已通过事件流持久化标题（单一数据源），前端只更新本地投影
           sessionStore.updateProjections(titleSessionId, { title });
-          setSessionRefreshTrigger(prev => prev + 1);
         }
         return;
       }
@@ -121,7 +114,6 @@ export function useChat() {
         const planSlug = event.plan_slug;
         if (planSlug && eventSessionId) {
           sessionStore.updateProjections(eventSessionId, { plan_slug: planSlug });
-          setSessionRefreshTrigger(prev => prev + 1);
         }
         return;
       }
@@ -151,7 +143,6 @@ export function useChat() {
           event.cached_tokens || 0
         );
       }
-      
       if (eventType === 'context/compacted') {
         // 更新 token 计数
         if (event.last_input_token_count !== undefined) {
@@ -277,7 +268,6 @@ export function useChat() {
         if (isCurrentSession) {
           currentSessionIdRef.current = doneSessionId;
           setCurrentSessionId(doneSessionId);
-          setSessionRefreshTrigger(prev => prev + 1);
           setIsWaitingResponse(false);
         }
       }
@@ -338,40 +328,38 @@ export function useChat() {
   const handleSessionSelect = async (sessionId: string) => {
     logger.info('[SESSION] handleSessionSelect:', sessionId);
     
-    // 保存当前 session 到 localStorage
     localStorage.setItem('lastSessionId', sessionId);
     
-    // Switch session in store
     sessionStore.select(sessionId);
     
-    // Update ref immediately
     currentSessionIdRef.current = sessionId;
     setCurrentSessionId(sessionId);
     
-    // Reset UI state
     resetNodes(sessionId);
     setIsLoadingSession(true);
     pendingSessionNameRef.current = null;
     
-    // Load session data with lazy loading
     try {
-      // Load session metadata
-      const sessionResponse = await fetch(`/api/sessions/${sessionId}`);
+      const [summaryResult, eventsResult, fileChangesResult] = await Promise.allSettled([
+        fetchSessionSummary(sessionId),
+        fetch(`/api/sessions/${sessionId}/events?limit=50`).then(r => r.ok ? r.json() : Promise.reject(r.status)),
+        fetch(`/api/sessions/${sessionId}/file-changes`).then(r => r.ok ? r.json() : Promise.reject(r.status)),
+      ]);
       
-      // Check if session changed during fetch
       if (currentSessionIdRef.current !== sessionId) {
-        logger.info('[SESSION] session changed during metadata fetch, aborting');
+        logger.info('[SESSION] session changed during fetch, aborting');
         return;
       }
       
-      if (sessionResponse.ok) {
-        const data = await sessionResponse.json();
-        const metadata = data.metadata || {};
-        const projections = data.projections || {};
+      if (summaryResult.status === 'fulfilled') {
+        const summary = summaryResult.value;
+        const metadata = summary.metadata || {};
+        const projections = summary.projections || {};
+        const stats = summary.stats || {};
+        const breakdown = summary.breakdown || null;
         
-        // Update projections（标题单一数据源：后端事件流投影）
         sessionStore.updateProjections(sessionId, {
-          title: projections.title,
+          title: projections.title || metadata.name,
           cwd: metadata.cwd,
           updatedAt: Date.now(),
           running: projections.running ?? false,
@@ -383,19 +371,26 @@ export function useChat() {
           setCurrentCwd(metadata.cwd);
           localStorage.setItem('lastCwd', metadata.cwd);
         }
+        
+        if (stats.last_input_token_count) {
+          sessionStore.setContextStats(sessionId, stats.last_input_token_count, stats.context_window || 128000);
+        }
+        if (stats.input_tokens || stats.output_tokens) {
+          sessionStore.setDetailedStats(sessionId, stats.input_tokens || 0, stats.output_tokens || 0, stats.cached_tokens || 0);
+        }
+        
+        if (breakdown) {
+          sessionStore.setBreakdown(sessionId, breakdown);
+        }
+        
+        if (summary.permission_mode) {
+          sessionStore.setPermissionMode(sessionId, summary.permission_mode);
+          setPermissionMode(summary.permission_mode as 'default' | 'acceptEdits' | 'bypassPermissions');
+        }
       }
       
-      // Load recent events with pagination
-      const eventsResponse = await fetch(`/api/sessions/${sessionId}/events?limit=50`);
-      
-      // Check if session changed during fetch
-      if (currentSessionIdRef.current !== sessionId) {
-        logger.info('[SESSION] session changed during events fetch, aborting');
-        return;
-      }
-      
-      if (eventsResponse.ok) {
-        const { events, has_more, base_seq, total_count } = await eventsResponse.json();
+      if (eventsResult.status === 'fulfilled') {
+        const { events, has_more, base_seq, total_count } = eventsResult.value;
         logger.info('[SESSION] loaded:', {
           id: sessionId,
           eventCount: events.length,
@@ -404,67 +399,23 @@ export function useChat() {
           baseSeq: base_seq,
         });
         
-        // Fetch stats from API
-        let statsRestored = false;
-        try {
-          const statsResponse = await fetch(`/api/sessions/${sessionId}/stats`);
-          if (statsResponse.ok) {
-            const stats = await statsResponse.json();
-            if (stats.last_input_token_count) {
-              sessionStore.setContextStats(sessionId, stats.last_input_token_count, stats.context_window || 128000);
-            }
-            if (stats.input_tokens || stats.output_tokens) {
-              sessionStore.setDetailedStats(sessionId, stats.input_tokens || 0, stats.output_tokens || 0, stats.cached_tokens || 0);
-              statsRestored = true;
-            }
-          }
-        } catch (err) {
-          logger.debug('[SESSION] failed to fetch stats:', err);
-        }
-        
-        // Fallback: restore context stats and detailed stats from events if API didn't return valid stats
-        if (!statsRestored) {
-          for (let i = events.length - 1; i >= 0; i--) {
-            const e = events[i];
-            if (e.type === 'stats') {
-              if (e.last_input_token_count) {
-                sessionStore.setContextStats(sessionId, e.last_input_token_count, e.context_window || 128000);
-              }
-              if (e.input_tokens || e.output_tokens) {
-                sessionStore.setDetailedStats(sessionId, e.input_tokens || 0, e.output_tokens || 0, e.cached_tokens || 0);
-              }
-              break;
-            }
-          }
-        }
-
-        // Load file changes for Changes panel from git-based snapshots
-        try {
-          const changesResponse = await fetch(`/api/sessions/${sessionId}/file-changes`);
-          if (changesResponse.ok) {
-            const { files } = await changesResponse.json();
-            if (files && files.length > 0) {
-              const acceptedKey = `acceptedChanges:${sessionId}`;
-              const accepted: string[] = JSON.parse(localStorage.getItem(acceptedKey) || '[]');
-              const filtered = files.filter((f: any) => !accepted.includes(f.file_path));
-              sessionStore.setFileSnapshots(sessionId, filtered);
-            }
-          }
-        } catch (err) {
-          logger.debug('[SESSION] failed to fetch file changes:', err);
-        }
-
-        // Update pagination state
         const lastSeq = events.length > 0 ? Math.max(...events.map((e: any) => e.seq ?? 0)) : -1;
         sessionStore.setPagination(sessionId, has_more, base_seq, lastSeq);
-
-        // Load events into nodes
         loadSessionEvents(sessionId, events);
+      }
+      
+      if (fileChangesResult.status === 'fulfilled') {
+        const { files } = fileChangesResult.value;
+        if (files && files.length > 0) {
+          const acceptedKey = `acceptedChanges:${sessionId}`;
+          const accepted: string[] = JSON.parse(localStorage.getItem(acceptedKey) || '[]');
+          const filtered = files.filter((f: any) => !accepted.includes(f.file_path));
+          sessionStore.setFileSnapshots(sessionId, filtered);
+        }
       }
     } catch (err) {
       console.error('Failed to load session:', err);
     } finally {
-      // Only reset loading state if this is still the current session
       if (currentSessionIdRef.current === sessionId) {
         setIsLoadingSession(false);
       }

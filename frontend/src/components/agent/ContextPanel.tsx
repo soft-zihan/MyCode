@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
-import { fetchSessionStats, fetchTokenBreakdown, SessionStats, TokenBreakdown as TokenBreakdownData } from '../../api/client';
+import { useSessionStore } from '../../store';
+import { sessionStore } from '../../store';
 import { McpPanel } from './McpPanel';
 import { PromptsPanel } from './PromptsPanel';
 
@@ -37,37 +37,10 @@ function BreakdownItem({ label, tokens, totalTokens, color, indent = 0, detail }
 }
 
 export function ContextPanel({ sessionId, onFileSelect }: ContextPanelProps) {
-  const [stats, setStats] = useState<SessionStats | null>(null);
-  const [breakdown, setBreakdown] = useState<TokenBreakdownData | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [toolResultChars, setToolResultChars] = useState<Record<string, number>>({});
-
-  const loadData = useCallback(async () => {
-    if (!sessionId) return;
-    setLoading(true);
-    try {
-      const [statsResult, breakdownResult] = await Promise.all([
-        fetchSessionStats(sessionId),
-        fetchTokenBreakdown(sessionId),
-      ]);
-      setStats(statsResult);
-      setBreakdown(breakdownResult);
-      
-      // 从 localStorage 读取工具结果字符数
-      const key = `tool_result_chars:${sessionId}`;
-      const chars = JSON.parse(localStorage.getItem(key) || '{}');
-      setToolResultChars(chars);
-    } catch (err) {
-      console.error('Failed to load token data:', err);
-    } finally {
-      setLoading(false);
-    }
-  }, [sessionId]);
-
-  useEffect(() => {
-    loadData();
-    // 只在 session 切换时刷新，不自动轮询
-  }, [sessionId]);
+  const stats = useSessionStore(() => sessionId ? sessionStore.getDetailedStats(sessionId) : null);
+  const breakdown = useSessionStore(() => sessionId ? sessionStore.getBreakdown(sessionId) : null);
+  const contextUsed = useSessionStore(() => sessionId ? sessionStore.getContextUsed(sessionId) : 0);
+  const contextTotal = useSessionStore(() => sessionId ? sessionStore.getContextTotal(sessionId) : 128000);
 
   if (!sessionId) {
     return (
@@ -77,29 +50,21 @@ export function ContextPanel({ sessionId, onFileSelect }: ContextPanelProps) {
     );
   }
 
-  if (loading || !stats) {
-    return (
-      <div className="p-4 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500" />
-      </div>
-    );
-  }
-
-  const inputTokens = stats.input_tokens || 0;
-  const outputTokens = stats.output_tokens || 0;
-  const cachedTokens = stats.cached_tokens || 0;
-  const contextWindow = stats.context_window || 128000;
-  const contextUsed = stats.last_input_token_count || 0;
+  const inputTokens = stats?.inputTokens || 0;
+  const outputTokens = stats?.outputTokens || 0;
+  const cachedTokens = stats?.cachedTokens || 0;
+  const contextWindow = contextTotal;
   const cachePercent = inputTokens > 0 ? Math.round((cachedTokens / inputTokens) * 100) : 0;
   const contextPercent = contextWindow > 0 ? Math.round((contextUsed / contextWindow) * 100) : 0;
 
   const totalTokens = breakdown ? breakdown.total_tokens : 0;
 
-  // 计算各部分占比
   const systemTotal = breakdown ? (
     breakdown.base_prompt_tokens + breakdown.claude_md_tokens + breakdown.skills_tokens +
     breakdown.memory_tokens + breakdown.wiki_tokens + breakdown.agents_tokens
   ) : 0;
+
+  const toolResultByName: Record<string, number> = breakdown?.tool_result_by_name || {};
 
   return (
     <div className="flex-1 overflow-auto flex flex-col">
@@ -151,7 +116,7 @@ export function ContextPanel({ sessionId, onFileSelect }: ContextPanelProps) {
         </div>
       </div>
 
-      {/* Context Composition - 层次结构 */}
+      {/* Context Composition */}
       {breakdown && (
         <div className="px-3 py-2 border-b border-gray-200">
           <div className="flex items-center justify-between mb-2">
@@ -217,16 +182,15 @@ export function ContextPanel({ sessionId, onFileSelect }: ContextPanelProps) {
               <span className="text-xs font-mono text-gray-900">{formatTokens(breakdown.tool_tokens)}</span>
               <span className="text-[10px] text-gray-400 w-8 text-right">{totalTokens > 0 ? Math.round((breakdown.tool_tokens / totalTokens) * 100) : 0}%</span>
             </div>
-            {/* 按工具名拆分的结果（从 localStorage 读取） */}
-            {Object.keys(toolResultChars).length > 0 && (
+            {Object.keys(toolResultByName).length > 0 && (
               <div className="ml-4 mt-1 space-y-0.5">
-                {Object.entries(toolResultChars)
+                {Object.entries(toolResultByName)
                   .sort(([, a], [, b]) => b - a)
-                  .map(([toolName, chars]) => (
+                  .map(([toolName, tokens]) => (
                     <BreakdownItem 
                       key={toolName}
                       label={toolName} 
-                      tokens={Math.round(chars / 4)}
+                      tokens={tokens}
                       totalTokens={totalTokens} 
                       color="#fbbf24" 
                       indent={1} 

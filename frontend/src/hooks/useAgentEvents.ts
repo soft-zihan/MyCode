@@ -160,15 +160,6 @@ export function useAgentEvents(sessionId: string | null): UseAgentEventsReturn {
           const result = event.result as string;
           const status = (event.status as string) || 'success';
           const subAgentId = event.sub_agent_id as string | undefined;
-          const toolName = event.name as string;
-
-          // 保存到 localStorage 用于 Context 面板显示
-          if (sessionId && toolName && result) {
-            const key = `tool_result_chars:${sessionId}`;
-            const existing = JSON.parse(localStorage.getItem(key) || '{}');
-            existing[toolName] = (existing[toolName] || 0) + result.length;
-            localStorage.setItem(key, JSON.stringify(existing));
-          }
 
           if (subAgentId && prev.subAgents.has(subAgentId)) {
             const newSubAgents = new Map(prev.subAgents);

@@ -551,6 +551,20 @@ export async function fetchSessionStats(sessionId: string): Promise<SessionStats
   return res.json();
 }
 
+export interface SessionSummary {
+  metadata: { id: string; name: string; cwd: string };
+  projections: { title?: string; cwd?: string; running?: boolean; updated_at?: string; plan_slug?: string };
+  stats: SessionStats;
+  breakdown: TokenBreakdown;
+  permission_mode: string;
+}
+
+export async function fetchSessionSummary(sessionId: string): Promise<SessionSummary> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/summary`);
+  if (!res.ok) throw new Error('Failed to fetch session summary');
+  return res.json();
+}
+
 export async function togglePlanMode(sessionId: string, enabled: boolean): Promise<{ mode: string }> {
   const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan-mode`, {
     method: 'POST',

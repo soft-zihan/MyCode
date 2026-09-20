@@ -6,6 +6,7 @@ import {
   updateSessionName,
   fetchProjects, deleteProject, registerProject, Project,
 } from '../../../api/client';
+import { sessionStore, useSessionStore } from '../../../store';
 
 function formatRelativeTime(timeStr: string): string {
   const now = new Date();
@@ -142,6 +143,18 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
   const [editingName, setEditingName] = useState<string>('');
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set());
 
+  const allProjections = useSessionStore(() => sessionStore.getAllProjections());
+
+  const displaySessions = sessions.map(s => {
+    const proj = allProjections.get(s.id);
+    if (!proj) return s;
+    return {
+      ...s,
+      name: proj.title || s.name,
+      startTime: proj.updatedAt ? new Date(proj.updatedAt).toISOString() : s.startTime,
+    };
+  });
+
   const toggleProjectCollapse = (cwd: string) => {
     setCollapsedProjects(prev => {
       const next = new Set(prev);
@@ -246,7 +259,7 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
   for (const project of projects) {
     grouped[project.cwd] = [];
   }
-  for (const session of sessions) {
+  for (const session of displaySessions) {
     const cwd = session.cwd || 'Unknown';
     if (!grouped[cwd]) grouped[cwd] = [];
     grouped[cwd].push(session);

@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
-import { fetchSessionStats, fetchTokenBreakdown, SessionStats, TokenBreakdown as TokenBreakdownData } from '../../api/client';
+import { useSessionStore } from '../../store';
+import { sessionStore } from '../../store';
 
 interface TokenBreakdownProps {
   sessionId: string | null;
@@ -20,32 +20,11 @@ const formatTokens = (n: number): string => {
 };
 
 export function TokenBreakdownPanel({ sessionId, compact = false }: TokenBreakdownProps) {
-  const [stats, setStats] = useState<SessionStats | null>(null);
-  const [breakdown, setBreakdown] = useState<TokenBreakdownData | null>(null);
-  const [loading, setLoading] = useState(false);
+  const stats = useSessionStore(() => sessionId ? sessionStore.getDetailedStats(sessionId) : null);
+  const breakdown = useSessionStore(() => sessionId ? sessionStore.getBreakdown(sessionId) : null);
+  const contextUsed = useSessionStore(() => sessionId ? sessionStore.getContextUsed(sessionId) : 0);
+  const contextTotal = useSessionStore(() => sessionId ? sessionStore.getContextTotal(sessionId) : 128000);
 
-  const loadData = useCallback(async () => {
-    if (!sessionId) return;
-    setLoading(true);
-    try {
-      const [statsResult, breakdownResult] = await Promise.all([
-        fetchSessionStats(sessionId),
-        fetchTokenBreakdown(sessionId),
-      ]);
-      setStats(statsResult);
-      setBreakdown(breakdownResult);
-    } catch (err) {
-      console.error('Failed to load token data:', err);
-    } finally {
-      setLoading(false);
-    }
-  }, [sessionId]);
-
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
-
-  // Compact mode: just show token counts inline
   if (compact) {
     if (!sessionId || !stats) {
       return (
@@ -54,20 +33,23 @@ export function TokenBreakdownPanel({ sessionId, compact = false }: TokenBreakdo
         </div>
       );
     }
+    const inputTokens = stats.inputTokens || 0;
+    const outputTokens = stats.outputTokens || 0;
+    const cachedTokens = stats.cachedTokens || 0;
     return (
       <div className="px-3 py-2 flex items-center gap-3 text-xs">
         <span className="text-gray-500">
-          <span className="font-medium text-gray-700">{formatTokens(stats.input_tokens)}</span> in
+          <span className="font-medium text-gray-700">{formatTokens(inputTokens)}</span> in
         </span>
         <span className="text-gray-300">|</span>
         <span className="text-gray-500">
-          <span className="font-medium text-gray-700">{formatTokens(stats.output_tokens)}</span> out
+          <span className="font-medium text-gray-700">{formatTokens(outputTokens)}</span> out
         </span>
-        {stats.cached_tokens && stats.cached_tokens > 0 && (
+        {cachedTokens > 0 && (
           <>
             <span className="text-gray-300">|</span>
             <span className="text-green-600">
-              {Math.round((stats.cached_tokens / stats.input_tokens) * 100)}% cache
+              {Math.round((cachedTokens / inputTokens) * 100)}% cache
             </span>
           </>
         )}
@@ -75,7 +57,7 @@ export function TokenBreakdownPanel({ sessionId, compact = false }: TokenBreakdo
     );
   }
 
-  if (!sessionId) {
+  if (!sessionId || !stats) {
     return (
       <div className="p-4 text-center text-gray-400 text-sm">
         Start a session to view token usage
@@ -83,23 +65,13 @@ export function TokenBreakdownPanel({ sessionId, compact = false }: TokenBreakdo
     );
   }
 
-  if (loading || !stats) {
-    return (
-      <div className="p-4 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500" />
-      </div>
-    );
-  }
-
-  const inputTokens = stats.input_tokens || 0;
-  const outputTokens = stats.output_tokens || 0;
-  const cachedTokens = stats.cached_tokens || 0;
-  const contextWindow = stats.context_window || 128000;
-  const contextUsed = stats.last_input_token_count || 0;
+  const inputTokens = stats.inputTokens || 0;
+  const outputTokens = stats.outputTokens || 0;
+  const cachedTokens = stats.cachedTokens || 0;
+  const contextWindow = contextTotal;
   const cachePercent = inputTokens > 0 ? Math.round((cachedTokens / inputTokens) * 100) : 0;
   const contextPercent = contextWindow > 0 ? Math.round((contextUsed / contextWindow) * 100) : 0;
 
-  // 计算 system tokens 总和
   const systemTokens = breakdown ? (
     breakdown.base_prompt_tokens + breakdown.claude_md_tokens + breakdown.skills_tokens +
     breakdown.memory_tokens + breakdown.wiki_tokens + breakdown.agents_tokens
