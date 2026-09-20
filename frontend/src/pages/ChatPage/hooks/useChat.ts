@@ -99,6 +99,9 @@ export function useChat() {
           currentSessionIdRef.current = newSessionId;
           setCurrentSessionId(newSessionId);
           setSessionRefreshTrigger(prev => prev + 1);
+          
+          // 清空新 session 的工具结果统计
+          localStorage.removeItem(`tool_result_chars:${newSessionId}`);
         }
         return;
       }

@@ -39,6 +39,7 @@ export function ContextPanel({ sessionId }: ContextPanelProps) {
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [breakdown, setBreakdown] = useState<TokenBreakdownData | null>(null);
   const [loading, setLoading] = useState(false);
+  const [toolResultChars, setToolResultChars] = useState<Record<string, number>>({});
 
   const loadData = useCallback(async () => {
     if (!sessionId) return;
@@ -50,6 +51,11 @@ export function ContextPanel({ sessionId }: ContextPanelProps) {
       ]);
       setStats(statsResult);
       setBreakdown(breakdownResult);
+      
+      // 从 localStorage 读取工具结果字符数
+      const key = `tool_result_chars:${sessionId}`;
+      const chars = JSON.parse(localStorage.getItem(key) || '{}');
+      setToolResultChars(chars);
     } catch (err) {
       console.error('Failed to load token data:', err);
     } finally {
@@ -250,16 +256,16 @@ export function ContextPanel({ sessionId }: ContextPanelProps) {
             <BreakdownItem label="User" tokens={breakdown.user_tokens} totalTokens={totalTokens} color="#3b82f6" indent={1} detail={`${breakdown.message_count} 条`} />
             <BreakdownItem label="Assistant" tokens={breakdown.assistant_tokens} totalTokens={totalTokens} color="#60a5fa" indent={1} />
             <BreakdownItem label="Tool Results" tokens={breakdown.tool_tokens} totalTokens={totalTokens} color="#93c5fd" indent={1} />
-            {/* 按工具名拆分的结果 */}
-            {breakdown.tool_result_by_name && Object.keys(breakdown.tool_result_by_name).length > 0 && (
+            {/* 按工具名拆分的结果（从 localStorage 读取） */}
+            {Object.keys(toolResultChars).length > 0 && (
               <div className="ml-4 mt-1 space-y-0.5">
-                {Object.entries(breakdown.tool_result_by_name)
+                {Object.entries(toolResultChars)
                   .sort(([, a], [, b]) => b - a)
-                  .map(([toolName, tokens]) => (
+                  .map(([toolName, chars]) => (
                     <BreakdownItem 
                       key={toolName}
                       label={toolName} 
-                      tokens={tokens} 
+                      tokens={Math.round(chars / 4)}
                       totalTokens={totalTokens} 
                       color="#bfdbfe" 
                       indent={2} 

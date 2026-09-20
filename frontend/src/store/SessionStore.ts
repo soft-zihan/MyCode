@@ -211,6 +211,8 @@ class SessionStore {
     if (this.currentSessionId === sessionId) {
       this.currentSessionId = null;
     }
+    // 清理 localStorage 中的工具结果统计
+    localStorage.removeItem(`tool_result_chars:${sessionId}`);
     this.notify();
   }
 
