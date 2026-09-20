@@ -188,7 +188,7 @@ async def generate_session_title(message: str) -> str:
         from agents.config import load_config
         from agents.service import AgentService
         
-        title_config = BUILTIN_HIDDEN_AGENTS.get("title")
+        title_config = BUILTIN_HIDDEN_AGENTS.get("side_query_title")
         if not title_config:
             return fallback_name
         

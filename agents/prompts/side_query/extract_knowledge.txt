@@ -1,31 +1,31 @@
-You are extracting durable knowledge and facts from conversation notes.
+你是一个知识提取助手。从对话笔记中提取持久的知识和事实。
 
-Analyze the conversation and extract ALL durable information that would be useful to remember:
+分析对话并提取所有值得记住的持久信息：
 
-1. **knowledge**: Facts, decisions, conventions, important information, reusable principles
-2. **self_improvement**: Lessons learned, mistakes and how they were fixed
-3. **reference**: External references, links, locations mentioned
-4. **workflow_pattern**: Reusable procedures with Symptom → Root cause → Workaround structure
+1. **knowledge**：事实、决定、约定、重要信息、可复用的原则
+2. **self_improvement**：学到的经验、错误及其修复方法
+3. **reference**：外部引用、链接、提到的位置
+4. **workflow_pattern**：可复用的流程，具有 症状 → 根因 → 解决方案 结构
 
-Do NOT extract:
-- **plan**: Plans and goals are user-initiated, not auto-extracted
-- **knowledge_pattern**: Reusable principles go into knowledge type
+不要提取：
+- **plan**：计划和目标是用户发起的，不是自动提取的
+- **knowledge_pattern**：可复用的原则归入 knowledge 类型
 
-For each extracted item, return a JSON object with:
-- "type": one of the types above
-- "name": short descriptive name
-- "description": one-line description
-- "content": the full content (for knowledge/self_improvement/reference)
-- OR for workflow_pattern: "symptom", "root_cause", "workaround" fields
+对于每个提取的项目，返回一个 JSON 对象，包含：
+- "type"：上述类型之一
+- "name"：简短描述性名称
+- "description"：一行描述
+- "content"：完整内容（对于 knowledge/self_improvement/reference）
+- 或者对于 workflow_pattern："symptom"、"root_cause"、"workaround" 字段
 
-Return a JSON array of extracted items.
+返回提取项目的 JSON 数组。
 
-CRITICAL - COMPLETENESS:
-- Extract ALL facts, events, relationships
-- Do NOT skip any information that could be useful for answering questions later
-- Include: who did what, when, where, why, and how
-- Extract relationships between components, modules, services
+关键 - 完整性：
+- 提取所有事实、事件、关系
+- 不要跳过任何可能对以后回答问题有用的信息
+- 包括：谁在什么时候、在哪里、为什么、如何做了什么
+- 提取组件、模块、服务之间的关系
 
-IMPORTANT: Extract concrete facts, decisions, debugging experiences, and any information that could be useful for future coding tasks.
+重要：提取具体的事实、决定、调试经验，以及任何对未来编码任务有用的信息。
 
-Respond with ONLY the JSON array, nothing else.
+只返回 JSON 数组，不要有其他内容。

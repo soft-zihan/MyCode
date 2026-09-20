@@ -168,11 +168,11 @@ export function ContextPanel({ sessionId, onFileSelect }: ContextPanelProps) {
                 title={`System: ${formatTokens(systemTotal)}`}
               />
             )}
-            {breakdown.tools_tokens > 0 && (
+            {breakdown.tool_tokens > 0 && (
               <div
                 className="h-full bg-amber-500"
-                style={{ width: `${(breakdown.tools_tokens / totalTokens) * 100}%` }}
-                title={`Tools: ${formatTokens(breakdown.tools_tokens)}`}
+                style={{ width: `${(breakdown.tool_tokens / totalTokens) * 100}%` }}
+                title={`Tool Results: ${formatTokens(breakdown.tool_tokens)}`}
               />
             )}
             {breakdown.messages_tokens > 0 && (
@@ -210,53 +210,13 @@ export function ContextPanel({ sessionId, onFileSelect }: ContextPanelProps) {
             <BreakdownItem label="Wiki" tokens={breakdown.wiki_tokens} totalTokens={totalTokens} color="#f3e8ff" indent={1} />
             <BreakdownItem label="Agents" tokens={breakdown.agents_tokens} totalTokens={totalTokens} color="#faf5ff" indent={1} detail="子代理" />
 
-            {/* Layer 2: Tools */}
+            {/* Layer 2: Tool Results */}
             <div className="flex items-center gap-2 py-0.5 font-medium mt-2">
               <div className="w-3 h-3 rounded-sm bg-amber-500" />
-              <span className="text-xs text-gray-700 flex-1">Tools</span>
-              <span className="text-xs font-mono text-gray-900">{formatTokens(breakdown.tools_tokens)}</span>
-              <span className="text-[10px] text-gray-400 w-8 text-right">{totalTokens > 0 ? Math.round((breakdown.tools_tokens / totalTokens) * 100) : 0}%</span>
+              <span className="text-xs text-gray-700 flex-1">Tool Results</span>
+              <span className="text-xs font-mono text-gray-900">{formatTokens(breakdown.tool_tokens)}</span>
+              <span className="text-[10px] text-gray-400 w-8 text-right">{totalTokens > 0 ? Math.round((breakdown.tool_tokens / totalTokens) * 100) : 0}%</span>
             </div>
-            {(breakdown.builtin_tool_count > 0 || breakdown.mcp_tool_count > 0) ? (
-              <>
-                <BreakdownItem 
-                  label="Built-in" 
-                  tokens={Math.round(breakdown.tools_tokens * (breakdown.builtin_tool_count / (breakdown.builtin_tool_count + breakdown.mcp_tool_count)))}
-                  totalTokens={totalTokens} 
-                  color="#f59e0b" 
-                  indent={1} 
-                  detail={`${breakdown.builtin_tool_count} 个`}
-                />
-                <BreakdownItem 
-                  label="MCP" 
-                  tokens={Math.round(breakdown.tools_tokens * (breakdown.mcp_tool_count / (breakdown.builtin_tool_count + breakdown.mcp_tool_count)))}
-                  totalTokens={totalTokens} 
-                  color="#fbbf24" 
-                  indent={1} 
-                  detail={`${breakdown.mcp_tool_count} 个`}
-                />
-              </>
-            ) : (
-              <BreakdownItem 
-                label="Tool Definitions" 
-                tokens={breakdown.tools_tokens}
-                totalTokens={totalTokens} 
-                color="#f59e0b" 
-                indent={1} 
-                detail="估算"
-              />
-            )}
-
-            {/* Layer 3: Messages */}
-            <div className="flex items-center gap-2 py-0.5 font-medium mt-2">
-              <div className="w-3 h-3 rounded-sm bg-blue-500" />
-              <span className="text-xs text-gray-700 flex-1">Messages</span>
-              <span className="text-xs font-mono text-gray-900">{formatTokens(breakdown.messages_tokens)}</span>
-              <span className="text-[10px] text-gray-400 w-8 text-right">{totalTokens > 0 ? Math.round((breakdown.messages_tokens / totalTokens) * 100) : 0}%</span>
-            </div>
-            <BreakdownItem label="User" tokens={breakdown.user_tokens} totalTokens={totalTokens} color="#3b82f6" indent={1} detail={`${breakdown.message_count} 条`} />
-            <BreakdownItem label="Assistant" tokens={breakdown.assistant_tokens} totalTokens={totalTokens} color="#60a5fa" indent={1} />
-            <BreakdownItem label="Tool Results" tokens={breakdown.tool_tokens} totalTokens={totalTokens} color="#93c5fd" indent={1} />
             {/* 按工具名拆分的结果（从 localStorage 读取） */}
             {Object.keys(toolResultChars).length > 0 && (
               <div className="ml-4 mt-1 space-y-0.5">
@@ -268,12 +228,22 @@ export function ContextPanel({ sessionId, onFileSelect }: ContextPanelProps) {
                       label={toolName} 
                       tokens={Math.round(chars / 4)}
                       totalTokens={totalTokens} 
-                      color="#bfdbfe" 
-                      indent={2} 
+                      color="#fbbf24" 
+                      indent={1} 
                     />
                   ))}
               </div>
             )}
+
+            {/* Layer 3: Messages */}
+            <div className="flex items-center gap-2 py-0.5 font-medium mt-2">
+              <div className="w-3 h-3 rounded-sm bg-blue-500" />
+              <span className="text-xs text-gray-700 flex-1">Messages</span>
+              <span className="text-xs font-mono text-gray-900">{formatTokens(breakdown.messages_tokens)}</span>
+              <span className="text-[10px] text-gray-400 w-8 text-right">{totalTokens > 0 ? Math.round((breakdown.messages_tokens / totalTokens) * 100) : 0}%</span>
+            </div>
+            <BreakdownItem label="User" tokens={breakdown.user_tokens} totalTokens={totalTokens} color="#3b82f6" indent={1} detail={`${breakdown.message_count} 条`} />
+            <BreakdownItem label="Assistant" tokens={breakdown.assistant_tokens} totalTokens={totalTokens} color="#60a5fa" indent={1} />
           </div>
         </div>
       )}

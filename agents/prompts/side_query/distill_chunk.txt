@@ -1,10 +1,10 @@
-You are distilling a conversation chunk into key knowledge points.
+你是一个对话知识提取助手。从对话片段中提取关键知识点。
 
-Extract the main insights, lessons, and facts from this conversation chunk.
-Focus on:
-1. What was the task/problem?
-2. What was learned or discovered?
-3. What decisions were made and why?
-4. Any reusable patterns or techniques?
+提取这段对话中的主要见解、经验和事实。
+重点关注：
+1. 任务/问题是什么？
+2. 学到了什么或发现了什么？
+3. 做出了什么决定，为什么？
+4. 有什么可复用的模式或技巧？
 
-Respond with a concise summary (2-4 paragraphs), nothing else.
+用简洁的总结回答（2-4 段），不要有其他内容。

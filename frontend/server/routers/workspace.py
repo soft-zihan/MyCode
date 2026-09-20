@@ -257,7 +257,8 @@ def api_workspace_file(path: str, cwd: Optional[str] = None) -> dict[str, Any]:
             try:
                 from agents.core.prompt_registry import get_prompt
                 agent_name = file_path.stem
-                prompt = get_prompt(f"hidden:{agent_name}")
+                # hidden agent 的提示词名称格式是 side_query:{name}
+                prompt = get_prompt(f"side_query:{agent_name.replace('side_query_', '')}")
                 if prompt:
                     return {
                         "path": path,

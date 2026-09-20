@@ -80,7 +80,7 @@ def list_all_prompts() -> list[PromptInfo]:
                 content=f.read_text(encoding="utf-8"),
             ))
     
-    # 4. Hidden Agent 提示词
+    # 4. Hidden Agent 提示词（归类为 side_query）
     user_agents_dir = Path.home() / ".mycode" / "agents"
     for name, config in BUILTIN_HIDDEN_AGENTS.items():
         override_path = user_agents_dir / f"{name}.md"
@@ -98,8 +98,8 @@ def list_all_prompts() -> list[PromptInfo]:
             source = str(override_path)
         
         prompts.append(PromptInfo(
-            name=f"hidden:{name}",
-            category="hidden",
+            name=f"side_query:{name.replace('side_query_', '')}",
+            category="side_query",
             description=config.description,
             source=source,
             editable=True,

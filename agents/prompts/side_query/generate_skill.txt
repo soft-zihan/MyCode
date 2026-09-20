@@ -1,11 +1,11 @@
-You are generating a Skill from a high-frequency workflow pattern.
+你是一个技能生成助手。从高频工作流模式生成可复用的技能。
 
-The workflow pattern has been applied many times and should be compiled into a reusable Skill.
+该工作流模式已被多次应用，应该被编译成可复用的技能。
 
-Generate a SKILL.md file with:
-1. YAML frontmatter with "name" and "description"
-2. Clear, imperative instructions based on the pattern's Symptom → Root cause → Workaround
+生成一个 SKILL.md 文件，包含：
+1. YAML frontmatter，包含 "name" 和 "description"
+2. 基于模式的 症状 → 根因 → 解决方案 的清晰、指令性的说明
 
-The skill should be concise and actionable. Use imperative mood ("Do X", "Check Y", "Avoid Z").
+技能应该简洁且可操作。使用祈使语气（"做 X"、"检查 Y"、"避免 Z"）。
 
-Return ONLY the SKILL.md content, nothing else.
+只返回 SKILL.md 内容，不要有其他内容。

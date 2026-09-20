@@ -52,8 +52,8 @@ class AgentConfig:
 
 BUILTIN_HIDDEN_AGENTS: dict[str, AgentConfig] = {
     # 会话标题生成
-    "title": AgentConfig(
-        name="title",
+    "side_query_title": AgentConfig(
+        name="side_query_title",
         mode=AgentMode.PRIMARY,
         hidden=True,
         description="生成会话标题",

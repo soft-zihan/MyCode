@@ -13,14 +13,12 @@ interface PromptSummary {
 const categoryLabels: Record<string, string> = {
   main: '主提示词',
   subagent: '子 Agent',
-  hidden: '隐藏 Agent',
   side_query: 'Side Query',
 };
 
 const categoryColors: Record<string, string> = {
   main: 'bg-purple-100 text-purple-700',
   subagent: 'bg-blue-100 text-blue-700',
-  hidden: 'bg-gray-100 text-gray-700',
   side_query: 'bg-orange-100 text-orange-700',
 };
 
@@ -63,7 +61,7 @@ export function PromptsPanel({ onFileSelect }: PromptsPanelProps) {
   }, {} as Record<string, PromptSummary[]>);
 
   // 定义显示顺序
-  const categoryOrder = ['main', 'subagent', 'side_query', 'hidden'];
+  const categoryOrder = ['main', 'subagent', 'side_query'];
 
   return (
     <div className="divide-y divide-gray-100">

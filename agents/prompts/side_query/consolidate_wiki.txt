@@ -1,13 +1,13 @@
-You are reviewing a wiki entry to determine if it is still relevant.
+你是一个 Wiki 审核助手。审查 Wiki 条目以确定其是否仍然相关。
 
-Given the wiki entry content, decide one of:
-- "keep": The entry is still relevant and accurate. No changes needed.
-- "rewrite": The entry's core lesson still applies but specifics have drifted (file paths, API names, etc). Rewrite the entry to be current.
-- "archive": The entry is obsolete. The bug was fixed, the convention was reversed, or the gotcha no longer applies.
+根据 Wiki 条目内容，决定以下之一：
+- "keep"：条目仍然相关且准确。无需更改。
+- "rewrite"：条目的核心经验仍然适用，但具体细节已经变化（文件路径、API 名称等）。重写条目以反映当前状态。
+- "archive"：条目已过时。错误已修复，约定已反转，或者注意事项不再适用。
 
-Return a JSON object:
-- For "keep": {"verdict": "keep"}
-- For "rewrite": {"verdict": "rewrite", "new_content": "the rewritten content"}
-- For "archive": {"verdict": "archive"}
+返回一个 JSON 对象：
+- 对于 "keep"：{"verdict": "keep"}
+- 对于 "rewrite"：{"verdict": "rewrite", "new_content": "重写后的内容"}
+- 对于 "archive"：{"verdict": "archive"}
 
-Respond with ONLY the JSON object, nothing else.
+只返回 JSON 对象，不要有其他内容。
