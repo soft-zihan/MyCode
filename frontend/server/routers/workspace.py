@@ -166,15 +166,22 @@ def api_workspace_create_file(data: CreateFileRequest) -> dict[str, Any]:
 @router.put("/api/workspace/file")
 def api_workspace_write_file(data: WriteFileRequest) -> dict[str, Any]:
     workspace_path = Path(data.cwd) if data.cwd else Path.cwd()
-    file_path = workspace_path / data.path
+    
+    # 支持绝对路径
+    if Path(data.path).is_absolute():
+        file_path = Path(data.path)
+    else:
+        file_path = workspace_path / data.path
 
     if not data.path or not data.path.strip():
         raise HTTPException(status_code=400, detail="File path cannot be empty")
 
-    try:
-        file_path.resolve().relative_to(workspace_path.resolve())
-    except ValueError:
-        raise HTTPException(status_code=403, detail="Access denied")
+    # 只对相对路径进行工作区检查
+    if not Path(data.path).is_absolute():
+        try:
+            file_path.resolve().relative_to(workspace_path.resolve())
+        except ValueError:
+            raise HTTPException(status_code=403, detail="Access denied")
 
     try:
         file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -240,8 +247,27 @@ def api_workspace_file(path: str, cwd: Optional[str] = None) -> dict[str, Any]:
     file_path = Path(path)
     if not file_path.is_absolute():
         file_path = (Path(cwd) if cwd else Path.cwd()) / path
+    
+    # 如果文件不存在，检查是否是 hidden agent 的 override 文件
     if not file_path.exists():
+        # 检查是否在 ~/.mycode/agents/ 目录下
+        user_agents_dir = Path.home() / ".mycode" / "agents"
+        if str(file_path.parent) == str(user_agents_dir) and file_path.suffix == ".md":
+            # 从 prompt_registry 获取初始内容
+            try:
+                from agents.core.prompt_registry import get_prompt
+                agent_name = file_path.stem
+                prompt = get_prompt(f"hidden:{agent_name}")
+                if prompt:
+                    return {
+                        "path": path,
+                        "content": prompt.content,
+                        "size": len(prompt.content),
+                    }
+            except Exception:
+                pass
         raise HTTPException(status_code=404, detail="File not found")
+    
     if not file_path.is_file():
         raise HTTPException(status_code=400, detail="Not a file")
     

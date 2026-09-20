@@ -56,14 +56,29 @@ def list_all_prompts() -> list[PromptInfo]:
             ))
     
     # 3. Hidden Agent 提示词
+    user_agents_dir = Path.home() / ".mycode" / "agents"
     for name, config in BUILTIN_HIDDEN_AGENTS.items():
+        override_path = user_agents_dir / f"{name}.md"
+        has_override = override_path.exists()
+        
+        # 如果有 override 文件，读取完整内容（包括 frontmatter）
+        if has_override:
+            content = override_path.read_text(encoding="utf-8")
+            source = str(override_path)
+        else:
+            # 如果没有 override，生成包含 frontmatter 的初始内容
+            from agents.memory.frontmatter import format_frontmatter
+            meta = {"name": name, "description": config.description}
+            content = format_frontmatter(meta, config.system_prompt)
+            source = str(override_path)
+        
         prompts.append(PromptInfo(
             name=f"hidden:{name}",
             category="hidden",
             description=config.description,
-            source="builtin",
+            source=source,
             editable=True,
-            content=config.system_prompt,
+            content=content,
         ))
     
     return prompts

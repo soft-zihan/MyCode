@@ -33,7 +33,16 @@ export function FileViewer({ filePath, cwd, onClose, readOnly = true, editable =
           setFrontmatter(data.frontmatter);
         }
       })
-      .catch(err => setError(err.message))
+      .catch(err => {
+        // 如果文件不存在，显示空编辑器（允许创建新文件）
+        if (err.message.includes('not found') || err.message.includes('404')) {
+          setContent('');
+          setEditedContent('');
+          setError(null);
+        } else {
+          setError(err.message);
+        }
+      })
       .finally(() => setLoading(false));
   }, [filePath, cwd]);
 
