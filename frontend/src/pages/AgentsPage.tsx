@@ -413,7 +413,26 @@ export default function AgentsPage() {
     );
   }
 
-  const allToolsForConfig = availableTools.filter(t => t.name !== 'agent' && t.name !== 'tool_search');
+  // Filter tools based on agent type restrictions
+  const getAvailableToolsForAgent = (agentName: string, agentCategory: string) => {
+    let tools = availableTools.filter(t => t.name !== 'agent');
+    
+    // Sub-agents have specific tool restrictions
+    if (agentCategory === 'sub') {
+      if (agentName === 'explore') {
+        // explore: only read-only tools
+        tools = tools.filter(t => ['read_file', 'outline_file', 'list_files', 'grep_search'].includes(t.name));
+      } else if (agentName === 'reviewer') {
+        // reviewer: read-only + run_shell
+        tools = tools.filter(t => ['read_file', 'outline_file', 'list_files', 'grep_search', 'run_shell'].includes(t.name));
+      }
+      // general: all tools except agent (already filtered)
+    }
+    
+    return tools;
+  };
+  
+  const allToolsForConfig = availableTools.filter(t => t.name !== 'agent');
 
   const sidebarContent = (
     <div className="flex flex-col h-full">
@@ -931,68 +950,78 @@ export default function AgentsPage() {
                             Click to toggle. Selected tools will be available to this agent.
                           </p>
                           
-                          {/* Native Tools */}
-                          <div>
-                            <div className="flex items-center gap-1.5 mb-2">
-                              <Cpu className="w-3.5 h-3.5 text-orange-500" />
-                              <h4 className="text-xs font-medium text-gray-700">Native Tools</h4>
-                              <span className="text-[10px] text-gray-400">
-                                ({allToolsForConfig.filter(t => t.source === 'native').length})
-                              </span>
-                            </div>
-                            <div className="flex flex-wrap gap-1.5">
-                              {allToolsForConfig.filter(t => t.source === 'native').map(tool => {
-                                const isSelected = tempAllowedTools.includes(tool.name);
-                                return (
-                                  <button
-                                    key={tool.name}
-                                    onClick={() => handleToggleTool(tool.name)}
-                                    className={`px-2 py-1 text-xs rounded border transition-colors ${
-                                      isSelected
-                                        ? 'bg-green-50 border-green-300 text-green-700 hover:bg-green-100'
-                                        : 'bg-gray-50 border-gray-300 text-gray-400 hover:bg-gray-100'
-                                    }`}
-                                    title={tool.description}
-                                  >
-                                    {tool.name}
-                                    {tool.deferred && <span className="ml-1 text-[9px] text-purple-500">D</span>}
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          </div>
-                          
-                          {/* MCP Tools */}
-                          {allToolsForConfig.filter(t => t.source === 'mcp').length > 0 && (
-                            <div>
-                              <div className="flex items-center gap-1.5 mb-2">
-                                <Server className="w-3.5 h-3.5 text-green-500" />
-                                <h4 className="text-xs font-medium text-gray-700">MCP Tools</h4>
-                                <span className="text-[10px] text-gray-400">
-                                  ({allToolsForConfig.filter(t => t.source === 'mcp').length})
-                                </span>
-                              </div>
-                              <div className="flex flex-wrap gap-1.5">
-                                {allToolsForConfig.filter(t => t.source === 'mcp').map(tool => {
-                                  const isSelected = tempAllowedTools.includes(tool.name);
-                                  return (
-                                    <button
-                                      key={tool.name}
-                                      onClick={() => handleToggleTool(tool.name)}
-                                      className={`px-2 py-1 text-xs rounded border transition-colors ${
-                                        isSelected
-                                          ? 'bg-green-50 border-green-300 text-green-700 hover:bg-green-100'
-                                          : 'bg-gray-50 border-gray-300 text-gray-400 hover:bg-gray-100'
-                                      }`}
-                                      title={tool.description}
-                                    >
-                                      {tool.name}
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          )}
+                          {/* Get filtered tools for this agent */}
+                          {(() => {
+                            const filteredTools = getAvailableToolsForAgent(selectedAgent.name, selectedAgent.category);
+                            const nativeTools = filteredTools.filter(t => t.source === 'native');
+                            const mcpTools = filteredTools.filter(t => t.source === 'mcp');
+                            
+                            return (
+                              <>
+                                {/* Native Tools */}
+                                <div>
+                                  <div className="flex items-center gap-1.5 mb-2">
+                                    <Cpu className="w-3.5 h-3.5 text-orange-500" />
+                                    <h4 className="text-xs font-medium text-gray-700">Native Tools</h4>
+                                    <span className="text-[10px] text-gray-400">
+                                      ({nativeTools.length})
+                                    </span>
+                                  </div>
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {nativeTools.map(tool => {
+                                      const isSelected = tempAllowedTools.includes(tool.name);
+                                      return (
+                                        <button
+                                          key={tool.name}
+                                          onClick={() => handleToggleTool(tool.name)}
+                                          className={`px-2 py-1 text-xs rounded border transition-colors ${
+                                            isSelected
+                                              ? 'bg-green-50 border-green-300 text-green-700 hover:bg-green-100'
+                                              : 'bg-gray-50 border-gray-300 text-gray-400 hover:bg-gray-100'
+                                          }`}
+                                          title={tool.description}
+                                        >
+                                          {tool.name}
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                                
+                                {/* MCP Tools */}
+                                {mcpTools.length > 0 && (
+                                  <div>
+                                    <div className="flex items-center gap-1.5 mb-2">
+                                      <Server className="w-3.5 h-3.5 text-green-500" />
+                                      <h4 className="text-xs font-medium text-gray-700">MCP Tools</h4>
+                                      <span className="text-[10px] text-gray-400">
+                                        ({mcpTools.length})
+                                      </span>
+                                    </div>
+                                    <div className="flex flex-wrap gap-1.5">
+                                      {mcpTools.map(tool => {
+                                        const isSelected = tempAllowedTools.includes(tool.name);
+                                        return (
+                                          <button
+                                            key={tool.name}
+                                            onClick={() => handleToggleTool(tool.name)}
+                                            className={`px-2 py-1 text-xs rounded border transition-colors ${
+                                              isSelected
+                                                ? 'bg-green-50 border-green-300 text-green-700 hover:bg-green-100'
+                                                : 'bg-gray-50 border-gray-300 text-gray-400 hover:bg-gray-100'
+                                            }`}
+                                            title={tool.description}
+                                          >
+                                            {tool.name}
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+                                )}
+                              </>
+                            );
+                          })()}
                           
                           {/* Skills */}
                           <div>

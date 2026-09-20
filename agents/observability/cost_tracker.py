@@ -12,10 +12,11 @@ _meter = None
 _token_counter = None
 _cache_hit_counter = None
 _compression_ratio_histogram = None
+_tool_result_counter = None
 
 
 def init_cost_metrics() -> None:
-    global _meter, _token_counter, _cache_hit_counter, _compression_ratio_histogram
+    global _meter, _token_counter, _cache_hit_counter, _compression_ratio_histogram, _tool_result_counter
 
     try:
         from opentelemetry import metrics
@@ -38,6 +39,11 @@ def init_cost_metrics() -> None:
         description="Context compression retention ratio",
         unit="ratio",
     )
+    _tool_result_counter = _meter.create_counter(
+        "MyCode.tool.result_chars",
+        description="Tool result character count per tool",
+        unit="chars",
+    )
 
 
 def record_tokens(model: str, input_tokens: int, output_tokens: int, cached_tokens: int = 0):
@@ -56,6 +62,12 @@ def record_compression(before_tokens: int, after_tokens: int):
             "after_tokens": after_tokens,
             "tokens_saved": before_tokens - after_tokens,
         })
+
+
+def record_tool_result(tool_name: str, result_chars: int):
+    """记录工具结果字符数到可观测系统。"""
+    if _tool_result_counter:
+        _tool_result_counter.add(result_chars, {"tool": tool_name})
 
 
 @dataclass

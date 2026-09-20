@@ -51,24 +51,12 @@ class AgentConfig:
 
 
 BUILTIN_HIDDEN_AGENTS: dict[str, AgentConfig] = {
-    "compaction": AgentConfig(
-        name="compaction",
-        mode=AgentMode.PRIMARY,
-        hidden=True,
-        description="上下文压缩专用 Agent",
-        system_prompt="""You are a context summarization agent. Your task is to compress the conversation history while preserving:
-1. Key decisions and their rationale
-2. Important file paths and code references
-3. Unresolved issues or pending tasks
-4. Critical tool call results
-
-Output a concise summary that allows the main agent to continue working effectively.""",
-    ),
+    # 会话标题生成
     "title": AgentConfig(
         name="title",
         mode=AgentMode.PRIMARY,
         hidden=True,
-        description="生成对话标题",
+        description="生成会话标题",
         system_prompt="""你是一个标题生成器。根据用户的消息，生成一个简洁的标题（5-10个中文字符）。
 
 要求：
@@ -83,18 +71,53 @@ Output a concise summary that allows the main agent to continue working effectiv
 用户消息："我想学习如何使用Python进行数据分析"
 输出：Python数据分析学习""",
     ),
-    "summary": AgentConfig(
-        name="summary",
+    # Side Query: 记忆选择
+    "side_query_memory": AgentConfig(
+        name="side_query_memory",
         mode=AgentMode.PRIMARY,
         hidden=True,
-        description="生成对话摘要",
-        system_prompt="""Generate a PR-style summary of this conversation. Include:
-1. What was the goal/task
-2. Key changes made
-3. Files modified
-4. Any remaining issues
-
-Keep it concise and informative.""",
+        description="Side Query: 选择相关记忆",
+        system_prompt="根据用户消息和文件名，选择最相关的记忆文件。",
+    ),
+    # Side Query: Wiki 选择
+    "side_query_wiki": AgentConfig(
+        name="side_query_wiki",
+        mode=AgentMode.PRIMARY,
+        hidden=True,
+        description="Side Query: 选择相关 Wiki 条目",
+        system_prompt="根据用户消息和文件名，选择最相关的 Wiki 条目。",
+    ),
+    # Side Query: 压缩 - 工具折叠
+    "side_query_tool_fold": AgentConfig(
+        name="side_query_tool_fold",
+        mode=AgentMode.PRIMARY,
+        hidden=True,
+        description="Side Query: 工具结果折叠摘要",
+        system_prompt="为工具调用结果生成简洁的摘要。",
+    ),
+    # Side Query: 压缩 - 会话笔记编译
+    "side_query_compile": AgentConfig(
+        name="side_query_compile",
+        mode=AgentMode.PRIMARY,
+        hidden=True,
+        description="Side Query: 编译会话笔记和项目知识",
+        system_prompt="从对话历史中提取会话笔记和项目知识。",
+    ),
+    # Side Query: 技能提取
+    "side_query_skill": AgentConfig(
+        name="side_query_skill",
+        mode=AgentMode.PRIMARY,
+        hidden=True,
+        description="Side Query: 技能提取和评估",
+        system_prompt="从对话中提取可复用的技能模式。",
+    ),
+    # Side Query: 目标提取
+    "side_query_goal": AgentConfig(
+        name="side_query_goal",
+        mode=AgentMode.PRIMARY,
+        hidden=True,
+        description="Side Query: 目标标准提取",
+        system_prompt="从用户目标中提取验收标准。",
     ),
 }
 

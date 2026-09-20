@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { fetchSessionStats, fetchTokenBreakdown, SessionStats, TokenBreakdown as TokenBreakdownData } from '../../api/client';
 import { McpPanel } from './McpPanel';
+import { PromptsPanel } from './PromptsPanel';
 
 interface ContextPanelProps {
   sessionId: string | null;
@@ -276,6 +277,14 @@ export function ContextPanel({ sessionId }: ContextPanelProps) {
           MCP Services
         </div>
         <McpPanel />
+      </div>
+
+      {/* Prompts */}
+      <div>
+        <div className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-gray-50 border-b border-gray-200">
+          System Prompts
+        </div>
+        <PromptsPanel />
       </div>
     </div>
   );

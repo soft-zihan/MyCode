@@ -70,6 +70,9 @@ class ToolDispatcher:
                 span.set_attribute("success", True)
                 span.set_attribute("duration_s", round(time.time() - _tool_t0, 2))
                 span.set_attribute("langfuse.observation.output", str(result)[:2000])
+                span.set_attribute("mycode.tool.result_chars", len(result))
+                from agents.observability.cost_tracker import record_tool_result
+                record_tool_result(name, len(result))
             except asyncio.TimeoutError:
                 span.record_error(TimeoutError(f"Tool '{name}' timed out after {timeout}s"))
                 print_error(f"[ERROR] Tool '{name}' timed out after {timeout}s")

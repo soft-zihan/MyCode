@@ -459,3 +459,45 @@ def api_delete_custom_agent(agent_name: str) -> dict[str, Any]:
                 raise HTTPException(status_code=500, detail=f"Failed to delete agent: {e}")
     
     raise HTTPException(status_code=404, detail=f"Agent file not found for '{agent_name}'")
+
+
+# ============================================================
+# 提示词管理 API
+# ============================================================
+
+
+@router.get("/api/prompts")
+def api_list_prompts() -> list[dict[str, Any]]:
+    """列出所有提示词摘要。"""
+    from agents.core.prompt_registry import get_prompt_summary
+    return get_prompt_summary()
+
+
+@router.get("/api/prompts/{prompt_name}")
+def api_get_prompt(prompt_name: str) -> dict[str, Any]:
+    """获取指定提示词详情。"""
+    from agents.core.prompt_registry import get_prompt
+    prompt = get_prompt(prompt_name)
+    if not prompt:
+        raise HTTPException(status_code=404, detail=f"Prompt not found: {prompt_name}")
+    return {
+        "name": prompt.name,
+        "category": prompt.category,
+        "description": prompt.description,
+        "source": prompt.source,
+        "editable": prompt.editable,
+        "content": prompt.content,
+    }
+
+
+class PromptSaveRequest(BaseModel):
+    content: str
+
+
+@router.put("/api/prompts/{prompt_name}")
+def api_save_prompt(prompt_name: str, req: PromptSaveRequest) -> dict[str, Any]:
+    """保存提示词。"""
+    from agents.core.prompt_registry import save_prompt
+    if not save_prompt(prompt_name, req.content):
+        raise HTTPException(status_code=400, detail=f"Cannot save prompt: {prompt_name}")
+    return {"status": "ok", "message": f"Prompt '{prompt_name}' saved."}
