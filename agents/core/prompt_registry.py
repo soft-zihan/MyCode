@@ -56,21 +56,36 @@ def list_all_prompts() -> list[PromptInfo]:
             ))
     
     # 3. Side Query 提示词
+    # 这些是独立的提示词文件，不包括 hidden agent 对应的文件
     side_query_dir = _PROMPTS_DIR / "side_query"
     if side_query_dir.exists():
         side_query_descriptions = {
-            "select_memories": "选择相关记忆",
-            "select_wiki": "选择相关 Wiki 条目",
+            "compile_session": "编译会话笔记",
+            "consolidate_wiki": "审核 Wiki 相关性",
+            "distill_chunk": "蒸馏对话块",
+            "explore": "技术调研",
+            "extract_goal": "提取目标标准",
             "extract_knowledge": "提取持久知识",
             "generate_skill": "生成 Skill",
-            "consolidate_wiki": "审核 Wiki 相关性",
-            "compile_session": "编译会话笔记",
-            "extract_goal": "提取目标标准",
+            "select_memories": "选择相关记忆",
+            "select_wiki": "选择相关 Wiki 条目",
             "verify_goal": "验证目标达成",
-            "explore": "技术调研",
-            "distill_chunk": "蒸馏对话块",
         }
+        
+        # 这些文件已经在 hidden agent 中处理，不需要重复加载
+        hidden_agent_files = {
+            "select_memories.txt",
+            "select_wiki.txt",
+            "compile_session.txt",
+            "generate_skill.txt",
+            "extract_goal.txt",
+        }
+        
         for f in sorted(side_query_dir.glob("*.txt")):
+            # 跳过已经在 hidden agent 中处理的文件
+            if f.name in hidden_agent_files:
+                continue
+                
             prompts.append(PromptInfo(
                 name=f"side_query:{f.stem}",
                 category="side_query",
@@ -81,7 +96,18 @@ def list_all_prompts() -> list[PromptInfo]:
             ))
     
     # 4. Hidden Agent 提示词（归类为 side_query）
+    # 这些 agent 的提示词在 agent_mode.py 中定义，或者从文件加载
     user_agents_dir = Path.home() / ".mycode" / "agents"
+    
+    # 定义 hidden agent 到提示词文件的映射
+    hidden_agent_prompt_files = {
+        "side_query_memory": "select_memories.txt",
+        "side_query_wiki": "select_wiki.txt",
+        "side_query_compile": "compile_session.txt",
+        "side_query_skill": "generate_skill.txt",
+        "side_query_goal": "extract_goal.txt",
+    }
+    
     for name, config in BUILTIN_HIDDEN_AGENTS.items():
         override_path = user_agents_dir / f"{name}.md"
         has_override = override_path.exists()
@@ -91,14 +117,30 @@ def list_all_prompts() -> list[PromptInfo]:
             content = override_path.read_text(encoding="utf-8")
             source = str(override_path)
         else:
-            # 如果没有 override，生成包含 frontmatter 的初始内容
-            from agents.memory.frontmatter import format_frontmatter
-            meta = {"name": name, "description": config.description}
-            content = format_frontmatter(meta, config.system_prompt)
-            source = str(override_path)
+            # 检查是否有对应的提示词文件
+            prompt_file = hidden_agent_prompt_files.get(name)
+            if prompt_file:
+                prompt_path = _PROMPTS_DIR / "side_query" / prompt_file
+                if prompt_path.exists():
+                    content = prompt_path.read_text(encoding="utf-8")
+                    source = str(prompt_path)
+                else:
+                    # 文件不存在，使用 agent_mode.py 中的提示词
+                    from agents.memory.frontmatter import format_frontmatter
+                    meta = {"name": name, "description": config.description}
+                    content = format_frontmatter(meta, config.system_prompt)
+                    source = "builtin"
+            else:
+                # 没有对应的提示词文件，使用 agent_mode.py 中的提示词
+                from agents.memory.frontmatter import format_frontmatter
+                meta = {"name": name, "description": config.description}
+                content = format_frontmatter(meta, config.system_prompt)
+                source = "builtin"
         
+        # 使用更清晰的名称
+        display_name = name.replace("side_query_", "")
         prompts.append(PromptInfo(
-            name=f"side_query:{name.replace('side_query_', '')}",
+            name=f"side_query:{display_name}",
             category="side_query",
             description=config.description,
             source=source,
