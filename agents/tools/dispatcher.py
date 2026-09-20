@@ -96,6 +96,10 @@ class ToolDispatcher:
             return self._execute_list_session_notes_tool(inp)
         if name == "read_session_notes":
             return self._execute_read_session_notes_tool(inp)
+        if name == "git_diff_before_last_compress":
+            return await self._execute_git_diff_before_last_compress_tool(inp)
+        if name == "git_diff_session":
+            return await self._execute_git_diff_session_tool(inp)
         if name in ("enter_plan_mode", "exit_plan_mode"):
             return await self.agent._execute_plan_mode_tool(name)
         if name == "agent":
@@ -141,7 +145,8 @@ class ToolDispatcher:
         return (
             "Context compacted into structured session memory. "
             "Continue from the folded memory now present in the conversation context."
-            f"{suffix}"
+            f"{suffix}\n\n"
+            "Tip: Use `git_diff_before_last_compress` to see what files were modified before this compression."
         )
 
     def _execute_context_restore_tool(self, inp: dict) -> str:
@@ -308,6 +313,86 @@ class ToolDispatcher:
         from agents.memory.frontmatter import parse_frontmatter
         meta, body = parse_frontmatter(content)
         return body
+
+    async def _execute_git_diff_before_last_compress_tool(self, inp: dict) -> str:
+        """执行 git_diff_before_last_compress 工具。"""
+        from agents.core.snapshot_service import SnapshotService
+        from pathlib import Path
+
+        session_id = self.agent.session_id
+        snapshots_dir = Path.home() / ".mycode" / "snapshots"
+        svc = SnapshotService(self.agent.workspace, str(snapshots_dir))
+
+        # 获取当前 session 的所有 snapshot
+        snapshots = await svc.list(session_id=session_id)
+        if len(snapshots) < 2:
+            return "No compression history found for current session."
+
+        # 找到最后一次压缩的 snapshot（label 包含 "compress" 的）
+        compress_snapshots = [s for s in snapshots if s.label and "compress" in s.label]
+        if len(compress_snapshots) < 2:
+            return "Not enough compression history found."
+
+        # 上上次压缩 → 上次压缩
+        to_snapshot = compress_snapshots[0]  # 最新的压缩
+        from_snapshot = compress_snapshots[1]  # 上一次的压缩
+
+        # 获取 diff
+        file_diffs = await svc.diff(from_snapshot.id, to_snapshot.id)
+
+        # 过滤文件
+        files_filter = inp.get("files")
+        if files_filter:
+            file_diffs = [d for d in file_diffs if d.path in files_filter]
+
+        if not file_diffs:
+            return "No file changes found."
+
+        # 返回文件列表
+        lines = [f"Files changed between compress {from_snapshot.id[:8]} → {to_snapshot.id[:8]}:"]
+        for d in file_diffs:
+            lines.append(f"  {d.status:8s} {d.path}")
+
+        return "\n".join(lines)
+
+    async def _execute_git_diff_session_tool(self, inp: dict) -> str:
+        """执行 git_diff_session 工具。"""
+        from agents.core.snapshot_service import SnapshotService
+        from pathlib import Path
+
+        session_id = str(inp.get("session_id") or "").strip()
+        if not session_id:
+            return "Error: session_id is required."
+
+        snapshots_dir = Path.home() / ".mycode" / "snapshots"
+        svc = SnapshotService(self.agent.workspace, str(snapshots_dir))
+
+        # 获取指定 session 的所有 snapshot
+        snapshots = await svc.list(session_id=session_id)
+        if len(snapshots) < 2:
+            return f"Not enough snapshots found for session '{session_id}'."
+
+        # 第一个 → 最后一个
+        from_snapshot = snapshots[-1]  # 最早的
+        to_snapshot = snapshots[0]  # 最新的
+
+        # 获取 diff
+        file_diffs = await svc.diff(from_snapshot.id, to_snapshot.id)
+
+        # 过滤文件
+        files_filter = inp.get("files")
+        if files_filter:
+            file_diffs = [d for d in file_diffs if d.path in files_filter]
+
+        if not file_diffs:
+            return "No file changes found."
+
+        # 返回文件列表
+        lines = [f"Files changed in session {session_id}:"]
+        for d in file_diffs:
+            lines.append(f"  {d.status:8s} {d.path}")
+
+        return "\n".join(lines)
 
     async def _execute_agent_tool(self, inp: dict) -> str:
         """执行 agent 工具（子 Agent）。"""

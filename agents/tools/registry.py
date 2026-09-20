@@ -280,6 +280,41 @@ tool_definitions: list[ToolDef] = [
         "deferred": True,
     },
     {
+        "name": "git_diff_before_last_compress",
+        "description": "Get the list of files changed before the last context compression. Returns file paths, status (added/modified/deleted), and line counts. Use this to understand what was modified before compression.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional list of file paths to filter. If provided, only returns changes for these files.",
+                },
+            },
+        },
+        "deferred": True,
+    },
+    {
+        "name": "git_diff_session",
+        "description": "Get the list of files changed during a specific session. Returns file paths, status (added/modified/deleted), and line counts. Use this to understand what a session modified.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "session_id": {
+                    "type": "string",
+                    "description": "The session ID to get diff for.",
+                },
+                "files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional list of file paths to filter. If provided, only returns changes for these files.",
+                },
+            },
+            "required": ["session_id"],
+        },
+        "deferred": True,
+    },
+    {
         "name": "skill_create",
         "description": "Create a new reusable skill from explicit durable workflow guidance when no suitable existing skill exists.",
         "input_schema": {
