@@ -105,6 +105,16 @@ def write_wiki_entry(
 
         meta = infer_facets(raw_meta, wiki_type)
 
+        # session_notes 类型每次写新文件（带时间戳）
+        if wiki_type == "session_notes":
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            filename = f"session_{session_id}_{timestamp}.md"
+            filepath = type_dir / filename
+        else:
+            slug = _slugify(name)
+            filename = f"{slug}.md"
+            filepath = type_dir / filename
+
         filepath.write_text(format_frontmatter(meta, content))
 
         try:
@@ -118,17 +128,17 @@ def write_wiki_entry(
                 with concurrent.futures.ThreadPoolExecutor() as pool:
                     snap = loop.run_in_executor(
                         pool,
-                        lambda: asyncio.run(svc.capture(session_id="wiki", label=f"wiki:{wiki_type}/{slug}"))
+                        lambda: asyncio.run(svc.capture(session_id="wiki", label=f"wiki:{wiki_type}/{filename}"))
                     ).result()
             except RuntimeError:
-                snap = asyncio.run(svc.capture(session_id="wiki", label=f"wiki:{wiki_type}/{slug}"))
+                snap = asyncio.run(svc.capture(session_id="wiki", label=f"wiki:{wiki_type}/{filename}"))
             meta["checkpoint_id"] = snap.id
             filepath.write_text(format_frontmatter(meta, content))
         except Exception:
             pass
 
         record_wiki_change(str(filepath.relative_to(wiki_dir)))
-        _git_commit(f"wiki: add {wiki_type}/{slug}")
+        _git_commit(f"wiki: add {wiki_type}/{filename}")
         update_wiki_index()
         if span:
             span.set_attribute("mycode.wiki.filepath", str(filepath.relative_to(wiki_dir)))

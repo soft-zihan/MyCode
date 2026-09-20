@@ -492,6 +492,7 @@ export default function ToolsPage() {
                   inputSchema: tool.input_schema,
                   source: 'native',
                 };
+                const isPlanTool = tool.name.startsWith('plan_') || tool.name === 'enter_plan_mode' || tool.name === 'exit_plan_mode';
                 return (
                   <div
                     key={tool.name}
@@ -502,6 +503,9 @@ export default function ToolsPage() {
                   >
                     <div className="flex items-center gap-1.5">
                       <h3 className="text-xs font-medium text-gray-900 truncate flex-1">{tool.name}</h3>
+                      {isPlanTool && (
+                        <span className="text-[9px] px-1 py-0.5 bg-blue-100 text-blue-700 rounded">P</span>
+                      )}
                       {tool.deferred && (
                         <span className="text-[9px] px-1 py-0.5 bg-purple-100 text-purple-700 rounded">D</span>
                       )}

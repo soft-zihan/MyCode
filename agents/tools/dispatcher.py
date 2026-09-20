@@ -243,10 +243,18 @@ class ToolDispatcher:
                 from agents.memory.frontmatter import parse_frontmatter
                 meta, body = parse_frontmatter(content)
 
-                session_id = f.stem.replace("session_", "")
+                # 文件名格式: session_{session_id}_{timestamp}.md
+                parts = f.stem.split("_")
+                if len(parts) >= 3:
+                    session_id = parts[1]
+                    timestamp = "_".join(parts[2:])
+                else:
+                    session_id = f.stem.replace("session_", "")
+                    timestamp = ""
 
                 notes.append({
                     "session_id": session_id,
+                    "timestamp": timestamp,
                     "title": meta.get("name", session_id),
                     "time": meta.get("modified", ""),
                     "content": body,
@@ -262,7 +270,8 @@ class ToolDispatcher:
 
         result_lines = [f"Found {len(notes)} session notes:"]
         for note in notes:
-            result_lines.append(f"  [{note['session_id']}] {note['title']} ({note['time']})")
+            ts = f" [{note['timestamp']}]" if note['timestamp'] else ""
+            result_lines.append(f"  [{note['session_id']}{ts}] {note['title']} ({note['time']})")
 
         if notes:
             latest = notes[0]
