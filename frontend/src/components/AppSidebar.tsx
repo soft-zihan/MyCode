@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { MessageSquare, Sparkles, Bot, Wrench, PanelLeft, PanelRight } from 'lucide-react';
+import { MessageSquare, Sparkles, Bot, Wrench, Activity, PanelLeft, PanelRight } from 'lucide-react';
 
 interface AppSidebarProps {
   children: React.ReactNode;
@@ -11,6 +11,7 @@ const navItems = [
   { path: '/agents', icon: Bot, label: 'Agents' },
   { path: '/mcp', icon: Wrench, label: 'Tools' },
   { path: '/skills', icon: Sparkles, label: 'Skills' },
+  { path: '/eval', icon: Activity, label: 'Eval' },
 ];
 
 const MIN_WIDTH = 180;

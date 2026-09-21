@@ -34,7 +34,7 @@ def main() -> None:
     args = parser.parse_args()
 
     from agents.observability.langfuse_api import LangfuseApiClient, load_langfuse_env
-    from eval.langfuse.code_evaluators import evaluate_bundle
+    from eval.langfuse.pipeline import evaluate_traces
 
     load_langfuse_env(PROJECT_ROOT)
     client = LangfuseApiClient()
@@ -48,32 +48,17 @@ def main() -> None:
         trace_ids = [t["id"] for t in traces if t.get("id")]
     print(f"[eval] 待评估 traces: {len(trace_ids)}")
 
-    total_scores = 0
-    for tid in trace_ids:
-        bundle = client.fetch_trace(tid)
-        scores = evaluate_bundle(bundle)
-        for s in scores:
-            client.create_score(
-                trace_id=tid,
-                name=s["name"],
-                value=s["value"],
-                data_type=s["data_type"],
-                comment=s.get("comment"),
-            )
-        total_scores += len(scores)
-        line = " ".join(f"{s['name']}={s['value']}" for s in scores) or "(no scores)"
-        print(f"  {tid[:16]}  {line}")
+    def progress(payload: dict) -> None:
+        result = payload["result"]
+        line = " ".join(f"{s['name']}={s['value']}" for s in result["code_scores"]) or "(no scores)"
+        print(f"  {result['trace_id'][:16]}  {line}")
+        for judge_score in result.get("judge_scores", []):
+            print(f"    [judge] {judge_score['name']}={judge_score['score']:.2f}  {judge_score['reasoning'][:80]}")
+        if judge_error := result.get("judge_error"):
+            print(f"    [judge] failed: {judge_error}")
 
-        if args.judge:
-            from eval.langfuse.judge import judge_trace
-            try:
-                posted = judge_trace(client, tid)
-                for p in posted:
-                    print(f"    [judge] {p['name']}={p['score']:.2f}  {p['reasoning'][:80]}")
-            except Exception as e:
-                print(f"    [judge] failed: {e}")
-
-    print(f"[eval] 完成：{len(trace_ids)} traces / {total_scores} code scores")
+    summary = evaluate_traces(client, trace_ids, judge=args.judge, progress=progress)
+    print(f"[eval] 完成：{summary['traces']} traces / {summary['code_scores']} code scores")
 
     if args.sync_failures:
         from eval.langfuse.dataset_sync import export_failures_to_dataset

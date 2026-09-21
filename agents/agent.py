@@ -140,6 +140,7 @@ class Agent:
                  thinking: bool=False,
                  max_cost_usd: float | None=None,
                  max_turns: int | None=None,
+                 max_tool_calls: int | None=None,
                  confirm_fn:Callable[[str], Awaitable[bool]] | None=None,
                  custom_system_prompt: str | None=None,
                  custom_tools: list[ToolDef] | None=None,
@@ -158,6 +159,7 @@ class Agent:
                 thinking = options.thinking
                 max_cost_usd = options.max_cost_usd
                 max_turns = options.max_turns
+                max_tool_calls = options.max_tool_calls
                 confirm_fn = options.confirm_fn
                 custom_system_prompt = options.custom_system_prompt
                 custom_tools = options.custom_tools
@@ -173,6 +175,7 @@ class Agent:
         self.tools = custom_tools if custom_tools is not None else tool_definitions
         self.max_cost_usd = max_cost_usd
         self.max_turns = max_turns
+        self.max_tool_calls = max_tool_calls
         self.confirm_fn = confirm_fn
         self._custom_system_prompt = custom_system_prompt
         self.workspace: Path = Path(workspace).resolve() if workspace else Path.cwd()
@@ -264,7 +267,11 @@ class Agent:
         self._last_tool_name: str = ""
         self._repeat_chain_key: str = ""
         self._repeat_chain_count: int = 0
+        self._loop_guard_stop_reason: str | None = None
+        self._tool_budget_stop_reason: str | None = None
         self._tool_result_chars: dict[str, int] = {}  # 每个工具的结果字符数统计
+        self._tool_call_count: int = 0
+        self._failed_tool_call_count: int = 0
 
         from .core.workspace import set_workspace, reset_workspace
         _ws_token = set_workspace(self.workspace)
@@ -428,7 +435,15 @@ class Agent:
             use_openai=True,
         )
 
-    def _spawn_sub_agent(self, *, system_prompt: str, tools: list[ToolDef], model_ref: str, label: str) -> "Agent":
+    def _spawn_sub_agent(
+        self,
+        *,
+        system_prompt: str,
+        tools: list[ToolDef],
+        model_ref: str,
+        label: str,
+        max_tool_calls: int | None = None,
+    ) -> "Agent":
         endpoint = resolve_agent_endpoint(label, model_ref=model_ref, primary=self._primary_endpoint())
         return Agent(
             model=endpoint.model,
@@ -437,6 +452,7 @@ class Agent:
             custom_system_prompt=system_prompt,
             custom_tools=tools,
             is_sub_agent=True,
+            max_tool_calls=max_tool_calls,
             permission_mode="plan" if self.permission_mode == "plan" else "bypassPermissions",
             parent_abort_event=self._abort_event,
             workspace=self.workspace,
@@ -620,6 +636,8 @@ class Agent:
         self._turn_output_buffer = []
         self._turn_thinking_buffer = []
         self._turn_event_buffer = []
+        self._loop_guard_stop_reason = None
+        self._tool_budget_stop_reason = None
         self._user_message_written_this_turn = False
 
         self._current_turn += 1
@@ -687,17 +705,35 @@ class Agent:
             self._turn_thinking_buffer = None
             self._turn_event_buffer = None
 
-            self.session.append("turn/end", {
+            if self._loop_guard_stop_reason:
+                turn_end_reason = "loop_guard"
+            elif self._tool_budget_stop_reason:
+                turn_end_reason = "budget_exceeded"
+            else:
+                turn_end_reason = "completed"
+            turn_end_event = {
                 "turn": self._current_turn,
-                "reason": "completed",
+                "reason": turn_end_reason,
                 "sub_agent_id": self._current_sub_agent_id,
                 "trace_id": self._current_trace_id,
-            })
+            }
+            if self._loop_guard_stop_reason:
+                turn_end_event["loop_guard_reason"] = self._loop_guard_stop_reason
+            if self._tool_budget_stop_reason:
+                turn_end_event["tool_budget_reason"] = self._tool_budget_stop_reason
+                turn_end_event["tool_call_count"] = self._tool_call_count
+                turn_end_event["max_tool_calls"] = self.max_tool_calls
+            self.session.append("turn/end", turn_end_event)
             turn_span.update(
-                output=assistant_text[:4000],
+                output=assistant_text[:20000],
                 metadata={
                     "event_range_end_seq": self.session.seq,
                     "aborted": self._aborted,
+                    "loop_guard_reason": self._loop_guard_stop_reason,
+                    "tool_budget_reason": self._tool_budget_stop_reason,
+                    "tool_call_count": self._tool_call_count,
+                    "failed_tool_call_count": self._failed_tool_call_count,
+                    "max_tool_calls": self.max_tool_calls,
                     "input_tokens_delta": self.total_input_tokens - _turn_start_input_tokens,
                     "output_tokens_delta": self.total_output_tokens - _turn_start_output_tokens,
                     "duration_s": round(time.time() - _turn_t0, 2),
@@ -733,12 +769,17 @@ class Agent:
         await self.chat(prompt)
         text = "".join(self._output_buffer)
         self._output_buffer = None
+        stop_reason = self._loop_guard_stop_reason or self._tool_budget_stop_reason
         return {
             "text": text,
             "tokens": {
                 "input": self.total_input_tokens - prev_in,
                 "output": self.total_output_tokens - prev_out
             },
+            "stop_reason": stop_reason,
+            "tool_budget_exceeded": bool(self._tool_budget_stop_reason),
+            "tool_call_count": self._tool_call_count,
+            "failed_tool_call_count": self._failed_tool_call_count,
         }
 
     def _emit_text(self, text: str) -> None:
@@ -973,8 +1014,25 @@ class Agent:
             event_data["sub_agent_id"] = self._current_sub_agent_id
         self.session.append("tool_call", event_data)
 
-    def publish_tool_result_event(self, call_id: str, name: str, result: str, status: str, snapshot: dict | None = None) -> None:
+    def publish_tool_result_event(
+        self,
+        call_id: str,
+        name: str,
+        result: str,
+        status: str,
+        snapshot: dict | None = None,
+        outcome: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        self._tool_call_count += 1
+        if status != "ok" or (outcome and outcome != "success"):
+            self._failed_tool_call_count += 1
+
         event_data = {"call_id": call_id, "name": name, "result": result, "status": status, "turn": self._current_turn, "step": self._current_step}
+        if outcome:
+            event_data["outcome"] = outcome
+        if metadata:
+            event_data["metadata"] = metadata
         if self._current_sub_agent_id:
             event_data["sub_agent_id"] = self._current_sub_agent_id
         if snapshot:
@@ -1051,11 +1109,20 @@ class Agent:
     def _get_current_cost_usd(self) -> float:
         return (self.total_input_tokens / 1_000_000) * 3 + (self.total_output_tokens / 1_000_000) * 15
 
+    def tool_budget_exceeded(self) -> bool:
+        return self.max_tool_calls is not None and self._tool_call_count >= self.max_tool_calls
+
     def _check_budget(self) -> dict:
         if self.max_cost_usd is not None and self._get_current_cost_usd() >= self.max_cost_usd:
-            return {"exceeded": True, "reason": f"Cost limit reached (${self._get_current_cost_usd():.4f} >= ${self.max_cost_usd})"}
+            return {"exceeded": True, "kind": "cost", "reason": f"Cost limit reached (${self._get_current_cost_usd():.4f} >= ${self.max_cost_usd})"}
         if self.max_turns is not None and self.current_turns >= self.max_turns:
-            return {"exceeded": True, "reason": f"Turn limit reached ({self.current_turns} >= {self.max_turns})"}
+            return {"exceeded": True, "kind": "turns", "reason": f"Turn limit reached ({self.current_turns} >= {self.max_turns})"}
+        if self.tool_budget_exceeded():
+            return {
+                "exceeded": True,
+                "kind": "tool_calls",
+                "reason": f"Tool call limit reached ({self._tool_call_count} >= {self.max_tool_calls})",
+            }
         return {"exceeded": False}
 
     async def compact(self)->None:

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { ChevronRight, Folder, Clock, Plus, Pencil, Trash2, X, ChevronDown, MessageSquare, Wrench, Bot, Sparkles, PanelLeft } from 'lucide-react';
+import { ChevronRight, Folder, Clock, Plus, Pencil, Trash2, X, ChevronDown, MessageSquare, Wrench, Bot, Sparkles, Activity, PanelLeft } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
 import {
   fetchSessions, deleteSession, Session,
@@ -262,8 +262,9 @@ export function LeftSidebar({ onSessionSelect, onNewSession, currentSessionId, r
     { path: '/', icon: MessageSquare, label: 'Chat' },
     { path: '/mcp', icon: Wrench, label: 'Tools' },
     { path: '/agents', icon: Bot, label: 'Agents' },
-      { path: '/skills', icon: Sparkles, label: 'Skills' },
-    ];
+    { path: '/skills', icon: Sparkles, label: 'Skills' },
+    { path: '/eval', icon: Activity, label: 'Eval' },
+  ];
 
   if (collapsed) {
     return (

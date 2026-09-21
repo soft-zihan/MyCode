@@ -25,6 +25,7 @@ from eval.langfuse.step_scorer import StepRecord, extract_steps
 class FailureMode(Enum):
     """失败模式。"""
     TOOL_LOOP = "tool_loop"
+    SUBAGENT_LOOP = "subagent_loop"
     WRONG_TOOL = "wrong_tool"
     PARAM_ERROR = "param_error"
     CONTEXT_LOSS = "context_loss"
@@ -105,6 +106,7 @@ class FailureClassifier:
     
     def __init__(self):
         self.checkers = [
+            self._check_subagent_loop,
             self._check_tool_loop,
             self._check_wrong_tool,
             self._check_param_error,
@@ -121,8 +123,9 @@ class FailureClassifier:
     ) -> TraceClassification:
         """对轨迹进行分类。"""
         steps = extract_steps(bundle)
+        agent_obs = [o for o in bundle.get("observations", []) if o.get("type") == "AGENT"]
         
-        if not steps:
+        if not steps and not agent_obs:
             return TraceClassification(
                 trace_id=trace_id,
                 is_failure=False,
@@ -131,8 +134,17 @@ class FailureClassifier:
             )
         
         has_error = any(s.tool_level == "ERROR" for s in steps)
+        has_agent_timeout = False
+        for obs in agent_obs:
+            meta = obs.get("metadata") if isinstance(obs.get("metadata"), dict) else {}
+            status = str(meta.get("status") or "").lower()
+            outcome = str(meta.get("outcome") or "").lower()
+            output = str(obs.get("output") or "").lower()
+            if outcome == "timeout" or status == "timeout" or "timed out" in output:
+                has_agent_timeout = True
+                break
         
-        if not has_error and len(steps) < 50:
+        if not has_error and not has_agent_timeout and len(steps) < 50:
             return TraceClassification(
                 trace_id=trace_id,
                 is_failure=False,
@@ -159,6 +171,71 @@ class FailureClassifier:
             primary_mode=primary_mode,
         )
     
+    def _check_subagent_loop(
+        self,
+        steps: list[StepRecord],
+        bundle: dict[str, Any],
+    ) -> FailureClassification | None:
+        """检查子 Agent 超时/重复派发。"""
+        agents = [o for o in bundle.get("observations", []) if o.get("type") == "AGENT"]
+        if not agents:
+            return None
+
+        timeouts: list[dict[str, Any]] = []
+        for obs in agents:
+            meta = obs.get("metadata") if isinstance(obs.get("metadata"), dict) else {}
+            status = str(meta.get("status") or "").lower()
+            outcome = str(meta.get("outcome") or "").lower()
+            output = str(obs.get("output") or "").lower()
+            if outcome == "timeout" or status == "timeout" or "timed out" in output:
+                timeouts.append(obs)
+
+        if len(timeouts) < 2:
+            return None
+
+        seen: dict[tuple, int] = {}
+        progressing = 0
+        evidence: list[str] = []
+        for obs in timeouts:
+            meta = obs.get("metadata") if isinstance(obs.get("metadata"), dict) else {}
+            key_input = obs.get("input")
+            if not isinstance(key_input, str):
+                key_input = json.dumps(key_input, ensure_ascii=False, sort_keys=True, default=str)
+            key = (obs.get("name"), key_input[:200])
+            seen[key] = seen.get(key, 0) + 1
+            tool_calls = int(meta.get("tool_call_count") or 0)
+            failed_calls = int(meta.get("failed_tool_call_count") or 0)
+            if tool_calls >= 5 and failed_calls / max(tool_calls, 1) <= 0.5:
+                progressing += 1
+                evidence.append(
+                    f"子 Agent `{obs.get('name')}` 超时但有进展：tool_calls={tool_calls}, failed={failed_calls}, child_turns={meta.get('child_turn_count')}"
+                )
+            else:
+                evidence.append(
+                    f"子 Agent `{obs.get('name')}` 超时且无明显进展：tool_calls={tool_calls}, failed={failed_calls}, child_turns={meta.get('child_turn_count')}"
+                )
+
+        worst = max(seen.items(), key=lambda kv: kv[1])
+        repeated_count = worst[1]
+        if repeated_count >= 2:
+            evidence.insert(0, f"相同子 Agent 输入重复超时 {repeated_count} 次")
+        evidence.insert(0, f"子 Agent 超时 {len(timeouts)}/{len(agents)} 次，其中有进展 {progressing} 次")
+
+        looping = repeated_count >= 2 or progressing < len(timeouts)
+        confidence = min(0.5 + 0.15 * len(timeouts) + (0.2 if repeated_count >= 2 else 0.0), 1.0)
+        if not looping:
+            confidence = min(confidence, 0.4)
+
+        return FailureClassification(
+            mode=FailureMode.SUBAGENT_LOOP,
+            confidence=confidence,
+            evidence=evidence[:8],
+            suggestion=(
+                "区分复杂子任务和循环失败：相同 prompt 重复超时时应阻止重试；"
+                "不同 prompt 但持续超时应缩小任务、改用直接工具或提高/取消子 Agent 预算。"
+            ),
+        )
+
     def _check_tool_loop(
         self,
         steps: list[StepRecord],
@@ -166,26 +243,33 @@ class FailureClassifier:
     ) -> FailureClassification | None:
         """检查工具死循环。"""
         seen: dict[tuple, int] = {}
+        failed_seen: dict[tuple, int] = {}
         for step in steps:
             input_str = json.dumps(step.tool_input, sort_keys=True, default=str)[:200]
             key = (step.tool_name, input_str)
             seen[key] = seen.get(key, 0) + 1
+            if step.tool_level == "ERROR":
+                failed_seen[key] = failed_seen.get(key, 0) + 1
         
         loops = {k: v for k, v in seen.items() if v >= 3}
         if not loops:
             return None
         
-        worst = max(loops.items(), key=lambda kv: kv[1])
+        worst = max(loops.items(), key=lambda kv: (failed_seen.get(kv[0], 0), kv[1]))
         tool_name, count = worst[0][0], worst[1]
+        failed_count = failed_seen.get(worst[0], 0)
+        confidence = min((count + failed_count) / 6, 1.0)
+        evidence = [f"工具 `{tool_name}` 被调用 {count} 次（相同输入）"]
+        if failed_count:
+            evidence.append(f"其中 {failed_count} 次为 ERROR，重复失败比单纯重复更像死循环")
+        else:
+            evidence.append("没有 ERROR 级别，可能是合法重复读取，也可能是低效轨迹")
         
         return FailureClassification(
             mode=FailureMode.TOOL_LOOP,
-            confidence=min(count / 5, 1.0),
-            evidence=[
-                f"工具 `{tool_name}` 被调用 {count} 次（相同输入）",
-                "Agent 可能陷入死循环，未尝试替代方案",
-            ],
-            suggestion="增加重复检测，超过 2 次相同调用时提示 Agent 尝试其他方法",
+            confidence=confidence,
+            evidence=evidence,
+            suggestion="增加重复检测，相同调用失败 2-3 次后阻止重试并要求更换策略",
         )
     
     def _check_wrong_tool(

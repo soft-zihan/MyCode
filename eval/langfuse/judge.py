@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections import Counter
 from typing import Any
 
 JUDGE_MODEL_ENV = "MYCODE_JUDGE_MODEL"
@@ -81,22 +82,66 @@ def _obs_attrs(obs: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _tool_sequence_text(bundle: dict[str, Any], max_items: int = 30) -> str:
-    """按时间排序的工具调用摘要（供 trajectory judge）。"""
+def _truncate_middle(text: Any, *, head_chars: int = 1000, tail_chars: int = 4000) -> str:
+    value = str(text or "")
+    if len(value) <= head_chars + tail_chars:
+        return value
+    return f"{value[:head_chars]}\n...[truncated {len(value) - head_chars - tail_chars} chars]...\n{value[-tail_chars:]}"
+
+
+def _tool_status(obs: dict[str, Any]) -> str:
+    metadata = obs.get("metadata") or {}
+    outcome = str(metadata.get("outcome") or "").lower()
+    if obs.get("level") == "ERROR" or outcome in {"error", "timeout", "cancelled", "blocked"}:
+        return (outcome or "error").upper()
+    return "ok"
+
+
+def _tool_line(index: int, obs: dict[str, Any]) -> str:
+    inp = obs.get("input")
+    if not isinstance(inp, str):
+        inp = json.dumps(inp, ensure_ascii=False, default=str)
+    return f"{index}. {obs.get('name')} [{_tool_status(obs)}] input={inp[:200]}"
+
+
+def _tool_sequence_text(
+    bundle: dict[str, Any],
+    *,
+    head_items: int = 15,
+    tail_items: int = 15,
+    failure_items: int = 20,
+) -> str:
+    """按时间排序的工具调用摘要（供 trajectory judge）。
+
+    长轨迹不只看前 30 个工具，而是保留 head、tail、失败/超时/blocked 样本和工具计数。
+    """
     tools = sorted(
         (o for o in bundle.get("observations", []) if o.get("type") == "TOOL"),
         key=lambda o: o.get("startTime") or "",
     )
-    lines = []
-    for i, t in enumerate(tools[:max_items], 1):
-        inp = t.get("input")
-        if not isinstance(inp, str):
-            inp = json.dumps(inp, ensure_ascii=False, default=str)
-        status = "ERROR" if t.get("level") == "ERROR" else "ok"
-        lines.append(f"{i}. {t.get('name')} [{status}] input={inp[:200]}")
-    if len(tools) > max_items:
-        lines.append(f"... ({len(tools) - max_items} more)")
-    return "\n".join(lines) or "(no tool calls)"
+    if not tools:
+        return "(no tool calls)"
+
+    indexed = list(enumerate(tools, 1))
+    selected: dict[int, tuple[int, dict[str, Any]]] = {}
+    for item in indexed[:head_items] + indexed[-tail_items:]:
+        selected[item[0]] = item
+
+    failures = [(i, t) for i, t in indexed if _tool_status(t) != "ok"]
+    for item in failures[:failure_items]:
+        selected[item[0]] = item
+
+    lines = [
+        f"total_tool_calls={len(tools)}",
+        "tool_counts=" + json.dumps(dict(Counter(t.get("name") for _, t in indexed)), ensure_ascii=False),
+        f"failed_or_blocked_tool_calls={len(failures)}",
+    ]
+    for index, tool in sorted(selected.values()):
+        lines.append(_tool_line(index, tool))
+    omitted = len(tools) - len(selected)
+    if omitted > 0:
+        lines.append(f"... ({omitted} selected/summarized tool calls omitted)")
+    return "\n".join(lines)
 
 
 def parse_judge_response(raw: str) -> dict[str, Any]:
@@ -130,8 +175,8 @@ def judge_task_completion(bundle: dict[str, Any]) -> dict[str, Any] | None:
     if not user_input or not agent_output:
         return None
     prompt = TASK_COMPLETION_PROMPT.format(
-        user_input=str(user_input)[:3000],
-        agent_output=str(agent_output)[:3000],
+        user_input=_truncate_middle(user_input, head_chars=2000, tail_chars=1000),
+        agent_output=_truncate_middle(agent_output, head_chars=1000, tail_chars=6000),
     )
     return _call_judge(prompt)
 
@@ -144,8 +189,8 @@ def judge_trajectory(bundle: dict[str, Any]) -> dict[str, Any] | None:
     if not any(o.get("type") == "TOOL" for o in bundle.get("observations", [])):
         return None
     prompt = TRAJECTORY_PROMPT.format(
-        user_input=str(user_input)[:2000],
-        tool_sequence=_tool_sequence_text(bundle)[:6000],
+        user_input=_truncate_middle(user_input, head_chars=1500, tail_chars=500),
+        tool_sequence=_tool_sequence_text(bundle)[:12000],
     )
     return _call_judge(prompt)
 

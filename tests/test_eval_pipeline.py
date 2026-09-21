@@ -11,17 +11,20 @@ from eval.langfuse.code_evaluators import (
     evaluate_bundle,
     eval_event_range_complete,
     eval_repeated_tool_calls,
+    eval_subagent_timeout_loop,
     eval_tool_success,
 )
-from eval.langfuse.judge import parse_judge_response, _tool_sequence_text
+from eval.langfuse.failure_classifier import FailureClassifier, FailureMode
+from eval.langfuse.judge import parse_judge_response, _tool_sequence_text, _truncate_middle
 
 
-def _obs(type_: str, name: str, level: str = "DEFAULT", input=None, metadata: dict | None = None, start: str = "") -> dict:
+def _obs(type_: str, name: str, level: str = "DEFAULT", input=None, output=None, metadata: dict | None = None, start: str = "") -> dict:
     return {
         "type": type_,
         "name": name,
         "level": level,
         "input": input,
+        "output": output,
         "startTime": start,
         "metadata": metadata or {},
     }
@@ -62,6 +65,32 @@ class TestCodeEvaluators:
         r = eval_repeated_tool_calls(bundle)
         assert r["value"] is False
 
+    def test_subagent_timeout_loop_repeated_prompt(self):
+        same = lambda: _obs(
+            "AGENT",
+            "agent.general",
+            level="ERROR",
+            input="same long task",
+            output="Sub-agent timed out after 900s",
+            metadata={"status": "timeout", "outcome": "timeout", "tool_call_count": 0, "failed_tool_call_count": 0},
+        )
+        r = eval_subagent_timeout_loop(_bundle([same(), same()]))
+        assert r["value"] is True
+        assert "timeouts=2" in r["comment"]
+
+    def test_subagent_timeout_with_progress_not_looping(self):
+        obs = lambda i: _obs(
+            "AGENT",
+            "agent.general",
+            level="ERROR",
+            input=f"different task {i}",
+            output="timeout",
+            metadata={"status": "timeout", "outcome": "timeout", "tool_call_count": 8, "failed_tool_call_count": 1, "child_turn_count": 2},
+        )
+        r = eval_subagent_timeout_loop(_bundle([obs(1), obs(2)]))
+        assert r["value"] is False
+        assert "progressing_timeouts=2" in r["comment"]
+
     def test_event_range_complete(self):
         bundle = _bundle([_obs("CHAIN", "turn", metadata={
             "turn_id": "s:1",
@@ -81,6 +110,23 @@ class TestCodeEvaluators:
         ])
         names = {r["name"] for r in evaluate_bundle(bundle)}
         assert names == {"tool_success", "repeated_tool_calls", "event_range_complete"}
+
+
+class TestFailureClassifier:
+    def test_subagent_timeout_loop_is_classified(self):
+        obs = _obs(
+            "AGENT",
+            "agent.general",
+            level="ERROR",
+            input="same task",
+            output="timed out",
+            metadata={"status": "timeout", "outcome": "timeout", "tool_call_count": 0},
+        )
+        bundle = _bundle([obs, obs], input="question", output="")
+        result = FailureClassifier().classify(bundle, "trace-1")
+        assert result.is_failure
+        assert result.primary_mode == FailureMode.SUBAGENT_LOOP
+        assert any("重复超时" in ev for ev in result.classifications[0].evidence)
 
 
 class TestEvaluateTraceWithFakeClient:
@@ -130,6 +176,30 @@ class TestJudgeParsing:
         text = _tool_sequence_text(bundle)
         assert text.index("a_tool") < text.index("b_tool")
         assert "ERROR" in text
+
+    def test_tool_sequence_keeps_head_tail_and_failures(self):
+        observations = []
+        for i in range(50):
+            level = "ERROR" if i == 25 else "DEFAULT"
+            observations.append(_obs(
+                "TOOL",
+                f"tool_{i}",
+                level=level,
+                input="{}",
+                start=f"2026-01-01T00:00:{i:02d}Z",
+            ))
+        text = _tool_sequence_text(_bundle(observations), head_items=5, tail_items=5, failure_items=5)
+        assert "total_tool_calls=50" in text
+        assert "tool_0 [ok]" in text
+        assert "tool_25 [ERROR]" in text
+        assert "tool_49 [ok]" in text
+        assert "\n20. tool_20 [ok]" not in text
+
+    def test_truncate_middle_preserves_final_answer(self):
+        text = _truncate_middle("HEAD" + "x" * 10000 + "FINAL ANSWER: 65", head_chars=10, tail_chars=20)
+        assert text.startswith("HEAD")
+        assert text.endswith("FINAL ANSWER: 65")
+        assert "truncated" in text
 
 
 class TestDatasetSync:

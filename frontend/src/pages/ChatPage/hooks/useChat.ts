@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   fetchConfig, AppConfig,
   compactSession, updatePermissionMode,
@@ -104,6 +105,7 @@ function computeBreakdownFromStats(event: Record<string, any>): Record<string, a
 }
 
 export function useChat() {
+  const [searchParams] = useSearchParams();
   const [inputValue, setInputValue] = useState('');
   const [contextFiles, setContextFiles] = useState<string[]>([]);
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -396,18 +398,20 @@ export function useChat() {
       setCurrentProject(lastCwd.split('/').pop() || lastCwd);
     }
     
-    // 恢复上次的 session（先探测：session 已被删除时清理陈旧引用，回到空状态）
-    const lastSessionId = localStorage.getItem('lastSessionId');
-    if (lastSessionId) {
-      logger.info('[INIT] restoring session:', lastSessionId);
-      fetchSessionSummary(lastSessionId)
-        .then(() => handleSessionSelect(lastSessionId))
+    const requestedSessionId = searchParams.get('session');
+    const initialSessionId = requestedSessionId || localStorage.getItem('lastSessionId');
+    if (initialSessionId) {
+      logger.info('[INIT] restoring session:', initialSessionId);
+      fetchSessionSummary(initialSessionId)
+        .then(() => handleSessionSelect(initialSessionId))
         .catch((err: unknown) => {
           if ((err as { status?: number } | undefined)?.status === 404) {
-            logger.info('[INIT] stale lastSessionId removed:', lastSessionId);
-            localStorage.removeItem('lastSessionId');
+            logger.info('[INIT] stale session removed:', initialSessionId);
+            if (!requestedSessionId) {
+              localStorage.removeItem('lastSessionId');
+            }
           } else {
-            handleSessionSelect(lastSessionId);
+            handleSessionSelect(initialSessionId);
           }
         });
     }

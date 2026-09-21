@@ -152,6 +152,7 @@ class LangfuseApiClient:
         expected_output: Any = None,
         metadata: dict | None = None,
         item_id: str | None = None,
+        source_trace_id: str | None = None,
     ) -> dict[str, Any]:
         response = self.api.dataset_items.create(
             dataset_name=dataset_name,
@@ -159,9 +160,46 @@ class LangfuseApiClient:
             expected_output=expected_output,
             metadata=metadata,
             id=item_id,
+            source_trace_id=source_trace_id,
             request_options=self._request_options,
         )
         return _model_to_dict(response)
+
+    def create_dataset_run_item(
+        self,
+        run_name: str,
+        dataset_item_id: str,
+        trace_id: str | None = None,
+        observation_id: str | None = None,
+        run_description: str | None = None,
+        metadata: dict | None = None,
+    ) -> dict[str, Any]:
+        response = self.api.dataset_run_items.create(
+            run_name=run_name,
+            dataset_item_id=dataset_item_id,
+            trace_id=trace_id,
+            observation_id=observation_id,
+            run_description=run_description,
+            metadata=metadata,
+            request_options=self._request_options,
+        )
+        return _model_to_dict(response)
+
+    def fetch_dataset_runs(self, dataset_name: str, page: int = 1, limit: int = 50) -> list[dict[str, Any]]:
+        response = self.api.datasets.get_runs(
+            dataset_name,
+            page=page,
+            limit=limit,
+            request_options=self._request_options,
+        )
+        return [_model_to_dict(run) for run in response.data]
+
+    def fetch_project(self) -> dict[str, Any]:
+        response = self.api.projects.get(request_options=self._request_options)
+        projects = getattr(response, "data", []) or []
+        if not projects:
+            return {}
+        return _model_to_dict(projects[0])
 
 
 _client: LangfuseApiClient | None = None

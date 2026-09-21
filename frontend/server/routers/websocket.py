@@ -97,9 +97,9 @@ def broadcast_event(event: dict[str, Any], target_session_id: str | None = None)
         print(f"[WS] broadcast: no subscribers for {event_type} session={session_id[:8] if session_id else 'N/A'}")
         return
     
-    # For session/created events, send to all subscribers
-    # For other events, only send to subscribers who subscribed to the target session
-    is_session_created = event_type == "session/created"
+    # For global events, send to all subscribers.
+    # For session events, only send to subscribers of the target session.
+    is_global_event = event_type == "session/created" or event_type.startswith("eval/")
     
     # Use target_session_id for filtering, not event's session_id
     # This is important for sub-agent events where event.session_id is the sub-agent's id
@@ -109,10 +109,9 @@ def broadcast_event(event: dict[str, Any], target_session_id: str | None = None)
     print(f"[WS] broadcast: {event_type} session={session_id[:8] if session_id else 'N/A'} target={filter_session_id[:8] if filter_session_id else 'all'} to {len(_subscribers)} subscribers")
     
     for subscriber in _subscribers[:]:  # copy list to avoid concurrent modification
-        # If subscriber subscribes to all sessions, or this specific target session
-        # For session/created events, send to all subscribers
+        # Global events and unsubscribed clients receive all matching traffic.
         should_send = (
-            is_session_created or
+            is_global_event or
             not subscriber.subscribed_sessions or
             filter_session_id in subscriber.subscribed_sessions
         )

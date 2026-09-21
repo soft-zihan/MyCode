@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from typing import Any
 
 from agents.tools.registry import EDIT_TOOLS
+from agents.tools.result import ToolExecutionResult
 
 
 class ToolDispatcher:
@@ -30,16 +32,18 @@ class ToolDispatcher:
         """获取工具超时时间（秒）。"""
         if name == "run_shell":
             return 300
-        if name in ("agent", "skill"):
-            return 300
+        if name == "agent":
+            return int(os.environ.get("MYCODE_AGENT_TOOL_TIMEOUT", "900"))
+        if name == "skill":
+            return int(os.environ.get("MYCODE_SKILL_TOOL_TIMEOUT", "300"))
         if name == "exit_plan_mode":
             return 600
         if name in ("read_file", "outline_file", "grep_search", "list_files", "web_search"):
             return 30
         return 60
 
-    async def execute_tool_call(self, name: str, inp: dict) -> str:
-        """执行工具调用（带超时和 trace）。"""
+    async def execute_tool_call(self, name: str, inp: dict) -> ToolExecutionResult:
+        """执行工具调用（带超时、结构化 outcome 和 trace）。"""
         from contextlib import nullcontext
 
         from agents.observability.trace import trace_span
@@ -70,38 +74,75 @@ class ToolDispatcher:
                     self._execute_tool_call_inner(name, inp),
                     timeout=timeout,
                 )
-                print_info(f"[DEBUG] execute_tool_call: {name} done, took {time.time()-_tool_t0:.2f}s")
+                duration_s = round(time.time() - _tool_t0, 2)
+                print_info(f"[DEBUG] execute_tool_call: {name} done, took {duration_s}s")
+                if isinstance(result, ToolExecutionResult):
+                    success = result.status == "ok" and result.outcome == "success"
+                    result.metadata.setdefault("tool_name", name)
+                    result.metadata.setdefault("duration_s", duration_s)
+                    result.metadata.setdefault("timeout_s", timeout)
+                    if span:
+                        span.update(
+                            output=result.text[:4000],
+                            metadata={
+                                "success": success,
+                                "outcome": result.outcome,
+                                "duration_s": duration_s,
+                                "result_chars": len(result.text),
+                                **{k: v for k, v in result.metadata.items() if k not in {"tool_name", "duration_s", "timeout_s"}},
+                            },
+                        )
+                    return result
+
                 if span:
                     span.update(
                         output=str(result)[:4000],
                         metadata={
                             "success": True,
-                            "duration_s": round(time.time() - _tool_t0, 2),
+                            "outcome": "success",
+                            "duration_s": duration_s,
                             "result_chars": len(result),
                         },
                     )
+                return ToolExecutionResult(
+                    text=result,
+                    status="ok",
+                    outcome="success",
+                    metadata={"tool_name": name, "duration_s": duration_s, "timeout_s": timeout},
+                )
             except asyncio.TimeoutError:
+                duration_s = round(time.time() - _tool_t0, 2)
                 error = TimeoutError(f"Tool '{name}' timed out after {timeout}s")
                 if span:
                     span.record_error(error)
-                    span.add_metadata(timeout_s=timeout, duration_s=round(time.time() - _tool_t0, 2))
+                    span.add_metadata(timeout_s=timeout, duration_s=duration_s, outcome="timeout", success=False)
                 print_error(f"[ERROR] Tool '{name}' timed out after {timeout}s")
-                return f"Error: tool '{name}' timed out after {timeout}s"
+                return ToolExecutionResult(
+                    text=f"Error: tool '{name}' timed out after {timeout}s",
+                    status="error",
+                    outcome="timeout",
+                    metadata={"tool_name": name, "duration_s": duration_s, "timeout_s": timeout},
+                )
             except TimeoutError as e:
+                duration_s = round(time.time() - _tool_t0, 2)
                 if span:
                     span.record_error(e)
-                    span.add_metadata(timeout_s=timeout, duration_s=round(time.time() - _tool_t0, 2))
+                    span.add_metadata(timeout_s=timeout, duration_s=duration_s, outcome="timeout", success=False)
                 print_error(f"[ERROR] Tool '{name}' timed out: {e}")
-                return f"Error: tool '{name}' timed out: {e}"
+                return ToolExecutionResult(
+                    text=f"Error: tool '{name}' timed out: {e}",
+                    status="error",
+                    outcome="timeout",
+                    metadata={"tool_name": name, "duration_s": duration_s, "timeout_s": timeout},
+                )
             except Exception as e:
                 if span:
                     span.record_error(e)
-                    span.add_metadata(duration_s=round(time.time() - _tool_t0, 2))
+                    span.add_metadata(duration_s=round(time.time() - _tool_t0, 2), outcome="error", success=False)
                 print_error(f"[ERROR] Tool '{name}' failed: {type(e).__name__}: {e}")
                 raise
-        return result
 
-    async def _execute_tool_call_inner(self, name: str, inp: dict) -> str:
+    async def _execute_tool_call_inner(self, name: str, inp: dict) -> str | ToolExecutionResult:
         """工具执行内部路由。"""
         if name == "compact_context":
             return await self._execute_compact_context_tool(inp)
@@ -392,7 +433,7 @@ class ToolDispatcher:
 
         return "\n".join(lines)
 
-    async def _execute_agent_tool(self, inp: dict) -> str:
+    async def _execute_agent_tool(self, inp: dict) -> str | ToolExecutionResult:
         """执行 agent 工具（子 Agent）。"""
         from agents.observability.trace import trace_span
         from agents.logging import print_sub_agent_start, print_sub_agent_end
@@ -403,6 +444,9 @@ class ToolDispatcher:
         agent_type = inp.get("type", "general")
         description = inp.get("description", "sub-agent task")
         prompt = inp.get("prompt", "")
+        timeout_s = self.get_tool_timeout("agent")
+        config = get_sub_agent_config(agent_type)
+        max_tool_calls = config.get("max_tool_calls")
         print_sub_agent_start(agent_type, description)
 
         sub_agent_id = str(uuid.uuid4())[:8]
@@ -416,6 +460,8 @@ class ToolDispatcher:
                 "agent_type": agent_type,
                 "description": description[:500],
                 "parent_session_id": self.agent.session_id,
+                "timeout_s": timeout_s,
+                "max_tool_calls": max_tool_calls,
             },
         ) as span:
             sub_session = Session(
@@ -430,15 +476,16 @@ class ToolDispatcher:
                 "agent_type": agent_type,
                 "description": description,
                 "sub_session_id": sub_session.id,
+                "timeout_s": timeout_s,
+                "max_tool_calls": max_tool_calls,
             })
-
-            config = get_sub_agent_config(agent_type)
 
             sub_agent = self.agent._spawn_sub_agent(
                 system_prompt=config["system_prompt"],
                 tools=config["tools"],
                 model_ref=config.get("model_ref", ""),
                 label=agent_type,
+                max_tool_calls=max_tool_calls,
             )
 
             sub_agent.session = sub_session
@@ -446,45 +493,141 @@ class ToolDispatcher:
             sub_agent._current_sub_agent_id = sub_agent_id
 
             start_time = time.time()
+            status = "error"
+            outcome = "error"
+            summary = ""
+            output_text = ""
+            input_tokens = 0
+            output_tokens = 0
+            stop_reason: str | None = None
+            error: Exception | None = None
             try:
                 result = await asyncio.create_task(sub_agent.run_once(prompt))
-                duration_s = round(time.time() - start_time, 2)
-                self.agent.total_input_tokens += result["tokens"]["input"]
-                self.agent.total_output_tokens += result["tokens"]["output"]
-                print_sub_agent_end(agent_type, description)
-                self.agent.session.append("sub_agent/end", {
-                    "agent_id": sub_agent_id,
-                    "status": "completed",
-                    "summary": (result["text"] or "")[:200],
-                    "duration_ms": int(duration_s * 1000),
-                    "sub_session_id": sub_session.id,
-                })
-                span.update(
-                    output=(result["text"] or "")[:4000],
+                input_tokens = int(result.get("tokens", {}).get("input", 0))
+                output_tokens = int(result.get("tokens", {}).get("output", 0))
+                self.agent.total_input_tokens += input_tokens
+                self.agent.total_output_tokens += output_tokens
+                output_text = result.get("text") or "(Sub-agent produced no output)"
+                summary = output_text[:500]
+                stop_reason = result.get("stop_reason")
+                if sub_agent._aborted:
+                    status = "aborted"
+                    outcome = "cancelled"
+                    return ToolExecutionResult(
+                        text="(Sub-agent aborted)",
+                        status="cancelled",
+                        outcome="cancelled",
+                        metadata={"reason": "aborted", "sub_session_id": sub_session.id},
+                    )
+                if result.get("tool_budget_exceeded"):
+                    status = "budget_exceeded"
+                    outcome = "budget_exceeded"
+                    summary = (
+                        f"Sub-agent stopped after tool budget: "
+                        f"{result.get('tool_call_count', 0)}/{max_tool_calls}. {summary}"
+                    ).strip()
+                    return ToolExecutionResult(
+                        text=output_text,
+                        status="ok",
+                        outcome="budget_exceeded",
+                        metadata={
+                            "reason": "tool_budget_exceeded",
+                            "tool_call_count": int(getattr(sub_agent, "_tool_call_count", 0) or 0),
+                            "failed_tool_call_count": int(getattr(sub_agent, "_failed_tool_call_count", 0) or 0),
+                            "max_tool_calls": max_tool_calls,
+                            "partial": True,
+                            "sub_session_id": sub_session.id,
+                        },
+                    )
+                if stop_reason:
+                    status = "completed"
+                    outcome = "blocked"
+                    summary = f"Sub-agent stopped by {stop_reason}. {summary}".strip()
+                    return ToolExecutionResult(
+                        text=output_text,
+                        status="ok",
+                        outcome="blocked",
+                        metadata={
+                            "reason": stop_reason,
+                            "tool_call_count": int(getattr(sub_agent, "_tool_call_count", 0) or 0),
+                            "failed_tool_call_count": int(getattr(sub_agent, "_failed_tool_call_count", 0) or 0),
+                            "max_tool_calls": max_tool_calls,
+                            "partial": True,
+                            "sub_session_id": sub_session.id,
+                        },
+                    )
+                status = "completed"
+                outcome = "success"
+                return ToolExecutionResult(
+                    text=output_text,
+                    status="ok",
+                    outcome="success",
                     metadata={
-                        "status": "aborted" if sub_agent._aborted else "completed",
-                        "duration_s": duration_s,
-                        "input_tokens": result["tokens"]["input"],
-                        "output_tokens": result["tokens"]["output"],
-                        "summary": (result["text"] or "")[:500],
+                        "tool_call_count": int(getattr(sub_agent, "_tool_call_count", 0) or 0),
+                        "failed_tool_call_count": int(getattr(sub_agent, "_failed_tool_call_count", 0) or 0),
+                        "max_tool_calls": max_tool_calls,
+                        "sub_session_id": sub_session.id,
                     },
                 )
-                if sub_agent._aborted:
-                    return "(Sub-agent aborted)"
-                return result["text"] or "(Sub-agent produced no output)"
+            except asyncio.CancelledError:
+                if self.agent.abort_requested():
+                    status = "cancelled"
+                    outcome = "cancelled"
+                    summary = "Sub-agent cancelled by parent abort"
+                else:
+                    status = "timeout"
+                    outcome = "timeout"
+                    summary = f"Sub-agent timed out after {timeout_s}s"
+                    error = TimeoutError(summary)
+                output_text = summary
+                raise
             except Exception as e:
+                status = "error"
+                outcome = "error"
+                summary = f"{type(e).__name__}: {e}"
+                output_text = f"Sub-agent error: {e}"
+                error = e
+                return ToolExecutionResult(
+                    text=output_text,
+                    status="error",
+                    outcome="error",
+                    metadata={"reason": summary, "sub_session_id": sub_session.id},
+                )
+            finally:
                 duration_s = round(time.time() - start_time, 2)
+                tool_call_count = int(getattr(sub_agent, "_tool_call_count", 0) or 0)
+                failed_tool_call_count = int(getattr(sub_agent, "_failed_tool_call_count", 0) or 0)
+                child_turn_count = max(int(getattr(sub_agent, "_turn_number", 0) or 0), 1 if tool_call_count else 0)
                 print_sub_agent_end(agent_type, description)
                 self.agent.session.append("sub_agent/end", {
                     "agent_id": sub_agent_id,
-                    "status": "error",
-                    "summary": str(e),
+                    "status": status,
+                    "outcome": outcome,
+                    "summary": summary[:500],
                     "duration_ms": int(duration_s * 1000),
                     "sub_session_id": sub_session.id,
+                    "timeout_s": timeout_s,
+                    "max_tool_calls": max_tool_calls,
+                    "stop_reason": stop_reason,
+                    "tool_call_count": tool_call_count,
+                    "failed_tool_call_count": failed_tool_call_count,
+                    "child_turn_count": child_turn_count,
                 })
-                span.update(
-                    output=str(e)[:4000],
-                    metadata={"status": "error", "duration_s": duration_s},
-                )
-                span.record_error(e)
-                return f"Sub-agent error: {e}"
+                span_metadata = {
+                    "status": status,
+                    "outcome": outcome,
+                    "duration_s": duration_s,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "summary": summary[:500],
+                    "sub_session_id": sub_session.id,
+                    "timeout_s": timeout_s,
+                    "max_tool_calls": max_tool_calls,
+                    "stop_reason": stop_reason,
+                    "tool_call_count": tool_call_count,
+                    "failed_tool_call_count": failed_tool_call_count,
+                    "child_turn_count": child_turn_count,
+                }
+                span.update(output=output_text[:20000], metadata=span_metadata)
+                if error is not None:
+                    span.record_error(error)

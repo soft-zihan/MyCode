@@ -269,8 +269,15 @@ class AgentLoop:
                 print_info(f"Budget exceeded: {budget['reason']}")
                 break
 
-            await self._handle_tool_calls(tool_calls)
-            
+            guard_stop = await self._handle_tool_calls(tool_calls)
+            if guard_stop:
+                self._finalize_loop_guard_stop()
+                break
+
+            if self._agent.tool_budget_exceeded():
+                await self._finalize_tool_budget()
+                break
+
             self._agent.clear_context_flag()
             self._agent.refresh_runtime_system_prompt()
 
@@ -414,7 +421,63 @@ class AgentLoop:
         """完成文本响应：刷新 markdown、打印成本。"""
         pass
 
-    async def _handle_tool_calls(self, tool_calls: list[dict]) -> None:
+    def _finalize_loop_guard_stop(self) -> None:
+        a = self._agent
+        reason = a._loop_guard_stop_reason or "tool loop guard"
+        message = (
+            f"⚠️ Loop guard stopped this turn: {reason}\n\n"
+            "The previous tool strategy was not making sufficient progress. "
+            "Review the latest tool results, choose a different decomposition or tool, "
+            "or finish with the evidence already collected."
+        )
+        if a._turn_output_buffer is not None:
+            a._turn_output_buffer.append(message)
+        a.session.append("assistant_message", {
+            "turn": a._current_turn,
+            "step": a._current_step,
+            "content": message,
+        })
+
+    async def _finalize_tool_budget(self) -> None:
+        a = self._agent
+        reason = (
+            f"Tool call budget exceeded: {a._tool_call_count}/{a.max_tool_calls}"
+            if a.max_tool_calls is not None
+            else "Tool call budget exceeded"
+        )
+        a._tool_budget_stop_reason = "tool_budget_exceeded"
+        instruction = (
+            f"{reason}. Do not call any more tools. "
+            "Summarize the evidence already collected, state which subtasks are verified, "
+            "which remain uncertain, and give the best supported final result now."
+        )
+        a.session.append("step/start", {
+            "turn": a._current_turn,
+            "step": a._current_step + 1,
+            "reason": "tool_budget_exceeded",
+        })
+        a._current_step += 1
+        a.append_user_message(instruction)
+
+        response = await self.call_model_stream(tools_enabled=False)
+        choice = response.get("choices", [{}])[0] if response.get("choices") else {}
+        message = choice.get("message", {})
+        assistant_event = a.session.append("assistant_message", {
+            "turn": a._current_turn,
+            "step": a._current_step,
+            "thinking": message.get("thinking"),
+            "content": message.get("content") or "",
+            "tool_calls": None,
+        })
+        a.mark_last_usage_position(int(assistant_event.get("seq", -1)))
+        self._update_token_stats(response)
+        a.session.append("step/end", {
+            "turn": a._current_turn,
+            "step": a._current_step,
+            "reason": "tool_budget_exceeded",
+        })
+
+    async def _handle_tool_calls(self, tool_calls: list[dict]) -> bool:
         """处理工具调用：权限检查、执行、结果收集。"""
         from agents.tools.permissions import check_permission
         from agents.logging import print_info
@@ -476,11 +539,12 @@ class AgentLoop:
 
         from agents.logging import print_info
         print_info(f"[DEBUG] _handle_tool_calls: calling _execute_tool_batches with {len(oai_checked)} tools")
-        await self._execute_tool_batches(oai_checked)
-        print_info(f"[DEBUG] _handle_tool_calls: done")
+        guard_stop = await self._execute_tool_batches(oai_checked)
+        print_info(f"[DEBUG] _handle_tool_calls: done, guard_stop={guard_stop}")
+        return guard_stop
 
-    async def _execute_tool_batches(self, oai_checked: list[dict]) -> None:
-        """执行工具批次：并发安全工具并行执行，其他顺序执行。"""
+    async def _execute_tool_batches(self, oai_checked: list[dict]) -> bool:
+        """执行工具批次：并发安全工具并行执行，其他顺序执行。返回是否触发 loop guard stop。"""
         from agents.logging import print_info
 
         print_info(f"[DEBUG] _execute_tool_batches: start, {len(oai_checked)} tools")
@@ -496,39 +560,146 @@ class AgentLoop:
 
         print_info(f"[DEBUG] _execute_tool_batches: {len(oai_batches)} batches")
         oai_context_break = False
+        guard_stop = False
+        guard_reason: str | None = None
         for i, batch in enumerate(oai_batches):
             print_info(f"[DEBUG] _execute_tool_batches: batch {i}, concurrent={batch['concurrent']}, items={len(batch['items'])}")
-            if oai_context_break or a.abort_requested():
-                a.mark_aborted()
-                for ct in batch["items"]:
-                    if ct["allowed"]:
-                        cancel_result = "Action cancelled: user abort."
-                        a.publish_tool_result_event(ct["tc"]["id"], ct["fn"], cancel_result, "cancelled")
-                        a.append_tool_message(ct["tc"]["id"], cancel_result, ct["fn"])
-                for remaining_batch in oai_batches[oai_batches.index(batch) + 1:]:
+            if oai_context_break or guard_stop or a.abort_requested():
+                aborted = a.abort_requested()
+                if aborted:
+                    a.mark_aborted()
+                cancel_result = (
+                    "Action cancelled: user abort."
+                    if aborted
+                    else f"Action cancelled: loop guard stopped turn ({guard_reason or 'tool loop'})."
+                )
+                cancel_status = "cancelled" if aborted else "error"
+                cancel_outcome = "cancelled" if aborted else "blocked"
+                for remaining_batch in oai_batches[i:]:
                     for ct in remaining_batch["items"]:
                         if ct["allowed"]:
-                            cancel_result = "Action cancelled: user abort."
-                            a.publish_tool_result_event(ct["tc"]["id"], ct["fn"], cancel_result, "cancelled")
+                            a.publish_tool_result_event(
+                                ct["tc"]["id"],
+                                ct["fn"],
+                                cancel_result,
+                                cancel_status,
+                                outcome=cancel_outcome,
+                                metadata={"reason": guard_reason} if guard_reason else None,
+                            )
                             a.append_tool_message(ct["tc"]["id"], cancel_result, ct["fn"])
                 break
 
             if batch["concurrent"]:
-                await self._execute_concurrent_batch(batch["items"])
+                guard_stop, guard_reason = await self._execute_concurrent_batch(batch["items"])
             else:
-                oai_context_break = await self._execute_sequential_batch(batch["items"])
+                oai_context_break, guard_stop, guard_reason = await self._execute_sequential_batch(batch["items"])
+            if guard_stop:
+                a._loop_guard_stop_reason = guard_reason or "tool_loop"
 
-    async def _execute_concurrent_batch(self, items: list[dict]) -> None:
+        return guard_stop
+
+    def _publish_blocked_tool_result(self, ct: dict, decision) -> None:
+        a = self._agent
+        message = decision.message or "Loop guard blocked this repeated tool call."
+        a.publish_tool_result_event(
+            ct["tc"]["id"],
+            ct["fn"],
+            message,
+            "error",
+            outcome="blocked",
+            metadata=decision.metadata,
+        )
+        a.append_tool_message(ct["tc"]["id"], message, ct["fn"])
+        self._auto_mark_bad_case(
+            signal_type="tool_loop_blocked",
+            diagnosis={
+                "tool": ct["fn"],
+                "args": ct["inp"],
+                "reason": decision.reason,
+                "verdict": decision.verdict,
+                **(decision.metadata or {}),
+            },
+            tool_name=ct["fn"],
+        )
+
+    def _apply_warning_result(self, ct: dict, res: str, warning_result: dict) -> tuple[str, bool, str | None]:
+        a = self._agent
+        if warning_result["warnings"]:
+            res = res + "\n\n" + "\n".join(warning_result["warnings"])
+
+        if warning_result["going_off_track"]:
+            self._auto_mark_bad_case(
+                signal_type="tool_repeat",
+                diagnosis={"tool": ct["fn"], "args": ct["inp"], "reason": "警告后仍重复调用"},
+                tool_name=ct["fn"],
+            )
+
+        if warning_result["cycle_bad_case"]:
+            self._auto_mark_bad_case(
+                signal_type="tool_cycle",
+                diagnosis={"tool": ct["fn"], "args": ct["inp"], "reason": "警告后仍循环"},
+                tool_name=ct["fn"],
+            )
+
+        stop_reason: str | None = None
+        if warning_result["force_stop"]:
+            stop_info = warning_result.get("force_stop_info") or {}
+            signal_type = "tool_loop_blocked" if warning_result.get("blocked") else "force_stop"
+            stop_reason = stop_info.get("reason") or warning_result.get("verdict") or "force_stop"
+            force_stop_msg = (
+                f"\n\n⚠️ 硬兜底：工具 {stop_info.get('tool', ct['fn'])} 触发 {stop_reason}，"
+                f"count={stop_info.get('count')}，outcome={stop_info.get('outcome') or warning_result.get('outcome')}。"
+                "本轮将停止，请检查任务分解、工具选择或已有证据。"
+            )
+            res = res + force_stop_msg
+            self._auto_mark_bad_case(
+                signal_type=signal_type,
+                diagnosis={
+                    "tool": stop_info.get("tool", ct["fn"]),
+                    "count": stop_info.get("count"),
+                    "args": stop_info.get("args", ct["inp"]),
+                    "reason": stop_reason,
+                    "guard": stop_info.get("guard"),
+                },
+                tool_name=stop_info.get("tool", ct["fn"]),
+            )
+
+        repeat_warning = a.check_repeat_guard(ct["fn"], ct["inp"])
+        if repeat_warning:
+            res = res + "\n\n" + repeat_warning
+
+        return res, warning_result["force_stop"], stop_reason
+
+    async def _execute_concurrent_batch(self, items: list[dict]) -> tuple[bool, str | None]:
         """并发执行工具批次。"""
         a = self._agent
+        allowed_items: list[dict] = []
+        guard_stop = False
+        guard_reason: str | None = None
 
-        async def _run_oai_safe(ct_item: dict) -> tuple[dict, str, dict | None]:
+        for ct in items:
+            decision = self._tool_tracker.precheck(ct["fn"], ct["inp"])
+            if decision.action == "block":
+                self._publish_blocked_tool_result(ct, decision)
+                guard_stop = True
+                guard_reason = guard_reason or decision.reason
+            else:
+                allowed_items.append(ct)
+
+        if guard_stop:
+            for ct in allowed_items:
+                cancel_result = f"Action cancelled: loop guard stopped turn ({guard_reason or 'tool loop'})."
+                a.publish_tool_result_event(ct["tc"]["id"], ct["fn"], cancel_result, "error", outcome="blocked", metadata={"reason": guard_reason})
+                a.append_tool_message(ct["tc"]["id"], cancel_result, ct["fn"])
+            return guard_stop, guard_reason
+
+        async def _run_oai_safe(ct_item: dict) -> tuple[dict, Any, str, dict | None]:
             pre_snapshot = None
             if ct_item["fn"] in ("write_file", "edit_file"):
                 pre_snapshot = _capture_file_snapshot(ct_item["inp"].get("file_path", ""))
             
-            raw = await a.execute_tool_call(ct_item["fn"], ct_item["inp"])
-            raw = _safe_utf8_text(raw)
+            result = await a.execute_tool_call(ct_item["fn"], ct_item["inp"])
+            raw = _safe_utf8_text(result.text)
             res = a.persist_large_result(ct_item["fn"], raw)
             
             post_snapshot = None
@@ -543,56 +714,52 @@ class AgentLoop:
                     "old_content": pre_snapshot["content"],
                     "new_content": post_snapshot["content"],
                 }
-            
-            a.publish_tool_result_event(ct_item["tc"]["id"], ct_item["fn"], res, "ok", snapshot=file_snapshot)
-            return ct_item, res, file_snapshot
+            return ct_item, result, res, file_snapshot
 
-        results = await asyncio.gather(*[_run_oai_safe(ct) for ct in items])
-        for ct_item, res, file_snapshot in results:
-            a.record_tool_outcome(ct_item["fn"], not a.looks_like_tool_failure(ct_item["fn"], "", res))
+        results = await asyncio.gather(*[_run_oai_safe(ct) for ct in allowed_items])
+        for ct_item, result, res, file_snapshot in results:
+            text_failure = a.looks_like_tool_failure(ct_item["fn"], result.text, res)
+            success = result.status == "ok" and result.outcome == "success" and not text_failure
+            outcome = result.outcome if result.outcome != "success" else ("error" if text_failure else "success")
+            metadata = dict(result.metadata or {})
+            metadata["text_failure"] = text_failure
+            a.publish_tool_result_event(
+                ct_item["tc"]["id"],
+                ct_item["fn"],
+                res,
+                result.status,
+                snapshot=file_snapshot,
+                outcome=outcome,
+                metadata=metadata,
+            )
+            a.record_tool_outcome(ct_item["fn"], success)
             
-            # 检查工具调用警告
-            warning_result = check_tool_warnings(self._tool_tracker, ct_item["fn"], ct_item["inp"])
-            if warning_result["warnings"]:
-                res = res + "\n\n" + "\n".join(warning_result["warnings"])
-            
-            if warning_result["going_off_track"]:
-                self._auto_mark_bad_case(
-                    signal_type="tool_repeat",
-                    diagnosis={"tool": ct_item["fn"], "args": ct_item["inp"], "reason": "警告后仍重复调用"},
-                    tool_name=ct_item["fn"],
-                )
-            
-            if warning_result["cycle_bad_case"]:
-                self._auto_mark_bad_case(
-                    signal_type="tool_cycle",
-                    diagnosis={"tool": ct_item["fn"], "args": ct_item["inp"], "reason": "警告后仍循环"},
-                    tool_name=ct_item["fn"],
-                )
-            
-            if warning_result["force_stop"]:
-                stop_info = warning_result["force_stop_info"]
-                force_stop_msg = f"\n\n⚠️ 硬兜底：工具 {stop_info['tool']} 已调用 {stop_info['count']} 次，强行停止。请检查任务是否合理，或提供更多上下文。"
-                res = res + force_stop_msg
-                self._auto_mark_bad_case(
-                    signal_type="force_stop",
-                    diagnosis={"tool": stop_info["tool"], "count": stop_info["count"], "args": stop_info["args"]},
-                    tool_name=stop_info["tool"],
-                )
-            
-            repeat_warning = a.check_repeat_guard(ct_item["fn"], ct_item["inp"])
-            if repeat_warning:
-                res = res + "\n\n" + repeat_warning
+            warning_result = check_tool_warnings(
+                self._tool_tracker,
+                ct_item["fn"],
+                ct_item["inp"],
+                success=success,
+                outcome=outcome,
+                metadata=metadata,
+            )
+            res, force_stop, stop_reason = self._apply_warning_result(ct_item, res, warning_result)
+            if force_stop:
+                guard_stop = True
+                guard_reason = guard_reason or stop_reason
             a.append_tool_message(ct_item["tc"]["id"], res, ct_item["fn"])
 
-    async def _execute_sequential_batch(self, items: list[dict]) -> bool:
-        """顺序执行工具批次。返回是否触发上下文清理。"""
+        return guard_stop, guard_reason
+
+    async def _execute_sequential_batch(self, items: list[dict]) -> tuple[bool, bool, str | None]:
+        """顺序执行工具批次。返回 (是否触发上下文清理, 是否触发 loop guard, guard reason)。"""
         from agents.logging import print_info
         import time
 
         print_info(f"[DEBUG] _execute_sequential_batch: start, {len(items)} tools")
         a = self._agent
         context_break = False
+        guard_stop = False
+        guard_reason: str | None = None
 
         for i, ct in enumerate(items):
             fn_name = ct["fn"]
@@ -601,6 +768,13 @@ class AgentLoop:
                 a.append_tool_message(ct["tc"]["id"], ct["result"], ct["fn"])
                 continue
 
+            decision = self._tool_tracker.precheck(fn_name, ct["inp"])
+            if decision.action == "block":
+                self._publish_blocked_tool_result(ct, decision)
+                guard_stop = True
+                guard_reason = guard_reason or decision.reason
+                break
+
             t0 = time.time()
             print_info(f"[DEBUG] _execute_sequential_batch: calling execute_tool_call for {fn_name}")
             
@@ -608,9 +782,9 @@ class AgentLoop:
             if fn_name in ("write_file", "edit_file"):
                 pre_snapshot = _capture_file_snapshot(ct["inp"].get("file_path", ""))
             
-            raw = await a.execute_tool_call(ct["fn"], ct["inp"])
+            result = await a.execute_tool_call(ct["fn"], ct["inp"])
             print_info(f"[DEBUG] _execute_sequential_batch: execute_tool_call done for {fn_name}, took {time.time()-t0:.2f}s")
-            raw = _safe_utf8_text(raw)
+            raw = _safe_utf8_text(result.text)
             res = a.persist_large_result(ct["fn"], raw)
             
             post_snapshot = None
@@ -626,8 +800,21 @@ class AgentLoop:
                     "new_content": post_snapshot["content"],
                 }
             
-            a.publish_tool_result_event(ct["tc"]["id"], ct["fn"], res, "ok", snapshot=file_snapshot)
-            a.record_tool_outcome(ct["fn"], not a.looks_like_tool_failure(ct["fn"], raw, res))
+            text_failure = a.looks_like_tool_failure(ct["fn"], result.text, res)
+            success = result.status == "ok" and result.outcome == "success" and not text_failure
+            outcome = result.outcome if result.outcome != "success" else ("error" if text_failure else "success")
+            metadata = dict(result.metadata or {})
+            metadata["text_failure"] = text_failure
+            a.publish_tool_result_event(
+                ct["tc"]["id"],
+                ct["fn"],
+                res,
+                result.status,
+                snapshot=file_snapshot,
+                outcome=outcome,
+                metadata=metadata,
+            )
+            a.record_tool_outcome(ct["fn"], success)
             print_info(f"[DEBUG] _execute_sequential_batch: tool {fn_name} completed")
 
             if a.context_cleared:
@@ -636,44 +823,44 @@ class AgentLoop:
                 context_break = True
                 break
 
-            # 检查工具调用警告
-            warning_result = check_tool_warnings(self._tool_tracker, ct["fn"], ct["inp"])
-            if warning_result["warnings"]:
-                res = res + "\n\n" + "\n".join(warning_result["warnings"])
-
-            if warning_result["going_off_track"]:
-                self._auto_mark_bad_case(
-                    signal_type="tool_repeat",
-                    diagnosis={"tool": ct["fn"], "args": ct["inp"], "reason": "警告后仍重复调用"},
-                    tool_name=ct["fn"],
-                )
-
-            if warning_result["cycle_bad_case"]:
-                self._auto_mark_bad_case(
-                    signal_type="tool_cycle",
-                    diagnosis={"tool": ct["fn"], "args": ct["inp"], "reason": "警告后仍循环"},
-                    tool_name=ct["fn"],
-                )
-
-            if warning_result["force_stop"]:
-                stop_info = warning_result["force_stop_info"]
-                force_stop_msg = f"\n\n⚠️ 硬兜底：工具 {stop_info['tool']} 已调用 {stop_info['count']} 次，强行停止。请检查任务是否合理，或提供更多上下文。"
-                res = res + force_stop_msg
-                self._auto_mark_bad_case(
-                    signal_type="force_stop",
-                    diagnosis={"tool": stop_info["tool"], "count": stop_info["count"], "args": stop_info["args"]},
-                    tool_name=stop_info["tool"],
-                )
-
-            repeat_warning = a.check_repeat_guard(ct["fn"], ct["inp"])
-            if repeat_warning:
-                res = res + "\n\n" + repeat_warning
+            warning_result = check_tool_warnings(
+                self._tool_tracker,
+                ct["fn"],
+                ct["inp"],
+                success=success,
+                outcome=outcome,
+                metadata=metadata,
+            )
+            res, force_stop, stop_reason = self._apply_warning_result(ct, res, warning_result)
+            if force_stop:
+                guard_stop = True
+                guard_reason = guard_reason or stop_reason
 
             a.append_tool_message(ct["tc"]["id"], res, ct["fn"])
+            if guard_stop or context_break:
+                break
 
-        return context_break
+        if guard_stop or context_break:
+            for remaining in items[i + 1:]:
+                if remaining["allowed"]:
+                    cancel_result = (
+                        "Action cancelled: context cleared."
+                        if context_break
+                        else f"Action cancelled: loop guard stopped turn ({guard_reason or 'tool loop'})."
+                    )
+                    a.publish_tool_result_event(
+                        remaining["tc"]["id"],
+                        remaining["fn"],
+                        cancel_result,
+                        "error" if guard_stop else "cancelled",
+                        outcome="blocked" if guard_stop else "cancelled",
+                        metadata={"reason": guard_reason} if guard_reason else None,
+                    )
+                    a.append_tool_message(remaining["tc"]["id"], cancel_result, remaining["fn"])
 
-    async def call_model_stream(self) -> dict:
+        return context_break, guard_stop, guard_reason
+
+    async def call_model_stream(self, *, tools_enabled: bool = True) -> dict:
         """流式模型调用。"""
         from agents.observability.trace import trace_span
         from agents.agent import _with_retry, ContentLevelError
@@ -698,7 +885,7 @@ class AgentLoop:
                 _asm_t0 = time.perf_counter()
 
                 _t1 = time.perf_counter()
-                tool_defs = get_active_tool_definitions(a.tools)
+                tool_defs = get_active_tool_definitions(a.tools) if tools_enabled else []
                 _tool_defs_ms = (time.perf_counter() - _t1) * 1000
 
                 _t2 = time.perf_counter()

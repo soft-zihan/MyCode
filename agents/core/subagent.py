@@ -20,10 +20,47 @@ def get_agent_model_ref_env(agent_type: str) -> str:
     sanitized = "".join(ch.upper() if ch.isalnum() else "_" for ch in agent_type)
     return os.environ.get(f"MYCODE_MODEL_{sanitized}", "").strip()
 
+
+def _positive_int_or_none(value: object) -> int | None:
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def get_sub_agent_max_tool_calls(agent_type: str, custom_value: object | None = None) -> int | None:
+    """解析子 Agent 工具调用预算。
+
+    优先级：环境变量 `MYCODE_<TYPE>_MAX_TOOL_CALLS` > 自定义 frontmatter >
+    环境变量 `MYCODE_SUB_AGENT_MAX_TOOL_CALLS` > 内置默认值。
+    """
+    sanitized = "".join(ch.upper() if ch.isalnum() else "_" for ch in agent_type)
+    env_value = _positive_int_or_none(os.environ.get(f"MYCODE_{sanitized}_MAX_TOOL_CALLS", ""))
+    if env_value is not None:
+        return env_value
+
+    custom_parsed = _positive_int_or_none(custom_value)
+    if custom_parsed is not None:
+        return custom_parsed
+
+    global_env_value = _positive_int_or_none(os.environ.get("MYCODE_SUB_AGENT_MAX_TOOL_CALLS", ""))
+    if global_env_value is not None:
+        return global_env_value
+
+    return BUILT_IN_SUB_AGENT_MAX_TOOL_CALLS.get(agent_type, DEFAULT_SUB_AGENT_MAX_TOOL_CALLS)
+
 # ─── Read-only tools (for explore and plan agents) ──────────
 
 # explore 子代理只能拿到这几个只读工具，避免它们修改项目文件或系统状态。
 READ_ONLY_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "web_search"}
+
+DEFAULT_SUB_AGENT_MAX_TOOL_CALLS = 120
+BUILT_IN_SUB_AGENT_MAX_TOOL_CALLS = {
+    "explore": 80,
+    "reviewer": 80,
+    "general": 120,
+}
 
 # reviewer 子 Agent 工具白名单（只读 + run_shell 执行验收命令）
 REVIEWER_TOOLS = {
@@ -92,6 +129,7 @@ def _load_agents_from_dir(directory: Path, agents: dict[str, dict]) -> None:
                 "system_prompt": result.body,
                 # 自定义代理可在 frontmatter 中声明 model: 字段来指定模型。
                 "model": (meta.get("model") or "").strip() or None,
+                "max_tool_calls": meta.get("max-tool-calls"),
             }
         except Exception:
             # 单个自定义代理文件解析失败时不影响整个程序启动或其他代理加载。
@@ -121,19 +159,40 @@ def get_sub_agent_config(agent_type: str) -> dict:
         else:
             tools = [t for t in tool_definitions if t["name"] not in _sub_agent_excluded]
         model_ref = custom.get("model") or get_agent_model_ref_env(agent_type)
-        return {"system_prompt": custom["system_prompt"], "tools": tools, "model_ref": model_ref}
+        return {
+            "system_prompt": custom["system_prompt"],
+            "tools": tools,
+            "model_ref": model_ref,
+            "max_tool_calls": get_sub_agent_max_tool_calls(agent_type, custom.get("max_tool_calls")),
+        }
 
     # 内置子智能体从文件加载提示词
     model_ref = get_agent_model_ref_env(agent_type)
+    max_tool_calls = get_sub_agent_max_tool_calls(agent_type)
 
     if agent_type == "explore":
         read_only = [t for t in tool_definitions if t["name"] in READ_ONLY_TOOLS]
-        return {"system_prompt": _load_subagent_prompt("explore"), "tools": read_only, "model_ref": model_ref}
+        return {
+            "system_prompt": _load_subagent_prompt("explore"),
+            "tools": read_only,
+            "model_ref": model_ref,
+            "max_tool_calls": max_tool_calls,
+        }
     elif agent_type == "reviewer":
         reviewer_tools = [t for t in tool_definitions if t["name"] in REVIEWER_TOOLS]
-        return {"system_prompt": _load_subagent_prompt("reviewer"), "tools": reviewer_tools, "model_ref": model_ref}
+        return {
+            "system_prompt": _load_subagent_prompt("reviewer"),
+            "tools": reviewer_tools,
+            "model_ref": model_ref,
+            "max_tool_calls": max_tool_calls,
+        }
     else:  # general
-        return {"system_prompt": _load_subagent_prompt("general"), "tools": [t for t in tool_definitions if t["name"] not in _sub_agent_excluded], "model_ref": model_ref}
+        return {
+            "system_prompt": _load_subagent_prompt("general"),
+            "tools": [t for t in tool_definitions if t["name"] not in _sub_agent_excluded],
+            "model_ref": model_ref,
+            "max_tool_calls": max_tool_calls,
+        }
 
 
 # ─── 可用的agent类型(for system prompt) ──────────────

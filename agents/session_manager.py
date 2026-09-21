@@ -25,6 +25,10 @@ class SessionManager:
         model: str | None = None,
         permission_mode: str | None = None,
         cwd: str | None = None,
+        api_base: str | None = None,
+        api_key: str | None = None,
+        title: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> tuple[Any, Session]:
         """创建新 session 和 agent。"""
         from agents.agent import Agent
@@ -33,13 +37,22 @@ class SessionManager:
         logger = logging.getLogger(__name__)
         
         config = load_config()
-        api_key, api_base, model_name = self._resolve_model(config, model)
+        resolved_key, resolved_base, model_name = self._resolve_model(config, model)
+        api_key = api_key or resolved_key
+        api_base = api_base or resolved_base
         
         session = Session()
         print(f"[DEBUG] session_manager.create: session.id = {session.id}, permission_mode={permission_mode}")
+        created_payload: dict[str, Any] = {}
         if cwd:
+            created_payload["cwd"] = cwd
+        if metadata:
+            created_payload["metadata"] = metadata
+        if created_payload:
             # 工作区走事件流（单一数据源）：session/created → cwd 投影 → 快照/列表/重建
-            session.append("session/created", {"cwd": cwd})
+            session.append("session/created", created_payload)
+        if title:
+            session.append("session/title", {"title": title})
         agent = Agent(
             model=model_name,
             api_key=api_key,

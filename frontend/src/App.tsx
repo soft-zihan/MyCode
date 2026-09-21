@@ -3,6 +3,7 @@ import ChatPage from './pages/ChatPage';
 import SkillsPage from './pages/SkillsPage';
 import ToolsPage from './pages/ToolsPage';
 import AgentsPage from './pages/AgentsPage';
+import EvalPage from './pages/EvalPage';
 import BadCasesPage from './pages/BadCasesPage';
 
 function App() {
@@ -14,6 +15,7 @@ function App() {
           <Route path="/mcp" element={<ToolsPage />} />
           <Route path="/agents" element={<AgentsPage />} />
           <Route path="/skills" element={<SkillsPage />} />
+          <Route path="/eval" element={<EvalPage />} />
           <Route path="/bad-cases" element={<BadCasesPage />} />
         </Routes>
       </div>

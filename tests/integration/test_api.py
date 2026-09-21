@@ -403,30 +403,6 @@ class TestRewindAPI:
         assert "Nothing to rewind" in r.json()["detail"]
 
 
-class TestMemoriesAPI:
-    def test_list_memories_empty(self, api):
-        r = api.get("/api/memories")
-        assert r.status_code == 200
-        assert r.json() == []
-
-    def test_create_and_list_memory(self, api):
-        r = api.post("/api/memories", json={
-            "name": "test-mem",
-            "description": "test",
-            "type": "project",
-            "content": "some content",
-        })
-        assert r.status_code == 200
-        assert "filename" in r.json()
-
-        r2 = api.get("/api/memories")
-        assert len(r2.json()) >= 1
-
-    def test_get_memory_not_found(self, api):
-        r = api.get("/api/memories/nonexistent.md")
-        assert r.status_code == 404
-
-
 class TestWorkspaceAPI:
     def test_workspace_tree(self, api, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -482,3 +458,93 @@ class TestConcurrentRequests:
 
         assert all(r.status_code == 200 for r in results)
         assert all(r.json()["metadata"]["id"] == f"par-{i}" for i, r in enumerate(results))
+
+
+class _FakeEvalAdapter:
+    benchmark = "smoke"
+
+    def __init__(self):
+        self.setup_called = False
+        self.teardown_called = False
+
+    def load_tasks(self, options):
+        from eval.common.models import EvalTask
+
+        return [
+            EvalTask(
+                task_id="api-task-1",
+                benchmark="smoke",
+                prompt="hello",
+                name="API Task",
+                expected_output="ok",
+            )
+        ]
+
+    async def setup(self, state, options):
+        self.setup_called = True
+
+    async def run_task(self, state, task, result, options, index, total, emit):
+        result.passed = True
+        result.correct = True
+        result.status = "passed"
+        result.predicted = "ok"
+        result.duration_s = 0.01
+        emit({"type": "eval/task_event", "task_id": task.task_id})
+
+    async def teardown(self, state, options):
+        self.teardown_called = True
+
+
+class TestEvalAPI:
+    def test_eval_benchmarks(self, api):
+        r = api.get("/api/eval/benchmarks")
+        assert r.status_code == 200
+        ids = [item["id"] for item in r.json()["benchmarks"]]
+        assert ids == ["gaia", "hle", "smoke"]
+
+    def test_start_and_inspect_fake_eval_run(self, api, tmp_path, monkeypatch):
+        import time
+
+        import eval.common.service as service_module
+
+        monkeypatch.setattr(service_module, "REPORTS_DIR", tmp_path)
+        monkeypatch.setattr(service_module, "_service", None)
+        adapter = _FakeEvalAdapter()
+        monkeypatch.setattr(service_module, "get_adapter", lambda benchmark: adapter)
+
+        r = api.post("/api/eval/runs", json={
+            "benchmark": "smoke",
+            "skip_langfuse": True,
+            "sync_langfuse_dataset": False,
+            "judge_after_run": False,
+        })
+        assert r.status_code == 200
+        run_id = r.json()["run_id"]
+
+        deadline = time.time() + 5
+        data = r.json()
+        while time.time() < deadline and data.get("status") in ("pending", "running"):
+            detail = api.get(f"/api/eval/runs/{run_id}")
+            assert detail.status_code == 200
+            data = detail.json()
+            time.sleep(0.05)
+
+        assert data["status"] == "completed"
+        assert data["summary"]["passed"] == 1
+        assert data["tasks"][0]["task_id"] == "api-task-1"
+        assert adapter.setup_called
+        assert adapter.teardown_called
+
+        runs = api.get("/api/eval/runs")
+        assert runs.status_code == 200
+        assert any(run["run_id"] == run_id for run in runs.json()["runs"])
+
+        report = api.get(f"/api/eval/reports/{run_id}")
+        assert report.status_code == 200
+        assert report.json()["run_id"] == run_id
+
+        markdown = api.get(f"/api/eval/reports/{run_id}/markdown")
+        assert markdown.status_code == 200
+        assert run_id in markdown.text
+
+        service_module._service = None

@@ -31,9 +31,10 @@ class AgentOptions:
     # 思考模式
     thinking: bool = False
     
-    # 成本和轮次限制
+    # 成本、轮次和工具调用限制
     max_cost_usd: float | None = None
     max_turns: int | None = None
+    max_tool_calls: int | None = None
     
     # 确认函数
     confirm_fn: Callable[[str], Awaitable[bool]] | None = None
@@ -68,6 +69,7 @@ class AgentOptions:
             "thinking": self.thinking,
             "max_cost_usd": self.max_cost_usd,
             "max_turns": self.max_turns,
+            "max_tool_calls": self.max_tool_calls,
             "confirm_fn": self.confirm_fn,
             "custom_system_prompt": self.custom_system_prompt,
             "custom_tools": self.custom_tools,

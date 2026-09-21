@@ -869,3 +869,169 @@ export async function getPlanLedger(sessionId: string, slug: string): Promise<{ 
   if (!res.ok) return { success: false, message: 'Failed to fetch plan ledger' };
   return res.json();
 }
+
+export type EvalBenchmark = 'gaia' | 'hle' | 'smoke';
+export type EvalRunStatus = 'pending' | 'running' | 'completed' | 'aborted' | 'failed';
+export type EvalTaskStatus = 'pending' | 'running' | 'passed' | 'failed' | 'error' | 'aborted';
+
+export interface EvalBenchmarkSpec {
+  id: EvalBenchmark;
+  name: string;
+  description: string;
+  execution_modes: string[];
+  default_options: Record<string, any>;
+}
+
+export interface EvalTaskResult {
+  task_id: string;
+  benchmark: EvalBenchmark;
+  name: string;
+  status: EvalTaskStatus;
+  expected: string;
+  predicted: string;
+  correct: boolean | null;
+  passed: boolean | null;
+  duration_s: number;
+  tokens: Record<string, any>;
+  trace_id: string | null;
+  session_id: string | null;
+  error: string | null;
+  langfuse_dataset: Record<string, any>;
+  metadata: Record<string, any>;
+}
+
+export interface EvalRunSummary {
+  total: number;
+  completed?: number;
+  correct?: number;
+  passed?: number;
+  failed?: number;
+  errors?: number;
+  aborted?: number;
+  pass_at_1?: number;
+  avg_duration_s?: number;
+}
+
+export interface EvalRun {
+  run_id: string;
+  benchmark: EvalBenchmark;
+  eval_session_id: string;
+  status: EvalRunStatus;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+  model: string;
+  options?: Record<string, any>;
+  tasks?: EvalTaskResult[];
+  summary: EvalRunSummary;
+  report_json_path?: string | null;
+  report_md_path?: string | null;
+  error?: string | null;
+}
+
+export interface EvalRunList {
+  active: EvalRun[];
+  runs: EvalRun[];
+}
+
+export interface StartEvalRunRequest {
+  benchmark: EvalBenchmark;
+  sample?: number | null;
+  seed?: number;
+  level?: number | null;
+  category?: string | null;
+  include_image?: boolean;
+  only?: string[] | null;
+  suite?: string;
+  timeout_s?: number;
+  model?: string | null;
+  api_base?: string | null;
+  execution_mode?: 'backend_session' | 'in_process';
+  sync_langfuse_dataset?: boolean;
+  judge_after_run?: boolean;
+  skip_langfuse?: boolean;
+  keep_sessions?: boolean;
+  base_url?: string;
+  ws_url?: string;
+}
+
+async function evalRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_BASE}/eval${path}`, init);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(body.detail || `Eval request failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchEvalBenchmarks(): Promise<{ benchmarks: EvalBenchmarkSpec[] }> {
+  return evalRequest('/benchmarks');
+}
+
+export async function fetchEvalRuns(limit = 100): Promise<EvalRunList> {
+  return evalRequest(`/runs?limit=${limit}`);
+}
+
+export async function startEvalRun(request: StartEvalRunRequest): Promise<EvalRun> {
+  return evalRequest('/runs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  });
+}
+
+export async function fetchEvalRun(runId: string): Promise<EvalRun> {
+  return evalRequest(`/runs/${encodeURIComponent(runId)}`);
+}
+
+export async function abortEvalRun(runId: string): Promise<{ run_id: string; aborted: boolean }> {
+  return evalRequest(`/runs/${encodeURIComponent(runId)}/abort`, { method: 'POST' });
+}
+
+export async function judgeEvalRun(runId: string, judge = true): Promise<Record<string, any>> {
+  return evalRequest(`/runs/${encodeURIComponent(runId)}/judge`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ judge }),
+  });
+}
+
+export async function fetchEvalReports(limit = 100): Promise<{ runs: EvalRun[] }> {
+  return evalRequest(`/reports?limit=${limit}`);
+}
+
+export async function fetchEvalReport(runId: string): Promise<Record<string, any>> {
+  return evalRequest(`/reports/${encodeURIComponent(runId)}`);
+}
+
+export interface LangfuseInfo {
+  configured: boolean;
+  base_url: string;
+  project_id?: string;
+  project_name?: string;
+}
+
+export async function fetchEvalLangfuseInfo(): Promise<LangfuseInfo> {
+  return evalRequest('/langfuse');
+}
+
+export function evalReportMarkdownUrl(runId: string): string {
+  return `${API_BASE}/eval/reports/${encodeURIComponent(runId)}/markdown`;
+}
+
+export function langfuseProjectUrl(info: LangfuseInfo | null, path: string): string | null {
+  if (!info?.base_url || !info.project_id) return null;
+  return `${info.base_url.replace(/\/$/, '')}/project/${encodeURIComponent(info.project_id)}${path}`;
+}
+
+export function langfuseTraceUrl(info: LangfuseInfo | null, traceId: string): string | null {
+  return langfuseProjectUrl(info, `/traces/${encodeURIComponent(traceId)}`);
+}
+
+export function langfuseDatasetUrl(info: LangfuseInfo | null, datasetName: string): string | null {
+  return langfuseProjectUrl(info, `/datasets/${encodeURIComponent(datasetName)}`);
+}
+
+export function langfuseSessionUrl(info: LangfuseInfo | null, sessionId: string): string | null {
+  return langfuseProjectUrl(info, `/sessions/${encodeURIComponent(sessionId)}`);
+}

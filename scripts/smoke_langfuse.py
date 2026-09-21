@@ -18,7 +18,7 @@ load_langfuse_env(PROJECT_ROOT)
 os.environ["MYCODE_TRACING"] = "1"
 
 from agents.observability import flush_tracing, init_tracing, shutdown_tracing
-from agents.observability.status import get_langfuse_status
+from agents.observability.langfuse_api import get_client as get_langfuse_api_client
 from agents.observability.trace import trace_context, trace_span
 from agents.observability.tracer import get_trace_client
 
@@ -139,11 +139,12 @@ else:
             f"usageDetails={generation_usage}, expected input_cached_tokens={usage_details['input_cached_tokens']}"
         )
 
-status = get_langfuse_status(force=True)
-project_id = status.get("project_id") or "*"
+api_client = get_langfuse_api_client()
+project = api_client.fetch_project()
+project_id = project.get("id") or "*"
 print(f"[smoke] ✅ trace 已到达 Langfuse: id={detail.id} name={detail.name}")
 print(f"[smoke]    sessionId={detail.session_id} observations={len(observations)}")
-print(f"[smoke]    UI: {status.get('endpoint', '')}/project/{project_id}/traces/{detail.id}")
+print(f"[smoke]    UI: {api_client.base_url}/project/{project_id}/traces/{detail.id}")
 
 shutdown_tracing()
 

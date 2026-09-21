@@ -1,7 +1,7 @@
-"""HLE (Humanity's Last Exam) 评测 runner — 抽样 N 题跑 Pass@1，结果落盘并关联 Langfuse trace。
+"""HLE 评测 CLI — 通过共享 EvalService 抽样跑 Pass@1，结果落盘并关联 Langfuse trace / dataset。
 
 数据：data/HLE/all_500.json（500 题，字段 id/question/answer/answer_type/image/category）
-含 image 的题目默认跳过（当前 Agent 无视觉输入）；--include-image 可强制包含（仅提供路径）。
+含 image 的题目默认跳过；--include-image 可强制包含（仅提供路径）。
 
 用法：
     .venv/bin/python -m eval.hle.runner --sample 10 --seed 42
@@ -11,117 +11,14 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
-import json
-import random
 import sys
-import time
-import uuid
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from eval.common.runner_base import (  # noqa: E402
-    build_prompt,
-    exact_match,
-    extract_final_answer,
-    init_eval_tracing,
-    resolve_model_config,
-    run_agent_task,
-    write_reports,
-)
-
-DATA_PATH = PROJECT_ROOT / "data" / "HLE" / "all_500.json"
-IMAGES_DIR = PROJECT_ROOT / "data" / "HLE" / "images"
-
-
-def load_tasks(category: str | None = None, include_image: bool = False) -> list[dict]:
-    tasks = json.loads(DATA_PATH.read_text(encoding="utf-8"))
-    if not include_image:
-        tasks = [t for t in tasks if not t.get("image")]
-    if category:
-        tasks = [t for t in tasks if t.get("category") == category]
-    return tasks
-
-
-async def run(sample: int, seed: int, category: str | None, include_image: bool, timeout: int, model: str | None, api_base: str | None) -> dict:
-    from agents.observability import shutdown_tracing
-
-    tasks = load_tasks(category, include_image)
-    rng = random.Random(seed)
-    selected = rng.sample(tasks, min(sample, len(tasks)))
-
-    resolved_model, resolved_base, api_key = resolve_model_config(model, api_base)
-    run_id = f"hle-{time.strftime('%Y%m%d_%H%M%S')}-{uuid.uuid4().hex[:6]}"
-    session_id = f"eval-{run_id}"
-    init_eval_tracing("hle")
-
-    print(f"[hle] run_id={run_id} model={resolved_model} tasks={len(selected)}")
-
-    results = []
-    for i, task in enumerate(selected, 1):
-        task_id = task.get("id")
-        question = task["question"]
-        expected = str(task.get("answer", ""))
-        answer_type = task.get("answer_type", "")
-
-        attachment = None
-        if task.get("image"):
-            candidate = IMAGES_DIR / str(task["image"])
-            attachment = str(candidate) if candidate.exists() else None
-
-        hint = "exact match (multiple choice letter)" if answer_type == "multiple-choice" else "exact match"
-        prompt = build_prompt(question, attachment=attachment, answer_hint=hint)
-        print(f"  [{i}/{len(selected)}] {str(task_id)[:10]}… ", end="", flush=True)
-
-        out = await run_agent_task(
-            prompt,
-            benchmark="hle",
-            task_id=str(task_id),
-            session_id=session_id,
-            model=resolved_model,
-            api_base=resolved_base,
-            api_key=api_key,
-            timeout_s=timeout,
-        )
-        predicted = extract_final_answer(out["text"])
-        correct = (not out["error"]) and exact_match(expected, predicted)
-        results.append({
-            "task_id": task_id,
-            "category": task.get("category"),
-            "answer_type": answer_type,
-            "question_preview": question[:150],
-            "expected": expected,
-            "predicted": predicted,
-            "correct": correct,
-            "trace_id": out["trace_id"],
-            "duration_s": out["duration_s"],
-            "tokens": out["tokens"],
-            "error": out["error"],
-        })
-        mark = "✅" if correct else "❌"
-        print(f"{mark} {out['duration_s']}s  expected={expected[:30]!r} predicted={predicted[:30]!r}")
-
-    total = len(results)
-    correct_n = sum(1 for r in results if r["correct"])
-    summary = {
-        "total": total,
-        "correct": correct_n,
-        "pass_at_1": round(correct_n / total, 4) if total else 0.0,
-        "avg_duration_s": round(sum(r["duration_s"] for r in results) / total, 1) if total else 0.0,
-        "errors": sum(1 for r in results if r["error"]),
-    }
-    meta = {"model": resolved_model, "seed": seed, "category": category, "include_image": include_image, "session_id": session_id, "timeout_s": timeout}
-    json_path, md_path = write_reports("hle", run_id, meta, summary, results)
-
-    print(f"\n[hle] Pass@1: {correct_n}/{total} = {summary['pass_at_1']:.1%}")
-    print(f"[hle] 报告: {json_path}")
-    print(f"[hle]       {md_path}")
-    print(f"[hle] Langfuse traces: session={session_id}")
-
-    shutdown_tracing()
-    return {"summary": summary, "json_path": str(json_path), "run_id": run_id}
+from eval.common.cli import run_eval_cli_blocking  # noqa: E402
+from eval.common.models import EvalRunOptions  # noqa: E402
 
 
 def main() -> None:
@@ -133,8 +30,29 @@ def main() -> None:
     parser.add_argument("--timeout", type=int, default=0, help="单题超时秒数（默认 0，不超时）")
     parser.add_argument("--model", type=str, default=None, help="覆盖模型")
     parser.add_argument("--api-base", type=str, default=None, help="覆盖 API base")
+    parser.add_argument("--execution-mode", choices=["backend_session", "in_process"], default="in_process")
+    parser.add_argument("--judge", action="store_true", help="结束后运行 code evaluator + LLM judge")
+    parser.add_argument("--no-dataset", action="store_true", help="不同步 Langfuse Dataset")
+    parser.add_argument("--skip-langfuse", action="store_true", help="跳过 Langfuse")
     args = parser.parse_args()
-    asyncio.run(run(args.sample, args.seed, args.category, args.include_image, args.timeout, args.model, args.api_base))
+
+    options = EvalRunOptions(
+        benchmark="hle",
+        sample=args.sample,
+        seed=args.seed,
+        category=args.category,
+        include_image=args.include_image,
+        timeout_s=args.timeout,
+        model=args.model,
+        api_base=args.api_base,
+        execution_mode=args.execution_mode,
+        sync_langfuse_dataset=not args.no_dataset,
+        judge_after_run=args.judge,
+        skip_langfuse=args.skip_langfuse,
+    )
+    result = run_eval_cli_blocking(options)
+    if result.get("status") == "failed":
+        raise SystemExit(result.get("error") or "HLE eval failed")
 
 
 if __name__ == "__main__":

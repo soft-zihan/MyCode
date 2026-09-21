@@ -29,6 +29,10 @@ def _tools(bundle: dict[str, Any]) -> list[dict[str, Any]]:
     return [o for o in bundle.get("observations", []) if o.get("type") == "TOOL"]
 
 
+def _agents(bundle: dict[str, Any]) -> list[dict[str, Any]]:
+    return [o for o in bundle.get("observations", []) if o.get("type") == "AGENT"]
+
+
 def eval_tool_success(bundle: dict[str, Any]) -> ScoreResult | None:
     """工具调用成功率：level != ERROR 的 TOOL observation 占比。"""
     tools = _tools(bundle)
@@ -73,6 +77,57 @@ def eval_repeated_tool_calls(bundle: dict[str, Any]) -> ScoreResult | None:
     }
 
 
+def eval_subagent_timeout_loop(bundle: dict[str, Any]) -> ScoreResult | None:
+    """子 Agent 超时/循环检测：区分长任务进展和重复失败。"""
+    agents = _agents(bundle)
+    if not agents:
+        return None
+
+    timeouts: list[dict[str, Any]] = []
+    for obs in agents:
+        meta = _obs_metadata(obs)
+        status = str(meta.get("status") or "").lower()
+        outcome = str(meta.get("outcome") or "").lower()
+        output = str(obs.get("output") or "").lower()
+        if outcome == "timeout" or status == "timeout" or "timed out" in output:
+            timeouts.append(obs)
+
+    if not timeouts:
+        return {
+            "name": "subagent_timeout_loop",
+            "value": False,
+            "data_type": "BOOLEAN",
+            "comment": f"{len(agents)} sub-agent observation(s), no timeout",
+        }
+
+    repeated: dict[tuple, int] = {}
+    progressing_timeouts = 0
+    for obs in timeouts:
+        meta = _obs_metadata(obs)
+        key_input = obs.get("input")
+        if not isinstance(key_input, str):
+            key_input = json.dumps(key_input, ensure_ascii=False, sort_keys=True, default=str)
+        key = (obs.get("name"), key_input[:500])
+        repeated[key] = repeated.get(key, 0) + 1
+        tool_calls = int(meta.get("tool_call_count") or 0)
+        failed_calls = int(meta.get("failed_tool_call_count") or 0)
+        if tool_calls >= 5 and failed_calls / max(tool_calls, 1) <= 0.5:
+            progressing_timeouts += 1
+
+    worst_count = max(repeated.values())
+    looping = worst_count >= 2 or (len(timeouts) >= 3 and progressing_timeouts < len(timeouts))
+    worst_name = max(repeated.items(), key=lambda kv: kv[1])[0][0] if repeated else "agent"
+    return {
+        "name": "subagent_timeout_loop",
+        "value": looping,
+        "data_type": "BOOLEAN",
+        "comment": (
+            f"timeouts={len(timeouts)}/{len(agents)}, repeated={worst_name} x{worst_count}, "
+            f"progressing_timeouts={progressing_timeouts}"
+        ),
+    }
+
+
 def eval_event_range_complete(bundle: dict[str, Any]) -> ScoreResult | None:
     """埋点质量自检：turn(chain) observation 是否携带完整 event_range。"""
     turns = [
@@ -99,6 +154,7 @@ def eval_event_range_complete(bundle: dict[str, Any]) -> ScoreResult | None:
 ALL_EVALUATORS: list[Callable[[dict[str, Any]], ScoreResult | None]] = [
     eval_tool_success,
     eval_repeated_tool_calls,
+    eval_subagent_timeout_loop,
     eval_event_range_complete,
 ]
 

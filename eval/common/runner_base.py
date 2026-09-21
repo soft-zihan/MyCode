@@ -165,7 +165,7 @@ async def run_agent_task(
                 span.record_error(e)
             finally:
                 span.update(
-                    output=result["text"][:4000] if result["text"] else (result["error"] or ""),
+                    output=result["text"][:20000] if result["text"] else (result["error"] or ""),
                     metadata={
                         "duration_s": round(time.time() - t0, 2),
                         "success": result["error"] is None,
@@ -210,13 +210,14 @@ def write_reports(
     summary: dict[str, Any],
     results: list[dict[str, Any]],
     reports_dir: Path | None = None,
+    report_stem: str | None = None,
 ) -> tuple[Path, Path]:
     """写 JSON + Markdown 报告，返回两个路径。"""
     out_dir = reports_dir or REPORTS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
-    ts = time.strftime("%Y%m%d_%H%M%S")
-    json_path = out_dir / f"{benchmark}_{ts}.json"
-    md_path = out_dir / f"{benchmark}_{ts}.md"
+    stem = report_stem or f"{benchmark}_{time.strftime('%Y%m%d_%H%M%S')}"
+    json_path = out_dir / f"{stem}.json"
+    md_path = out_dir / f"{stem}.md"
 
     report = {
         "benchmark": benchmark,

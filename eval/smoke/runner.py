@@ -6,12 +6,13 @@
    → WS 收事件直到 turn/end → 断言（回复内容/工具/子智能体/文件产物）
 3. Langfuse 校验：按 sessionId 拉 trace，断言 Span 树结构
    （turn span + event_range 完整 + GENERATION usage），跑 code evaluators 提交 score
-4. 报告落盘 eval/reports/smoke_*.json/.md
+4. 报告落盘 eval/reports/{run_id}.json/.md/.state.json
 
 用法：
-    .venv/bin/python -m eval.smoke.runner                # 全部任务
+    .venv/bin/python -m eval.smoke.runner --suite comprehensive
     .venv/bin/python -m eval.smoke.runner --only read_file shell_exec
     .venv/bin/python -m eval.smoke.runner --skip-langfuse
+    .venv/bin/python -m eval.smoke.runner --cleanup
 """
 
 from __future__ import annotations
@@ -131,6 +132,11 @@ def setup_workspace(task: dict) -> Path:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(f["content"], encoding="utf-8")
     return ws
+
+
+def check_backend_health(base_url: str) -> None:
+    response = requests.get(f"{base_url}/api/health", timeout=5)
+    response.raise_for_status()
 
 
 def send_chat(base_url: str, message: str, session_id: str | None, cwd: str) -> dict:
@@ -454,7 +460,14 @@ def _cleanup_backend(base_url: str, session_id: str | None, workspace: Path) -> 
         pass
 
 
-async def run_task(listener: EventListener, task: dict, base_url: str, skip_langfuse: bool, keep: bool = False) -> dict:
+async def run_task(
+    listener: EventListener,
+    task: dict,
+    base_url: str,
+    skip_langfuse: bool,
+    keep: bool = False,
+    on_event: Any | None = None,
+) -> dict:
     workspace = setup_workspace(task)
     phases = task.get("phases")
     messages = task["messages"] if not phases else []
@@ -462,10 +475,26 @@ async def run_task(listener: EventListener, task: dict, base_url: str, skip_lang
     record: dict[str, Any] = {
         "id": task["id"], "name": task.get("name", ""), "turns": len(messages) or sum(len(p.get("messages", [])) for p in (phases or [])),
         "session_id": None, "failures": [], "duration_s": 0.0, "langfuse": None,
+        "workspace": str(workspace),
     }
+
+    def emit(event_type: str, **data: Any) -> None:
+        if on_event is None:
+            return
+        on_event({"type": event_type, "task_id": task["id"], **data})
+
     t0 = time.time()
     session_id = None
     window_start = len(listener.events)
+
+    def observe_session(sid: str | None) -> None:
+        nonlocal session_id
+        if sid and sid != session_id:
+            session_id = sid
+            record["session_id"] = sid
+            emit("smoke_session_started", session_id=sid, workspace=str(workspace))
+
+    emit("smoke_task_started", name=record["name"], workspace=str(workspace), turns=record["turns"])
     try:
         if phases:
             # 多阶段测试：每个阶段可以是新 session
@@ -485,8 +514,7 @@ async def run_task(listener: EventListener, task: dict, base_url: str, skip_lang
                     if resp.get("error"):
                         record["failures"].append(f"阶段{phase_idx} API error: {resp['error'][:150]}")
                         break
-                    session_id = resp["session_id"]
-                    record["session_id"] = session_id
+                    observe_session(resp["session_id"])
                     ok = await listener.wait_turn_end(session_id, baseline + 1, timeout_s)
                     if not ok:
                         record["failures"].append(f"阶段{phase_idx} 第 {i} 轮等待 turn/end 超时（{timeout_s}s）")
@@ -541,8 +569,7 @@ async def run_task(listener: EventListener, task: dict, base_url: str, skip_lang
                 if resp.get("error"):
                     record["failures"].append(f"API error: {resp['error'][:150]}")
                     break
-                session_id = resp["session_id"]
-                record["session_id"] = session_id
+                observe_session(resp["session_id"])
                 ok = await listener.wait_turn_end(session_id, baseline + 1, timeout_s)
                 if not ok:
                     record["failures"].append(f"第 {i} 轮等待 turn/end 超时（{timeout_s}s）")
@@ -560,6 +587,29 @@ async def run_task(listener: EventListener, task: dict, base_url: str, skip_lang
     except Exception as e:
         record["failures"].append(f"runner 异常: {type(e).__name__}: {e}")
     record["duration_s"] = round(time.time() - t0, 1)
+
+    if session_id and "responses" not in record:
+        events = listener.session_events(session_id)
+        answer = ""
+        for e in reversed(events):
+            if e.get("type") == "assistant_message":
+                answer = e.get("content", "")
+                if answer:
+                    break
+        expect = task.get("expect", {})
+        expected_keywords: list[Any] = []
+        for group in expect.get("response_contains", []):
+            if isinstance(group, list):
+                expected_keywords.extend(group)
+            else:
+                expected_keywords.append(group)
+        record["responses"] = [{
+            "phase": 1,
+            "question": messages[-1] if messages else "",
+            "answer": answer,
+            "expected_keywords": expected_keywords,
+            "wiki_recalled": expect.get("wiki_recalled", False),
+        }]
 
     if session_id and not skip_langfuse:
         try:
@@ -627,6 +677,13 @@ async def run_task(listener: EventListener, task: dict, base_url: str, skip_lang
     
     # 等待异步 wiki 写入完成
     await asyncio.sleep(2)
+    emit(
+        "smoke_task_finished",
+        session_id=session_id,
+        passed=record["passed"],
+        failures=record["failures"][:10],
+        duration_s=record["duration_s"],
+    )
     if not keep:
         _cleanup_backend(base_url, session_id, workspace)
     if not task.get("use_real_workspace"):
@@ -634,106 +691,74 @@ async def run_task(listener: EventListener, task: dict, base_url: str, skip_lang
     return record
 
 
-def write_smoke_report(results: list[dict], base_url: str, skip_langfuse: bool) -> tuple[Path, Path]:
-    ts = time.strftime("%Y%m%d_%H%M%S")
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    json_path = REPORTS_DIR / f"smoke_{ts}.json"
-    md_path = REPORTS_DIR / f"smoke_{ts}.md"
-
-    passed = sum(1 for r in results if r["passed"])
-    summary = {"total": len(results), "passed": passed, "failed": len(results) - passed}
-    json_path.write_text(json.dumps({
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "base_url": base_url, "skip_langfuse": skip_langfuse,
-        "summary": summary, "results": results,
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    lines = [
-        "# 对话冒烟评测报告", "",
-        f"- 服务: {base_url}",
-        f"- **通过: {passed}/{len(results)}**",
-        f"- Langfuse 校验: {'跳过' if skip_langfuse else '开启'}", "",
-        "| 任务 | 结果 | 轮数 | 耗时(s) | session | traces | 失败原因 |",
-        "|------|------|------|---------|---------|--------|----------|",
-    ]
-    for r in results:
-        lf = r.get("langfuse") or {}
-        lines.append(
-            f"| {r['id']} | {'✅' if r['passed'] else '❌'} | {r['turns']} | {r['duration_s']} "
-            f"| `{str(r['session_id'])[:8]}` | {lf.get('traces', '-')} | {'; '.join(r['failures'])[:80] or '-'} |"
-        )
-    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return json_path, md_path
-
-
 def get_failed_task_ids(suite: str) -> list[str]:
-    """从最近的报告中读取失败的任务 id。"""
-    reports = sorted(REPORTS_DIR.glob(f"smoke_*.json"), reverse=True)
-    if not reports:
-        return []
-    
-    import json as json_mod
+    """从最近的 EvalService smoke run 状态中读取失败任务 id。"""
+    reports = sorted(REPORTS_DIR.glob("smoke-*.state.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     for report_path in reports[:5]:
         try:
-            data = json_mod.loads(report_path.read_text())
-            if data.get("results"):
-                failed = [r["id"] for r in data["results"] if not r.get("passed", True)]
-                if failed:
-                    return failed
+            data = json.loads(report_path.read_text(encoding="utf-8"))
         except Exception:
             continue
+        if data.get("benchmark") != "smoke":
+            continue
+        if (data.get("options") or {}).get("suite") != suite:
+            continue
+        failed = [
+            task["task_id"]
+            for task in data.get("tasks", [])
+            if task.get("status") in ("failed", "error", "aborted")
+        ]
+        if failed:
+            return failed
     return []
 
 
-async def run(only: list[str] | None, base_url: str, ws_url: str, skip_langfuse: bool, keep: bool = False, suite: str = "smoke", rerun_failed: bool = False) -> int:
-    health = requests.get(f"{base_url}/api/health", timeout=5)
-    health.raise_for_status()
-    print(f"[smoke] 服务健康: {base_url}")
-
-    if rerun_failed:
-        failed_ids = get_failed_task_ids(suite)
-        if not failed_ids:
-            print(f"[smoke] 没有失败的任务需要重跑")
-            return 0
-        print(f"[smoke] 重跑失败任务: {failed_ids}")
-        only = failed_ids
-
-    tasks = load_tasks(only, suite)
-    listener = EventListener(ws_url)
-    await listener.start()
-    print(f"[smoke] WS 已连接，任务数: {len(tasks)} (suite={suite})")
-
-    results = []
-    try:
-        for i, task in enumerate(tasks, 1):
-            print(f"  [{i}/{len(tasks)}] {task['id']} …", end=" ", flush=True)
-            r = await run_task(listener, task, base_url, skip_langfuse, keep)
-            results.append(r)
-            mark = "✅" if r["passed"] else "❌"
-            print(f"{mark} {r['duration_s']}s" + (f"  {r['failures'][:2]}" if r["failures"] else ""))
-    finally:
-        await listener.stop()
-
-    json_path, md_path = write_smoke_report(results, base_url, skip_langfuse)
-    passed = sum(1 for r in results if r["passed"])
-    print(f"\n[smoke] 通过 {passed}/{len(results)}")
-    print(f"[smoke] 报告: {json_path}")
-    print(f"[smoke]       {md_path}")
-    return 0 if passed == len(results) else 1
-
-
 def main() -> None:
+    from eval.common.cli import run_eval_cli_blocking
+    from eval.common.models import EvalRunOptions
+
     parser = argparse.ArgumentParser(description="对话冒烟评测")
     parser.add_argument("--only", nargs="*", default=None, help="只跑指定任务 id")
+    parser.add_argument("--sample", type=int, default=None, help="只跑前 N 个任务")
     parser.add_argument("--rerun-failed", action="store_true", help="只重跑上次失败的任务")
     parser.add_argument("--suite", choices=["smoke", "comprehensive"], default="smoke",
-                        help="测试套件: smoke(30个单元) 或 comprehensive(5个综合场景)")
+                        help="测试套件: smoke(30个单元) 或 comprehensive(8个综合场景)")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--ws-url", default=DEFAULT_WS_URL)
     parser.add_argument("--skip-langfuse", action="store_true", help="跳过 Langfuse trace 校验")
-    parser.add_argument("--keep", action="store_true", help="保留后端会话与项目注册（排错用；默认自动清理）")
+    parser.add_argument("--cleanup", action="store_true", help="跑完删除后端 session / project；默认保留便于前端观察")
+    parser.add_argument("--no-dataset", action="store_true", help="不同步 Langfuse Dataset")
+    parser.add_argument("--judge", action="store_true", help="结束后运行 code evaluator + LLM judge")
     args = parser.parse_args()
-    sys.exit(asyncio.run(run(args.only, args.base_url, args.ws_url, args.skip_langfuse, args.keep, args.suite, args.rerun_failed)))
+
+    only = args.only
+    if args.rerun_failed:
+        only = get_failed_task_ids(args.suite)
+        if not only:
+            print("[smoke] 没有失败的任务需要重跑")
+            return
+        print(f"[smoke] 重跑失败任务: {only}")
+
+    check_backend_health(args.base_url)
+    print(f"[smoke] 服务健康: {args.base_url}")
+
+    options = EvalRunOptions(
+        benchmark="smoke",
+        sample=args.sample,
+        only=only,
+        suite=args.suite,
+        skip_langfuse=args.skip_langfuse,
+        keep_sessions=not args.cleanup,
+        sync_langfuse_dataset=not args.no_dataset and not args.skip_langfuse,
+        judge_after_run=args.judge,
+        base_url=args.base_url,
+        ws_url=args.ws_url,
+    )
+    result = run_eval_cli_blocking(options, shutdown_tracing=False)
+    summary = result.get("summary", {})
+    failed = summary.get("failed", 0) + summary.get("errors", 0) + summary.get("aborted", 0)
+    if result.get("status") == "failed" or failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
