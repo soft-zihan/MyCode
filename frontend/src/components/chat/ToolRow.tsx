@@ -119,6 +119,18 @@ const formatDuration = (ms?: number): string => {
   return `${(ms / 1000).toFixed(1)}s`;
 };
 
+// Full input for expanded view: shell commands keep original line breaks,
+// other tools render as indented JSON
+const formatInput = (name: string, input: Record<string, unknown>): string => {
+  if (name === 'run_shell' && typeof input.command === 'string') {
+    const rest = { ...input };
+    delete rest.command;
+    const extra = Object.keys(rest).length > 0 ? `\n\n${JSON.stringify(rest, null, 2)}` : '';
+    return input.command + extra;
+  }
+  return JSON.stringify(input, null, 2);
+};
+
 // Diff 视图组件，用于显示 edit_file 的结果
 const DiffView: React.FC<{ content: string }> = ({ content }) => {
   const lines = content.split('\n');
@@ -167,7 +179,8 @@ export const ToolRow: React.FC<ToolRowProps> = ({ call }) => {
     ? call.result.split('\n')[0].slice(0, 100)
     : summary;
   
-  const hasExpandableContent = call.result || call.snapshot;
+  const hasInput = !!call.input && Object.keys(call.input).length > 0;
+  const hasExpandableContent = hasInput || call.result || call.snapshot;
 
   return (
     <div 
@@ -237,6 +250,17 @@ export const ToolRow: React.FC<ToolRowProps> = ({ call }) => {
         <div className="border-t border-gray-200 bg-gray-50">
           {/* Input/Output card style */}
           <div className="p-2.5 space-y-2">
+            {/* Input section — full command/args, line breaks preserved */}
+            {hasInput && (
+              <div className="space-y-1">
+                <span className="text-[10px] font-medium text-gray-400 uppercase tracking-wider">
+                  Input
+                </span>
+                <pre className="text-xs bg-white border border-gray-200 rounded p-2 overflow-x-auto max-h-60 overflow-y-auto whitespace-pre-wrap break-all text-gray-700 font-mono">
+                  {formatInput(call.name, call.input)}
+                </pre>
+              </div>
+            )}
             {/* Output section */}
             {call.result && (
               <div className="space-y-1">
