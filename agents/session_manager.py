@@ -30,6 +30,7 @@ class SessionManager:
         title: str | None = None,
         metadata: dict[str, Any] | None = None,
         thinking: bool | None = None,
+        compression_arm: str | None = None,
     ) -> tuple[Any, Session]:
         """创建新 session 和 agent。"""
         from agents.agent import Agent
@@ -63,6 +64,7 @@ class SessionManager:
             session_id=session.id,
             workspace=cwd,
             thinking=resolved_thinking,
+            compression_arm=compression_arm,
         )
         print(f"[DEBUG] session_manager.create: agent.session_id = {agent.session_id}, agent.session.id = {agent.session.id}")
         agent.session = session

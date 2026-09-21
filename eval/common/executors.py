@@ -53,6 +53,7 @@ async def execute_in_process_task(
         api_key=api_key or "",
         timeout_s=options.timeout_s,
         thinking=options.thinking,
+        compression_arm=options.compression_arm,
     )
     out["execution_mode"] = "in_process"
     return out
@@ -79,6 +80,7 @@ async def execute_backend_session_task(
         api_base=api_base,
         api_key=api_key,
         thinking=options.thinking,
+        compression_arm=options.compression_arm,
         title=f"eval:{task.benchmark}:{task.task_id}",
         metadata={
             "eval_run_id": state.run_id,

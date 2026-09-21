@@ -542,9 +542,27 @@ async def run_task(
                     await asyncio.sleep(3)
                     session_id = None  # 强制新 session
 
-                # wait_for_files：异步产物（编译/整理/skill）轮询等待，超时按缺失断言
+                for i, msg in enumerate(phase_messages, 1):
+                    if time.time() - t0 > case_budget:
+                        record["failures"].append(f"case 预算超限（{case_budget}s），熔断于阶段{phase_idx}第{i}轮")
+                        budget_blown = True
+                        break
+                    baseline = listener.turn_end_count(session_id) if session_id else 0
+                    resp = await asyncio.to_thread(send_chat, base_url, msg, session_id, str(workspace), thinking)
+                    if resp.get("error"):
+                        record["failures"].append(f"阶段{phase_idx} API error: {resp['error'][:150]}")
+                        break
+                    observe_session(resp["session_id"])
+                    ok = await listener.wait_turn_end(session_id, baseline + 1, timeout_s)
+                    if not ok:
+                        record["failures"].append(f"阶段{phase_idx} 第 {i} 轮等待 turn/end 超时（{timeout_s}s）")
+                        break
+
+                # wait_for_files：异步产物（编译/整理/skill）轮询等待，超时按缺失断言。
+                # 必须在本阶段消息发送之后执行——产物由消息触发（如 compact_context
+                # 折叠后的提取编译），放在消息前会把等待预算烧在还不存在的文件上。
                 wait_specs = phase_expect.get("wait_for_files", [])
-                if wait_specs:
+                if wait_specs and not budget_blown:
                     wait_deadline = time.time() + phase_expect.get("wait_timeout_s", 240)
                     pending = list(wait_specs)
                     while pending and time.time() < wait_deadline:
@@ -567,23 +585,7 @@ async def run_task(
                         record["failures"].append(
                             f"wait_for_files 超时: {spec['path']} contains={spec.get('contains')!r}"
                         )
-                
-                for i, msg in enumerate(phase_messages, 1):
-                    if time.time() - t0 > case_budget:
-                        record["failures"].append(f"case 预算超限（{case_budget}s），熔断于阶段{phase_idx}第{i}轮")
-                        budget_blown = True
-                        break
-                    baseline = listener.turn_end_count(session_id) if session_id else 0
-                    resp = await asyncio.to_thread(send_chat, base_url, msg, session_id, str(workspace), thinking)
-                    if resp.get("error"):
-                        record["failures"].append(f"阶段{phase_idx} API error: {resp['error'][:150]}")
-                        break
-                    observe_session(resp["session_id"])
-                    ok = await listener.wait_turn_end(session_id, baseline + 1, timeout_s)
-                    if not ok:
-                        record["failures"].append(f"阶段{phase_idx} 第 {i} 轮等待 turn/end 超时（{timeout_s}s）")
-                        break
-                
+
                 # 提取回答内容（取最后一个 assistant_message）
                 events = listener.session_events(session_id)
                 last_turn_start = max(

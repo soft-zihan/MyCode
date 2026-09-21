@@ -110,6 +110,7 @@ async def run_agent_task(
     api_key: str,
     timeout_s: int = 0,
     thinking: bool | None = None,
+    compression_arm: str | None = None,
 ) -> dict[str, Any]:
     """运行单个评测任务，返回 {text, duration_s, tokens, trace_id, error, agent_session_id}。"""
     from agents.agent import Agent
@@ -149,6 +150,7 @@ async def run_agent_task(
                     permission_mode="bypassPermissions",
                     is_sub_agent=True,
                     thinking=thinking,
+                    compression_arm=compression_arm,
                 )
                 result["agent_session_id"] = agent.session_id
                 agent_task = asyncio.create_task(agent.run_once(prompt))

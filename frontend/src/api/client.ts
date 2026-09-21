@@ -960,6 +960,7 @@ export interface StartEvalRunRequest {
   judge_after_run?: boolean;
   skip_langfuse?: boolean;
   thinking?: boolean | null;
+  compression_arm?: 'none' | 'tool_only' | 'session_only' | 'full' | null;
   keep_sessions?: boolean;
   base_url?: string;
   ws_url?: string;

@@ -39,6 +39,10 @@ from .session import save_folded_session_memory
 logger = logging.getLogger(__name__)
 
 SESSION_FOLD_THRESHOLD = 0.40
+# 压缩对比实验臂（GAIA 消融）：full=现状；none=完全不压缩（配合 1M 窗口）；
+# tool_only=仅工具结果折叠；session_only=仅会话折叠。实验臂只保留利用率触发，
+# 禁用 idle 触发——idle 折叠会连带执行另一种机制，污染单臂对比。
+COMPRESSION_ARMS = {"full", "none", "tool_only", "session_only"}
 KEEP_RECENT_TOOL_ROUNDS = 3
 KEEP_RECENT_DIALOG_ROUNDS = 2
 KEEP_RECENT_TRAJECTORY_TOOL_ROUNDS = 5
@@ -119,7 +123,11 @@ class ContextCompressor:
         tool_abstract_batch_char_limit: int = TOOL_ABSTRACT_BATCH_CHAR_LIMIT,
         assistant_text_char_limit: int = ASSISTANT_TEXT_CHAR_LIMIT,
         wiki_enabled: bool = True,
+        arm: str = "full",
     ) -> None:
+        if arm not in COMPRESSION_ARMS:
+            raise ValueError(f"compression arm must be one of {sorted(COMPRESSION_ARMS)}, got {arm!r}")
+        self.arm = arm
         self.wiki_enabled = wiki_enabled
         self.tool_fold_threshold = tool_fold_threshold
         self.session_fold_threshold = session_fold_threshold
@@ -148,18 +156,24 @@ class ContextCompressor:
         session_id: str,
         folded_memories: list[dict],
     ) -> bool:
+        if self.arm == "none":
+            return False
+
         current_token_count = max(0, int(current_token_count))
         utilization = current_token_count / self.effective_window if self.effective_window else 0
         idle_seconds = time.time() - last_api_call_time if last_api_call_time else 0
 
         folded = False
-        should_compress = (
-            utilization > self.tool_fold_threshold
-            or idle_seconds > self.idle_timeout_seconds
-        )
+        if self.arm == "full":
+            should_compress = (
+                utilization > self.tool_fold_threshold
+                or idle_seconds > self.idle_timeout_seconds
+            )
+        else:
+            should_compress = utilization > self.tool_fold_threshold
 
         print(
-            f"[compressor] check: tokens={current_token_count}, utilization={utilization:.2%}, "
+            f"[compressor] check: arm={self.arm}, tokens={current_token_count}, utilization={utilization:.2%}, "
             f"idle={idle_seconds:.0f}s, threshold={self.tool_fold_threshold:.0%}, should_compress={should_compress}"
         )
 
@@ -173,6 +187,7 @@ class ContextCompressor:
             "compact",
             metadata={
                 "trigger": trigger,
+                "arm": self.arm,
                 "token_count_before": current_token_count,
                 "utilization_before": round(utilization, 3),
                 "idle_seconds": round(idle_seconds, 1),
@@ -183,9 +198,18 @@ class ContextCompressor:
             hidden_before = _count_hidden_seqs(session)
             message_tokens_before = estimate_visible_message_tokens(session)
 
-            folded = await self._fold_tool_results(session, side_query)
-            if span:
-                span.add_metadata(tool_fold=folded)
+            if self.arm == "session_only":
+                folded = False
+                if span:
+                    span.add_metadata(tool_fold=False)
+            else:
+                folded = await self._fold_tool_results(session, side_query)
+                if span:
+                    span.add_metadata(tool_fold=folded)
+
+            if self.arm == "tool_only":
+                _finish_compaction_span(span, session, hidden_before, folded, False)
+                return folded
 
             if folded:
                 estimated_tokens = self._estimate_tokens_after_fold(

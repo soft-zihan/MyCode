@@ -136,6 +136,7 @@ class Agent:
                  api_base: str | None=None,
                  api_key: str | None=None,
                  thinking: bool | None = None,
+                 compression_arm: str | None = None,
                  max_cost_usd: float | None=None,
                  max_turns: int | None=None,
                  max_tool_calls: int | None=None,
@@ -155,6 +156,7 @@ class Agent:
                 api_base = options.api_base
                 api_key = options.api_key
                 thinking = options.thinking
+                compression_arm = options.compression_arm
                 max_cost_usd = options.max_cost_usd
                 max_turns = options.max_turns
                 max_tool_calls = options.max_tool_calls
@@ -189,6 +191,14 @@ class Agent:
         self.context_window = _ep.context_window if _ep else DEFAULT_CONTEXT_WINDOW
         self.effective_window = self.context_window - 20000
         self.auto_compact_threshold = _ep.auto_compact_threshold if _ep else DEFAULT_AUTO_COMPACT_THRESHOLD
+        from agents.core.context_compressor import COMPRESSION_ARMS
+        self.compression_arm = compression_arm or "full"
+        if self.compression_arm not in COMPRESSION_ARMS:
+            raise ValueError(f"compression_arm must be one of {sorted(COMPRESSION_ARMS)}, got {self.compression_arm!r}")
+        if self.compression_arm == "none":
+            # 不压缩臂：窗口放大到 1M，让原始上下文直达模型（GAIA 压缩消融对照）
+            self.context_window = 1_000_000
+            self.effective_window = self.context_window - 20000
         self.session_id = session_id or uuid.uuid4().hex[:8]
         self.session_start_time= time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
 
@@ -217,6 +227,7 @@ class Agent:
             effective_window=self.effective_window,
             tool_fold_threshold=self.auto_compact_threshold,
             wiki_enabled=not self.is_sub_agent,
+            arm=self.compression_arm,
         )
         self._permission_gate = PermissionGate()
         self._session_lifecycle = SessionLifecycle()
@@ -943,8 +954,15 @@ class Agent:
         return self._build_side_query(max_tokens=max_tokens)
 
     def start_wiki_prefetch(self, user_message: str, side_query) -> None:
-        if self.is_sub_agent or self._wiki_prefetch is not None:
+        if self.is_sub_agent:
             return
+        if self._wiki_prefetch is not None:
+            # BC-8：闩锁只在上一轮 prefetch 仍在途或尚未消费时生效。
+            # 已消费则清空引用允许本轮重新召回——否则整个 session 只有第一轮
+            # 会召回，中途 remember 写入的条目对后续轮次永远不可见。
+            if not self._wiki_prefetch.done() or not self._wiki_prefetch_consumed:
+                return
+            self._wiki_prefetch = None
         cooled_wiki_paths = {
             path for path, turn in self._wiki_surfaced_at.items()
             if self._turn_number - turn < self.WIKI_RECALL_COOLDOWN_TURNS

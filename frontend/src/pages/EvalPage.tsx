@@ -37,6 +37,7 @@ const DEFAULT_FORM: StartEvalRunRequest = {
   skip_langfuse: false,
   keep_sessions: true,
   thinking: null,
+  compression_arm: null,
 };
 
 const STATUS_STYLES: Record<string, string> = {
@@ -351,6 +352,20 @@ export default function EvalPage() {
                 <option value="default">跟随全局配置</option>
                 <option value="true">开</option>
                 <option value="false">关（更快，考验鲁棒性）</option>
+              </select>
+            </label>
+
+            <label className="block text-sm">
+              <span className="text-gray-600">压缩策略（消融实验臂）</span>
+              <select
+                value={form.compression_arm ?? 'full'}
+                onChange={(e) => updateForm('compression_arm', e.target.value === 'full' ? null : e.target.value as 'none' | 'tool_only' | 'session_only')}
+                className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 bg-white"
+              >
+                <option value="full">full（现状：工具折叠+会话折叠）</option>
+                <option value="none">none（不压缩 + 1M 窗口）</option>
+                <option value="tool_only">tool_only（仅工具结果折叠）</option>
+                <option value="session_only">session_only（仅会话折叠）</option>
               </select>
             </label>
 

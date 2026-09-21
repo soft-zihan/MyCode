@@ -56,6 +56,7 @@ class EvalRunRequest(BaseModel):
     base_url: str = "http://localhost:5555"
     ws_url: str = "ws://localhost:5555/ws/events"
     thinking: bool | None = None
+    compression_arm: Literal["none", "tool_only", "session_only", "full"] | None = None
 
 
 class JudgeRequest(BaseModel):

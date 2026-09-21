@@ -29,6 +29,8 @@ def main() -> None:
     parser.add_argument("--level", type=int, default=None, choices=[1, 2, 3], help="只跑指定 Level")
     parser.add_argument("--thinking", choices=["on", "off", "default"], default="default",
                         help="推理模型 thinking 开关（default=跟随全局配置）")
+    parser.add_argument("--compression-arm", choices=["none", "tool_only", "session_only", "full"], default=None,
+                        help="压缩消融实验臂：none=不压缩+1M窗口, tool_only=仅工具折叠, session_only=仅会话折叠, full=现状（默认）")
     parser.add_argument("--timeout", type=int, default=0, help="单题超时秒数（默认 0，不超时）")
     parser.add_argument("--model", type=str, default=None, help="覆盖模型")
     parser.add_argument("--api-base", type=str, default=None, help="覆盖 API base")
@@ -44,6 +46,7 @@ def main() -> None:
         seed=args.seed,
         level=args.level,
         thinking={"on": True, "off": False, "default": None}[args.thinking],
+        compression_arm=args.compression_arm,
         timeout_s=args.timeout,
         model=args.model,
         api_base=args.api_base,

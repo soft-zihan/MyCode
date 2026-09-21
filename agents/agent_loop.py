@@ -327,7 +327,9 @@ class AgentLoop:
             try:
                 await asyncio.wait_for(asyncio.shield(a._wiki_prefetch), timeout=20.0)
             except asyncio.TimeoutError:
-                print(f"[wiki_recall] timeout after 20s, skipping injection")
+                # BC-8：超时也要释放闩锁（标记已消费），否则后续轮次永远无法重新召回
+                print("[wiki_recall] timeout after 20s, skipping injection")
+                a._wiki_prefetch_consumed = True
                 return
         a._wiki_prefetch_consumed = True
         try:

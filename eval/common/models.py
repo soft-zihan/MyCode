@@ -81,6 +81,7 @@ class EvalRunOptions:
     base_url: str = "http://localhost:5555"
     ws_url: str = "ws://localhost:5555/ws/events"
     thinking: bool | None = None  # None=跟随全局配置
+    compression_arm: str | None = None  # None/full=现状; none/tool_only/session_only=压缩消融实验臂
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -91,6 +92,7 @@ class EvalRunOptions:
             "category": self.category,
             "include_image": self.include_image,
             "thinking": self.thinking,
+            "compression_arm": self.compression_arm,
             "only": self.only,
             "suite": self.suite,
             "timeout_s": self.timeout_s,
