@@ -109,15 +109,29 @@ class ToolCallTracker:
     blocked_keys: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
     blocked_tools: dict[str, dict[str, Any]] = field(default_factory=dict)
     near_duplicate_history: dict[str, list[frozenset[str]]] = field(default_factory=lambda: defaultdict(list))
+    pending_near_duplicate_signatures: dict[str, list[frozenset[str]]] = field(default_factory=lambda: defaultdict(list))
     last_decision: ToolGuardDecision | None = None
 
     def _near_duplicate_previous_count(self, tool_name: str, signature: frozenset[str]) -> int:
         history = self.near_duplicate_history.get(tool_name, [])[-NEAR_DUPLICATE_HISTORY_LIMIT:]
+        pending = self.pending_near_duplicate_signatures.get(tool_name, [])
         return sum(
             1
-            for previous in history
+            for previous in (*history, *pending)
             if jaccard_similarity(previous, signature) >= NEAR_DUPLICATE_SIMILARITY
         )
+
+    def clear_pending_near_duplicates(self) -> None:
+        self.pending_near_duplicate_signatures.clear()
+
+    def _discard_pending_near_duplicate(self, tool_name: str, signature: frozenset[str]) -> None:
+        pending = self.pending_near_duplicate_signatures.get(tool_name)
+        if not pending:
+            return
+        for index, candidate in enumerate(pending):
+            if candidate == signature:
+                del pending[index]
+                return
 
     def _near_duplicate_info(
         self,
