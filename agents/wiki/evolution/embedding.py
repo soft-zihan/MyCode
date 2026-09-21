@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -18,6 +19,11 @@ from agents.wiki.wiki_manager import get_wiki_dir, WikiEntry
 DEFAULT_EMBEDDING_MODEL = "qwen3-embedding"
 EMBEDDING_DIM = 1024
 CACHE_DIR_NAME = ".embed-cache"
+
+
+def content_hash(text: str) -> str:
+    """计算内容哈希（embedding 缓存键）。"""
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def get_embedding_model() -> str:

@@ -939,8 +939,8 @@ class Agent:
         self._repeat_chain_key = ""
         self._repeat_chain_count = 0
 
-    def build_side_query(self):
-        return self._build_side_query()
+    def build_side_query(self, *, max_tokens: int = 2000):
+        return self._build_side_query(max_tokens=max_tokens)
 
     def start_wiki_prefetch(self, user_message: str, side_query) -> None:
         if self.is_sub_agent or self._wiki_prefetch is not None:

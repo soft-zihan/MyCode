@@ -681,6 +681,13 @@ async def select_relevant_wiki_entries(
             by_path = {e.rel_path: e for e in candidates}
             selected = [by_path[p] for p in selected_paths if p in by_path][:5]
 
+            if not selected:
+                # side_query 空返回（如推理模型 reasoning 吃光 max_tokens）时的确定性兜底：
+                # 按 query 词与 name/description/content 的重叠度取 top5，0 分不注入
+                selected = _keyword_fallback_select(query, candidates)
+                if selected:
+                    print(f"[wiki_select] side_query empty, keyword fallback selected {len(selected)} entries")
+
             result = []
             for e in selected:
                 increment_applied_count(e.rel_path)
@@ -694,6 +701,25 @@ async def select_relevant_wiki_entries(
             return result
         except Exception:
             return []
+
+
+def _keyword_fallback_select(query: str, candidates: list[WikiEntry], limit: int = 5) -> list[WikiEntry]:
+    """确定性关键词兜底选择：query 分词与条目文本重叠计数，0 分不选。"""
+    q = query.lower()
+    q_tokens = {t for t in re.split(r"[\s,，。.:：;；!！?？/\\-]+", q) if len(t) >= 2}
+    # CJK 无空格分词：补字符 bigram，保证中文 query 可匹配
+    cjk = re.sub(r"[^\u4e00-\u9fff]", "", q)
+    q_tokens.update(cjk[i:i + 2] for i in range(len(cjk) - 1))
+    if not q_tokens:
+        return []
+    scored: list[tuple[int, WikiEntry]] = []
+    for e in candidates:
+        text = f"{e.name} {e.meta.get('description', '')} {e.content[:500]}".lower()
+        score = sum(1 for t in q_tokens if t in text)
+        if score > 0:
+            scored.append((score, e))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [e for _, e in scored[:limit]]
 
 
 def format_wiki_for_injection(entries: list[WikiEntry]) -> str:
