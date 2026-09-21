@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agents.core.workspace import get_workspace
-from agents.memory.frontmatter import parse_frontmatter, format_frontmatter
+from agents.core.frontmatter import parse_frontmatter, format_frontmatter
 from agents.plan.task_models import normalize_status
 from agents.plan.plan_models import Plan, PlanStatus, PlanGranularity, Task
 

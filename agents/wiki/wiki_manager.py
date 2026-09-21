@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from agents.core.workspace import get_workspace
-from agents.memory.frontmatter import parse_frontmatter, format_frontmatter
+from agents.core.frontmatter import parse_frontmatter, format_frontmatter
 
 logger = logging.getLogger(__name__)
 

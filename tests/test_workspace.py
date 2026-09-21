@@ -203,20 +203,16 @@ def test_skills_cache_keyed_by_workspace(tmp_path):
 
 # ─── Agent / SessionManager ─────────────────────────────────────────
 
-def _isolate_agent_env(monkeypatch, tmp_path) -> tuple[Path, Path]:
-    """隔离 Agent 构造的磁盘副作用：memory 目录 + session 存储目录。"""
-    import agents.memory.memory as memory_mod
+def _isolate_agent_env(monkeypatch, tmp_path) -> Path:
+    """隔离 Agent 构造的磁盘副作用：session 存储目录。"""
     import agents.core.session as session_mod
 
-    mem_dir = tmp_path / "mem"
-    mem_dir.mkdir()
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir()
-    monkeypatch.setattr(memory_mod, "get_memory_dir", lambda: mem_dir)
     monkeypatch.setenv("MYCODE_SESSION_DIR", str(sessions_dir))
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setattr(session_mod, "_backend", None)
-    return mem_dir, sessions_dir
+    return sessions_dir
 
 
 def test_agent_init_sets_workspace_without_leaking_contextvar(monkeypatch, tmp_path):
@@ -236,7 +232,7 @@ def test_create_keeps_process_cwd_and_records_workspace_event(monkeypatch, tmp_p
     """核心回归：create() 不再 os.chdir；cwd 进事件流 → 投影；进程 CWD 恒定。"""
     from agents.session_manager import SessionManager
 
-    _, sessions_dir = _isolate_agent_env(monkeypatch, tmp_path)
+    sessions_dir = _isolate_agent_env(monkeypatch, tmp_path)
     launch = tmp_path / "launch"
     ws = tmp_path / "ws"
     launch.mkdir()

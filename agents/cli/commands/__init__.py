@@ -15,7 +15,6 @@ from .session import (
 from .inspect import (
     cmd_context,
     cmd_ctx,
-    cmd_memory,
     cmd_skills,
     cmd_skill_stats,
     cmd_skill_eval,
@@ -57,7 +56,6 @@ __all__ = [
     "cmd_quit",
     "cmd_context",
     "cmd_ctx",
-    "cmd_memory",
     "cmd_skills",
     "cmd_skill_stats",
     "cmd_skill_eval",

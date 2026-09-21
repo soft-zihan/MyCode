@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agents.wiki.wiki_manager import get_wiki_dir, WikiEntry
-from agents.memory.frontmatter import parse_frontmatter, format_frontmatter
+from agents.core.frontmatter import parse_frontmatter, format_frontmatter
 
 
 def disable_entry(entry: WikiEntry) -> None:

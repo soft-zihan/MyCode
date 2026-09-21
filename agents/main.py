@@ -141,7 +141,7 @@ def _expand_at_references(text: str) -> tuple[str, list[str]]:
 
 REPL_COMMANDS = [
     "/new", "/clear", "/plan", "/cost", "/compact", "/cd", "/help", "/thinking",
-    "/rewind", "/undo", "/goal", "/context", "/ctx", "/memory", "/skills",
+    "/rewind", "/undo", "/goal", "/context", "/ctx", "/skills",
     "/skill-stats", "/skill-eval", "/extract_now", "/skill-feedback",
     "/skill-evolve", "/skill-create", "/fork", "/sessions", "/switch",
     "/resume", "/rename", "/export", "/trace", "/graph", "/models", "/status",

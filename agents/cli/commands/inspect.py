@@ -4,7 +4,6 @@ from typing import TYPE_CHECKING
 
 from ..registry import command
 from ...logging import print_info, print_error
-from ...memory import list_memories
 from ...skills import discover_skills, skill_stats
 
 if TYPE_CHECKING:
@@ -52,43 +51,6 @@ async def cmd_ctx(agent: "Agent", args: str) -> None:
         print_info(agent.delete_context_messages(indexes))
     else:
         print_info(agent.keep_context_messages(indexes))
-
-
-@command(
-    name="memory",
-    description="List memories or prune",
-    usage="[prune [--dry-run] [--threshold=0.1]]",
-    category="inspect",
-)
-async def cmd_memory(agent: "Agent", args: str) -> None:
-    if args.startswith("prune"):
-        from ..memory import auto_prune_memories
-        prune_args = args[5:].strip().split()
-        dry_run = "--dry-run" in prune_args
-        threshold = 0.1
-        for arg in prune_args:
-            if arg.startswith("--threshold="):
-                try:
-                    threshold = float(arg.split("=")[1])
-                except ValueError:
-                    pass
-        pruned = auto_prune_memories(threshold=threshold, dry_run=dry_run)
-        if dry_run:
-            print_info(f"Would prune {len(pruned)} memories:")
-        else:
-            print_info(f"Pruned {len(pruned)} memories:")
-        for f in pruned[:10]:
-            print(f"  - {f}")
-        if len(pruned) > 10:
-            print(f"  ... and {len(pruned) - 10} more")
-        return
-    memories = list_memories()
-    if not memories:
-        print_info("No memories saved yet.")
-        return
-    print_info(f"Memories: {len(memories)} entries")
-    for m in memories:
-        print_info(f"  {m}")
 
 
 @command(

@@ -54,6 +54,5 @@ def test_resolve_api_config_anthropic_compatible(monkeypatch):
 def test_package_imports():
     import agents.agent  # noqa: F401
     import agents.tools  # noqa: F401
-    import agents.memory  # noqa: F401
     import agents.core.session  # noqa: F401
     import agents.core.subagent  # noqa: F401

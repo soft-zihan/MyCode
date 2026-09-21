@@ -206,7 +206,7 @@ def api_get_agent(agent_name: str) -> dict[str, Any]:
             # Check for override
             override_path = Path.home() / ".mycode" / "agents" / f"{agent_name}.md"
             if override_path.exists():
-                from agents.memory.frontmatter import parse_frontmatter
+                from agents.core.frontmatter import parse_frontmatter
                 raw = override_path.read_text()
                 result = parse_frontmatter(raw)
                 system_prompt = result.body
@@ -260,7 +260,7 @@ def api_get_agent_prompt(agent_name: str) -> dict[str, Any]:
         # Check for override
         override_path = Path.home() / ".mycode" / "agents" / f"{agent_name}.md"
         if override_path.exists():
-            from agents.memory.frontmatter import parse_frontmatter
+            from agents.core.frontmatter import parse_frontmatter
             raw = override_path.read_text()
             result = parse_frontmatter(raw)
             return {"prompt": result.body}
@@ -272,7 +272,7 @@ def api_get_agent_prompt(agent_name: str) -> dict[str, Any]:
         # Check for override first
         override_path = Path.home() / ".mycode" / "agents" / f"{agent_name}.md"
         if override_path.exists():
-            from agents.memory.frontmatter import parse_frontmatter
+            from agents.core.frontmatter import parse_frontmatter
             raw = override_path.read_text()
             result = parse_frontmatter(raw)
             return {"prompt": result.body}

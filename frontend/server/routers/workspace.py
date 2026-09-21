@@ -282,7 +282,7 @@ def api_workspace_file(path: str, cwd: Optional[str] = None) -> dict[str, Any]:
         
         if ".mycode/wiki/" in str(file_path) and file_path.suffix == ".md":
             try:
-                from agents.memory.frontmatter import parse_frontmatter
+                from agents.core.frontmatter import parse_frontmatter
                 meta, body = parse_frontmatter(content)
                 result["frontmatter"] = meta
                 result["content"] = body

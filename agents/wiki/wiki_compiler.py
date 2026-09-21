@@ -31,7 +31,6 @@ from agents.wiki.wiki_capture import (
 
 
 COMPILE_LOCK_FILE = ".compile.lock"
-COMPILE_STATE_FILE = ".compile_state.json"
 
 
 def _acquire_compile_lock() -> bool:
@@ -59,25 +58,6 @@ def _release_compile_lock() -> None:
     lock_path = wiki_dir / COMPILE_LOCK_FILE
     if lock_path.exists():
         lock_path.unlink()
-
-
-def _load_compile_state() -> dict[str, Any]:
-    """加载 compile 状态。"""
-    wiki_dir = get_wiki_dir()
-    state_path = wiki_dir / COMPILE_STATE_FILE
-    if state_path.exists():
-        try:
-            return json.loads(state_path.read_text())
-        except Exception:
-            pass
-    return {"last_attempted_date": None, "metadata_retry_counts": {}}
-
-
-def _save_compile_state(state: dict[str, Any]) -> None:
-    """保存 compile 状态。"""
-    wiki_dir = get_wiki_dir()
-    state_path = wiki_dir / COMPILE_STATE_FILE
-    state_path.write_text(json.dumps(state, indent=2))
 
 
 def _dedup_check(wiki_type: str, name: str) -> bool:
@@ -115,7 +95,7 @@ async def compile_single_session(session_path: Path, side_query: Any) -> dict[st
             "deduped": 0,
         }
         
-        from agents.memory.frontmatter import parse_frontmatter
+        from agents.core.frontmatter import parse_frontmatter
         result = parse_frontmatter(session_path.read_text())
         content = result.body
         
@@ -324,7 +304,7 @@ async def check_and_compile_pending_sessions(side_query: Any, threshold: int = 2
     Returns:
         总提取统计信息
     """
-    from agents.memory.frontmatter import parse_frontmatter
+    from agents.core.frontmatter import parse_frontmatter
 
     total_stats: dict[str, int] = {
         "knowledge": 0, "self_improvement": 0, "user": 0,

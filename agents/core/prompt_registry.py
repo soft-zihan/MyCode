@@ -126,13 +126,13 @@ def list_all_prompts() -> list[PromptInfo]:
                     source = str(prompt_path)
                 else:
                     # 文件不存在，使用 agent_mode.py 中的提示词
-                    from agents.memory.frontmatter import format_frontmatter
+                    from agents.core.frontmatter import format_frontmatter
                     meta = {"name": name, "description": config.description}
                     content = format_frontmatter(meta, config.system_prompt)
                     source = "builtin"
             else:
                 # 没有对应的提示词文件，使用 agent_mode.py 中的提示词
-                from agents.memory.frontmatter import format_frontmatter
+                from agents.core.frontmatter import format_frontmatter
                 meta = {"name": name, "description": config.description}
                 content = format_frontmatter(meta, config.system_prompt)
                 source = "builtin"
@@ -198,7 +198,7 @@ def save_prompt(name: str, content: str) -> bool:
         override_path = user_agents_dir / f"{agent_name}.md"
         
         # 写入 frontmatter + content
-        from agents.memory.frontmatter import format_frontmatter
+        from agents.core.frontmatter import format_frontmatter
         meta = {"name": agent_name, "description": BUILTIN_HIDDEN_AGENTS.get(agent_name, None) and BUILTIN_HIDDEN_AGENTS[agent_name].description or ""}
         override_path.write_text(format_frontmatter(meta, content), encoding="utf-8")
         return True

@@ -175,7 +175,7 @@ class ContextManager:
             
             # 编译成功：从 frontmatter 读取 max_seq，推进水位线
             try:
-                from agents.memory.frontmatter import parse_frontmatter
+                from agents.core.frontmatter import parse_frontmatter
                 from agents.wiki.wiki_capture import get_last_extract_pos, set_last_extract_pos
                 meta = parse_frontmatter(session_path.read_text()).meta
                 session_id = meta.get("session_id", "")

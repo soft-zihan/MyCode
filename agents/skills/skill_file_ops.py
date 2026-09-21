@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from agents.core.workspace import get_workspace
-from agents.memory.frontmatter import format_frontmatter, parse_frontmatter
+from agents.core.frontmatter import format_frontmatter, parse_frontmatter
 from agents.observability.trace import trace_event
 from agents._utils import safe_skill_slug as _safe_skill_slug, utc_now as _utc_now, read_json as _read_json, write_json as _write_json
 

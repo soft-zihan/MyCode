@@ -108,7 +108,7 @@ def _mark_entry_stale(entry: WikiEntry) -> None:
     if not filepath.exists():
         return
 
-    from agents.memory.frontmatter import parse_frontmatter, format_frontmatter
+    from agents.core.frontmatter import parse_frontmatter, format_frontmatter
     result = parse_frontmatter(filepath.read_text())
     result.meta["stale"] = "true"
     result.meta["stale_since"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -174,7 +174,7 @@ def _rewrite_entry(entry: WikiEntry, new_content: str) -> None:
     if not filepath.exists():
         return
 
-    from agents.memory.frontmatter import parse_frontmatter, format_frontmatter
+    from agents.core.frontmatter import parse_frontmatter, format_frontmatter
     result = parse_frontmatter(filepath.read_text())
     result.meta["modified"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     result.meta["last_refreshed"] = result.meta["modified"]

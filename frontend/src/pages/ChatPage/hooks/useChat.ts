@@ -35,7 +35,6 @@ function computeBreakdownFromStats(event: Record<string, any>): Record<string, a
   const systemBaseChars = event.system_base_chars || 0;
   const systemClaudeMdChars = event.system_claude_md_chars || 0;
   const systemSkillsChars = event.system_skills_chars || 0;
-  const systemMemoryChars = event.system_memory_chars || 0;
   const systemWikiChars = event.system_wiki_chars || 0;
   const systemAgentsChars = event.system_agents_chars || 0;
   const systemWorkspaceChars = event.system_workspace_chars || 0;
@@ -45,7 +44,7 @@ function computeBreakdownFromStats(event: Record<string, any>): Record<string, a
   
   let userTokens: number, assistantTokens: number, toolTokens: number;
   let basePromptTokens: number, claudeMdTokens: number, skillsTokens: number;
-  let memoryTokens: number, wikiTokens: number, agentsTokens: number, planModeTokens: number;
+  let wikiTokens: number, agentsTokens: number, planModeTokens: number;
   
   if (actualInputTokens > 0 && totalChars > 0) {
     const scale = actualInputTokens / (totalChars / CHARS_PER_TOKEN);
@@ -55,7 +54,6 @@ function computeBreakdownFromStats(event: Record<string, any>): Record<string, a
     basePromptTokens = Math.round(((systemBaseChars + systemWorkspaceChars) / CHARS_PER_TOKEN) * scale);
     claudeMdTokens = Math.round((systemClaudeMdChars / CHARS_PER_TOKEN) * scale);
     skillsTokens = Math.round((systemSkillsChars / CHARS_PER_TOKEN) * scale);
-    memoryTokens = Math.round((systemMemoryChars / CHARS_PER_TOKEN) * scale);
     wikiTokens = Math.round((systemWikiChars / CHARS_PER_TOKEN) * scale);
     agentsTokens = Math.round((systemAgentsChars / CHARS_PER_TOKEN) * scale);
     planModeTokens = Math.round((planModeChars / CHARS_PER_TOKEN) * scale);
@@ -66,7 +64,6 @@ function computeBreakdownFromStats(event: Record<string, any>): Record<string, a
     basePromptTokens = Math.round((systemBaseChars + systemWorkspaceChars) / CHARS_PER_TOKEN);
     claudeMdTokens = Math.round(systemClaudeMdChars / CHARS_PER_TOKEN);
     skillsTokens = Math.round(systemSkillsChars / CHARS_PER_TOKEN);
-    memoryTokens = Math.round(systemMemoryChars / CHARS_PER_TOKEN);
     wikiTokens = Math.round(systemWikiChars / CHARS_PER_TOKEN);
     agentsTokens = Math.round(systemAgentsChars / CHARS_PER_TOKEN);
     planModeTokens = Math.round(planModeChars / CHARS_PER_TOKEN);
@@ -89,7 +86,6 @@ function computeBreakdownFromStats(event: Record<string, any>): Record<string, a
     base_prompt_tokens: basePromptTokens,
     claude_md_tokens: claudeMdTokens,
     skills_tokens: skillsTokens,
-    memory_tokens: memoryTokens,
     wiki_tokens: wikiTokens,
     agents_tokens: agentsTokens,
     tools_tokens: toolTokens,

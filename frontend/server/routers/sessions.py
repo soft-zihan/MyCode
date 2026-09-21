@@ -259,7 +259,6 @@ def _compute_breakdown_from_stats(latest_stats: dict, agent: Any) -> dict[str, A
     system_base_chars = latest_stats.get("system_base_chars", 0)
     system_claude_md_chars = latest_stats.get("system_claude_md_chars", 0)
     system_skills_chars = latest_stats.get("system_skills_chars", 0)
-    system_memory_chars = latest_stats.get("system_memory_chars", 0)
     system_wiki_chars = latest_stats.get("system_wiki_chars", 0)
     system_agents_chars = latest_stats.get("system_agents_chars", 0)
     system_workspace_chars = latest_stats.get("system_workspace_chars", 0)
@@ -283,7 +282,6 @@ def _compute_breakdown_from_stats(latest_stats: dict, agent: Any) -> dict[str, A
         base_prompt_tokens = int(((system_base_chars + system_workspace_chars) / 4) * scale)
         claude_md_tokens = int((system_claude_md_chars / 4) * scale)
         skills_tokens = int((system_skills_chars / 4) * scale)
-        memory_tokens = int((system_memory_chars / 4) * scale)
         wiki_tokens = int((system_wiki_chars / 4) * scale)
         agents_tokens = int((system_agents_chars / 4) * scale)
         plan_mode_chars = latest_stats.get("plan_mode_chars", 0)
@@ -295,7 +293,6 @@ def _compute_breakdown_from_stats(latest_stats: dict, agent: Any) -> dict[str, A
         base_prompt_tokens = (system_base_chars + system_workspace_chars) // 4
         claude_md_tokens = system_claude_md_chars // 4
         skills_tokens = system_skills_chars // 4
-        memory_tokens = system_memory_chars // 4
         wiki_tokens = system_wiki_chars // 4
         agents_tokens = system_agents_chars // 4
         plan_mode_tokens = latest_stats.get("plan_mode_chars", 0) // 4
@@ -314,7 +311,6 @@ def _compute_breakdown_from_stats(latest_stats: dict, agent: Any) -> dict[str, A
         "base_prompt_tokens": base_prompt_tokens,
         "claude_md_tokens": claude_md_tokens,
         "skills_tokens": skills_tokens,
-        "memory_tokens": memory_tokens,
         "wiki_tokens": wiki_tokens,
         "agents_tokens": agents_tokens,
         "tools_tokens": tool_tokens,
@@ -376,21 +372,19 @@ def _compute_breakdown_from_agent(agent: Any) -> dict[str, Any]:
     try:
         from agents.core.prompt import (
             load_claude_md, build_skill_descriptions,
-            build_memory_prompt_section, build_wiki_prompt_section,
+            build_wiki_prompt_section,
             build_agent_descriptions, build_workspace_structure
         )
         system_claude_md_chars = len(load_claude_md())
         system_skills_chars = len(build_skill_descriptions())
-        system_memory_chars = len(build_memory_prompt_section())
         system_wiki_chars = len(build_wiki_prompt_section())
         system_agents_chars = len(build_agent_descriptions())
         system_workspace_chars = len(build_workspace_structure())
-        system_base_chars = system_chars - system_claude_md_chars - system_skills_chars - system_memory_chars - system_wiki_chars - system_agents_chars - system_workspace_chars
+        system_base_chars = system_chars - system_claude_md_chars - system_skills_chars - system_wiki_chars - system_agents_chars - system_workspace_chars
     except Exception:
         system_base_chars = system_chars
         system_claude_md_chars = 0
         system_skills_chars = 0
-        system_memory_chars = 0
         system_wiki_chars = 0
         system_agents_chars = 0
         system_workspace_chars = 0
@@ -411,7 +405,6 @@ def _compute_breakdown_from_agent(agent: Any) -> dict[str, Any]:
         base_prompt_tokens = int(((system_base_chars + system_workspace_chars) / 4) * scale)
         claude_md_tokens = int((system_claude_md_chars / 4) * scale)
         skills_tokens = int((system_skills_chars / 4) * scale)
-        memory_tokens = int((system_memory_chars / 4) * scale)
         wiki_tokens = int((system_wiki_chars / 4) * scale)
         agents_tokens = int((system_agents_chars / 4) * scale)
         tools_tokens = int((tools_chars / 4) * scale)
@@ -423,7 +416,6 @@ def _compute_breakdown_from_agent(agent: Any) -> dict[str, Any]:
         base_prompt_tokens = (system_base_chars + system_workspace_chars) // 4
         claude_md_tokens = system_claude_md_chars // 4
         skills_tokens = system_skills_chars // 4
-        memory_tokens = system_memory_chars // 4
         wiki_tokens = system_wiki_chars // 4
         agents_tokens = system_agents_chars // 4
         tools_tokens = tools_chars // 4
@@ -446,7 +438,6 @@ def _compute_breakdown_from_agent(agent: Any) -> dict[str, Any]:
         "base_prompt_tokens": base_prompt_tokens,
         "claude_md_tokens": claude_md_tokens,
         "skills_tokens": skills_tokens,
-        "memory_tokens": memory_tokens,
         "wiki_tokens": wiki_tokens,
         "agents_tokens": agents_tokens,
         "tools_tokens": tools_tokens,
@@ -468,7 +459,7 @@ def _compute_breakdown_from_jsonl(events_file: Path, latest_stats: dict) -> dict
     if not latest_stats:
         return {
             "base_prompt_tokens": 0, "claude_md_tokens": 0, "skills_tokens": 0,
-            "memory_tokens": 0, "wiki_tokens": 0, "agents_tokens": 0,
+            "wiki_tokens": 0, "agents_tokens": 0,
             "tools_tokens": 0, "builtin_tool_count": 0, "mcp_tool_count": 0,
             "messages_tokens": 0, "message_count": 0,
             "user_tokens": 0, "assistant_tokens": 0, "tool_tokens": 0,
@@ -485,7 +476,6 @@ def _compute_breakdown_from_jsonl(events_file: Path, latest_stats: dict) -> dict
     system_base_chars = latest_stats.get("system_base_chars", 0)
     system_claude_md_chars = latest_stats.get("system_claude_md_chars", 0)
     system_skills_chars = latest_stats.get("system_skills_chars", 0)
-    system_memory_chars = latest_stats.get("system_memory_chars", 0)
     system_wiki_chars = latest_stats.get("system_wiki_chars", 0)
     system_agents_chars = latest_stats.get("system_agents_chars", 0)
     system_workspace_chars = latest_stats.get("system_workspace_chars", 0)
@@ -496,7 +486,6 @@ def _compute_breakdown_from_jsonl(events_file: Path, latest_stats: dict) -> dict
         system_base_chars = int(system_chars * 0.5)
         system_claude_md_chars = int(system_chars * 0.2)
         system_skills_chars = int(system_chars * 0.1)
-        system_memory_chars = int(system_chars * 0.05)
         system_wiki_chars = int(system_chars * 0.05)
         system_agents_chars = int(system_chars * 0.05)
         system_workspace_chars = int(system_chars * 0.05)
@@ -528,7 +517,6 @@ def _compute_breakdown_from_jsonl(events_file: Path, latest_stats: dict) -> dict
         base_prompt_tokens = int(((system_base_chars + system_workspace_chars) / 4) * scale)
         claude_md_tokens = int((system_claude_md_chars / 4) * scale)
         skills_tokens = int((system_skills_chars / 4) * scale)
-        memory_tokens = int((system_memory_chars / 4) * scale)
         wiki_tokens = int((system_wiki_chars / 4) * scale)
         agents_tokens = int((system_agents_chars / 4) * scale)
     else:
@@ -539,7 +527,6 @@ def _compute_breakdown_from_jsonl(events_file: Path, latest_stats: dict) -> dict
         base_prompt_tokens = (system_base_chars + system_workspace_chars) // 4
         claude_md_tokens = system_claude_md_chars // 4
         skills_tokens = system_skills_chars // 4
-        memory_tokens = system_memory_chars // 4
         wiki_tokens = system_wiki_chars // 4
         agents_tokens = system_agents_chars // 4
 
@@ -561,7 +548,6 @@ def _compute_breakdown_from_jsonl(events_file: Path, latest_stats: dict) -> dict
         "base_prompt_tokens": base_prompt_tokens,
         "claude_md_tokens": claude_md_tokens,
         "skills_tokens": skills_tokens,
-        "memory_tokens": memory_tokens,
         "wiki_tokens": wiki_tokens,
         "agents_tokens": agents_tokens,
         "tools_tokens": tools_definition_tokens,
@@ -856,7 +842,6 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
                 system_base_chars = latest_stats.get("system_base_chars", 0)
                 system_claude_md_chars = latest_stats.get("system_claude_md_chars", 0)
                 system_skills_chars = latest_stats.get("system_skills_chars", 0)
-                system_memory_chars = latest_stats.get("system_memory_chars", 0)
                 system_wiki_chars = latest_stats.get("system_wiki_chars", 0)
                 system_agents_chars = latest_stats.get("system_agents_chars", 0)
                 system_workspace_chars = latest_stats.get("system_workspace_chars", 0)
@@ -881,7 +866,6 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
                     base_prompt_tokens = int(((system_base_chars + system_workspace_chars) / 4) * scale)
                     claude_md_tokens = int((system_claude_md_chars / 4) * scale)
                     skills_tokens = int((system_skills_chars / 4) * scale)
-                    memory_tokens = int((system_memory_chars / 4) * scale)
                     wiki_tokens = int((system_wiki_chars / 4) * scale)
                     agents_tokens = int((system_agents_chars / 4) * scale)
                 else:
@@ -892,7 +876,6 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
                     base_prompt_tokens = (system_base_chars + system_workspace_chars) // 4
                     claude_md_tokens = system_claude_md_chars // 4
                     skills_tokens = system_skills_chars // 4
-                    memory_tokens = system_memory_chars // 4
                     wiki_tokens = system_wiki_chars // 4
                     agents_tokens = system_agents_chars // 4
                 
@@ -915,7 +898,6 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
                     "base_prompt_tokens": base_prompt_tokens,
                     "claude_md_tokens": claude_md_tokens,
                     "skills_tokens": skills_tokens,
-                    "memory_tokens": memory_tokens,
                     "wiki_tokens": wiki_tokens,
                     "agents_tokens": agents_tokens,
                     "tools_tokens": tool_tokens,
@@ -979,21 +961,19 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
             try:
                 from agents.core.prompt import (
                     load_claude_md, build_skill_descriptions,
-                    build_memory_prompt_section, build_wiki_prompt_section,
+                    build_wiki_prompt_section,
                     build_agent_descriptions, build_workspace_structure
                 )
                 system_claude_md_chars = len(load_claude_md())
                 system_skills_chars = len(build_skill_descriptions())
-                system_memory_chars = len(build_memory_prompt_section())
                 system_wiki_chars = len(build_wiki_prompt_section())
                 system_agents_chars = len(build_agent_descriptions())
                 system_workspace_chars = len(build_workspace_structure())
-                system_base_chars = system_chars - system_claude_md_chars - system_skills_chars - system_memory_chars - system_wiki_chars - system_agents_chars - system_workspace_chars
+                system_base_chars = system_chars - system_claude_md_chars - system_skills_chars - system_wiki_chars - system_agents_chars - system_workspace_chars
             except:
                 system_base_chars = system_chars
                 system_claude_md_chars = 0
                 system_skills_chars = 0
-                system_memory_chars = 0
                 system_wiki_chars = 0
                 system_agents_chars = 0
                 system_workspace_chars = 0
@@ -1016,7 +996,6 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
                 base_prompt_tokens = int(((system_base_chars + system_workspace_chars) / 4) * scale)
                 claude_md_tokens = int((system_claude_md_chars / 4) * scale)
                 skills_tokens = int((system_skills_chars / 4) * scale)
-                memory_tokens = int((system_memory_chars / 4) * scale)
                 wiki_tokens = int((system_wiki_chars / 4) * scale)
                 agents_tokens = int((system_agents_chars / 4) * scale)
                 tools_tokens = int((tools_chars / 4) * scale)
@@ -1028,7 +1007,6 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
                 base_prompt_tokens = (system_base_chars + system_workspace_chars) // 4
                 claude_md_tokens = system_claude_md_chars // 4
                 skills_tokens = system_skills_chars // 4
-                memory_tokens = system_memory_chars // 4
                 wiki_tokens = system_wiki_chars // 4
                 agents_tokens = system_agents_chars // 4
                 tools_tokens = tools_chars // 4
@@ -1052,7 +1030,6 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
                 "base_prompt_tokens": base_prompt_tokens,
                 "claude_md_tokens": claude_md_tokens,
                 "skills_tokens": skills_tokens,
-                "memory_tokens": memory_tokens,
                 "wiki_tokens": wiki_tokens,
                 "agents_tokens": agents_tokens,
                 "tools_tokens": tools_tokens,
@@ -1076,7 +1053,7 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
     if not events_file.exists():
         return {
             "base_prompt_tokens": 0, "claude_md_tokens": 0, "skills_tokens": 0,
-            "memory_tokens": 0, "wiki_tokens": 0, "agents_tokens": 0,
+            "wiki_tokens": 0, "agents_tokens": 0,
             "tools_tokens": 0, "builtin_tool_count": 0, "mcp_tool_count": 0,
             "messages_tokens": 0, "message_count": 0,
             "user_tokens": 0, "assistant_tokens": 0, "tool_tokens": 0,
@@ -1098,7 +1075,7 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
     if not latest_stats:
         return {
             "base_prompt_tokens": 0, "claude_md_tokens": 0, "skills_tokens": 0,
-            "memory_tokens": 0, "wiki_tokens": 0, "agents_tokens": 0,
+            "wiki_tokens": 0, "agents_tokens": 0,
             "tools_tokens": 0, "builtin_tool_count": 0, "mcp_tool_count": 0,
             "messages_tokens": 0, "message_count": 0,
             "user_tokens": 0, "assistant_tokens": 0, "tool_tokens": 0,
@@ -1149,7 +1126,6 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
         system_base_chars = int(system_chars * 0.5)  # 基础提示词占 50%
         system_claude_md_chars = int(system_chars * 0.2)  # CLAUDE.md 占 20%
         system_skills_chars = int(system_chars * 0.1)  # Skills 占 10%
-        system_memory_chars = int(system_chars * 0.05)  # Memory 占 5%
         system_wiki_chars = int(system_chars * 0.05)  # Wiki 占 5%
         system_agents_chars = int(system_chars * 0.05)  # Agents 占 5%
         system_workspace_chars = int(system_chars * 0.05)  # Workspace 占 5%
@@ -1157,7 +1133,6 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
         system_base_chars = latest_stats.get("system_base_chars", 0)
         system_claude_md_chars = latest_stats.get("system_claude_md_chars", 0)
         system_skills_chars = latest_stats.get("system_skills_chars", 0)
-        system_memory_chars = latest_stats.get("system_memory_chars", 0)
         system_wiki_chars = latest_stats.get("system_wiki_chars", 0)
         system_agents_chars = latest_stats.get("system_agents_chars", 0)
         system_workspace_chars = latest_stats.get("system_workspace_chars", 0)
@@ -1194,7 +1169,6 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
         base_prompt_tokens = int(((system_base_chars + system_workspace_chars) / 4) * scale)
         claude_md_tokens = int((system_claude_md_chars / 4) * scale)
         skills_tokens = int((system_skills_chars / 4) * scale)
-        memory_tokens = int((system_memory_chars / 4) * scale)
         wiki_tokens = int((system_wiki_chars / 4) * scale)
         agents_tokens = int((system_agents_chars / 4) * scale)
     else:
@@ -1206,7 +1180,6 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
         base_prompt_tokens = (system_base_chars + system_workspace_chars) // 4
         claude_md_tokens = system_claude_md_chars // 4
         skills_tokens = system_skills_chars // 4
-        memory_tokens = system_memory_chars // 4
         wiki_tokens = system_wiki_chars // 4
         agents_tokens = system_agents_chars // 4
     
@@ -1230,7 +1203,6 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
         "base_prompt_tokens": base_prompt_tokens,
         "claude_md_tokens": claude_md_tokens,
         "skills_tokens": skills_tokens,
-        "memory_tokens": memory_tokens,
         "wiki_tokens": wiki_tokens,
         "agents_tokens": agents_tokens,
         "tools_tokens": tools_definition_tokens,

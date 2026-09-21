@@ -270,6 +270,73 @@ def test_near_duplicate_guard_ignores_different_topics():
         assert not result["force_stop"]
 
 
+def test_near_duplicate_precheck_reserves_pending_signatures():
+    tracker = ToolCallTracker()
+    base_query = "ams frozen peas standard pdf issue effective current"
+
+    for i in range(8):
+        decision = tracker.precheck("web_search", {"query": f"{base_query} variant {i}"})
+        assert decision.action == "allow"
+
+    blocked = tracker.precheck("web_search", {"query": f"{base_query} variant 8"})
+    assert blocked.action == "block"
+    assert blocked.reason == "near_duplicate_tool_calls"
+
+    for i in range(8):
+        result = check_tool_warnings(
+            tracker,
+            "web_search",
+            {"query": f"{base_query} variant {i}"},
+            success=True,
+        )
+        assert not result["blocked"]
+        assert not result["force_stop"]
+        assert any("near-duplicate" in warning for warning in result["warnings"])
+
+    tracker.clear_pending_near_duplicates()
+    assert tracker.precheck("web_search", {"query": f"{base_query} variant 9"}).action == "block"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_batch_blocks_near_duplicate_web_search_before_execution():
+    agent = _make_loop_stub_agent()
+    executed = []
+    published = []
+
+    async def fake_execute_tool_call(name, args):
+        executed.append((name, args))
+        return ToolExecutionResult(text="ok", status="ok", outcome="success")
+
+    def fake_publish_tool_result_event(*args, **kwargs):
+        published.append(kwargs)
+
+    agent.execute_tool_call = fake_execute_tool_call
+    agent.publish_tool_result_event = fake_publish_tool_result_event
+    agent.append_tool_message = lambda *args, **kwargs: None
+
+    loop = AgentLoop(agent)
+    loop._auto_mark_bad_case = lambda *args, **kwargs: None
+
+    base_query = "ams frozen peas standard pdf issue effective current"
+    items = [
+        {
+            "tc": {"id": f"call_{i}"},
+            "fn": "web_search",
+            "inp": {"query": f"{base_query} variant {i}"},
+            "allowed": True,
+        }
+        for i in range(9)
+    ]
+
+    guard_stop, guard_reason = await loop._execute_concurrent_batch(items)
+
+    assert executed == []
+    assert guard_stop is True
+    assert guard_reason == "near_duplicate_tool_calls"
+    blocked_outcomes = [event for event in published if event.get("outcome") == "blocked"]
+    assert len(blocked_outcomes) == 9
+
+
 def _make_loop_stub_agent():
     agent = SimpleNamespace(
         session=Session(session_id="loop-stub", origin="test"),

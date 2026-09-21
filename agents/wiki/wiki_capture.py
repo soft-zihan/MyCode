@@ -190,7 +190,7 @@ def capture_session_to_session(
         "max_seq": str(max(e.get("seq", 0) for e in events)),
     }
 
-    from agents.memory.frontmatter import format_frontmatter
+    from agents.core.frontmatter import format_frontmatter
     filepath.write_text(format_frontmatter(meta, content))
     _git_commit(f"wiki: capture session {session_id} segment {segment_index}")
     return filepath
@@ -293,7 +293,7 @@ async def redistill_failed_chunks(
 
     从 stash 恢复失败分块，重新蒸馏。
     """
-    from agents.memory.frontmatter import parse_frontmatter, format_frontmatter
+    from agents.core.frontmatter import parse_frontmatter, format_frontmatter
 
     result = parse_frontmatter(session_path.read_text())
     meta = result.meta
@@ -343,7 +343,7 @@ async def redistill_failed_chunks(
 
 
 def mark_session_compiled(filepath: Path) -> None:
-    from agents.memory.frontmatter import parse_frontmatter, format_frontmatter
+    from agents.core.frontmatter import parse_frontmatter, format_frontmatter
     try:
         result = parse_frontmatter(filepath.read_text())
         result.meta["compiled"] = "true"
@@ -355,7 +355,7 @@ def mark_session_compiled(filepath: Path) -> None:
 
 def list_uncompiled_segments() -> list[Path]:
     """列出所有未编译的 session segment 文件（编译失败/中断后待重试）。"""
-    from agents.memory.frontmatter import parse_frontmatter
+    from agents.core.frontmatter import parse_frontmatter
     session_root = get_wiki_dir() / "session"
     if not session_root.exists():
         return []

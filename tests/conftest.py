@@ -11,7 +11,7 @@ import pytest
 def isolated_home(tmp_path, monkeypatch):
     """Point HOME and memory/session dirs at a temp dir for every test.
 
-    agents.memory / agents.session derive their paths from Path.home() or
+    agents.session derives its paths from Path.home() or
     Path.cwd(), so redirecting both keeps tests from touching ~/.BearCode,
     ~/.bear-code or the real project's .bear/ directory.
     """

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from agents.core.workspace import get_workspace
-from agents.memory.frontmatter import parse_frontmatter
+from agents.core.frontmatter import parse_frontmatter
 from .skill_file_ops import (
     create_skill_file,
     evolve_skill_file,

@@ -225,7 +225,6 @@ class AgentLoop:
                 self._agent.mark_aborted()
                 break
 
-            await self._consume_memory_prefetch()
             await self._consume_wiki_prefetch()
 
             self._agent.session.append("step/start", {
@@ -283,7 +282,6 @@ class AgentLoop:
 
     async def _prepare_turn(self, user_message: str) -> None:
         """准备轮次：清理消息、重置状态、创建快照。"""
-        from agents.memory.memory import MemoryPrefetch, start_memory_prefetch
         from agents.core.snapshot_service import SnapshotService
         from pathlib import Path
         
@@ -318,26 +316,7 @@ class AgentLoop:
         if not a.is_sub_agent:
             sq = a.build_side_query()
             if sq:
-                a.start_memory_prefetch(user_message, sq)
                 a.start_wiki_prefetch(user_message, sq)
-
-    async def _consume_memory_prefetch(self) -> None:
-        """消费记忆预取结果。"""
-        from agents.memory.memory import format_memories_for_injection
-        
-        a = self._agent
-        if a.memory_prefetch and a.memory_prefetch.settled and not a.memory_prefetch.consumed:
-            a.memory_prefetch.consumed = True
-            try:
-                memories = a.memory_prefetch.task.result()
-                if memories:
-                    injection_text = format_memories_for_injection(memories)
-                    injection_text = _safe_utf8_text(injection_text)
-                    a.append_memory_injection(injection_text)
-                    for m in memories:
-                        a.record_memory_surface(m.path, len(m.content.encode()))
-            except Exception:
-                pass
 
     async def _consume_wiki_prefetch(self) -> None:
         a = self._agent
@@ -409,7 +388,6 @@ class AgentLoop:
                 "system_claude_md_chars": asm.get("system_claude_md_chars", 0),
                 "system_agents_md_chars": asm.get("system_agents_md_chars", 0),
                 "system_skills_chars": asm.get("system_skills_chars", 0),
-                "system_memory_chars": asm.get("system_memory_chars", 0),
                 "system_wiki_chars": asm.get("system_wiki_chars", 0),
                 "system_agents_chars": asm.get("system_agents_chars", 0),
                 "system_workspace_chars": asm.get("system_workspace_chars", 0),
@@ -562,39 +540,42 @@ class AgentLoop:
         oai_context_break = False
         guard_stop = False
         guard_reason: str | None = None
-        for i, batch in enumerate(oai_batches):
-            print_info(f"[DEBUG] _execute_tool_batches: batch {i}, concurrent={batch['concurrent']}, items={len(batch['items'])}")
-            if oai_context_break or guard_stop or a.abort_requested():
-                aborted = a.abort_requested()
-                if aborted:
-                    a.mark_aborted()
-                cancel_result = (
-                    "Action cancelled: user abort."
-                    if aborted
-                    else f"Action cancelled: loop guard stopped turn ({guard_reason or 'tool loop'})."
-                )
-                cancel_status = "cancelled" if aborted else "error"
-                cancel_outcome = "cancelled" if aborted else "blocked"
-                for remaining_batch in oai_batches[i:]:
-                    for ct in remaining_batch["items"]:
-                        if ct["allowed"]:
-                            a.publish_tool_result_event(
-                                ct["tc"]["id"],
-                                ct["fn"],
-                                cancel_result,
-                                cancel_status,
-                                outcome=cancel_outcome,
-                                metadata={"reason": guard_reason} if guard_reason else None,
-                            )
-                            a.append_tool_message(ct["tc"]["id"], cancel_result, ct["fn"])
-                break
+        try:
+            for i, batch in enumerate(oai_batches):
+                print_info(f"[DEBUG] _execute_tool_batches: batch {i}, concurrent={batch['concurrent']}, items={len(batch['items'])}")
+                if oai_context_break or guard_stop or a.abort_requested():
+                    aborted = a.abort_requested()
+                    if aborted:
+                        a.mark_aborted()
+                    cancel_result = (
+                        "Action cancelled: user abort."
+                        if aborted
+                        else f"Action cancelled: loop guard stopped turn ({guard_reason or 'tool loop'})."
+                    )
+                    cancel_status = "cancelled" if aborted else "error"
+                    cancel_outcome = "cancelled" if aborted else "blocked"
+                    for remaining_batch in oai_batches[i:]:
+                        for ct in remaining_batch["items"]:
+                            if ct["allowed"]:
+                                a.publish_tool_result_event(
+                                    ct["tc"]["id"],
+                                    ct["fn"],
+                                    cancel_result,
+                                    cancel_status,
+                                    outcome=cancel_outcome,
+                                    metadata={"reason": guard_reason} if guard_reason else None,
+                                )
+                                a.append_tool_message(ct["tc"]["id"], cancel_result, ct["fn"])
+                    break
 
-            if batch["concurrent"]:
-                guard_stop, guard_reason = await self._execute_concurrent_batch(batch["items"])
-            else:
-                oai_context_break, guard_stop, guard_reason = await self._execute_sequential_batch(batch["items"])
-            if guard_stop:
-                a._loop_guard_stop_reason = guard_reason or "tool_loop"
+                if batch["concurrent"]:
+                    guard_stop, guard_reason = await self._execute_concurrent_batch(batch["items"])
+                else:
+                    oai_context_break, guard_stop, guard_reason = await self._execute_sequential_batch(batch["items"])
+                if guard_stop:
+                    a._loop_guard_stop_reason = guard_reason or "tool_loop"
+        finally:
+            self._tool_tracker.clear_pending_near_duplicates()
 
         return guard_stop
 
@@ -940,7 +921,6 @@ class AgentLoop:
                 _system_claude_md_chars = 0
                 _system_agents_md_chars = 0
                 _system_skills_chars = 0
-                _system_memory_chars = 0
                 _system_wiki_chars = 0
                 _system_agents_chars = 0
                 _system_workspace_chars = 0
@@ -967,17 +947,16 @@ class AgentLoop:
                 try:
                     from agents.core.prompt import (
                         load_claude_md, load_agents_md, build_skill_descriptions,
-                        build_memory_prompt_section, build_wiki_prompt_section,
+                        build_wiki_prompt_section,
                         build_agent_descriptions, build_workspace_structure
                     )
                     _system_claude_md_chars = len(load_claude_md())
                     _system_agents_md_chars = len(load_agents_md())
                     _system_skills_chars = len(build_skill_descriptions())
-                    _system_memory_chars = len(build_memory_prompt_section())
                     _system_wiki_chars = len(build_wiki_prompt_section())
                     _system_agents_chars = len(build_agent_descriptions())
                     _system_workspace_chars = len(build_workspace_structure())
-                    _system_base_chars = _system_chars - _system_claude_md_chars - _system_agents_md_chars - _system_skills_chars - _system_memory_chars - _system_wiki_chars - _system_agents_chars - _system_workspace_chars
+                    _system_base_chars = _system_chars - _system_claude_md_chars - _system_agents_md_chars - _system_skills_chars - _system_wiki_chars - _system_agents_chars - _system_workspace_chars
                 except Exception:
                     _system_base_chars = _system_chars
                 
@@ -1114,7 +1093,6 @@ class AgentLoop:
                         "system_claude_md_chars": _system_claude_md_chars,
                         "system_agents_md_chars": _system_agents_md_chars,
                         "system_skills_chars": _system_skills_chars,
-                        "system_memory_chars": _system_memory_chars,
                         "system_wiki_chars": _system_wiki_chars,
                         "system_agents_chars": _system_agents_chars,
                         "system_workspace_chars": _system_workspace_chars,

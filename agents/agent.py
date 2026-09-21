@@ -16,7 +16,6 @@ import openai
 from agents.tools.mcp import McpManager
 from agents.agent_loop import AgentLoop
 from agents.tools.executor import persist_large_result, detect_failure
-from agents.memory.memory import MemoryPrefetch, start_memory_prefetch, format_memories_for_injection
 from agents.wiki.wiki_manager import (
     select_relevant_wiki_entries,
     format_wiki_for_injection,
@@ -251,9 +250,7 @@ class Agent:
         self._mcp_manager = McpManager()
         self._mcp_initialized = False
 
-        self._memory_surfaced_at: dict[str, int] = {}
         self._turn_number = 0
-        self._session_memory_bytes = 0
 
         self._wiki_surfaced_at: dict[str, int] = {}
         self._wiki_prefetch: asyncio.Task | None = None
@@ -921,10 +918,6 @@ class Agent:
     def context_cleared(self) -> bool:
         return self._context_cleared
 
-    @property
-    def memory_prefetch(self):
-        return getattr(self, '_memory_prefetch', None)
-
     def abort_requested(self) -> bool:
         return self._abort_requested()
 
@@ -950,28 +943,17 @@ class Agent:
     def build_side_query(self):
         return self._build_side_query()
 
-    def start_memory_prefetch(self, user_message: str, side_query) -> None:
-        from agents.memory.memory import start_memory_prefetch
-        self._memory_prefetch = start_memory_prefetch(
-            user_message, side_query,
-            self._cooled_memory_paths(), self._session_memory_bytes,
-        )
-
     def start_wiki_prefetch(self, user_message: str, side_query) -> None:
         if self.is_sub_agent or self._wiki_prefetch is not None:
             return
         cooled_wiki_paths = {
             path for path, turn in self._wiki_surfaced_at.items()
-            if self._turn_number - turn < self.MEMORY_RECALL_COOLDOWN_TURNS
+            if self._turn_number - turn < self.WIKI_RECALL_COOLDOWN_TURNS
         }
         self._wiki_prefetch_consumed = False
         self._wiki_prefetch = asyncio.create_task(
             select_relevant_wiki_entries(user_message, side_query, cooled_wiki_paths)
         )
-
-    def record_memory_surface(self, path: str, content_bytes: int) -> None:
-        self._memory_surfaced_at[path] = self._turn_number
-        self._session_memory_bytes += content_bytes
 
     def add_input_tokens(self, count: int) -> None:
         self.total_input_tokens += count
@@ -1162,13 +1144,7 @@ class Agent:
     def _get_message_count(self) -> int:
         return self._context_manager._get_message_count()
 
-    MEMORY_RECALL_COOLDOWN_TURNS = 5
-
-    def _cooled_memory_paths(self) -> set[str]:
-        return {
-            path for path, turn in self._memory_surfaced_at.items()
-            if self._turn_number - turn < self.MEMORY_RECALL_COOLDOWN_TURNS
-        }
+    WIKI_RECALL_COOLDOWN_TURNS = 5
 
     async def _check_and_compact(self)->None:
         await self._context_manager._check_and_compact()

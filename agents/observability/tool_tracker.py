@@ -172,6 +172,7 @@ class ToolCallTracker:
         previous_count = self._near_duplicate_previous_count(tool_name, signature)
         similar_calls = previous_count + 1
         if similar_calls < NEAR_DUPLICATE_BLOCK_COUNT:
+            self.pending_near_duplicate_signatures[tool_name].append(signature)
             return None
         info = self._near_duplicate_info(tool_name, args, signature, similar_calls)
         return ToolGuardDecision(
@@ -209,6 +210,7 @@ class ToolCallTracker:
 
         signature = tool_similarity_signature(tool_name, args)
         if signature:
+            self._discard_pending_near_duplicate(tool_name, signature)
             previous_count = self._near_duplicate_previous_count(tool_name, signature)
             history = self.near_duplicate_history[tool_name]
             history.append(signature)
@@ -475,6 +477,7 @@ class ToolCallTracker:
         self.blocked_keys.clear()
         self.blocked_tools.clear()
         self.near_duplicate_history.clear()
+        self.pending_near_duplicate_signatures.clear()
         self.last_decision = None
 
 

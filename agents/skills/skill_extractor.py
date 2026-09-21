@@ -423,12 +423,3 @@ def _infer_category(candidate: OnlineSkillCandidate) -> str:
     if any(t in tags_lower for t in ["test", "testing"]):
         return "testing"
     return "general"
-
-
-async def run_memory_maintenance() -> dict[str, Any]:
-    """执行 memory maintenance（提权/归档检查）。
-
-    可在 skill evolution 后调用，让 memory 也参与进化循环。
-    """
-    from agents.memory.memory import maintenance_all_memories
-    return maintenance_all_memories()

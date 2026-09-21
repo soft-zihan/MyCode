@@ -314,7 +314,7 @@ class ToolDispatcher:
     def _execute_list_session_notes_tool(self, inp: dict) -> str:
         limit = int(inp.get("limit") or 10)
 
-        from agents.memory.frontmatter import parse_frontmatter
+        from agents.core.frontmatter import parse_frontmatter
         from agents.wiki.wiki_manager import get_wiki_dir
 
         wiki_dir = get_wiki_dir() / "session_notes"

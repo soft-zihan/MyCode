@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 
 from agents.core.workspace import get_workspace
-from agents.memory.frontmatter import parse_frontmatter
+from agents.core.frontmatter import parse_frontmatter
 from agents.tools import tool_definitions, ToolDef
 
 

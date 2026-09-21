@@ -63,7 +63,6 @@ def write_file(inp: dict) -> str:
             path_str = str(resolve_tool_path(inp["file_path"], must_exist=False))
 
         rt.write_file(path_str, inp["content"])
-        _auto_update_memory_index(path_str)
         lines = inp["content"].split("\n")
         line_count = len(lines)
         preview = "\n".join(f"{i + 1:4d} | {l}" for i, l in enumerate(lines[:30]))
@@ -72,32 +71,6 @@ def write_file(inp: dict) -> str:
     except Exception as e:
         return f"Error writing file: {e}"
 
-
-def _auto_update_memory_index(file_path: str) -> None:
-    try:
-        from agents.memory.memory import get_memory_dir
-        mem_dir = str(get_memory_dir())
-        if file_path.startswith(mem_dir) and file_path.endswith(".md") and not file_path.endswith("MEMORY.md"):
-            mem_path = Path(mem_dir)
-            lines = ["# Memory Index", ""]
-            for f in sorted(mem_path.glob("*.md")):
-                if f.name == "MEMORY.md":
-                    continue
-                try:
-                    raw = f.read_text()
-                    name_match = re.search(r"^name:\s*(.+)$", raw, re.MULTILINE)
-                    type_match = re.search(r"^type:\s*(.+)$", raw, re.MULTILINE)
-                    desc_match = re.search(r"^description:\s*(.+)$", raw, re.MULTILINE)
-                    if name_match and type_match:
-                        n = name_match.group(1).strip()
-                        t = type_match.group(1).strip()
-                        d = desc_match.group(1).strip()
-                        lines.append(f"- **[{n}]({f.name})** ({t}) — {d}")
-                except Exception:
-                    pass
-            (mem_path / "MEMORY.md").write_text("\n".join(lines))
-    except Exception:
-        pass
 
 
 def _normalize_quotes(s: str) -> str:
