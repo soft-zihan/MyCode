@@ -71,14 +71,6 @@ BUILTIN_HIDDEN_AGENTS: dict[str, AgentConfig] = {
 用户消息："我想学习如何使用Python进行数据分析"
 输出：Python数据分析学习""",
     ),
-    # Side Query: 记忆选择
-    "side_query_memory": AgentConfig(
-        name="side_query_memory",
-        mode=AgentMode.PRIMARY,
-        hidden=True,
-        description="Side Query: 选择相关记忆",
-        system_prompt="根据用户消息和文件名，选择最相关的记忆文件。",
-    ),
     # Side Query: Wiki 选择
     "side_query_wiki": AgentConfig(
         name="side_query_wiki",

@@ -43,7 +43,6 @@ from agents.logging import print_info, print_divider, print_assistant_text, prin
 from agents.plan.plan_mode import PlanModeManager
 from agents.tools.dispatcher import ToolDispatcher
 from agents.core.context import ContextManager
-from agents.core.session_manager import SessionManager
 
 
 class ContentLevelError(Exception):
@@ -217,6 +216,7 @@ class Agent:
         self._compressor = ContextCompressor(
             effective_window=self.effective_window,
             tool_fold_threshold=self.auto_compact_threshold,
+            wiki_enabled=not self.is_sub_agent,
         )
         self._permission_gate = PermissionGate()
         self._session_lifecycle = SessionLifecycle()
@@ -297,7 +297,6 @@ class Agent:
 
         self._tool_dispatcher = ToolDispatcher(agent_ref=self)
         self._context_manager = ContextManager(agent_ref=self)
-        self._session_manager = SessionManager(agent_ref=self)
 
     def _resolve_thinking_mode(self) -> str:
         if not self.thinking:
@@ -1110,8 +1109,13 @@ class Agent:
     async def compact(self)->None:
         await self._context_manager.compact()
 
-    def restore_session(self, data:dict)->None:
-        self._session_manager.restore_session(data)
+    def restore_session(self, data: dict) -> None:
+        from agents.core.session_lifecycle import SessionState
+        from agents.logging import print_info
+
+        state = SessionState(session_id=self.session_id, model=self.model)
+        self._session_lifecycle.restore(state, data, self.session)
+        print_info(f"Session restored ({self._get_message_count()} messages).")
 
     async def rewind_turns(self, n: int = 1) -> str:
         """统一回退：对话回退 N 轮 + 文件恢复到快照（原子操作）。"""
@@ -1130,7 +1134,18 @@ class Agent:
         return msg
 
     def fork_session(self) -> str:
-        return self._session_manager.fork_session()
+        from agents.core.session_lifecycle import SessionState
+
+        state = SessionState(
+            session_id=self.session_id,
+            model=self.model,
+            start_time=self.session_start_time,
+            cwd=str(self.workspace),
+        )
+        result, new_session = self._session_lifecycle.fork(state, self.session)
+        self.session = new_session
+        self.session_id = new_session.id
+        return result
 
     def describe_context(self) -> list[dict]:
         return self._context_manager.describe_context()
@@ -1154,12 +1169,6 @@ class Agent:
 
     async def _compact_openai(self, *, trigger: str)->bool:
         return await self._context_manager._compact_openai(trigger=trigger)
-
-    async def _generate_folded_session_memory(self, transcript: str) -> dict[str, Any]:
-        return await self._context_manager._generate_folded_session_memory(transcript)
-
-    async def _record_folded_session_memory(self, trigger: str, memory: dict[str, Any]) -> None:
-        await self._context_manager._record_folded_session_memory(trigger, memory)
 
     def _persist_large_result(self, tool_name: str, result: str) -> str:
         return persist_large_result(tool_name, result)

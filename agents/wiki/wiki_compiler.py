@@ -129,14 +129,6 @@ async def compile_single_session(session_path: Path, side_query: Any) -> dict[st
                         workaround=item.get("workaround", ""),
                         description=description,
                     )
-                elif item_type in ("knowledge_pattern", "plan"):
-                    write_wiki_entry(
-                        wiki_type="knowledge",
-                        name=name,
-                        content=item.get("content", ""),
-                        description=description,
-                    )
-                    stats["knowledge"] += 1
                 elif item_type == "self_improvement":
                     write_wiki_entry(
                         wiki_type="self_improvement",

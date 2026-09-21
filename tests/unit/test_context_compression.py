@@ -221,12 +221,13 @@ async def test_session_fold_merges_previous_notes_and_replaces_old_summary(monke
             "project_knowledge": "merged knowledge",
         })
 
-    wiki_calls: list[tuple[str, str, str]] = []
+    wiki_calls: list[dict] = []
 
-    async def fake_write_wiki(self, session_id, session_notes, project_knowledge, workspace=None):
-        wiki_calls.append((session_id, session_notes, project_knowledge))
+    async def fake_on_session_folded(**kwargs):
+        wiki_calls.append(kwargs)
 
-    monkeypatch.setattr(ContextCompressor, "_write_wiki_async", fake_write_wiki)
+    import agents.wiki.pipeline as wiki_pipeline
+    monkeypatch.setattr(wiki_pipeline, "on_session_folded", fake_on_session_folded)
 
     compressor = ContextCompressor(
         effective_window=1000,
@@ -248,7 +249,9 @@ async def test_session_fold_merges_previous_notes_and_replaces_old_summary(monke
     assert "user 0" in compile_prompt
     assert "user 3" not in compile_prompt
 
-    assert wiki_calls == [("sess", "merged notes", "merged knowledge")]
+    assert len(wiki_calls) == 1
+    assert wiki_calls[0]["session_id"] == "sess"
+    assert wiki_calls[0]["session_notes"] == "merged notes"
 
     messages = session.get_messages_for_llm()
     contents = [str(message.get("content") or "") for message in messages]

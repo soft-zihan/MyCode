@@ -118,7 +118,9 @@ class ContextCompressor:
         tool_abstract_input_char_limit: int = TOOL_ABSTRACT_INPUT_CHAR_LIMIT,
         tool_abstract_batch_char_limit: int = TOOL_ABSTRACT_BATCH_CHAR_LIMIT,
         assistant_text_char_limit: int = ASSISTANT_TEXT_CHAR_LIMIT,
+        wiki_enabled: bool = True,
     ) -> None:
+        self.wiki_enabled = wiki_enabled
         self.tool_fold_threshold = tool_fold_threshold
         self.session_fold_threshold = session_fold_threshold
         self.keep_recent_tool_rounds = keep_recent_tool_rounds
@@ -544,11 +546,18 @@ class ContextCompressor:
         except Exception as exc:
             logger.error("[session_fold] failed to persist folded memory: %s: %s", type(exc).__name__, exc)
 
-        if session_notes or project_knowledge:
+        if self.wiki_enabled:
             from agents.core.workspace import _current_workspace
+            from agents.wiki.pipeline import on_session_folded
             workspace = _current_workspace.get()
             task = asyncio.create_task(
-                self._write_wiki_async(session_id, session_notes, project_knowledge, workspace)
+                on_session_folded(
+                    session_id=session_id,
+                    session=session,
+                    session_notes=session_notes,
+                    side_query=side_query,
+                    workspace=workspace,
+                )
             )
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
@@ -610,96 +619,6 @@ class ContextCompressor:
             "</session-folded-memory>\n\n"
             "Continue the task from this state."
         )
-
-    async def _write_wiki_async(
-        self,
-        session_id: str,
-        session_notes: str,
-        project_knowledge: str,
-        workspace: Path | None = None,
-    ) -> None:
-        """异步写入 wiki，写入前预检索避免重复。"""
-        if workspace is not None:
-            from agents.core.workspace import set_workspace, reset_workspace
-            token = set_workspace(workspace)
-            try:
-                await self._do_write_wiki(session_id, session_notes, project_knowledge)
-            finally:
-                reset_workspace(token)
-        else:
-            await self._do_write_wiki(session_id, session_notes, project_knowledge)
-    
-    async def _do_write_wiki(
-        self,
-        session_id: str,
-        session_notes: str,
-        project_knowledge: str,
-    ) -> None:
-        logger.info(
-            "[wiki_write] start session=%s session_notes=%dchars knowledge=%dchars",
-            session_id,
-            len(session_notes),
-            len(project_knowledge),
-        )
-        try:
-            from agents.wiki.wiki_manager import (
-                write_wiki_entry, preflight_wiki_search, merge_wiki_entry
-            )
-
-            if session_notes:
-                await asyncio.to_thread(
-                    write_wiki_entry,
-                    wiki_type="session_notes",
-                    name=f"session_{session_id}",
-                    content=session_notes,
-                    description=f"Session notes for session {session_id}",
-                    extra_meta={"session_id": session_id},
-                    skip_if_unchanged=True,
-                )
-                logger.info("[wiki_write] session_notes updated for session=%s", session_id)
-
-            if project_knowledge:
-                similar = await preflight_wiki_search(project_knowledge, "knowledge")
-
-                if similar:
-                    top_entry, top_score = similar[0]
-                    if top_score >= 0.85:
-                        await asyncio.to_thread(
-                            merge_wiki_entry,
-                            top_entry,
-                            project_knowledge,
-                            mode="replace",
-                        )
-                        logger.info(
-                            "[wiki_write] knowledge merged (replace) to %s score=%.2f",
-                            top_entry.rel_path,
-                            top_score,
-                        )
-                        return
-                    elif top_score >= 0.70:
-                        await asyncio.to_thread(
-                            merge_wiki_entry,
-                            top_entry,
-                            project_knowledge,
-                            mode="append",
-                        )
-                        logger.info(
-                            "[wiki_write] knowledge merged (append) to %s score=%.2f",
-                            top_entry.rel_path,
-                            top_score,
-                        )
-                        return
-
-                await asyncio.to_thread(
-                    write_wiki_entry,
-                    wiki_type="knowledge",
-                    name=f"from_session_{session_id}",
-                    content=project_knowledge,
-                    description=f"Project knowledge extracted from session {session_id}",
-                )
-                logger.info("[wiki_write] knowledge written for session=%s", session_id)
-        except Exception as e:
-            logger.error("[wiki_write] failed session=%s: %s: %s", session_id, type(e).__name__, e)
 
     def _record_fold_event(self) -> None:
         self._fold_last_time = time.time()

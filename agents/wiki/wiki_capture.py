@@ -1,8 +1,5 @@
 """Wiki 捕获 — Session → Wiki/session/。
 
-参考：projects/llm-wiki-memory/scripts/hooks/flush.mjs
-增强：分块蒸馏、审计 frontmatter、redistill
-
 以压缩为分界点，把事件流切成多段，每段独立提取知识。
 使用水位线保证不重不漏。
 """
@@ -16,10 +13,6 @@ from pathlib import Path
 from typing import Any
 
 from agents.wiki.wiki_manager import get_wiki_dir, _git_commit
-
-
-MAX_CHUNK_SIZE = 4000
-MIN_CHUNK_SIZE = 500
 
 
 def _get_extract_state_path() -> Path:
@@ -151,6 +144,16 @@ def capture_session_to_session(
     # 带分段序号，避免覆盖
     filepath = session_dir / f"{slug}_seg{segment_index}.md"
 
+    # B1 修复：tool_result_msg 事件不带 tool_name，
+    # 从同段 assistant_message 的 tool_calls 反查 call_id → tool_name
+    tool_name_by_call_id: dict[str, str] = {}
+    for event in events:
+        for tc in event.get("tool_calls") or []:
+            call_id = tc.get("id") or ""
+            name = (tc.get("function") or {}).get("name") or ""
+            if call_id and name:
+                tool_name_by_call_id[call_id] = name
+
     # 从原始事件构建内容
     content_parts = []
     
@@ -175,7 +178,11 @@ def capture_session_to_session(
                     args = func.get("arguments", "")
                     content_parts.append(f"## Tool Call: {name}\n```json\n{args}\n```")
         elif event_type == "tool_result_msg":
-            tool_name = event.get("tool_name", "unknown")
+            tool_name = (
+                event.get("tool_name")
+                or tool_name_by_call_id.get(event.get("call_id") or "")
+                or _parse_tool_name_from_wrapper(content)
+            )
             content_parts.append(f"## Tool Result: {tool_name}\n{content}")
     
     content = "\n\n".join(content_parts) if content_parts else "(empty session)"
@@ -196,150 +203,15 @@ def capture_session_to_session(
     return filepath
 
 
-def chunk_dialogue(dialogue: str, max_chunk: int = MAX_CHUNK_SIZE) -> list[str]:
-    """将对话分块。
-
-    按 ### 标题分块，段落分割，硬切兜底。
-    """
-    if len(dialogue) <= max_chunk:
-        return [dialogue]
-
-    chunks: list[str] = []
-    current_chunk = ""
-
-    sections = re.split(r"(?=###\s+)", dialogue)
-
-    for section in sections:
-        if len(current_chunk) + len(section) <= max_chunk:
-            current_chunk += section
-        else:
-            if current_chunk:
-                chunks.append(current_chunk)
-            if len(section) <= max_chunk:
-                current_chunk = section
-            else:
-                paragraphs = section.split("\n\n")
-                current_chunk = ""
-                for para in paragraphs:
-                    if len(current_chunk) + len(para) + 2 <= max_chunk:
-                        current_chunk += ("\n\n" if current_chunk else "") + para
-                    else:
-                        if current_chunk:
-                            chunks.append(current_chunk)
-                        if len(para) <= max_chunk:
-                            current_chunk = para
-                        else:
-                            for i in range(0, len(para), max_chunk):
-                                chunks.append(para[i:i+max_chunk])
-                            current_chunk = ""
-
-    if current_chunk:
-        chunks.append(current_chunk)
-
-    return chunks if chunks else [dialogue]
+_TOOL_WRAPPER_RE = re.compile(r'<tool_result tool="([^"]+)">')
 
 
-async def distill_chunks(
-    chunks: list[str],
-    side_query: Any,
-) -> dict[str, Any]:
-    """分块蒸馏。
-
-    每块独立蒸馏，最后合并。
-    返回蒸馏结果和审计信息。
-    """
-    results: list[dict] = []
-    failed_chunks: list[int] = []
-    provider_chain_tried = ["ollama"]
-    final_provider = "ollama"
-
-    for i, chunk in enumerate(chunks):
-        try:
-            distilled = await _distill_single_chunk(chunk, side_query)
-            results.append({"chunk_index": i, "content": distilled, "status": "success"})
-        except Exception as e:
-            results.append({"chunk_index": i, "content": "", "status": "failed", "error": str(e)})
-            failed_chunks.append(i)
-
-    return {
-        "chunks_total": len(chunks),
-        "chunks_succeeded": len(chunks) - len(failed_chunks),
-        "failed_chunks": failed_chunks,
-        "provider_chain_tried": provider_chain_tried,
-        "final_provider": final_provider,
-        "results": results,
-    }
-
-
-# 从文件加载 side query 提示词
-from pathlib import Path
-_PROMPTS_DIR = Path(__file__).parent.parent / "prompts" / "side_query"
-DISTILL_CHUNK_PROMPT = (_PROMPTS_DIR / "distill_chunk.txt").read_text(encoding="utf-8")
-
-
-async def _distill_single_chunk(chunk: str, side_query: Any) -> str:
-    """蒸馏单个块。"""
-    try:
-        return await side_query(DISTILL_CHUNK_PROMPT, chunk[:MAX_CHUNK_SIZE])
-    except Exception:
-        raise
-
-
-async def redistill_failed_chunks(
-    session_path: Path,
-    side_query: Any,
-) -> dict[str, Any]:
-    """重蒸馏失败的块。
-
-    从 stash 恢复失败分块，重新蒸馏。
-    """
-    from agents.core.frontmatter import parse_frontmatter, format_frontmatter
-
-    result = parse_frontmatter(session_path.read_text())
-    meta = result.meta
-
-    failed_indices = meta.get("failed_chunks", "[]")
-    if isinstance(failed_indices, str):
-        try:
-            failed_indices = json.loads(failed_indices)
-        except json.JSONDecodeError:
-            failed_indices = []
-
-    if not failed_indices:
-        return {"redistilled": 0, "still_failed": 0}
-
-    stash_path = session_path.with_suffix(".stash.json")
-    if not stash_path.exists():
-        return {"redistilled": 0, "still_failed": len(failed_indices)}
-
-    try:
-        stash = json.loads(stash_path.read_text())
-    except (json.JSONDecodeError, KeyError):
-        return {"redistilled": 0, "still_failed": len(failed_indices)}
-
-    redistilled = 0
-    still_failed: list[int] = []
-
-    for idx in failed_indices:
-        if idx >= len(stash.get("chunks", [])):
-            continue
-
-        chunk = stash["chunks"][idx]
-        try:
-            distilled = await _distill_single_chunk(chunk, side_query)
-            stash["results"][idx] = {"chunk_index": idx, "content": distilled, "status": "success"}
-            redistilled += 1
-        except Exception:
-            still_failed.append(idx)
-
-    stash["failed_chunks"] = still_failed
-    stash_path.write_text(json.dumps(stash, ensure_ascii=False, indent=2))
-
-    meta["failed_chunks"] = json.dumps(still_failed)
-    meta["chunks_succeeded"] = str(len(stash["results"]) - len(still_failed))
-    session_path.write_text(format_frontmatter(meta, result.body))
-
-    return {"redistilled": redistilled, "still_failed": len(still_failed)}
+def _parse_tool_name_from_wrapper(content: Any) -> str:
+    """兜底：append_tool_message 把工具名包在 <tool_result tool="..."> 里。"""
+    if not isinstance(content, str):
+        return "unknown"
+    m = _TOOL_WRAPPER_RE.search(content[:200])
+    return m.group(1) if m else "unknown"
 
 
 def mark_session_compiled(filepath: Path) -> None:

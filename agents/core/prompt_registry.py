@@ -62,19 +62,16 @@ def list_all_prompts() -> list[PromptInfo]:
         side_query_descriptions = {
             "compile_session": "编译会话笔记",
             "consolidate_wiki": "审核 Wiki 相关性",
-            "distill_chunk": "蒸馏对话块",
             "explore": "技术调研",
             "extract_goal": "提取目标标准",
             "extract_knowledge": "提取持久知识",
             "generate_skill": "生成 Skill",
-            "select_memories": "选择相关记忆",
             "select_wiki": "选择相关 Wiki 条目",
             "verify_goal": "验证目标达成",
         }
         
         # 这些文件已经在 hidden agent 中处理，不需要重复加载
         hidden_agent_files = {
-            "select_memories.txt",
             "select_wiki.txt",
             "compile_session.txt",
             "generate_skill.txt",
@@ -101,7 +98,6 @@ def list_all_prompts() -> list[PromptInfo]:
     
     # 定义 hidden agent 到提示词文件的映射
     hidden_agent_prompt_files = {
-        "side_query_memory": "select_memories.txt",
         "side_query_wiki": "select_wiki.txt",
         "side_query_compile": "compile_session.txt",
         "side_query_skill": "generate_skill.txt",
