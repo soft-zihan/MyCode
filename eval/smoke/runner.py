@@ -107,22 +107,39 @@ class EventListener:
         return False
 
 
+def _wipe_except(directory: Path, keep: set[Path]) -> None:
+    """递归清空 directory，保留 keep 中的路径（含其父目录链）。"""
+    import shutil
+    for child in directory.iterdir():
+        if child in keep:
+            continue
+        if child.is_dir():
+            child_prefix = str(child) + "/"
+            if any(str(k).startswith(child_prefix) for k in keep):
+                _wipe_except(child, keep)
+            else:
+                shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
+
+
 def setup_workspace(task: dict) -> Path:
     """评测 workspace 准备：全量清空隔离（BC-5：残留 1.3G 曾导致 grep 超时与跨用例污染）。
 
-    embed 缓存（内容寻址，跨用例无害）保留以省时。
+    保留项（BC-6）：
+    - .embed-cache：内容寻址，跨用例无害，省时；
+    - .extract_state.json：提取水位线。清掉会让全局 session 存储里所有旧会话
+      （同 cwd 的历史评测会话）重新变成"待补编译"，backfill 把它们编译进新
+      用例的 wiki 造成跨用例污染并拖慢当前用例的折叠编译。
     """
-    import shutil
     if task.get("use_real_workspace"):
         ws = PROJECT_ROOT / "eval" / "workspace"
+        keep = {
+            ws / ".mycode" / "wiki" / ".embed-cache",
+            ws / ".mycode" / "wiki" / ".extract_state.json",
+        }
         if ws.exists():
-            for child in ws.iterdir():
-                if child == ws / ".mycode" / "wiki" / ".embed-cache":
-                    continue
-                if child.is_dir():
-                    shutil.rmtree(child, ignore_errors=True)
-                else:
-                    child.unlink(missing_ok=True)
+            _wipe_except(ws, keep)
         ws.mkdir(parents=True, exist_ok=True)
     else:
         ws = Path(tempfile.mkdtemp(prefix=f"smoke_{task['id']}_"))

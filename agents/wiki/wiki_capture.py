@@ -64,6 +64,35 @@ def get_all_session_ids() -> list[str]:
     return session_ids
 
 
+def get_session_workspace(session_id: str) -> str | None:
+    """读取 session 的工作区（session/created 事件的 cwd，顶层字段）。
+
+    只扫描文件头部若干行；找不到返回 None。
+    """
+    from agents.core.session import session_dir
+    path = session_dir() / f"{session_id}.events.jsonl"
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            for i, line in enumerate(f):
+                if i >= 5:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if e.get("type") == "session/created":
+                    cwd = e.get("cwd")
+                    if cwd:
+                        return str(Path(cwd).resolve())
+                    return None
+    except OSError:
+        return None
+    return None
+
+
 def get_session_max_seq(session_id: str) -> int:
     """获取指定 session 的最大 seq（只读文件尾部，避免全量加载）。"""
     from agents.core.session import session_dir
@@ -102,8 +131,12 @@ def get_session_events_from_seq(session_id: str, from_seq: int) -> list[dict]:
 
 
 def find_sessions_needing_compilation(threshold: int = 10) -> list[tuple[str, int, int]]:
-    """找出需要补编译的 session。
-    
+    """找出需要补编译的 session（BC-6：仅限当前工作区）。
+
+    session 存储是全局的（~/.mycode/sessions），而 wiki 是工作区级的。
+    不过滤会把其它项目/评测工作区的会话编译进当前 wiki（跨工作区污染），
+    因此以 session/created 事件的 cwd 与当前 wiki 所属工作区做匹配。
+
     Returns:
         [(session_id, last_extract_pos, max_seq), ...]
         其中 max_seq - last_extract_pos > threshold，
@@ -117,13 +150,16 @@ def find_sessions_needing_compilation(threshold: int = 10) -> list[tuple[str, in
     idle_seconds = float(get_setting("capture.idleMinutes", 30)) * 60
     now = time.time()
     sessions_needing = []
-    
+    wiki_workspace = str(get_wiki_dir().parent.parent.resolve())
+
     for session_id in get_all_session_ids():
         last_pos = get_last_extract_pos(session_id)
         max_seq = get_session_max_seq(session_id)
         
         # 如果有未提取的事件且超过阈值
         if max_seq > last_pos and (max_seq - last_pos) > threshold:
+            if get_session_workspace(session_id) != wiki_workspace:
+                continue
             events_path = session_dir() / f"{session_id}.events.jsonl"
             try:
                 if now - events_path.stat().st_mtime < idle_seconds:
@@ -276,6 +312,11 @@ def _parse_tool_name_from_wrapper(content: Any) -> str:
 
 def mark_session_compiled(filepath: Path) -> None:
     from agents.core.frontmatter import parse_frontmatter, format_frontmatter
+    if not filepath.exists():
+        # BC-6：后台补编译与外部清理（如评测 workspace 重置）可能并发，
+        # segment 消失视为无需标记，跳过而非炸掉整轮 backfill
+        print(f"[wiki_capture] mark_session_compiled skipped, segment gone: {filepath.name}")
+        return
     try:
         result = parse_frontmatter(filepath.read_text())
         result.meta["compiled"] = "true"

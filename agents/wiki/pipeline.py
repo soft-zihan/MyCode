@@ -114,9 +114,17 @@ async def _compile_segment(session_path: Path, side_query: SideQueryFn) -> None:
     from agents.wiki.wiki_compiler import compile_single_session, check_and_compile_pending_sessions
 
     try:
-        result = await compile_single_session(session_path, side_query)
+        # BC-6：折叠触发的编译对延迟敏感（评测 wait_for_files / 用户召回），
+        # 锁忙时有限重试而非直接丢给空闲补编译（后者可能被 backfill 队列拖到几分钟后）
+        result = None
+        for attempt in range(3):
+            result = await compile_single_session(session_path, side_query)
+            if result is not None:
+                break
+            print(f"[wiki_compile_single] lock busy (attempt {attempt + 1}/3): {session_path.name}")
+            await asyncio.sleep(15)
         if result is None:
-            # compile lock 被占用，segment 保持 compiled=false，由补编译机制重试
+            # 仍被占用：segment 保持 compiled=false，由补编译机制重试
             print(f"[wiki_compile_single] lock busy, deferred: {session_path.name}")
             return
 
@@ -124,7 +132,8 @@ async def _compile_segment(session_path: Path, side_query: SideQueryFn) -> None:
 
         total = sum(v for v in result.values() if isinstance(v, int))
         if total > 0:
-            print(f"[wiki_compile] extracted {total} entries from {session_path.name}")
+            breakdown = {k: v for k, v in result.items() if isinstance(v, int) and v > 0}
+            print(f"[wiki_compile] extracted {total} entries from {session_path.name}: {breakdown}")
 
         backfill_result = await check_and_compile_pending_sessions(side_query, threshold=BACKFILL_THRESHOLD)
         backfill_total = sum(v for v in backfill_result.values() if isinstance(v, int))

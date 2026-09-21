@@ -423,11 +423,11 @@ tool_definitions: list[ToolDef] = [
     },
     {
         "name": "remember",
-        "description": "Save a persistent memory to the wiki. Use IMMEDIATELY in the current turn when the user says 'remember X', 'always/never do X', or corrects your behavior (wiki_type=feedback, content must include the Rule, Why, and How to apply). Deduplication is automatic: similar existing entries are merged, and the result tells you which entry was updated. Types: feedback (user corrections/confirmed rules), user (preferences), knowledge (project facts/decisions/conventions), reference (external links/docs), workflow_pattern (troubleshooting pattern; requires symptom/root_cause/workaround instead of content).",
+        "description": "Save a persistent memory to the wiki. Use IMMEDIATELY in the current turn when the user says 'remember X', 'always/never do X', 'from now on X', or corrects your behavior — such user-taught rules MUST use wiki_type=feedback even when they look like project conventions (litmus test: does it constrain how the agent should act? then feedback, not knowledge). Feedback content must include the Rule, Why, and How to apply. Deduplication is automatic: similar existing entries are merged, and the result tells you which entry was updated. Types: feedback (rules/corrections/confirmations the user teaches the agent), user (personal preferences), knowledge (objective project facts/architecture decisions/technical details), reference (external links/docs), workflow_pattern (troubleshooting pattern; requires symptom/root_cause/workaround instead of content).",
         "input_schema": {
             "type": "object",
             "properties": {
-                "wiki_type": {"type": "string", "enum": ["feedback", "user", "knowledge", "reference", "workflow_pattern"], "description": "Memory type. feedback = user-initiated correction/confirmation; self_improvement (Agent's own mistakes) is NOT writable here"},
+                "wiki_type": {"type": "string", "enum": ["feedback", "user", "knowledge", "reference", "workflow_pattern"], "description": "Memory type. feedback = any rule the user teaches/corrects/confirms ('remember...', 'never...', 'always...', 'from now on...'), even if it looks like a project convention; knowledge = objective project facts/architecture only; self_improvement (Agent's own mistakes) is NOT writable here"},
                 "name": {"type": "string", "description": "Short descriptive entry name"},
                 "description": {"type": "string", "description": "Optional one-line description"},
                 "content": {"type": "string", "description": "Memory content (required except workflow_pattern). For feedback: Rule -> Why -> How to apply"},
