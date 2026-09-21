@@ -259,7 +259,7 @@ async def test_session_fold_merges_previous_notes_and_replaces_old_summary(monke
     assert any("merged notes" in content for content in contents)
 
 
-def test_agent_uses_configured_auto_compact_threshold(tmp_path, monkeypatch):
+def test_agent_uses_default_auto_compact_threshold(tmp_path, monkeypatch):
     agent = _make_agent(tmp_path, monkeypatch)
     assert agent._compressor.effective_window == agent.effective_window
     assert agent._compressor.tool_fold_threshold == agent.auto_compact_threshold

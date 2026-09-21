@@ -55,7 +55,6 @@ class SessionManager:
             session.append("session/created", created_payload)
         if title:
             session.append("session/title", {"title": title})
-        resolved_thinking = thinking if thinking is not None else config.thinking
         agent = Agent(
             model=model_name,
             api_key=api_key,
@@ -63,7 +62,7 @@ class SessionManager:
             permission_mode=permission_mode or "bypassPermissions",
             session_id=session.id,
             workspace=cwd,
-            thinking=resolved_thinking,
+            thinking=thinking,  # None 时由 Agent 解析端点级 thinking 配置
             compression_arm=compression_arm,
         )
         print(f"[DEBUG] session_manager.create: agent.session_id = {agent.session_id}, agent.session.id = {agent.session.id}")

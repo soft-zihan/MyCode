@@ -8,7 +8,6 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from agents.config import (
-    DEFAULT_AUTO_COMPACT_THRESHOLD,
     DEFAULT_CONTEXT_WINDOW,
     load_config, save_config, list_endpoints, get_primary_endpoint,
     AppConfig, ModelEndpointConfig
@@ -22,7 +21,7 @@ class EndpointConfig(BaseModel):
     base_url: str
     api_key: str
     context_window: int = DEFAULT_CONTEXT_WINDOW
-    auto_compact_threshold: float = DEFAULT_AUTO_COMPACT_THRESHOLD
+    thinking: bool | None = None  # null=跟随模型默认
     provider_name: str = ""
 
 
@@ -54,7 +53,7 @@ async def api_verify_model(data: ModelVerifyRequest) -> dict[str, Any]:
     try:
         chat_url = f"{data.base_url.rstrip('/')}/chat/completions"
         headers = {
-            "Authorization": f"mycodeer {data.api_key}",
+            "Authorization": f"Bearer {data.api_key}",
             "Content-Type": "application/json"
         }
         
@@ -128,7 +127,7 @@ def api_update_config(data: ConfigUpdate) -> dict[str, Any]:
             base_url=v.base_url,
             api_key=v.api_key,
             context_window=v.context_window,
-            auto_compact_threshold=v.auto_compact_threshold,
+            thinking=v.thinking,
             provider_name=v.provider_name,
         )
         for k, v in data.endpoints.items()
@@ -136,18 +135,6 @@ def api_update_config(data: ConfigUpdate) -> dict[str, Any]:
     config.routing = data.routing
     save_config(config)
     return {"status": "ok", "message": "Config saved successfully"}
-
-
-class ThinkingUpdate(BaseModel):
-    enabled: bool | None = None  # null=跟随模型默认
-
-
-@router.put("/api/config/thinking")
-def api_update_thinking(data: ThinkingUpdate) -> dict[str, Any]:
-    config = load_config()
-    config.thinking = data.enabled
-    save_config(config)
-    return {"status": "ok", "thinking": config.thinking}
 
 
 @router.get("/api/config/plan-strategies")

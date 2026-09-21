@@ -28,7 +28,7 @@ class ModelEndpointConfig:
     base_url: str
     api_key: str
     context_window: int = DEFAULT_CONTEXT_WINDOW
-    auto_compact_threshold: float = DEFAULT_AUTO_COMPACT_THRESHOLD
+    thinking: bool | None = None  # None=跟随模型默认；True/False=显式开/关（qwen 系走 enable_thinking）
     provider_name: str = ""  # User-friendly name for the provider
 
     def to_dict(self) -> dict[str, Any]:
@@ -41,7 +41,7 @@ class ModelEndpointConfig:
             base_url=data.get("base_url", ""),
             api_key=data.get("api_key", ""),
             context_window=data.get("context_window", DEFAULT_CONTEXT_WINDOW),
-            auto_compact_threshold=data.get("auto_compact_threshold", DEFAULT_AUTO_COMPACT_THRESHOLD),
+            thinking=data.get("thinking"),
             provider_name=data.get("provider_name", ""),
         )
 
@@ -85,7 +85,6 @@ class AppConfig:
     endpoints: dict[str, ModelEndpointConfig]
     routing: dict[str, str]
     cross_session_memory: bool = True
-    thinking: bool | None = None  # None=跟随模型默认；True/False=显式开/关（qwen 系走 enable_thinking）
     plan_strategies: PlanStrategyConfig = field(default_factory=PlanStrategyConfig)
 
     def to_dict(self) -> dict[str, Any]:
@@ -93,7 +92,6 @@ class AppConfig:
             "endpoints": {k: v.to_dict() for k, v in self.endpoints.items()},
             "routing": self.routing,
             "cross_session_memory": self.cross_session_memory,
-            "thinking": self.thinking,
             "plan_strategies": self.plan_strategies.to_dict(),
         }
 
@@ -112,7 +110,6 @@ class AppConfig:
             endpoints=endpoints,
             routing=routing_data,
             cross_session_memory=data.get("cross_session_memory", True),
-            thinking=data.get("thinking"),
             plan_strategies=PlanStrategyConfig.from_dict(strategies_data),
         )
 

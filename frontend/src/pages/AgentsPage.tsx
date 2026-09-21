@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react';
 import { 
-  fetchAgents, fetchAgent, fetchConfig, saveConfig, fetchSkills, updateThinkingConfig,
+  fetchAgents, fetchAgent, fetchConfig, saveConfig, fetchSkills,
   Agent, AgentDetail, AppConfig, ModelEndpointConfig, Skill,
-  DEFAULT_CONTEXT_WINDOW, DEFAULT_AUTO_COMPACT_THRESHOLD
+  DEFAULT_CONTEXT_WINDOW
 } from '../api/client';
 import { Bot, Server, RefreshCw, Save, Plus, Trash2, ChevronDown, ChevronRight, Globe, Cpu, CheckCircle, XCircle, Loader, Edit2, X, RotateCcw, Sparkles } from 'lucide-react';
 import { PageLayout } from '../components/PageLayout';
@@ -19,7 +19,7 @@ interface ModelConfig {
   id: string;
   name: string;
   context_window: number;
-  auto_compact_threshold: number;
+  thinking: boolean | null;  // null=跟随模型默认
 }
 
 interface ToolInfo {
@@ -89,7 +89,7 @@ export default function AgentsPage() {
           id: id,
           name: endpoint.model,
           context_window: endpoint.context_window || DEFAULT_CONTEXT_WINDOW,
-          auto_compact_threshold: endpoint.auto_compact_threshold ?? DEFAULT_AUTO_COMPACT_THRESHOLD
+          thinking: endpoint.thinking ?? null
         });
       });
       setProviders(Array.from(providerMap.values()));
@@ -264,7 +264,7 @@ export default function AgentsPage() {
             base_url: provider.base_url,
             api_key: provider.api_key,
             context_window: model.context_window,
-            auto_compact_threshold: model.auto_compact_threshold,
+            thinking: model.thinking,
             provider_name: provider.name
           };
         });
@@ -314,7 +314,7 @@ export default function AgentsPage() {
             id: `model_${Date.now()}`,
             name: 'new-model',
             context_window: DEFAULT_CONTEXT_WINDOW,
-            auto_compact_threshold: DEFAULT_AUTO_COMPACT_THRESHOLD
+            thinking: null
           }]
         };
       }
@@ -610,31 +610,6 @@ export default function AgentsPage() {
               </div>
             </div>
 
-            <div className="px-6 pt-4">
-              <div className="flex items-center gap-3 border border-gray-200 rounded-lg p-3 bg-gray-50">
-                <Sparkles className="w-4 h-4 text-indigo-500" />
-                <span className="text-sm text-gray-700">全局 Thinking（推理模型深度思考）</span>
-                <select
-                  value={config?.thinking === null || config?.thinking === undefined ? 'default' : String(config.thinking)}
-                  onChange={async (e) => {
-                    const v = e.target.value === 'default' ? null : e.target.value === 'true';
-                    try {
-                      await updateThinkingConfig(v);
-                      setConfig(await fetchConfig());
-                    } catch (err) {
-                      console.error('thinking config save failed', err);
-                    }
-                  }}
-                  className="rounded-md border border-gray-300 px-2 py-1 text-sm bg-white"
-                >
-                  <option value="default">跟随模型默认</option>
-                  <option value="true">开</option>
-                  <option value="false">关</option>
-                </select>
-                <span className="text-xs text-gray-400">qwen 系模型经 enable_thinking 生效；关闭可显著提速</span>
-              </div>
-            </div>
-
             <div className="flex-1 overflow-y-auto p-6">
               {providers.length === 0 ? (
                 <div className="text-center py-12 text-gray-500">
@@ -744,16 +719,16 @@ export default function AgentsPage() {
                                         className="w-28 px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500"
                                       />
                                       <span className="text-xs text-gray-500">tokens</span>
-                                      <input
-                                        type="number"
-                                        step="0.05"
-                                        min="0.1"
-                                        max="0.95"
-                                        value={model.auto_compact_threshold}
-                                        onChange={(e) => updateModel(provider.id, model.id, 'auto_compact_threshold', parseFloat(e.target.value) || DEFAULT_AUTO_COMPACT_THRESHOLD)}
-                                        className="w-20 px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                                      />
-                                      <span className="text-xs text-gray-500">compact</span>
+                                      <select
+                                        value={model.thinking === null ? 'default' : String(model.thinking)}
+                                        onChange={(e) => updateModel(provider.id, model.id, 'thinking', e.target.value === 'default' ? null : e.target.value === 'true')}
+                                        className="w-28 px-1 py-1 text-xs border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
+                                        title="Thinking（推理模型深度思考）：qwen 系经 enable_thinking 生效；关闭可显著提速"
+                                      >
+                                        <option value="default">Thinking 默认</option>
+                                        <option value="true">Thinking 开</option>
+                                        <option value="false">Thinking 关</option>
+                                      </select>
                                       <button
                                         onClick={() => verifyModel(provider.id, model.id)}
                                         disabled={verifyingModel === model.id}
