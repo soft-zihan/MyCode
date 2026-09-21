@@ -20,14 +20,18 @@ def priority_rank(priority: str) -> int:
 
 def rerank_within_bands(
     items: list[tuple[WikiEntry, float]],
-    band_width: float = 0.05,
+    band_width: float | None = None,
 ) -> list[tuple[WikiEntry, float]]:
     """在 cosine band 内按 priority 重排。
 
-    参考：wiki-search-rank.mjs:rerankWithinBands
+    band_width 缺省取 settings recall.priorityBand。
     """
     if not items:
         return []
+
+    if band_width is None:
+        from agents.wiki.evolution.settings import get_setting
+        band_width = float(get_setting("recall.priorityBand", 0.05))
 
     items.sort(key=lambda x: -x[1])
 

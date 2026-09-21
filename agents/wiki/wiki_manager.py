@@ -515,6 +515,8 @@ async def select_relevant_wiki_entries(
             t1 = time.time()
             scored = await hybrid_recall(query, max_results=10)
             recall_time = time.time() - t1
+            # B5：hybrid_recall 全量召回，主路径必须过滤冷却中条目再取 top5
+            scored = [(e, sc) for e, sc in scored if e.rel_path not in already_surfaced]
             if scored:
                 result: list[WikiEntry] = []
                 for entry, score in scored[:5]:

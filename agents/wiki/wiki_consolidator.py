@@ -1,11 +1,15 @@
 """Wiki 整理 — 过期扫描 + LLM 刷新。
 
-定期运行，标记过期条目并由 LLM 判定保留/重写/归档。
+事件驱动运行（编译成功/remember 写入后），标记过期条目并由 LLM 判定保留/重写/归档。
 去重由写入前预检索（preflight）负责，不再在此处处理。
+归档一律软删（disable + truncate），保留 G6 追溯链，禁止硬删。
 """
 
 from __future__ import annotations
 
+import json
+import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,22 +17,22 @@ from typing import Any
 from agents.wiki.wiki_manager import (
     get_wiki_dir,
     list_wiki_entries,
-    delete_wiki_entry,
     _git_commit,
     update_wiki_index,
     WikiEntry,
 )
 
+logger = logging.getLogger(__name__)
 
-STALE_MONTHS = 3
-MAX_REFRESH_PER_RUN = 25
+DEFAULT_STALE_MONTHS = 3
+DEFAULT_MAX_REFRESH_PER_RUN = 25
 
 
 def _load_settings():
     from agents.wiki.evolution.settings import get_setting
     return {
-        "stale_months": get_setting("consolidate.staleAfterMonths", STALE_MONTHS),
-        "max_refresh": get_setting("consolidate.maxRefreshPerRun", MAX_REFRESH_PER_RUN),
+        "stale_months": int(get_setting("consolidate.staleAfterMonths", DEFAULT_STALE_MONTHS)),
+        "max_refresh": int(get_setting("consolidate.maxRefreshPerRun", DEFAULT_MAX_REFRESH_PER_RUN)),
     }
 
 
@@ -44,9 +48,9 @@ async def consolidate(side_query: Any) -> dict[str, int]:
     cfg = _load_settings()
     stats = {"stale_marked": 0, "refreshed": 0, "archived": 0}
 
-    stats["stale_marked"] = await _mark_stale_entries()
+    stats["stale_marked"] = await _mark_stale_entries(cfg["stale_months"])
 
-    stale_entries = _find_stale_entries()
+    stale_entries = _find_stale_entries(cfg["stale_months"])
     for entry in stale_entries[:cfg["max_refresh"]]:
         try:
             verdict = await _semantic_refresh(entry, side_query)
@@ -56,8 +60,8 @@ async def consolidate(side_query: Any) -> dict[str, int]:
                 disable_entry(entry)
                 truncate_archived_body(entry)
                 stats["archived"] += 1
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[consolidate] refresh failed for %s: %s: %s", entry.rel_path, type(e).__name__, e)
 
     if sum(stats.values()) > 0:
         _git_commit(
@@ -69,11 +73,11 @@ async def consolidate(side_query: Any) -> dict[str, int]:
     return stats
 
 
-async def _mark_stale_entries() -> int:
+async def _mark_stale_entries(stale_months: int) -> int:
     """标记 stale 条目。
 
     使用 last_applied（最后一次被检索注入的时间）判断是否还在使用。
-    3 个月未被引用的条目标记为 stale。
+    stale_months 个月未被引用的条目标记为 stale。
     """
     entries = list_wiki_entries()
     now = datetime.now(timezone.utc)
@@ -92,11 +96,11 @@ async def _mark_stale_entries() -> int:
         try:
             last_applied = datetime.fromisoformat(last_applied_str.replace("Z", "+00:00"))
             days_since = (now - last_applied).days
-            if days_since > STALE_MONTHS * 30:
+            if days_since > stale_months * 30:
                 _mark_entry_stale(entry)
                 marked += 1
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[consolidate] refresh failed for %s: %s: %s", entry.rel_path, type(e).__name__, e)
 
     return marked
 
@@ -115,7 +119,7 @@ def _mark_entry_stale(entry: WikiEntry) -> None:
     filepath.write_text(format_frontmatter(result.meta, result.body))
 
 
-def _find_stale_entries() -> list[WikiEntry]:
+def _find_stale_entries(stale_months: int) -> list[WikiEntry]:
     """查找 stale 条目，使用 last_applied 判断。"""
     entries = list_wiki_entries()
     now = datetime.now(timezone.utc)
@@ -130,10 +134,10 @@ def _find_stale_entries() -> list[WikiEntry]:
         try:
             last_applied = datetime.fromisoformat(last_applied_str.replace("Z", "+00:00"))
             days_since = (now - last_applied).days
-            if days_since > STALE_MONTHS * 30:
+            if days_since > stale_months * 30:
                 stale.append(entry)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[consolidate] refresh failed for %s: %s: %s", entry.rel_path, type(e).__name__, e)
 
     stale.sort(key=lambda e: e.meta.get("last_applied", e.meta.get("modified", "")))
     return stale
@@ -150,7 +154,6 @@ async def _semantic_refresh(entry: WikiEntry, side_query: Any) -> str:
         if not match:
             return "keep"
 
-        import json
         result = json.loads(match.group(0))
         verdict = result.get("verdict", "keep")
 
@@ -160,7 +163,7 @@ async def _semantic_refresh(entry: WikiEntry, side_query: Any) -> str:
                 _rewrite_entry(entry, new_content)
             return "rewrite"
         elif verdict == "archive":
-            delete_wiki_entry(entry.rel_path)
+            # B2：软删由 consolidate() 统一执行（disable_entry + truncate_archived_body）
             return "archive"
 
         return "keep"
@@ -180,5 +183,3 @@ def _rewrite_entry(entry: WikiEntry, new_content: str) -> None:
     result.meta["last_refreshed"] = result.meta["modified"]
     filepath.write_text(format_frontmatter(result.meta, new_content))
 
-
-import re

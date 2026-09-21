@@ -149,17 +149,19 @@ def score_candidate(
 async def semantic_recall(
     query: str,
     wiki_types: list[str] | None = None,
-    score_threshold: float = 0.1,
+    score_threshold: float | None = None,
     max_results: int = 10,
 ) -> list[tuple[WikiEntry, float]]:
     """语义搜索 — embedding cosine similarity + 加权评分。
 
-    借鉴 ows 的 scoring.ts，多信号加权求和。
+    score_threshold 缺省取 settings recall.scoreThreshold。
     """
+    from agents.wiki.evolution.settings import get_setting
+    if score_threshold is None:
+        score_threshold = float(get_setting("recall.scoreThreshold", 0.12))
     from agents.wiki.evolution.embedding import (
         embed_text, embed_text_for_leaf, cosine_similarity,
-        get_cached_embedding, set_cached_embedding, content_hash, ColdBudget,
-        EmbeddingCache,
+        ColdBudget, EmbeddingCache,
     )
 
     with trace_span(
@@ -190,7 +192,8 @@ async def semantic_recall(
 
         cache = EmbeddingCache.get()
 
-        budget = ColdBudget(max_cold=100)
+        from agents.wiki.evolution.settings import get_setting as _get_setting
+        budget = ColdBudget(max_cold=int(_get_setting("cold.maxCold", 50)))
         query_vec = await embed_text(query)
         query_terms = re.findall(r'\w+', query.lower())
 
@@ -249,13 +252,16 @@ async def semantic_recall(
 async def hybrid_recall(
     query: str,
     wiki_types: list[str] | None = None,
-    score_threshold: float = 0.1,
+    score_threshold: float | None = None,
     max_results: int = 10,
 ) -> list[tuple[WikiEntry, float]]:
     """混合搜索 — 语义 + 关键词 + 加权评分。
 
-    借鉴 ows 的 scoring.ts，多信号加权求和。
+    score_threshold 缺省取 settings recall.scoreThreshold。
     """
+    from agents.wiki.evolution.settings import get_setting
+    if score_threshold is None:
+        score_threshold = float(get_setting("recall.scoreThreshold", 0.12))
     with trace_span(
         "wiki.recall.hybrid",
         input=query[:200],
@@ -321,10 +327,13 @@ def recall_lessons(
     error_pattern: str | None = None,
     tags: list[str] | None = None,
     include_knowledge: bool = True,
-    score_threshold: float = 0.12,
+    score_threshold: float | None = None,
     max_results: int = 5,
 ) -> dict[str, Any]:
     """关键词 recall（同步 fallback）。"""
+    from agents.wiki.evolution.settings import get_setting
+    if score_threshold is None:
+        score_threshold = float(get_setting("recall.scoreThreshold", 0.12))
     entries = list_wiki_entries(LESSON_ATOM_TYPE)
 
     results: list[tuple[WikiEntry, float]] = []

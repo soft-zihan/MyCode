@@ -62,7 +62,7 @@ def get_default_settings() -> dict[str, Any]:
             },
         },
         "consolidate": {
-            "staleAfterMonths": 6,
+            "staleAfterMonths": 3,
             "maxRefreshPerRun": 25,
             "dedupCosineThreshold": 0.9,
         },

@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import re
 from pathlib import Path
@@ -16,9 +15,19 @@ from typing import Any
 from agents.wiki.wiki_manager import get_wiki_dir, WikiEntry
 
 
-EMBEDDING_MODEL = "qwen3-embedding"
+DEFAULT_EMBEDDING_MODEL = "qwen3-embedding"
 EMBEDDING_DIM = 1024
 CACHE_DIR_NAME = ".embed-cache"
+
+
+def get_embedding_model() -> str:
+    """embedding 模型名（settings embed.model，默认 qwen3-embedding）。"""
+    from agents.wiki.evolution.settings import get_setting
+    return str(get_setting("embed.model", DEFAULT_EMBEDDING_MODEL))
+
+
+def _resolve_model(model: str | None) -> str:
+    return model or get_embedding_model()
 
 
 def get_cache_dir() -> Path:
@@ -28,14 +37,9 @@ def get_cache_dir() -> Path:
     return d
 
 
-def content_hash(text: str) -> str:
-    """计算内容哈希。"""
-    return hashlib.sha256(text.encode()).hexdigest()
-
-
-def get_cache_path(model: str = EMBEDDING_MODEL) -> Path:
+def get_cache_path(model: str | None = None) -> Path:
     """获取缓存文件路径。"""
-    return get_cache_dir() / f"{model}.json"
+    return get_cache_dir() / f"{_resolve_model(model)}.json"
 
 
 class EmbeddingCache:
@@ -47,16 +51,17 @@ class EmbeddingCache:
     _dirty: bool
     _load_time: float
     
-    def __init__(self, model: str = EMBEDDING_MODEL):
-        self._model = model
+    def __init__(self, model: str | None = None):
+        self._model = _resolve_model(model)
         self._dirty = False
         self._load_time = 0.0
         self._load()
     
     @classmethod
-    def get(cls, model: str = EMBEDDING_MODEL) -> EmbeddingCache:
-        if cls._instance is None or cls._instance._model != model:
-            cls._instance = cls(model)
+    def get(cls, model: str | None = None) -> EmbeddingCache:
+        resolved = _resolve_model(model)
+        if cls._instance is None or cls._instance._model != resolved:
+            cls._instance = cls(resolved)
         return cls._instance
     
     def _load(self) -> None:
@@ -97,46 +102,33 @@ class EmbeddingCache:
         return len(self._cache["entries"])
 
 
-def load_cache(model: str = EMBEDDING_MODEL) -> dict[str, Any]:
-    """加载 embedding 缓存。"""
-    path = get_cache_path(model)
-    if not path.exists():
-        return {"model": model, "dim": EMBEDDING_DIM, "entries": {}}
-    try:
-        data = json.loads(path.read_text())
-        if data.get("model") != model:
-            return {"model": model, "dim": EMBEDDING_DIM, "entries": {}}
-        return data
-    except (json.JSONDecodeError, KeyError):
-        return {"model": model, "dim": EMBEDDING_DIM, "entries": {}}
-
-
-def save_cache(cache: dict[str, Any], model: str = EMBEDDING_MODEL) -> None:
-    """保存 embedding 缓存。"""
-    path = get_cache_path(model)
-    path.write_text(json.dumps(cache, ensure_ascii=False, indent=2))
-
-
-def get_cached_embedding(text: str, model: str = EMBEDDING_MODEL) -> list[float] | None:
+def get_cached_embedding(text: str, model: str | None = None) -> list[float] | None:
     """从缓存获取 embedding。"""
     return EmbeddingCache.get(model).get_embedding(text)
 
 
-def set_cached_embedding(text: str, embedding: list[float], model: str = EMBEDDING_MODEL) -> None:
+def set_cached_embedding(text: str, embedding: list[float], model: str | None = None) -> None:
     """缓存 embedding。"""
     cache = EmbeddingCache.get(model)
     cache.set_embedding(text, embedding)
     cache.save()
 
 
-async def embed_text(text: str, model: str = EMBEDDING_MODEL) -> list[float]:
+async def embed_text(text: str, model: str | None = None) -> list[float]:
     """生成文本的 embedding。
 
-    使用 ollama 本地模型，失败时重试。
+    模型/后端由 settings embed.model / embed.backend 配置，失败时重试。
     """
+    from agents.wiki.evolution.settings import get_setting
+
+    model = _resolve_model(model)
     cached = get_cached_embedding(text, model)
     if cached is not None:
         return cached
+
+    backend = str(get_setting("embed.backend", "ollama"))
+    if backend != "ollama":
+        raise RuntimeError(f"unsupported embed.backend: {backend!r} (only 'ollama' is implemented)")
 
     embedding = await _call_ollama_embedding(text, model)
     set_cached_embedding(text, embedding, model)
@@ -168,8 +160,9 @@ async def _call_ollama_embedding(text: str, model: str) -> list[float]:
     raise RuntimeError("ollama embedding failed")
 
 
-async def embed_batch(texts: list[str], model: str = EMBEDDING_MODEL) -> list[list[float]]:
+async def embed_batch(texts: list[str], model: str | None = None) -> list[list[float]]:
     """批量生成 embeddings。"""
+    model = _resolve_model(model)
     results: list[list[float] | None] = [None] * len(texts)
     to_embed: list[tuple[int, str]] = []
 
