@@ -131,20 +131,23 @@ def write_wiki_entry(
         filepath.write_text(format_frontmatter(meta, content))
 
         try:
+            import concurrent.futures
             from agents.core.snapshot_service import SnapshotService
             from agents.core.workspace import get_workspace
             snapshots_dir = Path.home() / ".mycode" / "snapshots"
             svc = SnapshotService(str(get_workspace()), str(snapshots_dir))
+
+            def _capture():
+                return asyncio.run(svc.capture(session_id="wiki", label=f"wiki:{wiki_type}/{filename}"))
+
             try:
-                loop = asyncio.get_running_loop()
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    snap = loop.run_in_executor(
-                        pool,
-                        lambda: asyncio.run(svc.capture(session_id="wiki", label=f"wiki:{wiki_type}/{filename}"))
-                    ).result()
+                asyncio.get_running_loop()
             except RuntimeError:
-                snap = asyncio.run(svc.capture(session_id="wiki", label=f"wiki:{wiki_type}/{filename}"))
+                snap = _capture()
+            else:
+                # 同步函数被事件循环内直接调用（应经 to_thread）：在独立线程跑，避免嵌套 loop
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    snap = pool.submit(_capture).result(timeout=30)
             meta["checkpoint_id"] = snap.id
             filepath.write_text(format_frontmatter(meta, content))
         except Exception as exc:

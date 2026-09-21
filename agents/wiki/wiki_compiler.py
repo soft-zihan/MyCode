@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import datetime, timezone
@@ -100,7 +101,7 @@ async def compile_single_session(session_path: Path, side_query: Any) -> dict[st
         content = result.body
         
         if not content.strip() or content.strip() == "(empty session)":
-            mark_session_compiled(session_path)
+            await asyncio.to_thread(mark_session_compiled, session_path)
             return stats
         
         # 按对话轮次分段
@@ -122,7 +123,8 @@ async def compile_single_session(session_path: Path, side_query: Any) -> dict[st
                     continue
                 
                 if item_type == "workflow_pattern":
-                    write_workflow_pattern(
+                    await asyncio.to_thread(
+                        write_workflow_pattern,
                         name=name,
                         symptom=item.get("symptom", ""),
                         root_cause=item.get("root_cause", ""),
@@ -130,7 +132,8 @@ async def compile_single_session(session_path: Path, side_query: Any) -> dict[st
                         description=description,
                     )
                 elif item_type == "self_improvement":
-                    write_wiki_entry(
+                    await asyncio.to_thread(
+                        write_wiki_entry,
                         wiki_type="self_improvement",
                         name=name,
                         content=item.get("content", ""),
@@ -138,7 +141,8 @@ async def compile_single_session(session_path: Path, side_query: Any) -> dict[st
                         extra_meta={"pending_confirm": "true"},
                     )
                 else:
-                    write_wiki_entry(
+                    await asyncio.to_thread(
+                        write_wiki_entry,
                         wiki_type=item_type,
                         name=name,
                         content=item.get("content", ""),
@@ -147,9 +151,9 @@ async def compile_single_session(session_path: Path, side_query: Any) -> dict[st
                 
                 stats[item_type] += 1
         
-        mark_session_compiled(session_path)
-        _git_commit(f"wiki: compile {sum(stats.values())} entries from {session_path.name}")
-        update_wiki_index()
+        await asyncio.to_thread(mark_session_compiled, session_path)
+        await asyncio.to_thread(_git_commit, f"wiki: compile {sum(stats.values())} entries from {session_path.name}")
+        await asyncio.to_thread(update_wiki_index)
         
         return stats
     
