@@ -133,8 +133,8 @@ class AgentService:
     def fork(self) -> str:
         return self._agent.fork_session()
 
-    async def compact(self) -> None:
-        await self._agent.compact()
+    async def compact(self) -> bool:
+        return await self._agent.compact()
 
     # ── 上下文操作 ──
 

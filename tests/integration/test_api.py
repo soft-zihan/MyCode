@@ -17,13 +17,11 @@ def _clear_state() -> None:
     import agents.core.session as session_module
     import agents.core.session_projection_cache as projection_module
     import agents.session_manager as manager_module
-    import routers.sessions as sessions_router
 
     session_module._backend = None
     projection_module._projection_cache = None
     rewind_module._service = None
     manager_module._session_manager = None
-    sessions_router._active_sessions.clear()
 
 
 def _write_session(
@@ -230,40 +228,6 @@ class TestSessionsAPI:
         assert first["fork_name"] == "original(fork 1)"
         assert second["fork_name"] == "original(fork 2)"
 
-    def test_session_stats_from_events(self, api, tmp_path):
-        _write_session(
-            "stats-1",
-            cwd=tmp_path,
-            title="Stats",
-            stats={
-                "input_tokens": 10,
-                "output_tokens": 5,
-                "cached_tokens": 2,
-                "context_window": 128000,
-                "effective_window": 108000,
-                "last_input_token_count": 20,
-                "last_total_token_count": 25,
-                "estimated_context_tokens": 25,
-                "msg_count": 2,
-                "system_chars": 100,
-                "user_chars": 20,
-                "assistant_chars": 30,
-                "tool_result_chars": 0,
-            },
-        )
-
-        r = api.get("/api/sessions/stats-1/stats")
-        assert r.status_code == 200
-        stats = r.json()
-        assert stats["input_tokens"] == 10
-        assert stats["output_tokens"] == 5
-        assert stats["cached_tokens"] == 2
-        assert stats["context_window"] == 128000
-        assert stats["effective_window"] == 108000
-        assert stats["last_input_token_count"] == 20
-        assert stats["last_total_token_count"] == 25
-        assert stats["estimated_context_tokens"] == 25
-
     def test_session_summary_from_events(self, api, tmp_path):
         _write_session(
             "summary-1",
@@ -275,8 +239,10 @@ class TestSessionsAPI:
                 "cached_tokens": 2,
                 "context_window": 128000,
                 "effective_window": 108000,
-                "last_input_token_count": 20,
-                "last_total_token_count": 25,
+                "cache_hit_rate": 0.2,
+                "total_input_tokens": 20,
+                "total_output_tokens": 25,
+                "total_cached_tokens": 4,
                 "estimated_context_tokens": 25,
                 "msg_count": 2,
                 "system_chars": 100,
@@ -295,11 +261,6 @@ class TestSessionsAPI:
         assert data["stats"]["output_tokens"] == 5
         assert data["stats"]["cached_tokens"] == 2
         assert data["breakdown"]["message_count"] == 2
-
-    def test_session_stats_not_found(self, api):
-        r = api.get("/api/sessions/nonexistent/stats")
-        assert r.status_code == 404
-
 
 class TestSessionEventsAPI:
     def test_events_default_pagination(self, api):

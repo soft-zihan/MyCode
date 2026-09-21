@@ -69,12 +69,13 @@ class ContextManager:
         self.agent._same_tool_repeat_count = 0
         self.agent._last_tool_name = ""
 
-    async def compact(self) -> None:
-        """手动压缩会话。"""
+    async def compact(self) -> bool:
+        """手动压缩会话。返回是否实际执行了折叠。"""
         compacted = await self._compact_conversation(trigger="manual")
         if not compacted:
             from agents.logging import print_info
             print_info("Nothing to compact yet.")
+        return compacted
 
     async def _check_and_compact(self) -> None:
         """自动检查并压缩。"""

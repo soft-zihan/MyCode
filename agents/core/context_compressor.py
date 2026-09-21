@@ -262,7 +262,7 @@ class ContextCompressor:
 
         with trace_span("compact", metadata={"trigger": "manual"}) as span:
             hidden_before = _count_hidden_seqs(session)
-            folded = await self._fold_session(session, side_query, session_id, folded_memories)
+            folded = await self._fold_session(session, side_query, session_id, folded_memories, trigger="manual")
             _finish_compaction_span(span, session, hidden_before, folded, folded)
             return folded
 
@@ -479,6 +479,7 @@ class ContextCompressor:
         side_query: SideQueryFn | None,
         session_id: str,
         folded_memories: list[dict],
+        trigger: str = "auto",
     ) -> bool:
         groups = build_message_groups(session)
         cut_index = find_session_fold_cut(
@@ -552,12 +553,12 @@ class ContextCompressor:
             "previous_notes_chars": len(previous_notes),
             "transcript_chars": len(transcript),
             "fold_mode": fold_mode,
-            "trigger": "auto",
+            "trigger": trigger,
         })
 
         record = {
             "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "trigger": "auto",
+            "trigger": trigger,
             "fold_mode": fold_mode,
             "session_id": session_id,
             "summary": summary,
