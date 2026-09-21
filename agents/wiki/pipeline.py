@@ -130,6 +130,11 @@ async def _compile_segment(session_path: Path, side_query: SideQueryFn) -> None:
         backfill_total = sum(v for v in backfill_result.values() if isinstance(v, int))
         if backfill_total > 0:
             print(f"[wiki_backfill] extracted {backfill_total} entries from pending sessions")
+
+        # Phase 3 触发点：编译成功后检查整理门槛（24h + ≥5 条目变更）
+        from agents.wiki.wiki_consolidator import maybe_schedule_consolidate
+        if maybe_schedule_consolidate(side_query):
+            print("[wiki_consolidate] scheduled (threshold met)")
     except Exception as e:
         # 编译失败：水位线不推进，segment 保持 compiled=false，下次补编译自动重试
         print(f"[wiki_compile_single] compile failed for {session_path.name}: {type(e).__name__}: {e}")

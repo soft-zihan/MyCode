@@ -19,8 +19,11 @@ def _error(message: str) -> str:
     return json.dumps({"action": "error", "error": message}, ensure_ascii=False)
 
 
-async def remember(inp: dict) -> str:
+async def remember(inp: dict, side_query=None) -> str:
     """写入一条持久记忆，自动去重合并。
+
+    Args:
+        side_query: 可选，用于写入后触发 Phase 3 整理门槛检查。
 
     Returns:
         JSON 字符串 {action: created|merged|appended, path, message}
@@ -75,11 +78,13 @@ async def remember(inp: dict) -> str:
                 path = await asyncio.to_thread(
                     merge_wiki_entry, top_entry, content, mode="replace"
                 )
+                _maybe_consolidate(side_query)
                 return _result("merged", path, top_entry, top_score)
             if top_score >= MERGE_APPEND_THRESHOLD:
                 path = await asyncio.to_thread(
                     merge_wiki_entry, top_entry, content, mode="append"
                 )
+                _maybe_consolidate(side_query)
                 return _result("appended", path, top_entry, top_score)
 
         if wiki_type == "workflow_pattern":
@@ -99,6 +104,7 @@ async def remember(inp: dict) -> str:
                 content=content,
                 description=description,
             )
+        _maybe_consolidate(side_query)
         from agents.wiki.wiki_manager import get_wiki_dir
         rel = str(path.relative_to(get_wiki_dir()))
         return json.dumps(
@@ -107,6 +113,19 @@ async def remember(inp: dict) -> str:
         )
     except Exception as e:
         return _error(f"{type(e).__name__}: {e}")
+
+
+def _maybe_consolidate(side_query) -> None:
+    """Phase 3 触发点：remember 写入后检查整理门槛。"""
+    if side_query is None:
+        return
+    try:
+        from agents.wiki.wiki_consolidator import maybe_schedule_consolidate
+        if maybe_schedule_consolidate(side_query):
+            print("[wiki_consolidate] scheduled after remember (threshold met)")
+    except RuntimeError:
+        # 无事件循环（同步测试环境）——跳过调度
+        pass
 
 
 def _result(action: str, path, top_entry, top_score: float) -> str:

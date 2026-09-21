@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
 import subprocess
@@ -193,7 +194,7 @@ def write_workflow_pattern(
     )
 
 
-def list_wiki_entries(wiki_type: str | None = None) -> list[WikiEntry]:
+def list_wiki_entries(wiki_type: str | None = None, include_archived: bool = False) -> list[WikiEntry]:
     wiki_dir = get_wiki_dir()
     entries: list[WikiEntry] = []
 
@@ -209,6 +210,8 @@ def list_wiki_entries(wiki_type: str | None = None) -> list[WikiEntry]:
                 if not meta.get("name") or not meta.get("type"):
                     continue
                 t = meta["type"] if meta["type"] in VALID_WIKI_TYPES else wt
+                if not include_archived and meta.get("status", "active") == "archived":
+                    continue
                 rel_path = str(f.relative_to(wiki_dir))
                 entries.append(WikiEntry(
                     name=meta["name"],
@@ -288,8 +291,11 @@ def increment_applied_count(rel_path: str) -> None:
         result.meta["applied_count"] = str(count)
         result.meta["last_applied"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         filepath.write_text(format_frontmatter(result.meta, result.body))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("[wiki] increment_applied_count failed for %s: %s: %s", rel_path, type(e).__name__, e)
+    # 3.3：被剪枝条目回热 → 移出剪枝名单，下次索引更新自动回归
+    if _unprune_from_index(rel_path):
+        update_wiki_index()
 
 
 async def preflight_wiki_search(
@@ -400,17 +406,61 @@ def _get_index_path() -> Path:
     return get_wiki_dir() / "WIKI.md"
 
 
-def update_wiki_index() -> None:
-    entries = list_wiki_entries()
+CONSOLIDATE_STATE_FILE = ".consolidate_state.json"
 
+
+def _load_index_state() -> dict:
+    path = get_wiki_dir() / CONSOLIDATE_STATE_FILE
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("[wiki] consolidate state parse error: %s: %s", type(e).__name__, e)
+    return {}
+
+
+def _save_index_state(state: dict) -> None:
+    (get_wiki_dir() / CONSOLIDATE_STATE_FILE).write_text(
+        json.dumps(state, ensure_ascii=False, indent=2)
+    )
+
+
+def _unprune_from_index(rel_path: str) -> bool:
+    """条目回热：从剪枝名单移除。返回名单是否有变化。"""
+    state = _load_index_state()
+    pruned = state.get("pruned_from_index", [])
+    if rel_path not in pruned:
+        return False
+    pruned.remove(rel_path)
+    state["pruned_from_index"] = pruned
+    _save_index_state(state)
+    return True
+
+
+def _coldness_key(entry: WikiEntry) -> tuple:
+    """越冷越靠前：新鲜度 asc → usage_count asc → applied_count asc。"""
+    freshness = (
+        entry.meta.get("last_used")
+        or entry.meta.get("last_applied")
+        or entry.meta.get("modified")
+        or ""
+    )
+    return (
+        freshness,
+        int(entry.meta.get("usage_count", "0") or 0),
+        int(entry.meta.get("applied_count", "0") or 0),
+    )
+
+
+def _build_index_lines(entries: list[WikiEntry], with_desc: set[str]) -> list[str]:
     sections: dict[str, list[str]] = {}
     for e in entries:
         section = e.type.replace("_", " ").title()
         if section not in sections:
             sections[section] = []
-        desc = e.meta.get("description", "")
         pending = " [待确认]" if e.meta.get("pending_confirm") == "true" else ""
         compiled = " [已编译]" if e.meta.get("compiled_to_skill") == "true" else ""
+        desc = e.meta.get("description", "") if e.rel_path in with_desc else ""
         line = f"- {e.name}{pending}{compiled} → {e.rel_path}"
         if desc:
             line = f"- {desc}{pending}{compiled} → {e.rel_path}"
@@ -426,8 +476,41 @@ def update_wiki_index() -> None:
             lines.append(f"## {section}")
             lines.extend(sections[section])
             lines.append("")
+    return lines
+
+
+def _over_budget(lines: list[str]) -> bool:
+    return len(lines) > MAX_INDEX_LINES or len("\n".join(lines).encode()) > MAX_INDEX_BYTES
+
+
+def update_wiki_index() -> None:
+    """生成 WIKI.md 索引（3.3：超预算闭环剪枝，不再只靠静默截断）。
+
+    剪枝两级：最冷条目先去 description，仍超预算则整行移出索引
+    （条目本身不动，仍可被召回；回热时经 _unprune_from_index 自动回归）。
+    """
+    state = _load_index_state()
+    pruned: set[str] = set(state.get("pruned_from_index", []))
+    entries = [e for e in list_wiki_entries() if e.rel_path not in pruned]
+
+    with_desc = {e.rel_path for e in entries if e.meta.get("description")}
+    lines = _build_index_lines(entries, with_desc)
+
+    while _over_budget(lines) and entries:
+        coldest = min(entries, key=_coldness_key)
+        if coldest.rel_path in with_desc:
+            with_desc.discard(coldest.rel_path)
+        else:
+            entries.remove(coldest)
+            pruned.add(coldest.rel_path)
+        lines = _build_index_lines(entries, with_desc)
 
     _get_index_path().write_text("\n".join(lines))
+
+    new_pruned = sorted(pruned)
+    if new_pruned != sorted(state.get("pruned_from_index", [])):
+        state["pruned_from_index"] = new_pruned
+        _save_index_state(state)
 
 
 def load_wiki_index() -> str:

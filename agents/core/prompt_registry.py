@@ -61,7 +61,7 @@ def list_all_prompts() -> list[PromptInfo]:
     if side_query_dir.exists():
         side_query_descriptions = {
             "compile_session": "编译会话笔记",
-            "consolidate_wiki": "审核 Wiki 相关性",
+            "consolidate_v2": "Wiki 整理（git-diff 驱动）",
             "explore": "技术调研",
             "extract_goal": "提取目标标准",
             "extract_knowledge": "提取持久知识",
