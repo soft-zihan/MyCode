@@ -18,14 +18,6 @@ export interface SessionDetail {
   metadata: Session;
 }
 
-export interface Memory {
-  name: string;
-  description: string;
-  type: string;
-  filename: string;
-  content: string;
-}
-
 export interface Skill {
   name: string;
   description: string;
@@ -38,12 +30,6 @@ export interface SkillDetail extends Skill {
   prompt_template: string;
   raw_content: string;
   content?: string;
-}
-
-export interface TraceEvent {
-  ts: string;
-  kind: string;
-  [key: string]: any;
 }
 
 export interface WorkspaceNode {
@@ -147,33 +133,6 @@ export async function updateSessionName(id: string, name: string): Promise<void>
   console.log('[API] updateSessionName done');
 }
 
-export async function fetchMemories(): Promise<Memory[]> {
-  const res = await fetch(`${API_BASE}/memories`);
-  if (!res.ok) throw new Error('Failed to fetch memories');
-  return res.json();
-}
-
-export async function fetchMemory(filename: string): Promise<Memory> {
-  const res = await fetch(`${API_BASE}/memories/${filename}`);
-  if (!res.ok) throw new Error('Failed to fetch memory');
-  return res.json();
-}
-
-export async function createMemory(data: Omit<Memory, 'filename'>): Promise<{ filename: string }> {
-  const res = await fetch(`${API_BASE}/memories`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data),
-  });
-  if (!res.ok) throw new Error('Failed to create memory');
-  return res.json();
-}
-
-export async function deleteMemory(filename: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/memories/${filename}`, { method: 'DELETE' });
-  if (!res.ok) throw new Error('Failed to delete memory');
-}
-
 export async function fetchSkills(): Promise<Skill[]> {
   const res = await fetch(`${API_BASE}/skills`);
   if (!res.ok) throw new Error('Failed to fetch skills');
@@ -232,29 +191,6 @@ export async function fetchDirectories(path?: string): Promise<DirectoryList> {
   if (!res.ok) throw new Error('Failed to fetch directories');
   return res.json();
 }
-export async function fetchTraceEvents(n: number = 50, session?: string): Promise<{ session?: string; events: TraceEvent[] }> {
-  const params = new URLSearchParams({ n: String(n) });
-  if (session) params.set('session', session);
-  const res = await fetch(`${API_BASE}/trace?${params}`);
-  if (!res.ok) throw new Error('Failed to fetch trace events');
-  return res.json();
-}
-
-export interface TraceFile {
-  filename: string;
-  session_id: string;
-  created_at: string | null;
-  size: number;
-  line_count: number;
-  modified: number;
-}
-
-export async function fetchTraceFiles(): Promise<{ files: TraceFile[] }> {
-  const res = await fetch(`${API_BASE}/trace/files`);
-  if (!res.ok) throw new Error('Failed to fetch trace files');
-  return res.json();
-}
-
 export async function fetchWorkspaceTree(cwd?: string): Promise<WorkspaceNode> {
   const url = cwd ? `${API_BASE}/workspace/tree?cwd=${encodeURIComponent(cwd)}` : `${API_BASE}/workspace/tree`;
   const res = await fetch(url);
@@ -879,24 +815,6 @@ export async function fetchChampion(skillName: string): Promise<ChampionData> {
 export async function fetchSkillProvenance(skillName: string): Promise<any[]> {
   const res = await fetch(`${API_BASE}/skill-evolution/provenance/${skillName}`);
   if (!res.ok) throw new Error('Failed to fetch skill provenance');
-  return res.json();
-}
-
-export interface TraceStatus {
-  endpoint: string;
-  tracing_enabled: boolean;
-  reachable: boolean;
-  project_id: string | null;
-  project_name: string | null;
-  error: string | null;
-  checked_at: number;
-  trace_url_template?: string;
-  session_url_template?: string;
-}
-
-export async function fetchTraceStatus(force = false): Promise<TraceStatus> {
-  const res = await fetch(`${API_BASE}/trace/status?force=${force}`);
-  if (!res.ok) throw new Error('Failed to fetch trace status');
   return res.json();
 }
 

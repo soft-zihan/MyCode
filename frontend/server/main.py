@@ -15,12 +15,10 @@ sys.path.insert(0, str(project_root))
 from routers import (
     sessions_router,
     chat_router,
-    memories_router,
     skills_router,
     agents_router,
     config_router,
     workspace_router,
-    trace_router,
     mcp_router,
     events_router,
     projects_router,
@@ -45,12 +43,10 @@ app.add_middleware(
 
 app.include_router(sessions_router)
 app.include_router(chat_router)
-app.include_router(memories_router)
 app.include_router(skills_router)
 app.include_router(agents_router)
 app.include_router(config_router)
 app.include_router(workspace_router)
-app.include_router(trace_router)
 app.include_router(mcp_router)
 app.include_router(events_router)
 app.include_router(projects_router)
