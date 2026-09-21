@@ -9,13 +9,17 @@ export interface SessionEvent {
 }
 
 export interface AgentStats {
+  /** 最近一次模型调用（per-call） */
   input_tokens: number;
   output_tokens: number;
   cached_tokens?: number;
+  cache_hit_rate?: number;
+  /** 会话累计 */
+  total_input_tokens?: number;
+  total_output_tokens?: number;
+  total_cached_tokens?: number;
   context_window: number;
   effective_window?: number;
-  last_input_token_count?: number;
-  last_total_token_count?: number;
   estimated_context_tokens?: number;
 }
 
@@ -228,10 +232,12 @@ export function useAgentEvents(sessionId: string | null): UseAgentEventsReturn {
             input_tokens: event.input_tokens as number,
             output_tokens: event.output_tokens as number,
             cached_tokens: event.cached_tokens as number | undefined,
+            cache_hit_rate: event.cache_hit_rate as number | undefined,
+            total_input_tokens: event.total_input_tokens as number | undefined,
+            total_output_tokens: event.total_output_tokens as number | undefined,
+            total_cached_tokens: event.total_cached_tokens as number | undefined,
             context_window: event.context_window as number,
             effective_window: event.effective_window as number | undefined,
-            last_input_token_count: event.last_input_token_count as number | undefined,
-            last_total_token_count: event.last_total_token_count as number | undefined,
             estimated_context_tokens: event.estimated_context_tokens as number | undefined,
           };
           break;

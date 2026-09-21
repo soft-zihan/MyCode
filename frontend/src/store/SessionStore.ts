@@ -347,6 +347,13 @@ class SessionStore {
     return this.sessions.get(sessionId)?.contextTotal ?? DEFAULT_CONTEXT_WINDOW;
   }
 
+  setContextTotal(sessionId: string, total: number): void {
+    const state = this.getOrCreate(sessionId);
+    if (state.contextTotal === total) return;
+    state.contextTotal = total;
+    this.notify();
+  }
+
   setContextStats(sessionId: string, used: number, total: number): void {
     const state = this.getOrCreate(sessionId);
     if (state.contextUsed === used && state.contextTotal === total) return;

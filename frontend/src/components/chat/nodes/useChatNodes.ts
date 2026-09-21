@@ -41,6 +41,18 @@ const appendToInternalOrder = (
   return [...existing, newItem];
 };
 
+function foldEventMessage(type: string, event: Record<string, unknown>): string | null {
+  if (type === 'session_folded' && event.trigger === 'manual') {
+    return null;
+  }
+  if (type === 'tool_folded') {
+    const abstracts = event.abstracts;
+    const n = Array.isArray(abstracts) ? abstracts.length : 0;
+    return n > 0 ? `上下文自动压缩：已折叠 ${n} 条较早的工具结果` : '上下文自动压缩：已折叠较早的工具结果';
+  }
+  return '上下文自动压缩：较早对话已折叠为摘要';
+}
+
 export function useChatNodes(): UseChatNodesReturn {
   const snapshot = useSessionStore((s: any) => s.getCurrentSnapshot());
 
@@ -410,6 +422,26 @@ export function useChatNodes(): UseChatNodesReturn {
         break;
       }
 
+      case 'tool_folded':
+      case 'session_folded': {
+        const message = foldEventMessage(eventType, data);
+        if (message) {
+          updateSnap(prev => {
+            const newNodes = new Map(prev.nodes);
+            const key = nextKey('system');
+            newNodes.set(key, {
+              key,
+              kind: 'system',
+              seq: nextSeq(),
+              message,
+              timestamp: new Date().toISOString(),
+            });
+            return { order: [...prev.order, key], nodes: newNodes };
+          });
+        }
+        break;
+      }
+
       case 'turn/end': {
         updateSnap(prev => {
           const newNodes = new Map(prev.nodes);
@@ -552,6 +584,12 @@ export function useChatNodes(): UseChatNodesReturn {
           break;
         }
         
+        case 'tool_folded':
+        case 'session_folded': {
+          handleSSEEvent(sessionId, event);
+          break;
+        }
+
         case 'permission/request': {
           // Don't restore permission requests from history - they're only valid for active sessions
           break;
@@ -670,6 +708,21 @@ export function useChatNodes(): UseChatNodesReturn {
           break;
         }
         
+        case 'tool_folded':
+        case 'session_folded': {
+          const foldMessage = foldEventMessage(type, event);
+          if (foldMessage) {
+            newNodes.push({
+              key: nextKey('system'),
+              kind: 'system',
+              seq: nextSeq(),
+              message: foldMessage,
+              timestamp: new Date(event.time as number).toISOString(),
+            });
+          }
+          break;
+        }
+
         case 'tool_result_msg': {
           // Tool results are already included in assistant messages
           break;

@@ -22,7 +22,7 @@ const EMPTY_STATS = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
 const CHARS_PER_TOKEN = 4;
 
 function computeBreakdownFromStats(event: Record<string, any>): Record<string, any> | null {
-  const actualInputTokens = event.last_input_token_count || 0;
+  const actualInputTokens = event.input_tokens || 0;
   const systemChars = event.system_chars || 0;
   const userChars = event.user_chars || 0;
   const assistantChars = event.assistant_chars || 0;
@@ -116,7 +116,6 @@ export function useChat() {
   const pendingSessionNameRef = useRef<string | null>(null);
   
   const [permissionMode, setPermissionMode] = useState<'default' | 'acceptEdits' | 'plan' | 'bypassPermissions'>('bypassPermissions');
-  const [contextTotal, setContextTotal] = useState(DEFAULT_CONTEXT_WINDOW);
   
   const [sessionRefreshTrigger, setSessionRefreshTrigger] = useState(0);
   const [pendingSteerMessages, setPendingSteerMessages] = useState<Array<{content: string, contextFiles: string[], model?: string}>>([]);
@@ -131,6 +130,7 @@ export function useChat() {
   const planSlug = useSessionStore(() => sessionId ? sessionStore.getPlanSlug(sessionId) : undefined);
   const fileSnapshots = useSessionStore(() => sessionId ? sessionStore.getFileSnapshots(sessionId) : EMPTY_FILE_SNAPSHOTS);
   const contextUsed = useSessionStore(() => sessionId ? sessionStore.getContextUsed(sessionId) : 0);
+  const contextTotal = useSessionStore(() => sessionId ? sessionStore.getContextTotal(sessionId) : DEFAULT_CONTEXT_WINDOW);
   const sessionStats = useSessionStore(() => sessionId ? sessionStore.getDetailedStats(sessionId) : EMPTY_STATS);
   
   useEffect(() => {
@@ -213,14 +213,14 @@ export function useChat() {
       }
       
       if (eventType === 'stats') {
-        const contextUsed = event.estimated_context_tokens ?? event.last_total_token_count ?? 0;
+        const contextUsed = event.estimated_context_tokens ?? 0;
         const contextTotal = event.effective_window ?? event.context_window ?? DEFAULT_CONTEXT_WINDOW;
         sessionStore.setContextStats(targetSessionId, contextUsed, contextTotal);
         sessionStore.setDetailedStats(
           targetSessionId,
-          event.input_tokens || 0,
-          event.output_tokens || 0,
-          event.cached_tokens || 0
+          event.total_input_tokens || 0,
+          event.total_output_tokens || 0,
+          event.total_cached_tokens || 0
         );
         // 计算实时 breakdown
         const breakdown = computeBreakdownFromStats(event);
@@ -229,7 +229,7 @@ export function useChat() {
         }
       }
       if (eventType === 'context/compacted') {
-        const contextUsed = event.estimated_context_tokens ?? event.last_total_token_count ?? 0;
+        const contextUsed = event.estimated_context_tokens ?? 0;
         const contextTotal = event.effective_window ?? event.context_window ?? DEFAULT_CONTEXT_WINDOW;
         sessionStore.setContextStats(targetSessionId, contextUsed, contextTotal);
         handleNodeEvent(targetSessionId, {
@@ -384,7 +384,6 @@ export function useChat() {
       if (endpoints.length > 0 && !selectedModel) {
         const firstEndpoint = endpoints[0];
         setSelectedModel(firstEndpoint.model);
-        setContextTotal(firstEndpoint.context_window || DEFAULT_CONTEXT_WINDOW);
       }
     }).catch(console.error);
     
@@ -414,13 +413,13 @@ export function useChat() {
   }, []);
 
   useEffect(() => {
-    if (config && selectedModel) {
+    if (config && selectedModel && sessionId) {
       const endpoint = Object.values(config.endpoints).find(e => e.model === selectedModel);
       if (endpoint?.context_window) {
-        setContextTotal(endpoint.context_window);
+        sessionStore.setContextTotal(sessionId, endpoint.context_window);
       }
     }
-  }, [config, selectedModel]);
+  }, [config, selectedModel, sessionId]);
 
   const handleAddToChat = (path: string) => {
     if (!contextFiles.includes(path)) {
@@ -479,11 +478,11 @@ export function useChat() {
           localStorage.setItem('lastCwd', metadata.cwd);
         }
         
-        const contextUsed = stats.estimated_context_tokens || stats.last_total_token_count || 0;
+        const contextUsed = stats.estimated_context_tokens || 0;
         const contextTotal = stats.effective_window || stats.context_window || DEFAULT_CONTEXT_WINDOW;
         sessionStore.setContextStats(sessionId, contextUsed, contextTotal);
-        if (stats.input_tokens || stats.output_tokens) {
-          sessionStore.setDetailedStats(sessionId, stats.input_tokens || 0, stats.output_tokens || 0, stats.cached_tokens || 0);
+        if (stats.total_input_tokens || stats.total_output_tokens) {
+          sessionStore.setDetailedStats(sessionId, stats.total_input_tokens || 0, stats.total_output_tokens || 0, stats.total_cached_tokens || 0);
         }
         
         if (breakdown) {
@@ -737,7 +736,9 @@ export function useChat() {
     try {
       setIsCompacting(true);
       const result = await compactSession(currentSessionId);
-      if (result.success) {
+      if (result.success && result.folded === false) {
+        alert('当前上下文较小，暂无需压缩');
+      } else if (result.success) {
         alert('上下文压缩成功');
       } else {
         alert('压缩失败: ' + result.message);

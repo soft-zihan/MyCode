@@ -342,15 +342,13 @@ export async function disableMcpServer(serverName: string): Promise<{ success: b
 // ── Config (JSON) ────────────────────────────────────────────────────────────
 
 export const DEFAULT_CONTEXT_WINDOW = 1_000_000;
-export const DEFAULT_AUTO_COMPACT_THRESHOLD = 0.8;
-
 export interface ModelEndpointConfig {
   model: string;
   base_url: string;
   api_key: string;
   provider_name?: string;
   context_window?: number;
-  auto_compact_threshold?: number;
+  thinking?: boolean | null;  // null=跟随模型默认
 }
 
 export interface AgentRoutingConfig {
@@ -360,16 +358,6 @@ export interface AgentRoutingConfig {
 export interface AppConfig {
   endpoints: Record<string, ModelEndpointConfig>;
   routing: AgentRoutingConfig;
-  thinking?: boolean | null;
-}
-
-export async function updateThinkingConfig(enabled: boolean | null): Promise<void> {
-  const res = await fetch(`${API_BASE}/config/thinking`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ enabled }),
-  });
-  if (!res.ok) throw new Error('Failed to update thinking config');
 }
 
 export async function fetchConfig(): Promise<AppConfig> {
@@ -453,27 +441,25 @@ export async function abortSession(sessionId: string): Promise<void> {
   if (!res.ok) throw new Error('Failed to abort session');
 }
 
-export async function compactSession(sessionId: string): Promise<{ success: boolean; message: string }> {
+export async function compactSession(sessionId: string): Promise<{ success: boolean; folded?: boolean; message: string }> {
   const res = await fetch(`${API_BASE}/sessions/${sessionId}/compact`, { method: 'POST' });
   if (!res.ok) throw new Error('Failed to compact session');
   return res.json();
 }
 
 export interface SessionStats {
+  /** 最近一次模型调用（per-call） */
   input_tokens: number;
   output_tokens: number;
   cached_tokens: number;
+  cache_hit_rate: number;
+  /** 会话累计 */
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_cached_tokens: number;
   context_window: number;
   effective_window: number;
-  last_input_token_count: number;
-  last_total_token_count: number;
   estimated_context_tokens: number;
-}
-
-export async function fetchSessionStats(sessionId: string): Promise<SessionStats> {
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/stats`);
-  if (!res.ok) throw new Error('Failed to fetch session stats');
-  return res.json();
 }
 
 export interface SessionSummary {
@@ -494,24 +480,6 @@ export async function fetchSessionSummary(sessionId: string): Promise<SessionSum
   return res.json();
 }
 
-export async function getSessionStatus(sessionId: string): Promise<{
-  active: boolean;
-  model?: string;
-  permission_mode?: string;
-  total_input_tokens?: number;
-  total_output_tokens?: number;
-  current_turns?: number;
-  context?: {
-    used_tokens: number;
-    total_tokens: number;
-    occupancy_percent: number;
-  };
-}> {
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/status`);
-  if (!res.ok) throw new Error('Failed to get session status');
-  return res.json();
-}
-
 export async function updatePermissionMode(sessionId: string, mode: string): Promise<{ success: boolean; permission_mode: string }> {
   const res = await fetch(`${API_BASE}/sessions/${sessionId}/permission-mode`, {
     method: 'PUT',
@@ -519,27 +487,6 @@ export async function updatePermissionMode(sessionId: string, mode: string): Pro
     body: JSON.stringify({ mode }),
   });
   if (!res.ok) throw new Error('Failed to update permission mode');
-  return res.json();
-}
-
-export async function activateSession(sessionId: string): Promise<{ success: boolean; session_id: string; message: string }> {
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/activate`, {
-    method: 'POST',
-  });
-  if (!res.ok) throw new Error('Failed to activate session');
-  return res.json();
-}
-
-export async function getSessionStats(sessionId: string): Promise<{
-  session_id: string;
-  model: string;
-  total_input_tokens: number;
-  total_output_tokens: number;
-  current_turns: number;
-  tool_execution_stats: Record<string, { count: number; total_ms: number }>;
-}> {
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/stats`);
-  if (!res.ok) throw new Error('Failed to get session stats');
   return res.json();
 }
 
@@ -883,12 +830,29 @@ export type EvalBenchmark = 'gaia' | 'hle' | 'smoke';
 export type EvalRunStatus = 'pending' | 'running' | 'completed' | 'aborted' | 'failed';
 export type EvalTaskStatus = 'pending' | 'running' | 'passed' | 'failed' | 'error' | 'aborted';
 
+export interface EvalSuiteSpec {
+  id: string;
+  name: string;
+  description: string;
+}
+
+export interface BenchmarkDetail {
+  purpose: string;
+  data_source: string;
+  scoring: string;
+  execution: string;
+  duration: string;
+  commands: string[];
+}
+
 export interface EvalBenchmarkSpec {
   id: EvalBenchmark;
   name: string;
   description: string;
+  detail?: BenchmarkDetail;
   execution_modes: string[];
   default_options: Record<string, any>;
+  suites?: EvalSuiteSpec[];
 }
 
 export interface EvalTaskResult {
@@ -947,7 +911,6 @@ export interface StartEvalRunRequest {
   benchmark: EvalBenchmark;
   sample?: number | null;
   seed?: number;
-  level?: number | null;
   category?: string | null;
   include_image?: boolean;
   only?: string[] | null;
@@ -977,6 +940,21 @@ async function evalRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
 export async function fetchEvalBenchmarks(): Promise<{ benchmarks: EvalBenchmarkSpec[] }> {
   return evalRequest('/benchmarks');
+}
+
+export interface EvalTaskSpec {
+  id: string;
+  name: string;
+  meta?: Record<string, string>;
+}
+
+export async function fetchEvalTasks(
+  benchmark: string,
+  suite?: string,
+): Promise<{ benchmark: string; suite: string | null; total: number; tasks: EvalTaskSpec[] }> {
+  const q = new URLSearchParams({ benchmark });
+  if (suite) q.set('suite', suite);
+  return evalRequest(`/tasks?${q.toString()}`);
 }
 
 export async function fetchEvalRuns(limit = 100): Promise<EvalRunList> {
