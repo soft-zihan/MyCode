@@ -282,7 +282,8 @@ class EvalService:
             "seed": options.seed,
             "category": options.category,
             "include_image": options.include_image,
-            "suite": options.suite,
+            "thinking": options.thinking,
+            "compression_arm": options.compression_arm,
             "session_id": state.eval_session_id,
             "timeout_s": options.timeout_s,
             "execution_mode": options.execution_mode,
@@ -290,6 +291,8 @@ class EvalService:
             "langfuse_dataset": dataset_name(options.benchmark) if options.sync_langfuse_dataset else None,
             "status": state.status,
         }
+        if options.benchmark == "smoke":
+            meta["suite"] = options.suite
         json_path, md_path = write_reports(
             options.benchmark,
             state.run_id,

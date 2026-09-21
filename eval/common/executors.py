@@ -54,6 +54,7 @@ async def execute_in_process_task(
         timeout_s=options.timeout_s,
         thinking=options.thinking,
         compression_arm=options.compression_arm,
+        workspace=str(task_workspace(state.run_id, task.task_id)),
     )
     out["execution_mode"] = "in_process"
     return out

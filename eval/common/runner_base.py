@@ -25,23 +25,44 @@ REPORTS_DIR = PROJECT_ROOT / "eval" / "reports"
 FINAL_ANSWER_RE = re.compile(r"FINAL ANSWER\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
 
 
-def resolve_model_config(cli_model: str | None = None, cli_api_base: str | None = None) -> tuple[str, str | None, str | None]:
-    """解析 (model, api_base, api_key)：CLI > 环境变量 > load_config() 第一个 endpoint。"""
-    model = cli_model or os.environ.get("MODEL")
-    api_base = cli_api_base or os.environ.get("API") or os.environ.get("OPENAI_BASE_URL")
-    api_key = os.environ.get("APIKEY") or os.environ.get("OPENAI_API_KEY")
+def resolve_model_config(cli_model: str | None = None, cli_api_base: str | None = None) -> tuple[str, str, str]:
+    """解析 (model, api_base, api_key)。
 
-    if not (model and api_key):
-        from agents.config import load_config
-        config = load_config()
-        if config.endpoints:
-            ep = next(iter(config.endpoints.values()))
-            model = model or ep.model
-            api_key = api_key or ep.api_key
-            api_base = api_base or ep.base_url
+    模型名命中端点配置时 base/key 成对取自该端点（禁止与环境变量跨源混配），
+    CLI --api-base 可显式覆盖；未命中端点时用环境变量对
+    （API/OPENAI_BASE_URL/OPENAI_API_BASE + APIKEY/OPENAI_API_KEY）；
+    两者皆无则取第一个端点。api_base 无法解析时直接报错——
+    禁止静默回落 api.openai.com（OpenAI SDK 对 base_url=None 的默认行为）。
+    """
+    from agents.config import load_config
+
+    model = cli_model or os.environ.get("MODEL")
+    env_base = os.environ.get("API") or os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_BASE")
+    env_key = os.environ.get("APIKEY") or os.environ.get("OPENAI_API_KEY")
+
+    config = load_config()
+    endpoint = next((e for e in config.endpoints.values() if e.model == model), None) if model else None
+    if endpoint is None and not model and config.endpoints:
+        endpoint = next(iter(config.endpoints.values()))
+        model = endpoint.model
+
+    if endpoint is not None:
+        api_base = cli_api_base or endpoint.base_url
+        api_key = endpoint.api_key or env_key
+    else:
+        api_base = cli_api_base or env_base
+        api_key = env_key
+
+    if not model:
+        raise RuntimeError("无可用模型：CLI/--model、环境变量 MODEL 未指定且未配置任何端点")
     if not api_key:
-        raise RuntimeError("无可用 API key（检查 ~/.mycode 配置或 APIKEY/OPENAI_API_KEY 环境变量）")
-    return model or "unknown", api_base, api_key
+        raise RuntimeError("无可用 API key（检查 ~/.my-code/config.json 端点配置或 APIKEY/OPENAI_API_KEY 环境变量）")
+    if not api_base:
+        raise RuntimeError(
+            f"无法解析 api_base：模型 {model!r} 未命中任何端点配置，且环境未提供 "
+            "API/OPENAI_BASE_URL/OPENAI_API_BASE；拒绝静默回落 api.openai.com"
+        )
+    return model, api_base, api_key
 
 
 def init_eval_tracing(benchmark: str) -> None:
@@ -111,8 +132,12 @@ async def run_agent_task(
     timeout_s: int = 0,
     thinking: bool | None = None,
     compression_arm: str | None = None,
+    workspace: str,
 ) -> dict[str, Any]:
-    """运行单个评测任务，返回 {text, duration_s, tokens, trace_id, error, agent_session_id}。"""
+    """运行单个评测任务，返回 {text, duration_s, tokens, trace_id, error, agent_session_id}。
+
+    workspace 必填：任务产物必须隔离在专属工作区，禁止落到仓库根目录。
+    """
     from agents.agent import Agent
     from agents.observability import flush_tracing
     from agents.observability.trace import trace_context, trace_span
@@ -151,6 +176,7 @@ async def run_agent_task(
                     is_sub_agent=True,
                     thinking=thinking,
                     compression_arm=compression_arm,
+                    workspace=workspace,
                 )
                 result["agent_session_id"] = agent.session_id
                 agent_task = asyncio.create_task(agent.run_once(prompt))
