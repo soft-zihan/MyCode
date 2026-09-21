@@ -29,7 +29,7 @@ class AgentOptions:
     api_key: str | None = None
     
     # 思考模式
-    thinking: bool = False
+    thinking: bool | None = None  # None=跟随模型默认
     
     # 成本、轮次和工具调用限制
     max_cost_usd: float | None = None

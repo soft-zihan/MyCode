@@ -360,6 +360,16 @@ export interface AgentRoutingConfig {
 export interface AppConfig {
   endpoints: Record<string, ModelEndpointConfig>;
   routing: AgentRoutingConfig;
+  thinking?: boolean | null;
+}
+
+export async function updateThinkingConfig(enabled: boolean | null): Promise<void> {
+  const res = await fetch(`${API_BASE}/config/thinking`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) throw new Error('Failed to update thinking config');
 }
 
 export async function fetchConfig(): Promise<AppConfig> {
@@ -949,6 +959,7 @@ export interface StartEvalRunRequest {
   sync_langfuse_dataset?: boolean;
   judge_after_run?: boolean;
   skip_langfuse?: boolean;
+  thinking?: boolean | null;
   keep_sessions?: boolean;
   base_url?: string;
   ws_url?: string;

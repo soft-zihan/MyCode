@@ -28,10 +28,10 @@ BENCHMARKS = [
     },
     {
         "id": "smoke",
-        "name": "Smoke / Comprehensive",
+        "name": "Smoke / Chain",
         "description": "Project end-to-end benchmark through real backend HTTP + WebSocket",
         "execution_modes": ["smoke_backend_http"],
-        "default_options": {"suite": "comprehensive", "timeout_s": 0, "keep_sessions": True},
+        "default_options": {"suite": "chain", "timeout_s": 0, "keep_sessions": True},
     },
 ]
 
@@ -44,7 +44,7 @@ class EvalRunRequest(BaseModel):
     category: str | None = None
     include_image: bool = False
     only: list[str] | None = None
-    suite: str = "comprehensive"
+    suite: str = "chain"
     timeout_s: int = 0
     model: str | None = None
     api_base: str | None = None
@@ -55,6 +55,7 @@ class EvalRunRequest(BaseModel):
     keep_sessions: bool = True
     base_url: str = "http://localhost:5555"
     ws_url: str = "ws://localhost:5555/ws/events"
+    thinking: bool | None = None
 
 
 class JudgeRequest(BaseModel):

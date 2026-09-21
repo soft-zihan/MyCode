@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { 
-  fetchAgents, fetchAgent, fetchConfig, saveConfig, fetchSkills,
+  fetchAgents, fetchAgent, fetchConfig, saveConfig, fetchSkills, updateThinkingConfig,
   Agent, AgentDetail, AppConfig, ModelEndpointConfig, Skill,
   DEFAULT_CONTEXT_WINDOW, DEFAULT_AUTO_COMPACT_THRESHOLD
 } from '../api/client';
@@ -607,6 +607,31 @@ export default function AgentsPage() {
                     {saving ? 'Saving...' : 'Save Config'}
                   </button>
                 </div>
+              </div>
+            </div>
+
+            <div className="px-6 pt-4">
+              <div className="flex items-center gap-3 border border-gray-200 rounded-lg p-3 bg-gray-50">
+                <Sparkles className="w-4 h-4 text-indigo-500" />
+                <span className="text-sm text-gray-700">全局 Thinking（推理模型深度思考）</span>
+                <select
+                  value={config?.thinking === null || config?.thinking === undefined ? 'default' : String(config.thinking)}
+                  onChange={async (e) => {
+                    const v = e.target.value === 'default' ? null : e.target.value === 'true';
+                    try {
+                      await updateThinkingConfig(v);
+                      setConfig(await fetchConfig());
+                    } catch (err) {
+                      console.error('thinking config save failed', err);
+                    }
+                  }}
+                  className="rounded-md border border-gray-300 px-2 py-1 text-sm bg-white"
+                >
+                  <option value="default">跟随模型默认</option>
+                  <option value="true">开</option>
+                  <option value="false">关</option>
+                </select>
+                <span className="text-xs text-gray-400">qwen 系模型经 enable_thinking 生效；关闭可显著提速</span>
               </div>
             </div>
 

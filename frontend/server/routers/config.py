@@ -138,6 +138,18 @@ def api_update_config(data: ConfigUpdate) -> dict[str, Any]:
     return {"status": "ok", "message": "Config saved successfully"}
 
 
+class ThinkingUpdate(BaseModel):
+    enabled: bool | None = None  # null=跟随模型默认
+
+
+@router.put("/api/config/thinking")
+def api_update_thinking(data: ThinkingUpdate) -> dict[str, Any]:
+    config = load_config()
+    config.thinking = data.enabled
+    save_config(config)
+    return {"status": "ok", "thinking": config.thinking}
+
+
 @router.get("/api/config/plan-strategies")
 def api_get_plan_strategies() -> dict[str, Any]:
     """获取 Plan 策略配置"""

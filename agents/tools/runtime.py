@@ -91,16 +91,21 @@ class LocalRuntime:
         if not p.is_absolute():
             path = str(get_workspace() / p)
         args = ["grep", "--line-number", "--color=never", "-r", "-E"]
+        for excl in ("node_modules", ".git", "__pycache__", ".venv", "venv", "dist", "build", ".embed-cache"):
+            args.append(f"--exclude-dir={excl}")
         if include:
             args.append(f"--include={include}")
         args.extend(["--", pattern, path])
         
-        result = subprocess.run(args, capture_output=True, text=True, timeout=10)
+        try:
+            result = subprocess.run(args, capture_output=True, text=True, timeout=10)
+        except subprocess.TimeoutExpired:
+            return f"[grep timed out after 10s: search scope too large ({path}), narrow the path or use include filter]"
         if result.returncode == 1:
             return ""
         if result.returncode == 0:
             return result.stdout
-        return ""
+        return f"[grep exited with code {result.returncode}: {result.stderr.strip()[:200]}]"
 
 
 class DockerRuntime:

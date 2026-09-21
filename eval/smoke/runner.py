@@ -9,7 +9,7 @@
 4. 报告落盘 eval/reports/{run_id}.json/.md/.state.json
 
 用法：
-    .venv/bin/python -m eval.smoke.runner --suite comprehensive
+    .venv/bin/python -m eval.smoke.runner --suite chain
     .venv/bin/python -m eval.smoke.runner --only read_file shell_exec
     .venv/bin/python -m eval.smoke.runner --skip-langfuse
     .venv/bin/python -m eval.smoke.runner --cleanup
@@ -37,8 +37,11 @@ from langfuse.api.core import ApiError  # noqa: E402
 
 from eval.common.runner_base import REPORTS_DIR  # noqa: E402
 
-CONVERSATIONS_PATH = Path(__file__).parent / "conversations.jsonl"
-COMPREHENSIVE_PATH = Path(__file__).parent / "comprehensive.jsonl"
+SUITE_DIR = Path(__file__).parent
+SUITES = {
+    "smoke": SUITE_DIR / "conversations.jsonl",
+    "chain": SUITE_DIR / "chain.jsonl",
+}
 DEFAULT_BASE_URL = "http://localhost:5555"
 DEFAULT_WS_URL = "ws://localhost:5555/ws/events"
 
@@ -48,9 +51,9 @@ def load_tasks(only: list[str] | None = None, suite: str = "smoke") -> list[dict
     
     Args:
         only: 只加载指定 id 的任务
-        suite: 测试套件 - "smoke"(默认 30 个单元) 或 "comprehensive"(5 个综合场景)
+        suite: 测试套件 - smoke(单元) / chain(全链路)；GAIA 用独立 benchmark（--level 3 --sample 10）
     """
-    path = COMPREHENSIVE_PATH if suite == "comprehensive" else CONVERSATIONS_PATH
+    path = SUITES[suite]
     tasks = [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
     if only:
         tasks = [t for t in tasks if t["id"] in only]
@@ -105,32 +108,31 @@ class EventListener:
 
 
 def setup_workspace(task: dict) -> Path:
+    """评测 workspace 准备：全量清空隔离（BC-5：残留 1.3G 曾导致 grep 超时与跨用例污染）。
+
+    embed 缓存（内容寻址，跨用例无害）保留以省时。
+    """
+    import shutil
     if task.get("use_real_workspace"):
         ws = PROJECT_ROOT / "eval" / "workspace"
-        # 清理 wiki 目录，避免残留污染评测
-        wiki_dir = ws / ".mycode" / "wiki"
-        if wiki_dir.exists():
-            import shutil
-            # 清理 workflow_pattern 和 skills
-            for subdir in ["workflow_pattern", "knowledge", "session_notes"]:
-                p = wiki_dir / subdir
-                if p.exists():
-                    shutil.rmtree(p, ignore_errors=True)
-            # 清理 WIKI.md 索引
-            wiki_index = wiki_dir / "WIKI.md"
-            if wiki_index.exists():
-                wiki_index.unlink()
-        # 清理 skills 目录
-        skills_dir = ws / ".mycode" / "skills"
-        if skills_dir.exists():
-            import shutil
-            shutil.rmtree(skills_dir, ignore_errors=True)
-        return ws
-    ws = Path(tempfile.mkdtemp(prefix=f"smoke_{task['id']}_"))
+        if ws.exists():
+            for child in ws.iterdir():
+                if child == ws / ".mycode" / "wiki" / ".embed-cache":
+                    continue
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    child.unlink(missing_ok=True)
+        ws.mkdir(parents=True, exist_ok=True)
+    else:
+        ws = Path(tempfile.mkdtemp(prefix=f"smoke_{task['id']}_"))
     for f in task.get("setup", []):
         p = ws / f["path"]
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(f["content"], encoding="utf-8")
+        if "copy_from" in f:
+            shutil.copyfile(PROJECT_ROOT / f["copy_from"], p)
+        else:
+            p.write_text(f["content"], encoding="utf-8")
     return ws
 
 
@@ -139,12 +141,14 @@ def check_backend_health(base_url: str) -> None:
     response.raise_for_status()
 
 
-def send_chat(base_url: str, message: str, session_id: str | None, cwd: str) -> dict:
+def send_chat(base_url: str, message: str, session_id: str | None, cwd: str, thinking: bool | None = None) -> dict:
     payload: dict[str, Any] = {
         "message": message,
         "cwd": cwd,
         "permission_mode": "bypassPermissions",
     }
+    if thinking is not None:
+        payload["thinking"] = thinking
     if session_id:
         payload["session_id"] = session_id
     resp = requests.post(f"{base_url}/api/chat/stream", json=payload, timeout=30)
@@ -168,6 +172,10 @@ def check_assertions_for_phase(phase: dict, workspace: Path, events: list[dict],
         else:
             if needle not in assistant_text:
                 failures.append(f"response 缺少 {needle!r}（实际: {assistant_text[:120]!r}）")
+
+    for needle in expect.get("response_not_contains", []):
+        if needle in assistant_text:
+            failures.append(f"response 不应包含 {needle!r}（泄漏: {assistant_text[:120]!r}）")
 
     tools_used = {e.get("name") for e in events if e.get("type") == "tool_call"}
     
@@ -273,6 +281,10 @@ def check_assertions(task: dict, workspace: Path, events: list[dict], turn_event
         else:
             if needle not in assistant_text:
                 failures.append(f"response 缺少 {needle!r}（实际: {assistant_text[:120]!r}）")
+
+    for needle in expect.get("response_not_contains", []):
+        if needle in assistant_text:
+            failures.append(f"response 不应包含 {needle!r}（泄漏: {assistant_text[:120]!r}）")
 
     # response_format: 检查回复格式
     response_format = expect.get("response_format")
@@ -467,11 +479,13 @@ async def run_task(
     skip_langfuse: bool,
     keep: bool = False,
     on_event: Any | None = None,
+    thinking: bool | None = None,
 ) -> dict:
     workspace = setup_workspace(task)
     phases = task.get("phases")
     messages = task["messages"] if not phases else []
     timeout_s = task.get("expect", {}).get("timeout_s", 180)
+    case_budget = task.get("expect", {}).get("case_timeout_s", 900)
     record: dict[str, Any] = {
         "id": task["id"], "name": task.get("name", ""), "turns": len(messages) or sum(len(p.get("messages", [])) for p in (phases or [])),
         "session_id": None, "failures": [], "duration_s": 0.0, "langfuse": None,
@@ -496,9 +510,12 @@ async def run_task(
 
     emit("smoke_task_started", name=record["name"], workspace=str(workspace), turns=record["turns"])
     try:
+        budget_blown = False
         if phases:
             # 多阶段测试：每个阶段可以是新 session
             for phase_idx, phase in enumerate(phases, 1):
+                if budget_blown:
+                    break
                 phase_messages = phase.get("messages", [])
                 phase_expect = phase.get("expect", {})
                 new_session = phase.get("new_session", False)
@@ -507,10 +524,40 @@ async def run_task(
                     # 等待异步 wiki 写入完成（compact_context 触发）
                     await asyncio.sleep(3)
                     session_id = None  # 强制新 session
+
+                # wait_for_files：异步产物（编译/整理/skill）轮询等待，超时按缺失断言
+                wait_specs = phase_expect.get("wait_for_files", [])
+                if wait_specs:
+                    wait_deadline = time.time() + phase_expect.get("wait_timeout_s", 240)
+                    pending = list(wait_specs)
+                    while pending and time.time() < wait_deadline:
+                        still = []
+                        for spec in pending:
+                            matches = list(workspace.glob(spec["path"]))
+                            needle = spec.get("contains")
+                            ok = bool(matches) and (
+                                not needle or any(
+                                    needle in m.read_text(encoding="utf-8", errors="replace")
+                                    for m in matches if m.is_file()
+                                )
+                            )
+                            if not ok:
+                                still.append(spec)
+                        pending = still
+                        if pending:
+                            await asyncio.sleep(3)
+                    for spec in pending:
+                        record["failures"].append(
+                            f"wait_for_files 超时: {spec['path']} contains={spec.get('contains')!r}"
+                        )
                 
                 for i, msg in enumerate(phase_messages, 1):
+                    if time.time() - t0 > case_budget:
+                        record["failures"].append(f"case 预算超限（{case_budget}s），熔断于阶段{phase_idx}第{i}轮")
+                        budget_blown = True
+                        break
                     baseline = listener.turn_end_count(session_id) if session_id else 0
-                    resp = await asyncio.to_thread(send_chat, base_url, msg, session_id, str(workspace))
+                    resp = await asyncio.to_thread(send_chat, base_url, msg, session_id, str(workspace), thinking)
                     if resp.get("error"):
                         record["failures"].append(f"阶段{phase_idx} API error: {resp['error'][:150]}")
                         break
@@ -564,8 +611,11 @@ async def run_task(
         else:
             # 单阶段测试（原有逻辑）
             for i, msg in enumerate(messages, 1):
+                if time.time() - t0 > case_budget:
+                    record["failures"].append(f"case 预算超限（{case_budget}s），熔断于第{i}轮")
+                    break
                 baseline = listener.turn_end_count(session_id) if session_id else 0
-                resp = await asyncio.to_thread(send_chat, base_url, msg, session_id, str(workspace))
+                resp = await asyncio.to_thread(send_chat, base_url, msg, session_id, str(workspace), thinking)
                 if resp.get("error"):
                     record["failures"].append(f"API error: {resp['error'][:150]}")
                     break
@@ -721,14 +771,16 @@ def main() -> None:
     parser.add_argument("--only", nargs="*", default=None, help="只跑指定任务 id")
     parser.add_argument("--sample", type=int, default=None, help="只跑前 N 个任务")
     parser.add_argument("--rerun-failed", action="store_true", help="只重跑上次失败的任务")
-    parser.add_argument("--suite", choices=["smoke", "comprehensive"], default="smoke",
-                        help="测试套件: smoke(30个单元) 或 comprehensive(8个综合场景)")
+    parser.add_argument("--suite", choices=sorted(SUITES), default="smoke",
+                        help="测试套件: smoke(单元) / chain(全链路)")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--ws-url", default=DEFAULT_WS_URL)
     parser.add_argument("--skip-langfuse", action="store_true", help="跳过 Langfuse trace 校验")
     parser.add_argument("--cleanup", action="store_true", help="跑完删除后端 session / project；默认保留便于前端观察")
     parser.add_argument("--no-dataset", action="store_true", help="不同步 Langfuse Dataset")
     parser.add_argument("--judge", action="store_true", help="结束后运行 code evaluator + LLM judge")
+    parser.add_argument("--thinking", choices=["on", "off", "default"], default="default",
+                        help="推理模型 thinking 开关（default=跟随全局配置）")
     args = parser.parse_args()
 
     only = args.only
@@ -753,6 +805,7 @@ def main() -> None:
         judge_after_run=args.judge,
         base_url=args.base_url,
         ws_url=args.ws_url,
+        thinking={"on": True, "off": False, "default": None}[args.thinking],
     )
     result = run_eval_cli_blocking(options, shutdown_tracing=False)
     summary = result.get("summary", {})

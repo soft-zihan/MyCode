@@ -69,7 +69,7 @@ class EvalRunOptions:
     category: str | None = None
     include_image: bool = False
     only: list[str] | None = None
-    suite: str = "comprehensive"
+    suite: str = "chain"
     timeout_s: int = 0
     model: str | None = None
     api_base: str | None = None
@@ -80,6 +80,7 @@ class EvalRunOptions:
     keep_sessions: bool = True
     base_url: str = "http://localhost:5555"
     ws_url: str = "ws://localhost:5555/ws/events"
+    thinking: bool | None = None  # None=跟随全局配置
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -89,6 +90,7 @@ class EvalRunOptions:
             "level": self.level,
             "category": self.category,
             "include_image": self.include_image,
+            "thinking": self.thinking,
             "only": self.only,
             "suite": self.suite,
             "timeout_s": self.timeout_s,

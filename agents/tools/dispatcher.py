@@ -136,11 +136,19 @@ class ToolDispatcher:
                     metadata={"tool_name": name, "duration_s": duration_s, "timeout_s": timeout},
                 )
             except Exception as e:
+                # BC-4：工具运行时异常反馈给模型自行恢复（与 timeout 路径同语义），
+                # 不再杀死整个 turn（曾导致 grep 超时 → turn/end reason=error）
+                duration_s = round(time.time() - _tool_t0, 2)
                 if span:
                     span.record_error(e)
-                    span.add_metadata(duration_s=round(time.time() - _tool_t0, 2), outcome="error", success=False)
+                    span.add_metadata(duration_s=duration_s, outcome="error", success=False)
                 print_error(f"[ERROR] Tool '{name}' failed: {type(e).__name__}: {e}")
-                raise
+                return ToolExecutionResult(
+                    text=f"Error: tool '{name}' failed: {type(e).__name__}: {e}",
+                    status="error",
+                    outcome="error",
+                    metadata={"tool_name": name, "duration_s": duration_s, "timeout_s": timeout},
+                )
 
     async def _execute_tool_call_inner(self, name: str, inp: dict) -> str | ToolExecutionResult:
         """工具执行内部路由。"""

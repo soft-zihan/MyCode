@@ -23,6 +23,7 @@ class ChatMessage(BaseModel):
     model: Optional[str] = None
     permission_mode: Optional[str] = None
     cwd: Optional[str] = None
+    thinking: Optional[bool] = None
 
 
 @router.post("/api/chat")
@@ -137,6 +138,7 @@ async def api_chat_stream(data: ChatMessage) -> dict[str, Any]:
                 data.model,
                 data.permission_mode,
                 data.cwd,
+                thinking=data.thinking,
             )
             is_new_session = True
             logger.info(f"[DEBUG] New session created: {session.id}")

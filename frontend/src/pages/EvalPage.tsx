@@ -30,12 +30,13 @@ const DEFAULT_FORM: StartEvalRunRequest = {
   sample: 5,
   seed: 42,
   timeout_s: 0,
-  suite: 'comprehensive',
+  suite: 'chain',
   execution_mode: 'backend_session',
   sync_langfuse_dataset: true,
   judge_after_run: false,
   skip_langfuse: false,
   keep_sessions: true,
+  thinking: null,
 };
 
 const STATUS_STYLES: Record<string, string> = {
@@ -180,7 +181,7 @@ export default function EvalPage() {
       only: null,
       level: benchmark === 'gaia' ? prev.level : null,
       category: benchmark === 'hle' ? prev.category : null,
-      suite: benchmark === 'smoke' ? (prev.suite || 'comprehensive') : prev.suite,
+      suite: benchmark === 'smoke' ? (prev.suite || 'chain') : prev.suite,
     }));
   };
 
@@ -193,7 +194,7 @@ export default function EvalPage() {
         only: form.only && form.only.length ? form.only : null,
         level: form.benchmark === 'gaia' ? form.level : null,
         category: form.benchmark === 'hle' ? form.category : null,
-        suite: form.benchmark === 'smoke' ? (form.suite || 'comprehensive') : form.suite,
+        suite: form.benchmark === 'smoke' ? (form.suite || 'chain') : form.suite,
         execution_mode: form.benchmark === 'smoke' ? 'backend_session' : (form.execution_mode || 'backend_session'),
       };
       const run = await startEvalRun(payload);
@@ -339,16 +340,29 @@ export default function EvalPage() {
               </label>
             )}
 
+            <label className="block text-sm">
+              <span className="text-gray-600">Thinking</span>
+              <select
+                value={form.thinking === null || form.thinking === undefined ? 'default' : String(form.thinking)}
+                onChange={(e) => updateForm('thinking', e.target.value === 'default' ? null : e.target.value === 'true')}
+                className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 bg-white"
+              >
+                <option value="default">跟随全局配置</option>
+                <option value="true">开</option>
+                <option value="false">关（更快，考验鲁棒性）</option>
+              </select>
+            </label>
+
             {form.benchmark === 'smoke' && (
               <label className="block text-sm">
                 <span className="text-gray-600">Suite</span>
                 <select
-                  value={form.suite || 'comprehensive'}
+                  value={form.suite || 'chain'}
                   onChange={(e) => updateForm('suite', e.target.value)}
                   className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 bg-white"
                 >
-                  <option value="comprehensive">comprehensive</option>
-                  <option value="smoke">smoke</option>
+                  <option value="chain">chain（全链路评测）</option>
+                  <option value="smoke">smoke（单元）</option>
                 </select>
               </label>
             )}

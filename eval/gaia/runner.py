@@ -27,6 +27,8 @@ def main() -> None:
     parser.add_argument("--sample", type=int, default=10, help="抽样题数（默认 10）")
     parser.add_argument("--seed", type=int, default=42, help="抽样种子（默认 42）")
     parser.add_argument("--level", type=int, default=None, choices=[1, 2, 3], help="只跑指定 Level")
+    parser.add_argument("--thinking", choices=["on", "off", "default"], default="default",
+                        help="推理模型 thinking 开关（default=跟随全局配置）")
     parser.add_argument("--timeout", type=int, default=0, help="单题超时秒数（默认 0，不超时）")
     parser.add_argument("--model", type=str, default=None, help="覆盖模型")
     parser.add_argument("--api-base", type=str, default=None, help="覆盖 API base")
@@ -41,6 +43,7 @@ def main() -> None:
         sample=args.sample,
         seed=args.seed,
         level=args.level,
+        thinking={"on": True, "off": False, "default": None}[args.thinking],
         timeout_s=args.timeout,
         model=args.model,
         api_base=args.api_base,

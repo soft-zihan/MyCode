@@ -67,17 +67,32 @@ def select_raw_tasks(tasks: list[dict], options: EvalRunOptions, task_id_key: st
     return rng.sample(tasks, options.sample)
 
 
+GAIA_MEDIA_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".mp3", ".mp4", ".wav", ".m4a"}
+
+
 class GaiaBenchmark(BenchmarkAdapter):
     benchmark: BenchmarkName = "gaia"
 
-    def load_raw_tasks(self, level: int | None = None) -> list[dict[str, Any]]:
+    def load_raw_tasks(self, level: int | None = None, include_media: bool = False) -> list[dict[str, Any]]:
         tasks = json.loads(GAIA_DATA_PATH.read_text(encoding="utf-8"))
         if level:
             tasks = [task for task in tasks if task.get("Level") == level]
+        if not include_media:
+            # 视觉/音频/视频能力缺失（已知 gap），媒体依赖题只会产生恒定失败噪声
+            def _media_dependent(t: dict[str, Any]) -> bool:
+                fn = (t.get("file_name") or "").lower()
+                if any(fn.endswith(ext) for ext in GAIA_MEDIA_EXTS):
+                    return True
+                q = str(t.get("Question", "")).lower()
+                return "youtube" in q or "360 vr" in q
+            tasks = [t for t in tasks if not _media_dependent(t)]
         return tasks
 
     def load_tasks(self, options: EvalRunOptions) -> list[EvalTask]:
-        raw_tasks = select_raw_tasks(self.load_raw_tasks(options.level), options, "task_id")
+        raw_tasks = select_raw_tasks(
+            self.load_raw_tasks(options.level, include_media=options.include_image),
+            options, "task_id",
+        )
         tasks: list[EvalTask] = []
         for raw in raw_tasks:
             task_id = str(raw.get("task_id") or raw.get("id"))
@@ -271,6 +286,7 @@ class SmokeBenchmark(BenchmarkAdapter):
             options.skip_langfuse,
             options.keep_sessions,
             on_event=relay,
+            thinking=options.thinking,
         )
         result.passed = bool(record.get("passed"))
         result.correct = result.passed

@@ -135,7 +135,7 @@ class Agent:
                  model:str="deepseek-chat",
                  api_base: str | None=None,
                  api_key: str | None=None,
-                 thinking: bool=False,
+                 thinking: bool | None = None,
                  max_cost_usd: float | None=None,
                  max_turns: int | None=None,
                  max_tool_calls: int | None=None,

@@ -29,6 +29,7 @@ class SessionManager:
         api_key: str | None = None,
         title: str | None = None,
         metadata: dict[str, Any] | None = None,
+        thinking: bool | None = None,
     ) -> tuple[Any, Session]:
         """创建新 session 和 agent。"""
         from agents.agent import Agent
@@ -53,6 +54,7 @@ class SessionManager:
             session.append("session/created", created_payload)
         if title:
             session.append("session/title", {"title": title})
+        resolved_thinking = thinking if thinking is not None else config.thinking
         agent = Agent(
             model=model_name,
             api_key=api_key,
@@ -60,6 +62,7 @@ class SessionManager:
             permission_mode=permission_mode or "bypassPermissions",
             session_id=session.id,
             workspace=cwd,
+            thinking=resolved_thinking,
         )
         print(f"[DEBUG] session_manager.create: agent.session_id = {agent.session_id}, agent.session.id = {agent.session.id}")
         agent.session = session

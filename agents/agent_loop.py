@@ -883,6 +883,8 @@ class AgentLoop:
                     "stream": True,
                     "stream_options": {"include_usage": True},
                 }
+                if a.thinking is not None and "qwen" in a.model.lower():
+                    create_params["extra_body"] = {"enable_thinking": bool(a.thinking)}
                 if tool_defs:
                     _t4 = time.perf_counter()
                     openai_tools = _to_openai_tools(tool_defs)
