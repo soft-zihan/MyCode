@@ -106,8 +106,16 @@ def find_sessions_needing_compilation(threshold: int = 10) -> list[tuple[str, in
     
     Returns:
         [(session_id, last_extract_pos, max_seq), ...]
-        其中 max_seq - last_extract_pos > threshold
+        其中 max_seq - last_extract_pos > threshold，
+        且会话空闲 ≥ capture.idleMinutes（2.4：避免提取进行中的会话，
+        以 events.jsonl mtime 为最后活动时间；进行中场景由压缩触发覆盖）
     """
+    import time
+    from agents.core.session import session_dir
+    from agents.wiki.evolution.settings import get_setting
+
+    idle_seconds = float(get_setting("capture.idleMinutes", 30)) * 60
+    now = time.time()
     sessions_needing = []
     
     for session_id in get_all_session_ids():
@@ -116,9 +124,51 @@ def find_sessions_needing_compilation(threshold: int = 10) -> list[tuple[str, in
         
         # 如果有未提取的事件且超过阈值
         if max_seq > last_pos and (max_seq - last_pos) > threshold:
+            events_path = session_dir() / f"{session_id}.events.jsonl"
+            try:
+                if now - events_path.stat().st_mtime < idle_seconds:
+                    continue
+            except OSError:
+                continue
             sessions_needing.append((session_id, last_pos, max_seq))
     
     return sessions_needing
+
+
+def _capture_settings() -> dict:
+    from agents.wiki.evolution.settings import get_setting
+    return {
+        "tool_result_max_chars": int(get_setting("capture.toolResultMaxChars", 500)),
+        "context_ratio": float(get_setting("capture.contextRatio", 0.7)),
+        "side_context_window": int(get_setting("capture.sideContextWindow", 32000)),
+        "external_tools": [str(t).lower() for t in (get_setting("capture.externalTools") or [])],
+    }
+
+
+def _is_external_tool(tool_name: str, external_tools: list[str]) -> bool:
+    name = (tool_name or "").lower()
+    return any(marker in name for marker in external_tools)
+
+
+def _clean_tool_result(tool_name: str, content: str, cfg: dict) -> str:
+    """tool_result 降级（2.2）：外部内容占位，其余截断到 toolResultMaxChars。"""
+    if _is_external_tool(tool_name, cfg["external_tools"]):
+        return f"[external content from {tool_name} omitted]"
+    limit = cfg["tool_result_max_chars"]
+    if len(content) > limit:
+        return content[:limit] + "\n[truncated]"
+    return content
+
+
+def _fit_context_budget(content: str, cfg: dict) -> tuple[str, bool]:
+    """输入总预算：超过 side model 上下文 contextRatio 时头尾保留、中间截断。"""
+    budget = int(cfg["context_ratio"] * cfg["side_context_window"])
+    if len(content) <= budget:
+        return content, False
+    head = budget // 2
+    tail = budget - head
+    marker = f"\n\n[middle truncated: {len(content) - budget} chars omitted]\n\n"
+    return content[:head] + marker + content[-tail:], True
 
 
 def capture_session_to_session(
@@ -143,6 +193,10 @@ def capture_session_to_session(
     slug = session_id.replace("/", "_").replace("\\", "_")[:40]
     # 带分段序号，避免覆盖
     filepath = session_dir / f"{slug}_seg{segment_index}.md"
+
+    from agents.wiki.redact import redact_secrets
+
+    cfg = _capture_settings()
 
     # B1 修复：tool_result_msg 事件不带 tool_name，
     # 从同段 assistant_message 的 tool_calls 反查 call_id → tool_name
@@ -183,9 +237,14 @@ def capture_session_to_session(
                 or tool_name_by_call_id.get(event.get("call_id") or "")
                 or _parse_tool_name_from_wrapper(content)
             )
-            content_parts.append(f"## Tool Result: {tool_name}\n{content}")
+            cleaned = _clean_tool_result(tool_name, content, cfg)
+            content_parts.append(f"## Tool Result: {tool_name}\n{cleaned}")
     
     content = "\n\n".join(content_parts) if content_parts else "(empty session)"
+    # 2.3：secrets 脱敏（segment 落盘前）
+    content = redact_secrets(content)
+    # 2.2：输入总预算，头尾保留中间截断
+    content, truncated = _fit_context_budget(content, cfg)
 
     meta = {
         "session_id": session_id,
@@ -195,6 +254,7 @@ def capture_session_to_session(
         "compiled": "false",
         "event_count": str(len(events)),
         "max_seq": str(max(e.get("seq", 0) for e in events)),
+        "truncated": "true" if truncated else "false",
     }
 
     from agents.core.frontmatter import format_frontmatter

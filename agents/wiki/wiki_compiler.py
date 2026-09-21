@@ -200,8 +200,34 @@ def _split_into_segments(content: str) -> list[str]:
     return segments
 
 
+VALID_EXTRACT_TYPES = {
+    "knowledge", "self_improvement", "feedback", "user", "reference", "workflow_pattern",
+}
+
+
+def _validate_extraction(item: dict) -> str | None:
+    """字段级校验。返回 None 表示合法，否则返回丢弃原因。"""
+    item_type = item.get("type", "")
+    if item_type not in VALID_EXTRACT_TYPES:
+        return f"invalid type {item_type!r}"
+    if not str(item.get("name", "")).strip():
+        return "empty name"
+    if not str(item.get("description", "")).strip():
+        return "empty description"
+    if item_type == "workflow_pattern":
+        missing = [f for f in ("symptom", "root_cause", "workaround") if not str(item.get(f, "")).strip()]
+        if missing:
+            return f"workflow_pattern missing {missing}"
+    elif not str(item.get("content", "")).strip():
+        return "empty content"
+    return None
+
+
 async def _extract_from_session(content: str, side_query: Any) -> list[dict]:
-    """LLM 提取结构化知识。失败时抛异常（不标记 compiled，等待重试）。"""
+    """LLM 提取结构化知识。失败时抛异常（不标记 compiled，等待重试）。
+
+    非法条目单条丢弃并记日志，不整批失败。
+    """
     text = await side_query(
         EXTRACT_PROMPT,
         f"Session events:\n{content}",
@@ -215,7 +241,17 @@ async def _extract_from_session(content: str, side_query: Any) -> list[dict]:
     if not isinstance(items, list):
         raise ValueError(f"extract response JSON is not a list: {type(items).__name__}")
 
-    return [item for item in items if isinstance(item, dict) and item.get("type")]
+    valid: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            print(f"[wiki_extract] dropped non-dict item: {str(item)[:80]!r}")
+            continue
+        reason = _validate_extraction(item)
+        if reason:
+            print(f"[wiki_extract] dropped item ({reason}): {str(item.get('name', item))[:80]!r}")
+            continue
+        valid.append(item)
+    return valid
 
 
 async def compile_to_skill(pattern_rel_path: str, side_query: Any) -> str | None:

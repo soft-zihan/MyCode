@@ -69,6 +69,16 @@ def get_default_settings() -> dict[str, Any]:
         "cold": {
             "maxCold": 50,
         },
+        "capture": {
+            "toolResultMaxChars": 500,
+            "contextRatio": 0.7,
+            "sideContextWindow": 32000,
+            "idleMinutes": 30,
+            "externalTools": [
+                "web_search", "webfetch", "web_fetch", "firecrawl",
+                "browser", "playwright", "agent-reach",
+            ],
+        },
     }
 
 
