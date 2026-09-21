@@ -231,29 +231,91 @@ def _validate_extraction(item: dict) -> str | None:
     return None
 
 
+def _parse_json_arrays(text: str) -> tuple[bool, list]:
+    """扫描文本中所有配平的 [...] 片段，逐个解析，合并全部合法数组的条目。
+
+    覆盖弱模型三种失败形态（BC-3）：
+    - 数组嵌在散文/代码围栏中
+    - 多个 JSON 文档拼接（json.loads 报 Extra data）
+    - 数组前后有解释性文字
+
+    Returns:
+        (是否找到至少一个合法 JSON 数组, 合并后的条目列表)
+        找到合法空数组 [] 也算成功（"无可提取"是合法输出）。
+    """
+    found = False
+    items: list = []
+    depth = 0
+    start = -1
+    in_str = False
+    esc = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "[":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "]":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    try:
+                        parsed = json.loads(text[start:i + 1])
+                    except (json.JSONDecodeError, ValueError):
+                        parsed = None
+                    if isinstance(parsed, list):
+                        found = True
+                        items.extend(parsed)
+                    start = -1
+    return found, items
+
+
+_TEXT_FIELDS = ("content", "description", "symptom", "root_cause", "workaround")
+
+
+def _coerce_extraction_fields(item: dict) -> None:
+    """非 str 字段强转（dict/list → JSON 文本），修复 'expected str instance, dict found'（BC-3）。"""
+    for key in _TEXT_FIELDS:
+        val = item.get(key)
+        if val is not None and not isinstance(val, str):
+            item[key] = json.dumps(val, ensure_ascii=False) if isinstance(val, (dict, list)) else str(val)
+            print(f"[wiki_extract] coerced non-str field {key!r} ({type(val).__name__}) in item {str(item.get('name', '?'))[:40]!r}")
+
+
 async def _extract_from_session(content: str, side_query: Any) -> list[dict]:
     """LLM 提取结构化知识。失败时抛异常（不标记 compiled，等待重试）。
 
-    非法条目单条丢弃并记日志，不整批失败。
+    弱模型防御（BC-3）：解析失败重试 1 次；非法条目单条丢弃并记日志，不整批失败。
     """
-    text = await side_query(
-        EXTRACT_PROMPT,
-        f"Session events:\n{content}",
-    )
-
-    match = re.search(r"\[[\s\S]*\]", text)
-    if not match:
-        raise ValueError(f"extract response has no JSON array: {text[:200]!r}")
-
-    items = json.loads(match.group(0))
-    if not isinstance(items, list):
-        raise ValueError(f"extract response JSON is not a list: {type(items).__name__}")
+    text = ""
+    items: list = []
+    for attempt in (1, 2):
+        text = await side_query(
+            EXTRACT_PROMPT,
+            f"Session events:\n{content}",
+        )
+        found, items = _parse_json_arrays(text)
+        if found:
+            break
+        print(f"[wiki_extract] no valid JSON array (attempt {attempt}): {text[:120]!r}")
+    else:
+        raise ValueError(f"extract response has no JSON array after 2 attempts: {text[:200]!r}")
 
     valid: list[dict] = []
     for item in items:
         if not isinstance(item, dict):
             print(f"[wiki_extract] dropped non-dict item: {str(item)[:80]!r}")
             continue
+        _coerce_extraction_fields(item)
         reason = _validate_extraction(item)
         if reason:
             print(f"[wiki_extract] dropped item ({reason}): {str(item.get('name', item))[:80]!r}")
@@ -383,6 +445,8 @@ async def check_and_compile_pending_sessions(side_query: Any, threshold: int = 2
             print(f"[wiki_backfill] retried segment {seg_path.name}: {sum(v for v in stats.values() if isinstance(v, int))} entries")
         except Exception as e:
             print(f"[wiki_backfill] retry segment failed {seg_path.name}: {type(e).__name__}: {e}")
+            from agents.wiki.wiki_capture import register_compile_failure
+            register_compile_failure(seg_path)
             continue
 
     # 阶段 2：扫描水位线落后的 session（未触发过压缩）

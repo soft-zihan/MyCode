@@ -136,8 +136,11 @@ async def _compile_segment(session_path: Path, side_query: SideQueryFn) -> None:
         if maybe_schedule_consolidate(side_query):
             print("[wiki_consolidate] scheduled (threshold met)")
     except Exception as e:
-        # 编译失败：水位线不推进，segment 保持 compiled=false，下次补编译自动重试
+        # 编译失败：水位线不推进，segment 保持 compiled=false，下次补编译自动重试；
+        # 达到毒丸上限（3 次）由 register_compile_failure 终态化并推进水位线（BC-3）
         print(f"[wiki_compile_single] compile failed for {session_path.name}: {type(e).__name__}: {e}")
+        from agents.wiki.wiki_capture import register_compile_failure
+        register_compile_failure(session_path)
 
 
 def _advance_watermark(session_path: Path) -> None:

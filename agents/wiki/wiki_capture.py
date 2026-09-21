@@ -285,8 +285,52 @@ def mark_session_compiled(filepath: Path) -> None:
         raise
 
 
+MAX_COMPILE_ATTEMPTS = 3
+
+
+def register_compile_failure(filepath: Path) -> bool:
+    """记录 segment 编译失败次数；达到毒丸上限则终态化并推进水位线（BC-3）。
+
+    终态：compiled=failed（保留文件供人工回看，不再重试），水位线推进到
+    segment 的 max_seq，释放该 session 后续事件的提取。失败清单落日志，不静默吞。
+
+    Returns:
+        True 表示已达上限并终态化。
+    """
+    from agents.core.frontmatter import parse_frontmatter, format_frontmatter
+    try:
+        result = parse_frontmatter(filepath.read_text())
+        attempts = int(result.meta.get("compile_attempts", "0")) + 1
+        result.meta["compile_attempts"] = str(attempts)
+        terminal = attempts >= MAX_COMPILE_ATTEMPTS
+        if terminal:
+            result.meta["compiled"] = "failed"
+        filepath.write_text(format_frontmatter(result.meta, result.body))
+    except Exception as e:
+        print(f"[wiki_capture] register_compile_failure failed for {filepath}: {type(e).__name__}: {e}")
+        return False
+
+    if not terminal:
+        print(f"[wiki_capture] compile attempt {attempts}/{MAX_COMPILE_ATTEMPTS} failed: {filepath.name}")
+        return False
+
+    print(f"[wiki_capture] segment reached max attempts ({attempts}), marked compiled=failed, advancing watermark: {filepath.name}")
+    try:
+        session_id = result.meta.get("session_id", "")
+        seg_max_seq = int(result.meta.get("max_seq", "0"))
+        if session_id and seg_max_seq > get_last_extract_pos(session_id):
+            set_last_extract_pos(session_id, seg_max_seq)
+    except Exception as e:
+        print(f"[wiki_capture] watermark advance after terminal failure failed for {filepath}: {type(e).__name__}: {e}")
+    _git_commit(f"wiki: segment {filepath.stem} terminally failed after {MAX_COMPILE_ATTEMPTS} attempts")
+    return True
+
+
 def list_uncompiled_segments() -> list[Path]:
-    """列出所有未编译的 session segment 文件（编译失败/中断后待重试）。"""
+    """列出所有未编译的 session segment 文件（编译失败/中断后待重试）。
+
+    compiled=failed 是毒丸终态，不再重试。
+    """
     from agents.core.frontmatter import parse_frontmatter
     session_root = get_wiki_dir() / "session"
     if not session_root.exists():
@@ -296,7 +340,7 @@ def list_uncompiled_segments() -> list[Path]:
     for f in session_root.rglob("*_seg*.md"):
         try:
             result = parse_frontmatter(f.read_text())
-            if result.meta.get("compiled") != "true":
+            if result.meta.get("compiled") not in ("true", "failed"):
                 uncompiled.append(f)
         except Exception as e:
             print(f"[wiki_capture] parse segment failed {f}: {type(e).__name__}: {e}")
