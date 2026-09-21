@@ -201,15 +201,15 @@ tool_definitions: list[ToolDef] = [
     },
     {
         "name": "web_search",
-        "description": "Search the public web using DuckDuckGo/multi-backend metasearch. Use this for facts, documents, URLs, dates, and current information. Prefer it over curl or grep for internet research.",
+        "description": "Search the public web. Dual backend: DuckDuckGo (primary) with automatic fallback to Exa AI search on failure. Use this for facts, documents, URLs, dates, and current information. Prefer it over curl or grep for internet research. The response includes which backend served the results.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search query"},
                 "max_results": {"type": "integer", "description": "Maximum number of results to return (1-20, default: 8)"},
-                "region": {"type": "string", "description": "Search region, such as us-en, cn-zh, wt-wt (default: us-en)"},
-                "timelimit": {"type": "string", "enum": ["d", "w", "m", "y"], "description": "Optional recency filter: day, week, month, or year"},
-                "backend": {"type": "string", "description": "Optional search backend or comma-delimited backends (default: auto)"},
+                "region": {"type": "string", "description": "Search region, such as us-en, cn-zh, wt-wt (default: us-en, ddgs backend only)"},
+                "timelimit": {"type": "string", "enum": ["d", "w", "m", "y"], "description": "Optional recency filter: day, week, month, or year (ddgs backend only)"},
+                "backend": {"type": "string", "enum": ["auto", "ddgs", "exa"], "description": "auto: ddgs first, fall back to exa on failure (default); or force a single backend"},
             },
             "required": ["query"],
         },
