@@ -129,17 +129,10 @@ const toolDetails: Record<string, {
     category: '上下文管理',
   },
   // Wiki & Memory
-  write_wiki_entry: {
+  remember: {
     idempotent: false,
-    returns: 'Wiki 条目创建成功的确认信息。',
-    errorHandling: '写入失败时返回错误信息。',
-    executionMode: 'sequential',
-    category: 'Wiki & 记忆',
-  },
-  write_workflow_pattern: {
-    idempotent: false,
-    returns: '工作流模式创建成功的确认信息。',
-    errorHandling: '写入失败时返回错误信息。',
+    returns: 'JSON：{action: created|merged|appended, path, message}。',
+    errorHandling: '参数非法或写入失败时返回 {action: "error"}。',
     executionMode: 'sequential',
     category: 'Wiki & 记忆',
   },

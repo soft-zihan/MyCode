@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { 
   FolderTree, RefreshCw, FileText, BookOpen, Settings, Zap, Bot, 
-  MessageSquare
+  MessageSquare, ThumbsUp
 } from 'lucide-react';
 import { fetchWorkspaceTree, WorkspaceNode } from '../../api/client';
 
@@ -46,6 +46,14 @@ const MEMORY_CATEGORIES = [
     bgColor: 'bg-green-50',
     path: '.mycode/wiki/self_improvement',
     description: '自我改进与调试经验',
+  },
+  {
+    name: 'Feedback',
+    icon: ThumbsUp,
+    color: 'text-rose-500',
+    bgColor: 'bg-rose-50',
+    path: '.mycode/wiki/feedback',
+    description: '用户纠正与确认的规则',
   },
   {
     name: 'User',

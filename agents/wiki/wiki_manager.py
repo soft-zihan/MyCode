@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 VALID_WIKI_TYPES = {
     "knowledge",
     "self_improvement",
+    "feedback",
     "user",
     "reference",
     "workflow_pattern",
@@ -417,7 +418,7 @@ def update_wiki_index() -> None:
 
     lines = ["# Wiki Index", ""]
     section_order = [
-        "Knowledge", "Self Improvement", "User", "Reference",
+        "Knowledge", "Self Improvement", "Feedback", "User", "Reference",
         "Workflow Pattern",
     ]
     for section in section_order:
@@ -650,7 +651,7 @@ You have a persistent, file-based wiki system at `{wiki_dir}`.
 - Deleted when the corresponding session is deleted
 - Use `list_session_notes` and `read_session_notes` tools to browse and read details
 
-### 2. Long-term Memory (knowledge/, workflow_pattern/, self_improvement/, user/, reference/)
+### 2. Long-term Memory (knowledge/, workflow_pattern/, self_improvement/, feedback/, user/, reference/)
 - Persistent knowledge recalled automatically based on current task
 - workflow_pattern entries can be compiled into executable Skills when high-frequency
 - No manual action needed - recall is automatic
@@ -662,11 +663,15 @@ You have a persistent, file-based wiki system at `{wiki_dir}`.
 ## Wiki Recall
 Wiki entries are automatically recalled based on your current task. You don't need to manually search.
 
-## When to Save
-- When the user corrects you or gives feedback → self_improvement
-- When you discover a debugging lesson → self_improvement or knowledge
-- When you learn a user preference → user
-- When you find a reusable pattern → workflow_pattern
+## When to Save (use the `remember` tool — NEVER write wiki files directly)
+- User explicitly says "remember X / always X / never X again" → call remember() IMMEDIATELY in the current turn, do not wait for session end
+- User corrects your behavior → remember(wiki_type=feedback) in the current turn; content MUST contain the Rule, Why, and How to apply
+- When you learn a user preference → remember(wiki_type=user)
+- Project facts/decisions/conventions worth persisting → remember(wiki_type=knowledge)
+- External links/docs → remember(wiki_type=reference)
+- Reusable troubleshooting pattern → remember(wiki_type=workflow_pattern, symptom/root_cause/workaround)
+- remember() returns created/merged/appended — when merged or appended, tell the user which existing entry was updated
+- Type boundary: feedback = user-initiated correction/confirmation; self_improvement = Agent's own mistakes (extraction pipeline only, not writable via remember)
 
 ## What NOT to Save
 - Code patterns you can read from the codebase

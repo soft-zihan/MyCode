@@ -91,7 +91,7 @@ async def compile_single_session(session_path: Path, side_query: Any) -> dict[st
     
     try:
         stats: dict[str, int] = {
-            "knowledge": 0, "self_improvement": 0, "user": 0,
+            "knowledge": 0, "self_improvement": 0, "feedback": 0, "user": 0,
             "reference": 0, "workflow_pattern": 0,
             "deduped": 0,
         }
@@ -303,7 +303,7 @@ async def check_and_compile_pending_sessions(side_query: Any, threshold: int = 2
     from agents.core.frontmatter import parse_frontmatter
 
     total_stats: dict[str, int] = {
-        "knowledge": 0, "self_improvement": 0, "user": 0,
+        "knowledge": 0, "self_improvement": 0, "feedback": 0, "user": 0,
         "reference": 0, "workflow_pattern": 0,
         "deduped": 0,
     }

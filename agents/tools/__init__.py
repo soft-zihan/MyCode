@@ -74,8 +74,6 @@ _grep_search = grep_search
 _grep_python = grep_python
 _web_search = web_search
 
-from agents.tools.wiki_tools import write_workflow_pattern as _write_workflow_pattern_tool
-from agents.tools.wiki_tools import write_wiki_entry as _write_wiki_entry_tool
 
 from agents.tools.plan_tools import (
     plan_propose as _plan_propose_tool,
@@ -103,14 +101,6 @@ from agents.tools.plan_tools import (
     plan_redo as _plan_redo_tool,
     plan_rollback as _plan_rollback_tool,
 )
-
-
-def _handle_write_workflow_pattern(inp: dict) -> str:
-    return _write_workflow_pattern_tool(inp)
-
-
-def _handle_write_wiki_entry(inp: dict) -> str:
-    return _write_wiki_entry_tool(inp)
 
 from agents.tools.permissions import (
     check_permission,
@@ -190,8 +180,6 @@ async def execute_tool(
         "web_search": web_search,
         "run_shell": run_shell,
         "shell_status": shell_status,
-        "write_workflow_pattern": _handle_write_workflow_pattern,
-        "write_wiki_entry": _handle_write_wiki_entry,
         "plan_propose": _plan_propose_tool,
         "plan_status": _plan_status_tool,
         "plan_list": _plan_list_tool,

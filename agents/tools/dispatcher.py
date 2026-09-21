@@ -150,6 +150,9 @@ class ToolDispatcher:
             return self._execute_context_restore_tool(inp)
         if name == "search_history":
             return self._execute_search_history_tool(inp)
+        if name == "remember":
+            from agents.tools.wiki_tools import remember
+            return await remember(inp)
         if name == "list_session_notes":
             return self._execute_list_session_notes_tool(inp)
         if name == "git_diff_before_last_compress":

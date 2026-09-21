@@ -15,7 +15,7 @@ ToolDef = dict
 PermissionMode = str
 
 READ_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "web_search", "compact_context", "shell_status", "search_history", "list_session_notes", "plan_status", "plan_list", "plan_read_artifact", "plan_explore", "plan_continue", "plan_retry", "plan_recall", "plan_check_expired"}
-EDIT_TOOLS = {"write_file", "edit_file", "skill_create", "write_workflow_pattern", "write_wiki_entry", "plan_propose", "plan_update", "plan_task_start", "plan_task_done", "plan_task_failed", "plan_complete", "plan_add_artifact", "plan_archive", "plan_save_explore", "plan_abandon", "plan_reopen", "plan_pause", "plan_resume", "plan_skip", "plan_redo", "plan_rollback", "ask_user", "todolist"}
+EDIT_TOOLS = {"write_file", "edit_file", "skill_create", "remember", "plan_propose", "plan_update", "plan_task_start", "plan_task_done", "plan_task_failed", "plan_complete", "plan_add_artifact", "plan_archive", "plan_save_explore", "plan_abandon", "plan_reopen", "plan_pause", "plan_resume", "plan_skip", "plan_redo", "plan_rollback", "ask_user", "todolist"}
 
 CONCURRENCY_SAFE_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "web_search", "shell_status"}
 
@@ -92,8 +92,7 @@ TOOL_EXECUTION_MODES: dict[str, str] = {
     "edit_file": "sequential",
     "run_shell": "sequential",
     "skill_create": "sequential",
-    "write_workflow_pattern": "sequential",
-    "write_wiki_entry": "sequential",
+    "remember": "sequential",
     "compact_context": "sequential",
     "context_restore": "sequential",
     "enter_plan_mode": "sequential",
@@ -423,32 +422,20 @@ tool_definitions: list[ToolDef] = [
         },
     },
     {
-        "name": "write_workflow_pattern",
-        "description": "Create a workflow_pattern entry in the wiki. Use this to record reusable troubleshooting workflows or operational procedures. The pattern will be automatically compiled into a skill when applied multiple times (applied_count >= 2).",
+        "name": "remember",
+        "description": "Save a persistent memory to the wiki. Use IMMEDIATELY in the current turn when the user says 'remember X', 'always/never do X', or corrects your behavior (wiki_type=feedback, content must include the Rule, Why, and How to apply). Deduplication is automatic: similar existing entries are merged, and the result tells you which entry was updated. Types: feedback (user corrections/confirmed rules), user (preferences), knowledge (project facts/decisions/conventions), reference (external links/docs), workflow_pattern (troubleshooting pattern; requires symptom/root_cause/workaround instead of content).",
         "input_schema": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Pattern name (e.g., 'db-connection-timeout')"},
-                "symptom": {"type": "string", "description": "Symptom description (what the user observes)"},
-                "root_cause": {"type": "string", "description": "Root cause description"},
-                "workaround": {"type": "string", "description": "Solution/troubleshooting steps"},
-                "description": {"type": "string", "description": "Optional short description"},
+                "wiki_type": {"type": "string", "enum": ["feedback", "user", "knowledge", "reference", "workflow_pattern"], "description": "Memory type. feedback = user-initiated correction/confirmation; self_improvement (Agent's own mistakes) is NOT writable here"},
+                "name": {"type": "string", "description": "Short descriptive entry name"},
+                "description": {"type": "string", "description": "Optional one-line description"},
+                "content": {"type": "string", "description": "Memory content (required except workflow_pattern). For feedback: Rule -> Why -> How to apply"},
+                "symptom": {"type": "string", "description": "workflow_pattern only: what the user observes"},
+                "root_cause": {"type": "string", "description": "workflow_pattern only: root cause"},
+                "workaround": {"type": "string", "description": "workflow_pattern only: solution/troubleshooting steps"},
             },
-            "required": ["name", "symptom", "root_cause", "workaround"],
-        },
-    },
-    {
-        "name": "write_wiki_entry",
-        "description": "Create a wiki entry for persistent memory. Use this to record important information that should be remembered across sessions. Types: knowledge (project info), self_improvement (lessons learned), user (user preferences), reference (external docs), workflow_pattern (troubleshooting workflows).",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "wiki_type": {"type": "string", "description": "Entry type: knowledge, self_improvement, user, reference, workflow_pattern"},
-                "name": {"type": "string", "description": "Entry name/title"},
-                "content": {"type": "string", "description": "Entry content (markdown supported)"},
-                "description": {"type": "string", "description": "Optional short description"},
-            },
-            "required": ["wiki_type", "name", "content"],
+            "required": ["wiki_type", "name"],
         },
     },
     {
