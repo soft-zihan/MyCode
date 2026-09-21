@@ -107,7 +107,7 @@ export function RewindDialog({
     return (
       <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
         <div className="bg-white rounded-lg p-6 flex items-center gap-3">
-          <Loader2 className="w-5 h-5 animate-spin text-blue-500" />
+          <Loader2 className="w-5 h-5 animate-spin text-indigo-500" />
           <span>正在计算回退计划...</span>
         </div>
       </div>
@@ -142,7 +142,7 @@ export function RewindDialog({
       <div className="bg-white rounded-lg w-full max-w-2xl max-h-[80vh] flex flex-col">
         <div className="flex items-center justify-between px-6 py-4 border-b">
           <h2 className="text-lg font-semibold flex items-center gap-2">
-            <RotateCcw className="w-5 h-5 text-blue-500" />
+            <RotateCcw className="w-5 h-5 text-indigo-500" />
             回退到这个时间点？
           </h2>
           <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded">
@@ -151,8 +151,8 @@ export function RewindDialog({
         </div>
 
         <div className="flex-1 overflow-y-auto px-6 py-4">
-          <div className="mb-4 p-3 bg-blue-50 rounded flex items-start gap-2">
-            <MessageSquare className="w-4 h-4 text-blue-500 mt-0.5 shrink-0" />
+          <div className="mb-4 p-3 bg-indigo-50 rounded flex items-start gap-2">
+            <MessageSquare className="w-4 h-4 text-indigo-500 mt-0.5 shrink-0" />
             <div className="text-sm text-gray-700">
               <p>
                 对话将删除 <span className="font-semibold">{plan.removed_user_messages}</span> 条用户消息
@@ -208,7 +208,7 @@ export function RewindDialog({
           <button
             onClick={handleCommit}
             disabled={committing}
-            className="px-4 py-2 text-sm text-white bg-blue-500 hover:bg-blue-600 rounded flex items-center gap-2 disabled:opacity-50"
+            className="px-4 py-2 text-sm text-white bg-indigo-500 hover:bg-indigo-600 rounded flex items-center gap-2 disabled:opacity-50"
           >
             {committing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
             确认回退

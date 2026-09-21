@@ -67,7 +67,7 @@ export default function SessionsPage() {
           </div>
           <button
             onClick={loadSessions}
-            className="flex items-center px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
+            className="flex items-center px-4 py-2 bg-indigo-500 text-white rounded hover:bg-indigo-600 transition-colors"
           >
             <RefreshCw className="w-4 h-4 mr-2" />
             Refresh

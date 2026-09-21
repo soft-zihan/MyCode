@@ -89,36 +89,43 @@ with trace_context(
 flush_tracing()
 print("[smoke] span 已 flush，等待 Langfuse 摄取...")
 
+expected_types = {"CHAIN", "GENERATION", "TOOL"}
 deadline = time.time() + 90
 found = None
+detail = None
+observations: list = []
+observation_types: set[str] = set()
+generation = None
 while time.time() < deadline:
     try:
         traces = client.api.trace.list(name=trace_name, limit=50).data
         found = next((trace for trace in traces if trace.name == trace_name), None)
+        if found:
+            detail = client.api.trace.get(found.id)
+            observations = detail.observations or []
+            observation_types = {str(observation.type).upper() for observation in observations}
+            generation = next(
+                (observation for observation in observations if str(observation.type).upper() == "GENERATION"),
+                None,
+            )
+            if expected_types <= observation_types and generation:
+                break
     except Exception as exc:
-        print(f"[smoke] trace list failed: {type(exc).__name__}: {exc}")
-    if found:
-        break
+        print(f"[smoke] trace query failed: {type(exc).__name__}: {exc}")
     time.sleep(5)
 
-if not found:
+if not found or detail is None:
     shutdown_tracing()
     print(f"[smoke] ❌ 90 秒内未查询到 trace（标记 {smoke_id}），请检查密钥/网络")
     sys.exit(1)
 
-detail = client.api.trace.get(found.id)
-observations = detail.observations or []
-observation_types = {str(observation.type).upper() for observation in observations}
-generation = next(
-    (observation for observation in observations if str(observation.type).upper() == "GENERATION"),
-    None,
-)
-
 errors: list[str] = []
 if detail.session_id != session_id:
     errors.append(f"sessionId={detail.session_id!r}, expected={session_id!r}")
-if not {"CHAIN", "GENERATION", "TOOL"} <= observation_types:
-    errors.append(f"missing observation types: {observation_types}")
+if not expected_types <= observation_types:
+    errors.append(
+        f"missing observation types: present={sorted(observation_types)}, expected={sorted(expected_types)}"
+    )
 if not generation:
     errors.append("missing GENERATION observation")
 else:

@@ -67,10 +67,12 @@ from agents.tools.search_tools import (
     grep_search,
     grep_python,
 )
+from agents.tools.web_tools import web_search
 
 # Backward compatibility aliases
 _grep_search = grep_search
 _grep_python = grep_python
+_web_search = web_search
 
 from agents.tools.wiki_tools import write_workflow_pattern as _write_workflow_pattern_tool
 from agents.tools.wiki_tools import write_wiki_entry as _write_wiki_entry_tool
@@ -185,6 +187,7 @@ async def execute_tool(
         "edit_file": edit_file,
         "list_files": list_files,
         "grep_search": grep_search,
+        "web_search": web_search,
         "run_shell": run_shell,
         "shell_status": shell_status,
         "write_workflow_pattern": _handle_write_workflow_pattern,
@@ -272,6 +275,7 @@ __all__ = [
     "shell_status",
     "grep_search",
     "grep_python",
+    "web_search",
     "_read_file",
     "_write_file",
     "_edit_file",
@@ -280,5 +284,6 @@ __all__ = [
     "_shell_status",
     "_grep_search",
     "_grep_python",
+    "_web_search",
     "resolve_tool_path",
 ]

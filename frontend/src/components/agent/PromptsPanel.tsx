@@ -19,7 +19,7 @@ const categoryLabels: Record<string, string> = {
 
 const categoryColors: Record<string, string> = {
   main: 'bg-purple-100 text-purple-700',
-  subagent: 'bg-blue-100 text-blue-700',
+  subagent: 'bg-indigo-100 text-indigo-700',
   side_query: 'bg-orange-100 text-orange-700',
   plan: 'bg-green-100 text-green-700',
 };

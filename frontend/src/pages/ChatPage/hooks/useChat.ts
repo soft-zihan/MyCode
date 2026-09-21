@@ -5,6 +5,7 @@ import {
   forkSession, respondToPermission, respondToQuestion,
   stageRewind, commitRewind,
   fetchSessionSummary,
+  DEFAULT_CONTEXT_WINDOW,
 } from '../../../api/client';
 import type { RewindPlan } from '../../../api/client';
 import { useChatNodes } from '../../../components/chat/nodes';
@@ -117,7 +118,7 @@ export function useChat() {
   const pendingSessionNameRef = useRef<string | null>(null);
   
   const [permissionMode, setPermissionMode] = useState<'default' | 'acceptEdits' | 'plan' | 'bypassPermissions'>('bypassPermissions');
-  const [contextTotal, setContextTotal] = useState(128000);
+  const [contextTotal, setContextTotal] = useState(DEFAULT_CONTEXT_WINDOW);
   
   const [sessionRefreshTrigger, setSessionRefreshTrigger] = useState(0);
   const [pendingSteerMessages, setPendingSteerMessages] = useState<Array<{content: string, contextFiles: string[], model?: string}>>([]);
@@ -214,7 +215,9 @@ export function useChat() {
       }
       
       if (eventType === 'stats') {
-        sessionStore.setContextStats(targetSessionId, event.last_input_token_count || 0, event.context_window || 128000);
+        const contextUsed = event.estimated_context_tokens ?? event.last_total_token_count ?? 0;
+        const contextTotal = event.effective_window ?? event.context_window ?? DEFAULT_CONTEXT_WINDOW;
+        sessionStore.setContextStats(targetSessionId, contextUsed, contextTotal);
         sessionStore.setDetailedStats(
           targetSessionId,
           event.input_tokens || 0,
@@ -228,11 +231,9 @@ export function useChat() {
         }
       }
       if (eventType === 'context/compacted') {
-        // 更新 token 计数
-        if (event.last_input_token_count !== undefined) {
-          sessionStore.setContextStats(targetSessionId, event.last_input_token_count, event.context_window || 128000);
-        }
-        // 显示压缩提示
+        const contextUsed = event.estimated_context_tokens ?? event.last_total_token_count ?? 0;
+        const contextTotal = event.effective_window ?? event.context_window ?? DEFAULT_CONTEXT_WINDOW;
+        sessionStore.setContextStats(targetSessionId, contextUsed, contextTotal);
         handleNodeEvent(targetSessionId, {
           type: 'system',
           message: event.message || '上下文已压缩',
@@ -385,7 +386,7 @@ export function useChat() {
       if (endpoints.length > 0 && !selectedModel) {
         const firstEndpoint = endpoints[0];
         setSelectedModel(firstEndpoint.model);
-        setContextTotal(firstEndpoint.context_window || 128000);
+        setContextTotal(firstEndpoint.context_window || DEFAULT_CONTEXT_WINDOW);
       }
     }).catch(console.error);
     
@@ -478,9 +479,9 @@ export function useChat() {
           localStorage.setItem('lastCwd', metadata.cwd);
         }
         
-        if (stats.last_input_token_count) {
-          sessionStore.setContextStats(sessionId, stats.last_input_token_count, stats.context_window || 128000);
-        }
+        const contextUsed = stats.estimated_context_tokens || stats.last_total_token_count || 0;
+        const contextTotal = stats.effective_window || stats.context_window || DEFAULT_CONTEXT_WINDOW;
+        sessionStore.setContextStats(sessionId, contextUsed, contextTotal);
         if (stats.input_tokens || stats.output_tokens) {
           sessionStore.setDetailedStats(sessionId, stats.input_tokens || 0, stats.output_tokens || 0, stats.cached_tokens || 0);
         }

@@ -53,7 +53,7 @@ class BadCase:
     tool_name: str | None = None
     
     # 问题描述
-    signal_type: str = ""  # 信号类型：wrong_tool, incomplete, tool_repeat, tool_cycle, span_error, etc.
+    signal_type: str = ""  # 信号类型：wrong_tool, incomplete, memory_not_used, other, tool_repeat, tool_cycle, force_stop, eval_failure
     reason: str = ""  # 问题原因
     comment: str = ""  # 用户/系统备注
     

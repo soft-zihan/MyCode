@@ -32,7 +32,7 @@ export const UserNodeView = memo(function UserNodeView({ node, sessionId, userMe
       <div className="max-w-full">
         {node.contextFiles && node.contextFiles.length > 0 && (
           <div className="flex items-center gap-1 flex-wrap mb-1 px-2">
-            <span className="text-xs text-gray-500">Context:</span>
+            <span className="text-[11px] text-gray-400">Context:</span>
             {node.contextFiles.map(file => (
               <span
                 key={file}
@@ -44,19 +44,18 @@ export const UserNodeView = memo(function UserNodeView({ node, sessionId, userMe
             ))}
           </div>
         )}
-        <div className="rounded-lg px-4 py-3 bg-blue-500 text-white">
-          <pre className="whitespace-pre-wrap text-sm font-sans">{node.content}</pre>
-          <div className="text-xs mt-1 flex items-center gap-2 text-blue-100">
-            <span>{new Date(node.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
-            {node.agent && <span>• Agent: {node.agent}</span>}
-            {node.model && <span>• Model: {node.model}</span>}
-          </div>
+        <div className="rounded-2xl rounded-br-md px-4 py-2.5 bg-gray-100 text-gray-900 max-w-[85%] ml-auto">
+          <pre className="whitespace-pre-wrap text-sm font-sans leading-relaxed">{node.content}</pre>
+        </div>
+        <div className="hidden group-hover:flex text-[11px] mt-1 px-1 items-center gap-2 text-gray-400 justify-end">
+          <span>{new Date(node.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
+          {node.model && <span>· {node.model}</span>}
         </div>
         {(onEdit || onRewind) && (
-          <div className="relative opacity-0 group-hover:opacity-100 transition-opacity" ref={menuRef}>
+          <div className="relative hidden group-hover:block" ref={menuRef}>
             <button
               onClick={() => setShowMenu(!showMenu)}
-              className="mt-1 p-1 text-blue-600 hover:bg-blue-50 rounded flex items-center gap-0.5"
+              className="mt-0.5 p-1 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded flex items-center gap-0.5"
               title="回退到此消息"
             >
               <RotateCcw className="w-3.5 h-3.5" />
@@ -69,7 +68,7 @@ export const UserNodeView = memo(function UserNodeView({ node, sessionId, userMe
                     onClick={() => { setShowMenu(false); onRewind(userMessageIndex); }}
                     className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
                   >
-                    <RotateCcw className="w-3.5 h-3.5 text-blue-500" />
+                    <RotateCcw className="w-3.5 h-3.5 text-indigo-500" />
                     回退到此消息（含文件）
                   </button>
                 )}

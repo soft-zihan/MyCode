@@ -199,7 +199,7 @@ function FileTreeNode({
     <div>
       <div
         className={`flex items-center px-2 py-1 cursor-pointer hover:bg-gray-100 group transition-colors ${
-          isSelected ? 'bg-blue-50 text-blue-700' : ''
+          isSelected ? 'bg-indigo-50 text-indigo-700' : ''
         } ${isDragTarget ? 'bg-green-100 ring-1 ring-green-400' : ''}`}
         style={{ paddingLeft: `${level * 16 + 8}px` }}
         onClick={handleClick}
@@ -217,7 +217,7 @@ function FileTreeNode({
             ) : (
               <ChevronRight className="w-4 h-4 mr-1 flex-shrink-0" />
             )}
-            <Folder className="w-4 h-4 mr-2 text-blue-500 flex-shrink-0" />
+            <Folder className="w-4 h-4 mr-2 text-indigo-500 flex-shrink-0" />
           </>
         ) : (
           <>
@@ -236,7 +236,7 @@ function FileTreeNode({
               if (e.key === 'Escape') handleRenameCancel(e);
             }}
             onClick={(e) => e.stopPropagation()}
-            className="flex-1 px-1 py-0 text-sm border border-blue-400 rounded focus:outline-none"
+            className="flex-1 px-1 py-0 text-sm border border-indigo-400 rounded focus:outline-none"
             autoFocus
           />
         ) : (
@@ -284,7 +284,7 @@ function FileTreeNode({
         {!editMode && !isRenaming && (
           <button
             onClick={handleAddToChat}
-            className="opacity-0 group-hover:opacity-100 p-1 hover:bg-blue-100 rounded text-blue-500 transition-opacity"
+            className="opacity-0 group-hover:opacity-100 p-1 hover:bg-indigo-100 rounded text-indigo-500 transition-opacity"
             title={node.type === 'directory' ? "Add directory structure to context" : "Add to chat context"}
           >
             <Plus className="w-3 h-3" />

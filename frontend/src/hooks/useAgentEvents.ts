@@ -13,7 +13,10 @@ export interface AgentStats {
   output_tokens: number;
   cached_tokens?: number;
   context_window: number;
+  effective_window?: number;
   last_input_token_count?: number;
+  last_total_token_count?: number;
+  estimated_context_tokens?: number;
 }
 
 export interface ToolCallEvent {
@@ -226,7 +229,10 @@ export function useAgentEvents(sessionId: string | null): UseAgentEventsReturn {
             output_tokens: event.output_tokens as number,
             cached_tokens: event.cached_tokens as number | undefined,
             context_window: event.context_window as number,
+            effective_window: event.effective_window as number | undefined,
             last_input_token_count: event.last_input_token_count as number | undefined,
+            last_total_token_count: event.last_total_token_count as number | undefined,
+            estimated_context_tokens: event.estimated_context_tokens as number | undefined,
           };
           break;
         }

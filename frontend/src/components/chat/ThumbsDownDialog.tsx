@@ -44,14 +44,14 @@ export function ThumbsDownDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-md p-6">
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-6">
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+          <h3 className="text-lg font-semibold text-gray-900">
             反馈问题
           </h3>
           <button
             onClick={onClose}
-            className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
+            className="p-1 rounded hover:bg-gray-100"
           >
             <X className="w-5 h-5 text-gray-500" />
           </button>
@@ -59,7 +59,7 @@ export function ThumbsDownDialog({
 
         <div className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
               请选择原因：
             </label>
             <div className="space-y-2">
@@ -74,9 +74,9 @@ export function ThumbsDownDialog({
                     value={option.value}
                     checked={reason === option.value}
                     onChange={() => setReason(option.value)}
-                    className="w-4 h-4 text-blue-600"
+                    className="w-4 h-4 text-indigo-600"
                   />
-                  <span className="text-sm text-gray-700 dark:text-gray-300">
+                  <span className="text-sm text-gray-700">
                     {option.label}
                   </span>
                 </label>
@@ -86,7 +86,7 @@ export function ThumbsDownDialog({
 
           {hasToolCalls && (
             <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
                 期望调用的工具（可选）：
               </label>
               <input
@@ -94,13 +94,13 @@ export function ThumbsDownDialog({
                 value={expectedTool}
                 onChange={(e) => setExpectedTool(e.target.value)}
                 placeholder="例如：read_file"
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+                className="w-full px-3 py-2 border border-gray-300 rounded-md bg-white text-gray-900"
               />
             </div>
           )}
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
               备注（可选）：
             </label>
             <textarea
@@ -108,7 +108,7 @@ export function ThumbsDownDialog({
               onChange={(e) => setComment(e.target.value)}
               placeholder="请描述具体问题..."
               rows={3}
-              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100"
+              className="w-full px-3 py-2 border border-gray-300 rounded-md bg-white text-gray-900"
             />
           </div>
         </div>
@@ -116,7 +116,7 @@ export function ThumbsDownDialog({
         <div className="flex justify-end gap-2 mt-6">
           <button
             onClick={onClose}
-            className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 rounded-md hover:bg-gray-200 dark:hover:bg-gray-600"
+            className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200"
           >
             取消
           </button>

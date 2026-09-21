@@ -84,7 +84,7 @@ export const ChatView = memo(function ChatView({ snapshot, sessionId, isStreamin
           return (
             <div key={key}>
               {showForkButton && (
-                <div className="flex items-center gap-2 py-2 my-2 group/fork">
+                <div className="flex items-center gap-2 h-3 -my-1 group/fork opacity-0 hover:opacity-100 transition-opacity">
                   <div className="flex-1 h-px bg-gray-200"></div>
                   <button
                     onClick={() => {

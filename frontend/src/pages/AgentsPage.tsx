@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import { 
   fetchAgents, fetchAgent, fetchConfig, saveConfig, fetchSkills,
-  Agent, AgentDetail, AppConfig, ModelEndpointConfig, Skill
+  Agent, AgentDetail, AppConfig, ModelEndpointConfig, Skill,
+  DEFAULT_CONTEXT_WINDOW, DEFAULT_AUTO_COMPACT_THRESHOLD
 } from '../api/client';
 import { Bot, Server, RefreshCw, Save, Plus, Trash2, ChevronDown, ChevronRight, Globe, Cpu, CheckCircle, XCircle, Loader, Edit2, X, RotateCcw, Sparkles } from 'lucide-react';
 import { PageLayout } from '../components/PageLayout';
@@ -18,6 +19,7 @@ interface ModelConfig {
   id: string;
   name: string;
   context_window: number;
+  auto_compact_threshold: number;
 }
 
 interface ToolInfo {
@@ -86,7 +88,8 @@ export default function AgentsPage() {
         provider.models.push({
           id: id,
           name: endpoint.model,
-          context_window: endpoint.context_window || 128000
+          context_window: endpoint.context_window || DEFAULT_CONTEXT_WINDOW,
+          auto_compact_threshold: endpoint.auto_compact_threshold ?? DEFAULT_AUTO_COMPACT_THRESHOLD
         });
       });
       setProviders(Array.from(providerMap.values()));
@@ -261,6 +264,7 @@ export default function AgentsPage() {
             base_url: provider.base_url,
             api_key: provider.api_key,
             context_window: model.context_window,
+            auto_compact_threshold: model.auto_compact_threshold,
             provider_name: provider.name
           };
         });
@@ -309,7 +313,8 @@ export default function AgentsPage() {
           models: [...p.models, {
             id: `model_${Date.now()}`,
             name: 'new-model',
-            context_window: 128000
+            context_window: DEFAULT_CONTEXT_WINDOW,
+            auto_compact_threshold: DEFAULT_AUTO_COMPACT_THRESHOLD
           }]
         };
       }
@@ -436,10 +441,10 @@ export default function AgentsPage() {
 
   const sidebarContent = (
     <div className="flex flex-col h-full">
-      <div className="border-b border-gray-200 bg-blue-50/30 h-1/3 flex flex-col">
+      <div className="border-b border-gray-200 bg-indigo-50/30 h-1/3 flex flex-col">
         <div className="px-3 py-2 flex items-center justify-between">
           <div className="flex items-center gap-1.5">
-            <Server className="w-3.5 h-3.5 text-blue-500" />
+            <Server className="w-3.5 h-3.5 text-indigo-500" />
             <h3 className="text-xs font-semibold text-gray-700">Providers</h3>
           </div>
           <span className="text-[10px] text-gray-400">{providers.length}</span>
@@ -451,8 +456,8 @@ export default function AgentsPage() {
             providers.map(provider => (
               <div key={provider.id}>
                 <div
-                  className={`px-3 py-1.5 cursor-pointer hover:bg-blue-100/50 transition-colors flex items-center gap-1.5 ${
-                    activeSection === 'models' && expandedProvider === provider.id ? 'bg-blue-100 border-l-2 border-blue-500' : ''
+                  className={`px-3 py-1.5 cursor-pointer hover:bg-indigo-100/50 transition-colors flex items-center gap-1.5 ${
+                    activeSection === 'models' && expandedProvider === provider.id ? 'bg-indigo-100 border-l-2 border-indigo-500' : ''
                   }`}
                   onClick={() => handleProviderClick(provider.id)}
                 >
@@ -461,7 +466,7 @@ export default function AgentsPage() {
                   <span className="text-[10px] text-gray-400">{provider.models.length}</span>
                 </div>
                 {expandedProvider === provider.id && provider.models.length > 0 && (
-                  <div className="bg-blue-50/50 border-t border-blue-100">
+                  <div className="bg-indigo-50/50 border-t border-indigo-100">
                     {provider.models.map(model => (
                       <div key={model.id} className="px-3 py-1 pl-7 text-[11px] text-gray-500 truncate">
                         {model.name}
@@ -495,7 +500,7 @@ export default function AgentsPage() {
                 }`}
                 onClick={() => handleAgentClick(agent.name)}
               >
-                <Bot className="w-3 h-3 text-blue-500 flex-shrink-0" />
+                <Bot className="w-3 h-3 text-indigo-500 flex-shrink-0" />
                 <span className="text-xs text-gray-700 truncate flex-1">{agent.name}</span>
                 {agent.has_override && (
                   <span className="text-[9px] px-1 py-0.5 bg-amber-100 text-amber-700 rounded" title="Has custom override">~</span>
@@ -596,7 +601,7 @@ export default function AgentsPage() {
                   <button
                     onClick={handleSaveConfig}
                     disabled={saving || !config}
-                    className="flex items-center px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors disabled:opacity-50"
+                    className="flex items-center px-4 py-2 bg-indigo-500 text-white rounded hover:bg-indigo-600 transition-colors disabled:opacity-50"
                   >
                     <Save className="w-4 h-4 mr-2" />
                     {saving ? 'Saving...' : 'Save Config'}
@@ -632,7 +637,7 @@ export default function AgentsPage() {
                           ) : (
                             <ChevronRight className="w-5 h-5 text-gray-500" />
                           )}
-                          <Globe className="w-5 h-5 text-blue-500" />
+                          <Globe className="w-5 h-5 text-indigo-500" />
                           <div>
                             <div className="font-semibold text-gray-900">{provider.name}</div>
                             <div className="text-xs text-gray-500">{provider.base_url}</div>
@@ -658,7 +663,7 @@ export default function AgentsPage() {
                                 type="text"
                                 value={provider.name}
                                 onChange={(e) => updateProvider(provider.id, 'name', e.target.value)}
-                                className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500"
                               />
                             </div>
                             <div>
@@ -667,7 +672,7 @@ export default function AgentsPage() {
                                 type="text"
                                 value={provider.base_url}
                                 onChange={(e) => updateProvider(provider.id, 'base_url', e.target.value)}
-                                className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500"
                               />
                             </div>
                             <div>
@@ -676,7 +681,7 @@ export default function AgentsPage() {
                                 type="password"
                                 value={provider.api_key}
                                 onChange={(e) => updateProvider(provider.id, 'api_key', e.target.value)}
-                                className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500"
                               />
                             </div>
                           </div>
@@ -686,7 +691,7 @@ export default function AgentsPage() {
                               <h4 className="text-sm font-semibold text-gray-700">Models</h4>
                               <button
                                 onClick={() => addModel(provider.id)}
-                                className="flex items-center px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600"
+                                className="flex items-center px-2 py-1 text-xs bg-indigo-500 text-white rounded hover:bg-indigo-600"
                               >
                                 <Plus className="w-3 h-3 mr-1" />
                                 Add Model
@@ -705,19 +710,29 @@ export default function AgentsPage() {
                                         type="text"
                                         value={model.name}
                                         onChange={(e) => updateModel(provider.id, model.id, 'name', e.target.value)}
-                                        className="flex-1 px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                        className="flex-1 px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500"
                                       />
                                       <input
                                         type="number"
                                         value={model.context_window}
-                                        onChange={(e) => updateModel(provider.id, model.id, 'context_window', parseInt(e.target.value) || 128000)}
-                                        className="w-24 px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                        onChange={(e) => updateModel(provider.id, model.id, 'context_window', parseInt(e.target.value) || DEFAULT_CONTEXT_WINDOW)}
+                                        className="w-28 px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500"
                                       />
                                       <span className="text-xs text-gray-500">tokens</span>
+                                      <input
+                                        type="number"
+                                        step="0.05"
+                                        min="0.1"
+                                        max="0.95"
+                                        value={model.auto_compact_threshold}
+                                        onChange={(e) => updateModel(provider.id, model.id, 'auto_compact_threshold', parseFloat(e.target.value) || DEFAULT_AUTO_COMPACT_THRESHOLD)}
+                                        className="w-20 px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                                      />
+                                      <span className="text-xs text-gray-500">compact</span>
                                       <button
                                         onClick={() => verifyModel(provider.id, model.id)}
                                         disabled={verifyingModel === model.id}
-                                        className="flex items-center px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50"
+                                        className="flex items-center px-2 py-1 text-xs bg-indigo-500 text-white rounded hover:bg-indigo-600 disabled:opacity-50"
                                       >
                                         {verifyingModel === model.id ? (
                                           <Loader className="w-3 h-3 animate-spin" />
@@ -843,7 +858,7 @@ export default function AgentsPage() {
                         onBlur={() => {
                           handleSaveConfig();
                         }}
-                        className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white"
+                        className="w-full px-3 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
                       >
                         {/* Primary agents don't inherit, they use the default model */}
                         {selectedAgent.category !== 'primary' && (
@@ -881,7 +896,7 @@ export default function AgentsPage() {
                       ) : (
                         <button
                           onClick={handleEditPrompt}
-                          className="flex items-center px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600"
+                          className="flex items-center px-2 py-1 text-xs bg-indigo-500 text-white rounded hover:bg-indigo-600"
                         >
                           <Edit2 className="w-3 h-3 mr-1" />
                           Edit
@@ -892,7 +907,7 @@ export default function AgentsPage() {
                       <textarea
                         value={editedPrompt}
                         onChange={(e) => setEditedPrompt(e.target.value)}
-                        className="w-full h-64 px-3 py-2 text-xs font-mono border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 resize-none bg-white"
+                        className="w-full h-64 px-3 py-2 text-xs font-mono border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-none bg-white"
                       />
                     ) : (
                       <pre className="text-xs font-mono text-gray-700 whitespace-pre-wrap bg-white p-3 rounded border border-gray-200 max-h-48 overflow-y-auto">
@@ -936,7 +951,7 @@ export default function AgentsPage() {
                         ) : (
                           <button
                             onClick={handleStartEditTools}
-                            className="flex items-center px-2 py-1 text-xs bg-blue-500 text-white rounded hover:bg-blue-600"
+                            className="flex items-center px-2 py-1 text-xs bg-indigo-500 text-white rounded hover:bg-indigo-600"
                           >
                             <Edit2 className="w-3 h-3 mr-1" />
                             Configure
@@ -1157,7 +1172,7 @@ export default function AgentsPage() {
                       type="text"
                       value={newAgent.name}
                       onChange={(e) => setNewAgent({ ...newAgent, name: e.target.value })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500"
                       placeholder="e.g., reviewer, coder"
                     />
                   </div>
@@ -1168,7 +1183,7 @@ export default function AgentsPage() {
                       type="text"
                       value={newAgent.description}
                       onChange={(e) => setNewAgent({ ...newAgent, description: e.target.value })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500"
                       placeholder="What this agent does"
                     />
                   </div>
@@ -1178,7 +1193,7 @@ export default function AgentsPage() {
                     <textarea
                       value={newAgent.system_prompt}
                       onChange={(e) => setNewAgent({ ...newAgent, system_prompt: e.target.value })}
-                      className="w-full h-40 px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 resize-none"
+                      className="w-full h-40 px-3 py-2 text-sm font-mono border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-none"
                       placeholder="Enter the system prompt..."
                     />
                   </div>
@@ -1188,7 +1203,7 @@ export default function AgentsPage() {
                     <select
                       value={newAgent.model}
                       onChange={(e) => setNewAgent({ ...newAgent, model: e.target.value })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500"
                     >
                       <option value="">Use default model</option>
                       {getAllModels().map(m => (
@@ -1240,7 +1255,7 @@ export default function AgentsPage() {
                   </button>
                   <button
                     onClick={handleCreateAgent}
-                    className="px-4 py-2 text-sm text-white bg-blue-500 rounded hover:bg-blue-600"
+                    className="px-4 py-2 text-sm text-white bg-indigo-500 rounded hover:bg-indigo-600"
                   >
                     Create
                   </button>

@@ -35,22 +35,22 @@ interface BadCaseStats {
 
 const STATUS_CONFIG = {
   pending: { label: '待审核', color: 'text-yellow-600', icon: Clock },
-  verified: { label: '已验证', color: 'text-blue-600', icon: AlertCircle },
+  verified: { label: '已验证', color: 'text-indigo-600', icon: AlertCircle },
   fixed: { label: '已修复', color: 'text-green-600', icon: CheckCircle },
   flaky: { label: '偶发', color: 'text-gray-600', icon: XCircle },
   ignored: { label: '已忽略', color: 'text-gray-400', icon: XCircle },
 };
 
 const SEVERITY_CONFIG = {
-  high: { label: '高', color: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400' },
-  medium: { label: '中', color: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400' },
-  low: { label: '低', color: 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-400' },
+  high: { label: '高', color: 'bg-red-100 text-red-800' },
+  medium: { label: '中', color: 'bg-yellow-100 text-yellow-800' },
+  low: { label: '低', color: 'bg-gray-100 text-gray-800' },
 };
 
 const SOURCE_CONFIG = {
-  user_feedback: { label: '用户反馈', color: 'bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400' },
-  auto_detect: { label: '自动检测', color: 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400' },
-  eval: { label: '评测失败', color: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400' },
+  user_feedback: { label: '用户反馈', color: 'bg-purple-100 text-purple-800' },
+  auto_detect: { label: '自动检测', color: 'bg-indigo-100 text-indigo-800' },
+  eval: { label: '评测失败', color: 'bg-red-100 text-red-800' },
 };
 
 export default function BadCasesPage() {
@@ -110,33 +110,33 @@ export default function BadCasesPage() {
   return (
     <PageLayout sidebarContent={null}>
       <div className="p-6 space-y-6">
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Bad Case 墙</h1>
+        <h1 className="text-2xl font-bold text-gray-900">Bad Case 墙</h1>
         {/* 统计卡片 */}
         {stats && (
           <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4 border border-gray-200 dark:border-gray-700">
-              <div className="text-2xl font-bold text-gray-900 dark:text-gray-100">{stats.total}</div>
-              <div className="text-sm text-gray-500 dark:text-gray-400">总计</div>
+            <div className="bg-white rounded-lg p-4 border border-gray-200">
+              <div className="text-2xl font-bold text-gray-900">{stats.total}</div>
+              <div className="text-sm text-gray-500">总计</div>
             </div>
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4 border border-yellow-200 dark:border-yellow-800">
+            <div className="bg-white rounded-lg p-4 border border-yellow-200">
               <div className="text-2xl font-bold text-yellow-600">{stats.pending}</div>
-              <div className="text-sm text-gray-500 dark:text-gray-400">待审核</div>
+              <div className="text-sm text-gray-500">待审核</div>
             </div>
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4 border border-blue-200 dark:border-blue-800">
-              <div className="text-2xl font-bold text-blue-600">{stats.verified}</div>
-              <div className="text-sm text-gray-500 dark:text-gray-400">已验证</div>
+            <div className="bg-white rounded-lg p-4 border border-indigo-200">
+              <div className="text-2xl font-bold text-indigo-600">{stats.verified}</div>
+              <div className="text-sm text-gray-500">已验证</div>
             </div>
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4 border border-green-200 dark:border-green-800">
+            <div className="bg-white rounded-lg p-4 border border-green-200">
               <div className="text-2xl font-bold text-green-600">{stats.fixed}</div>
-              <div className="text-sm text-gray-500 dark:text-gray-400">已修复</div>
+              <div className="text-sm text-gray-500">已修复</div>
             </div>
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4 border border-gray-200 dark:border-gray-700">
+            <div className="bg-white rounded-lg p-4 border border-gray-200">
               <div className="text-2xl font-bold text-gray-600">{stats.flaky}</div>
-              <div className="text-sm text-gray-500 dark:text-gray-400">偶发</div>
+              <div className="text-sm text-gray-500">偶发</div>
             </div>
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4 border border-gray-200 dark:border-gray-700">
+            <div className="bg-white rounded-lg p-4 border border-gray-200">
               <div className="text-2xl font-bold text-gray-400">{stats.ignored}</div>
-              <div className="text-sm text-gray-500 dark:text-gray-400">已忽略</div>
+              <div className="text-sm text-gray-500">已忽略</div>
             </div>
           </div>
         )}
@@ -148,8 +148,8 @@ export default function BadCasesPage() {
               onClick={() => setFilter('all')}
               className={`px-3 py-1.5 text-sm rounded-md ${
                 filter === 'all'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300'
+                  ? 'bg-indigo-600 text-white'
+                  : 'bg-gray-100 text-gray-700'
               }`}
             >
               全部
@@ -159,7 +159,7 @@ export default function BadCasesPage() {
               className={`px-3 py-1.5 text-sm rounded-md ${
                 filter === 'user_feedback'
                   ? 'bg-purple-600 text-white'
-                  : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300'
+                  : 'bg-gray-100 text-gray-700'
               }`}
             >
               用户反馈
@@ -168,8 +168,8 @@ export default function BadCasesPage() {
               onClick={() => setFilter('auto_detect')}
               className={`px-3 py-1.5 text-sm rounded-md ${
                 filter === 'auto_detect'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300'
+                  ? 'bg-indigo-600 text-white'
+                  : 'bg-gray-100 text-gray-700'
               }`}
             >
               自动检测
@@ -179,7 +179,7 @@ export default function BadCasesPage() {
               className={`px-3 py-1.5 text-sm rounded-md ${
                 filter === 'eval'
                   ? 'bg-red-600 text-white'
-                  : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300'
+                  : 'bg-gray-100 text-gray-700'
               }`}
             >
               评测失败
@@ -190,7 +190,7 @@ export default function BadCasesPage() {
             <select
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value)}
-              className="px-3 py-1.5 text-sm rounded-md bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300"
+              className="px-3 py-1.5 text-sm rounded-md bg-gray-100 text-gray-700"
             >
               <option value="all">所有状态</option>
               <option value="pending">待审核</option>
@@ -202,7 +202,7 @@ export default function BadCasesPage() {
             
             <button
               onClick={loadBadCases}
-              className="p-1.5 rounded-md bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600"
+              className="p-1.5 rounded-md bg-gray-100 text-gray-700 hover:bg-gray-200"
               title="刷新"
             >
               <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
@@ -221,7 +221,7 @@ export default function BadCasesPage() {
             return (
               <div
                 key={badCase.id}
-                className="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4"
+                className="bg-white rounded-lg border border-gray-200 p-4"
               >
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
@@ -236,13 +236,13 @@ export default function BadCasesPage() {
                       <span className={`px-2 py-0.5 text-xs rounded-full ${sourceColor}`}>
                         {SOURCE_CONFIG[badCase.source as keyof typeof SOURCE_CONFIG]?.label}
                       </span>
-                      <span className="text-xs text-gray-500 dark:text-gray-400">
+                      <span className="text-xs text-gray-500">
                         {formatTime(badCase.created_at)}
                       </span>
                     </div>
                     
-                    <div className="text-sm text-gray-900 dark:text-gray-100 mb-1">
-                      <span className="font-mono text-xs bg-gray-100 dark:bg-gray-700 px-1.5 py-0.5 rounded">
+                    <div className="text-sm text-gray-900 mb-1">
+                      <span className="font-mono text-xs bg-gray-100 px-1.5 py-0.5 rounded">
                         {badCase.session_id.slice(0, 8)}
                       </span>
                       {badCase.turn_number && (
@@ -253,12 +253,12 @@ export default function BadCasesPage() {
                       )}
                     </div>
                     
-                    <div className="text-sm text-gray-700 dark:text-gray-300">
+                    <div className="text-sm text-gray-700">
                       {badCase.reason}
                     </div>
                     
                     {badCase.comment && (
-                      <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      <div className="text-xs text-gray-500 mt-1">
                         {badCase.comment}
                       </div>
                     )}
@@ -270,13 +270,13 @@ export default function BadCasesPage() {
                       <>
                         <button
                           onClick={() => handleUpdateStatus(badCase.id, 'verified')}
-                          className="px-2 py-1 text-xs rounded bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 hover:bg-green-200 dark:hover:bg-green-900/50"
+                          className="px-2 py-1 text-xs rounded bg-green-100 text-green-700 hover:bg-green-200"
                         >
                           确认
                         </button>
                         <button
                           onClick={() => handleUpdateStatus(badCase.id, 'ignored')}
-                          className="px-2 py-1 text-xs rounded bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600"
+                          className="px-2 py-1 text-xs rounded bg-gray-100 text-gray-700 hover:bg-gray-200"
                         >
                           忽略
                         </button>
@@ -286,7 +286,7 @@ export default function BadCasesPage() {
                     {badCase.status === 'verified' && (
                       <button
                         onClick={() => handleUpdateStatus(badCase.id, 'fixed')}
-                        className="px-2 py-1 text-xs rounded bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 hover:bg-green-200 dark:hover:bg-green-900/50"
+                        className="px-2 py-1 text-xs rounded bg-green-100 text-green-700 hover:bg-green-200"
                       >
                         标记已修复
                       </button>
@@ -294,7 +294,7 @@ export default function BadCasesPage() {
                     
                     <a
                       href={`/sessions/${badCase.session_id}`}
-                      className="px-2 py-1 text-xs rounded bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600 flex items-center gap-1"
+                      className="px-2 py-1 text-xs rounded bg-gray-100 text-gray-700 hover:bg-gray-200 flex items-center gap-1"
                       title="查看 Session"
                     >
                       <ExternalLink className="w-3 h-3" />
@@ -307,7 +307,7 @@ export default function BadCasesPage() {
           })}
           
           {badCases.length === 0 && !loading && (
-            <div className="text-center py-12 text-gray-500 dark:text-gray-400">
+            <div className="text-center py-12 text-gray-500">
               暂无 bad case
             </div>
           )}

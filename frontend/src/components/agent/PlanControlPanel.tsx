@@ -145,7 +145,7 @@ export function PlanControlPanel({ sessionId, planSlug, permissionMode }: PlanCo
   if (!strategies) {
     return (
       <div className="p-4 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500" />
+        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-indigo-500" />
       </div>
     );
   }
@@ -306,7 +306,7 @@ export function PlanControlPanel({ sessionId, planSlug, permissionMode }: PlanCo
             )}
           </div>
           <div className="px-3 py-2 bg-gray-50 border-b border-gray-200">
-            <span className="text-xs text-gray-500">📋 计划已归档: {planSlug}</span>
+            <span className="text-xs text-gray-500">计划已归档: {planSlug}</span>
           </div>
           <div className="border-b border-gray-200">
             <button
@@ -328,7 +328,7 @@ export function PlanControlPanel({ sessionId, planSlug, permissionMode }: PlanCo
                           className="w-full flex items-center gap-2 px-2 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
                         >
                           {expandedArtifact === filename ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-                          <FileText className="w-3 h-3 text-blue-500" />
+                          <FileText className="w-3 h-3 text-indigo-500" />
                           {filename}
                           <span className="text-gray-400 ml-auto text-[10px]">{content.length} chars</span>
                         </button>
@@ -441,12 +441,12 @@ export function PlanControlPanel({ sessionId, planSlug, permissionMode }: PlanCo
       <div className="px-3 py-2 bg-green-50 border-b border-green-100">
         <div className="flex items-center gap-2 mb-2">
           <span className="text-xs font-medium text-green-800">
-            📋 Plan: {progress.slug}
+            Plan: {progress.slug}
           </span>
           <span className={`text-xs px-1.5 py-0.5 rounded ${
             isCompleted ? 'bg-green-200 text-green-800' :
             isPaused ? 'bg-yellow-200 text-yellow-800' :
-            'bg-blue-200 text-blue-800'
+            'bg-indigo-200 text-indigo-800'
           }`}>
             {progress.status}
           </span>
@@ -520,7 +520,7 @@ export function PlanControlPanel({ sessionId, planSlug, permissionMode }: PlanCo
                 <span className="text-gray-500 w-16">进度:</span>
                 <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
                   <div
-                    className="h-full bg-blue-500 transition-all duration-300"
+                    className="h-full bg-indigo-500 transition-all duration-300"
                     style={{ width: `${progressPercent}%` }}
                   />
                 </div>
@@ -551,7 +551,7 @@ export function PlanControlPanel({ sessionId, planSlug, permissionMode }: PlanCo
                     <XCircle className="w-4 h-4 text-red-500 flex-shrink-0" />
                   )}
                   {task.status === 'in-progress' && (
-                    <Clock className="w-4 h-4 text-blue-500 animate-pulse flex-shrink-0" />
+                    <Clock className="w-4 h-4 text-indigo-500 animate-pulse flex-shrink-0" />
                   )}
                   {task.status === 'pending' && (
                     <Clock className="w-4 h-4 text-gray-400 flex-shrink-0" />
@@ -562,7 +562,7 @@ export function PlanControlPanel({ sessionId, planSlug, permissionMode }: PlanCo
                   <span className={`flex-1 ${
                     task.status === 'done' ? 'text-green-700 line-through' :
                     task.status === 'failed' ? 'text-red-700' :
-                    task.status === 'in-progress' ? 'text-blue-700 font-medium' :
+                    task.status === 'in-progress' ? 'text-indigo-700 font-medium' :
                     task.status === 'skipped' ? 'text-gray-400 line-through' :
                     'text-gray-600'
                   }`}>
@@ -619,7 +619,7 @@ export function PlanControlPanel({ sessionId, planSlug, permissionMode }: PlanCo
                       ) : (
                         <ChevronRight className="w-3 h-3" />
                       )}
-                      <FileText className="w-3 h-3 text-blue-500" />
+                      <FileText className="w-3 h-3 text-indigo-500" />
                       {filename}
                       <span className="text-gray-400 ml-auto text-[10px]">{content.length} chars</span>
                     </button>
@@ -654,7 +654,7 @@ export function PlanControlPanel({ sessionId, planSlug, permissionMode }: PlanCo
                     <span className={`px-1 py-0.5 rounded text-[10px] font-medium ${
                       entry.status === 'done' ? 'bg-green-100 text-green-700' :
                       entry.status === 'failed' ? 'bg-red-100 text-red-700' :
-                      entry.status === 'started' ? 'bg-blue-100 text-blue-700' :
+                      entry.status === 'started' ? 'bg-indigo-100 text-indigo-700' :
                       'bg-gray-100 text-gray-700'
                     }`}>
                       {entry.status}

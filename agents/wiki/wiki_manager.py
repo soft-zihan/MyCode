@@ -6,6 +6,8 @@ Wiki 是项目级持久记忆，存储在 .mycode/wiki/ 下，独立 git 仓库�
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import logging
 import re
 import subprocess
 from datetime import datetime, timezone
@@ -15,6 +17,7 @@ from typing import Any
 from agents.core.workspace import get_workspace
 from agents.memory.frontmatter import parse_frontmatter, format_frontmatter
 
+logger = logging.getLogger(__name__)
 
 VALID_WIKI_TYPES = {
     "knowledge",
@@ -40,9 +43,6 @@ def _slugify(text: str) -> str:
     s = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "_", text.lower())
     s = s.strip("_")
     return s[:40] or hashlib.md5(text.encode()).hexdigest()[:8]
-
-
-import hashlib
 
 
 class WikiEntry:
@@ -72,7 +72,7 @@ def write_wiki_entry(
     description: str = "",
     extra_meta: dict[str, str] | None = None,
     sub_dir: str = "",
-    session_id: str = "",
+    skip_if_unchanged: bool = False,
 ) -> Path:
     from agents.observability.trace import trace_span
     from agents.wiki.evolution.normalise_meta import infer_facets
@@ -95,6 +95,28 @@ def write_wiki_entry(
         slug = _slugify(name)
         filename = f"{slug}.md"
         filepath = type_dir / filename
+        existed = filepath.exists()
+
+        if skip_if_unchanged and existed:
+            try:
+                existing = parse_frontmatter(filepath.read_text())
+                existing_body = existing.body.strip()
+                existing_meta = existing.meta or {}
+                extra_meta_changed = any(
+                    str(existing_meta.get(key, "")) != str(value)
+                    for key, value in (extra_meta or {}).items()
+                )
+                if existing_body == str(content).strip() and not extra_meta_changed:
+                    if span:
+                        span.set_metadata("skipped", "unchanged")
+                    return filepath
+            except Exception as exc:
+                logger.warning(
+                    "[wiki_write] failed to compare existing entry %s: %s: %s",
+                    filepath.name,
+                    type(exc).__name__,
+                    exc,
+                )
 
         raw_meta: dict[str, str] = {
             "name": name,
@@ -107,17 +129,6 @@ def write_wiki_entry(
             raw_meta.update(extra_meta)
 
         meta = infer_facets(raw_meta, wiki_type)
-
-        # session_notes 类型每次写新文件（带时间戳）
-        if wiki_type == "session_notes":
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            filename = f"session_{session_id}_{timestamp}.md"
-            filepath = type_dir / filename
-        else:
-            slug = _slugify(name)
-            filename = f"{slug}.md"
-            filepath = type_dir / filename
-
         filepath.write_text(format_frontmatter(meta, content))
 
         try:
@@ -137,11 +148,17 @@ def write_wiki_entry(
                 snap = asyncio.run(svc.capture(session_id="wiki", label=f"wiki:{wiki_type}/{filename}"))
             meta["checkpoint_id"] = snap.id
             filepath.write_text(format_frontmatter(meta, content))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "[wiki_write] snapshot capture failed for %s/%s: %s: %s",
+                wiki_type,
+                filename,
+                type(exc).__name__,
+                exc,
+            )
 
         record_wiki_change(str(filepath.relative_to(wiki_dir)))
-        _git_commit(f"wiki: add {wiki_type}/{filename}")
+        _git_commit(f"wiki: {'update' if existed else 'add'} {wiki_type}/{filename}")
         update_wiki_index()
         if span:
             span.set_metadata("filepath", str(filepath.relative_to(wiki_dir)))
@@ -608,8 +625,8 @@ def _git_commit(message: str) -> None:
             ["git", "commit", "-m", message, "--allow-empty"],
             cwd=wiki_dir, capture_output=True, timeout=10,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("[wiki_git] commit failed: %s: %s", type(exc).__name__, exc)
 
 
 def init_wiki_git() -> None:
@@ -624,8 +641,8 @@ def init_wiki_git() -> None:
             ["git", "commit", "-m", "wiki: init", "--allow-empty"],
             cwd=wiki_dir, capture_output=True, timeout=10,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("[wiki_git] init failed: %s: %s", type(exc).__name__, exc)
 
 
 # ── System prompt 段 ──
@@ -650,7 +667,8 @@ You have a persistent, file-based wiki system at `{wiki_dir}`.
 ## Wiki Categories
 
 ### 1. Session Notes (session_notes/)
-- Temporary notes from each session, written incrementally
+- Each session has one stable note file: `session_{{session_id}}.md`
+- Session folding merges previous notes with newly folded context and updates the file in place
 - Searchable via `search_history` tool to find past session context
 - Deleted when the corresponding session is deleted
 - Use `list_session_notes` and `read_session_notes` tools to browse and read details

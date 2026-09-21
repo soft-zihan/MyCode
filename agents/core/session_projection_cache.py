@@ -283,25 +283,23 @@ def _init_context_used() -> int:
 
 
 def _apply_context_used(state: int, event: dict[str, Any]) -> int:
-    t = event.get("type")
-    if t == "stats":
-        return event.get("last_input_token_count", state)
-    if t in ("context/compacted", "tool_folded", "session_folded"):
-        return event.get("last_input_token_count", state)
-    return state
+    if event.get("type") != "stats":
+        return state
+    estimated = event.get("estimated_context_tokens")
+    if estimated is not None:
+        return int(estimated)
+    return int(event.get("last_total_token_count", state))
 
 
 def _init_context_total() -> int:
-    return 128000
+    from agents.config import DEFAULT_CONTEXT_WINDOW
+    return DEFAULT_CONTEXT_WINDOW
 
 
 def _apply_context_total(state: int, event: dict[str, Any]) -> int:
-    t = event.get("type")
-    if t == "stats":
-        return event.get("context_window", state)
-    if t in ("context/compacted", "tool_folded", "session_folded"):
-        return event.get("context_window", state)
-    return state
+    if event.get("type") != "stats":
+        return state
+    return int(event.get("effective_window", state))
 
 
 def _init_plan_slug() -> str | None:
@@ -318,8 +316,8 @@ register_projection("title", _init_title, _apply_title, state_version=1)
 register_projection("updated_at", _init_updated_at, _apply_updated_at, state_version=1)
 register_projection("cwd", _init_cwd, _apply_cwd, state_version=1)
 register_projection("running", _init_running, _apply_running, state_version=1)
-register_projection("context_used", _init_context_used, _apply_context_used, state_version=1)
-register_projection("context_total", _init_context_total, _apply_context_total, state_version=1)
+register_projection("context_used", _init_context_used, _apply_context_used, state_version=2)
+register_projection("context_total", _init_context_total, _apply_context_total, state_version=2)
 register_projection("plan_slug", _init_plan_slug, _apply_plan_slug, state_version=1)
 
 

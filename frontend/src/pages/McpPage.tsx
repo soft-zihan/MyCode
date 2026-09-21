@@ -149,7 +149,7 @@ export default function McpPage() {
                 <div
                   key={server.name}
                   className={`px-3 py-2 cursor-pointer hover:bg-gray-50 ${isDisabled ? 'opacity-50' : ''} ${
-                    expandedServer === server.name ? 'bg-blue-50 border-l-2 border-blue-500' : ''
+                    expandedServer === server.name ? 'bg-indigo-50 border-l-2 border-indigo-500' : ''
                   }`}
                   onClick={() => setExpandedServer(expandedServer === server.name ? null : server.name)}
                 >
@@ -190,7 +190,7 @@ export default function McpPage() {
           </div>
           <button
             onClick={() => { loadServers(); loadTools(); }}
-            className="flex items-center px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
+            className="flex items-center px-4 py-2 bg-indigo-500 text-white rounded hover:bg-indigo-600 transition-colors"
           >
             <RefreshCw className="w-4 h-4 mr-2" />
             Refresh
@@ -209,7 +209,7 @@ export default function McpPage() {
             </div>
             <button
               onClick={() => setExpandedNative(!expandedNative)}
-              className="text-sm text-blue-600 hover:text-blue-700"
+              className="text-sm text-indigo-600 hover:text-indigo-700"
             >
               {expandedNative ? '▼ Collapse' : '▶ Expand'}
             </button>
@@ -292,7 +292,7 @@ export default function McpPage() {
                         {tools && (
                           <button
                             onClick={() => setExpandedServer(isExpanded ? null : server.name)}
-                            className="text-sm text-blue-600 hover:text-blue-700"
+                            className="text-sm text-indigo-600 hover:text-indigo-700"
                           >
                             {tools.tool_count} tools {isExpanded ? '▼' : '▶'}
                           </button>
@@ -311,7 +311,7 @@ export default function McpPage() {
                             <div className="mt-1 space-y-1">
                               {Object.entries(server.env).map(([key, value]) => (
                                 <div key={key} className="text-sm font-mono bg-gray-50 rounded px-3 py-1.5">
-                                  <span className="text-blue-600">{key}</span>
+                                  <span className="text-indigo-600">{key}</span>
                                   <span className="text-gray-400">=</span>
                                   <span className="text-gray-700">{value}</span>
                                 </div>
@@ -328,7 +328,7 @@ export default function McpPage() {
                             <div key={tool.name} className="bg-gray-50 rounded p-3 border border-gray-200">
                               <div className="flex items-start justify-between mb-2">
                                 <div className="flex items-center gap-2">
-                                  <Wrench className="w-4 h-4 text-blue-500" />
+                                  <Wrench className="w-4 h-4 text-indigo-500" />
                                   <span className="font-mono font-semibold text-gray-900">{tool.name}</span>
                                 </div>
                               </div>

@@ -1,14 +1,13 @@
 """ContextCompressor — 两级上下文压缩管线。
 
 职责：
-- 策略 A：工具调用折叠（上下文 > 80% 或空闲 > 5 分钟）
-- 策略 B：会话折叠（工具折叠后仍 >= 40%）
+- 策略 A：工具调用折叠（上下文利用率超过配置阈值或空闲超时）
+- 策略 B：会话折叠（工具折叠后仍高于目标水位）
 
-折叠通过追加 events_hidden 事件实现，原始内容保留在事件中。
+折叠通过追加 events_hidden 事件实现，原始内容保留在事件日志中。
 摘要作为独立事件（tool_folded / session_folded）插入。
 
-会话折叠时，一次 side query 同时编译任务笔记和项目知识。
-任务笔记立即注入新上下文，项目知识异步写入 wiki。
+会话折叠会合并上一次会话笔记，避免重复生成浅层摘要。
 """
 
 from __future__ import annotations
@@ -16,32 +15,54 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Awaitable
 
+from .context_events import (
+    build_groups_transcript,
+    build_message_groups,
+    collect_hidden_seqs,
+    estimate_visible_message_tokens,
+    find_session_fold_cut,
+    find_tool_fold_indices,
+    latest_session_notes,
+)
 from .session_memory import (
+    clip_text,
     fallback_folded_memory,
     format_folded_memory,
-    FOLD_SESSION_MEMORY_SYSTEM,
 )
 from .session import save_folded_session_memory
-from agents.logging import print_info
 
 logger = logging.getLogger(__name__)
 
-TOOL_FOLD_THRESHOLD = 0.80
 SESSION_FOLD_THRESHOLD = 0.40
 KEEP_RECENT_TOOL_ROUNDS = 3
 KEEP_RECENT_DIALOG_ROUNDS = 2
+KEEP_RECENT_TRAJECTORY_TOOL_ROUNDS = 5
 IDLE_TIMEOUT_S = 5 * 60
-SINGLE_RESULT_CHAR_LIMIT = 30000
+TOOL_ABSTRACT_CHAR_LIMIT = 1200
+TOOL_ABSTRACT_INPUT_CHAR_LIMIT = 8000
+TOOL_ABSTRACT_BATCH_CHAR_LIMIT = 50000
+ASSISTANT_TEXT_CHAR_LIMIT = 800
 
 SideQueryFn = Callable[[str, str], Awaitable[str]]
 
-# 任务笔记和项目知识编译的 system prompt - 从文件加载
+TOOL_ABSTRACT_SYSTEM = """You compress old tool results for an AI coding agent.
+Return only valid JSON:
+{"abstracts": [{"call_id": "...", "abstract": "..."}]}
+
+Rules:
+- Preserve file paths, commands, important outputs, test results, errors, decisions, and unresolved issues.
+- Keep each abstract concise and under 1200 characters.
+- Do not invent details that are absent from the tool result.
+"""
+
+# 会话笔记和项目知识编译的 system prompt - 从文件加载
 _PROMPTS_DIR = Path(__file__).parent.parent / "prompts" / "side_query"
-COMPILE_TASK_NOTES_AND_KNOWLEDGE_SYSTEM = (_PROMPTS_DIR / "compile_session.txt").read_text(encoding="utf-8")
+COMPILE_SESSION_NOTES_AND_KNOWLEDGE_SYSTEM = (_PROMPTS_DIR / "compile_session.txt").read_text(encoding="utf-8")
 
 
 def _sanitize_for_utf8(value: Any) -> Any:
@@ -55,12 +76,7 @@ def _sanitize_for_utf8(value: Any) -> Any:
 
 
 def _count_hidden_seqs(session: Any) -> int:
-    """统计当前 events_hidden 累计隐藏的 seq 数。"""
-    hidden: set = set()
-    for event in session._log:
-        if event.get("type") == "events_hidden":
-            hidden.update(event.get("hidden_seqs", []))
-    return len(hidden)
+    return len(collect_hidden_seqs(session.events))
 
 
 def _finish_compaction_span(
@@ -75,7 +91,7 @@ def _finish_compaction_span(
         return
     hidden_after = _count_hidden_seqs(session)
     seqs_hidden = hidden_after - hidden_before
-    total = len(session._log)
+    total = len(session.events)
     metadata: dict[str, Any] = {
         "folded": folded,
         "session_fold": session_folded,
@@ -91,59 +107,59 @@ class ContextCompressor:
     def __init__(
         self,
         *,
-        tool_fold_threshold: float = TOOL_FOLD_THRESHOLD,
+        effective_window: int,
+        tool_fold_threshold: float,
         session_fold_threshold: float = SESSION_FOLD_THRESHOLD,
         keep_recent_tool_rounds: int = KEEP_RECENT_TOOL_ROUNDS,
         keep_recent_dialog_rounds: int = KEEP_RECENT_DIALOG_ROUNDS,
+        keep_recent_trajectory_tool_rounds: int = KEEP_RECENT_TRAJECTORY_TOOL_ROUNDS,
         idle_timeout_seconds: int = IDLE_TIMEOUT_S,
-        single_result_char_limit: int = SINGLE_RESULT_CHAR_LIMIT,
-        effective_window: int = 108800,
+        tool_abstract_char_limit: int = TOOL_ABSTRACT_CHAR_LIMIT,
+        tool_abstract_input_char_limit: int = TOOL_ABSTRACT_INPUT_CHAR_LIMIT,
+        tool_abstract_batch_char_limit: int = TOOL_ABSTRACT_BATCH_CHAR_LIMIT,
+        assistant_text_char_limit: int = ASSISTANT_TEXT_CHAR_LIMIT,
     ) -> None:
         self.tool_fold_threshold = tool_fold_threshold
         self.session_fold_threshold = session_fold_threshold
         self.keep_recent_tool_rounds = keep_recent_tool_rounds
         self.keep_recent_dialog_rounds = keep_recent_dialog_rounds
+        self.keep_recent_trajectory_tool_rounds = keep_recent_trajectory_tool_rounds
         self.idle_timeout_seconds = idle_timeout_seconds
-        self.single_result_char_limit = single_result_char_limit
+        self.tool_abstract_char_limit = tool_abstract_char_limit
+        self.tool_abstract_input_char_limit = tool_abstract_input_char_limit
+        self.tool_abstract_batch_char_limit = tool_abstract_batch_char_limit
+        self.assistant_text_char_limit = assistant_text_char_limit
         self.effective_window = effective_window
 
         self._fold_last_time: float = 0.0
         self._fold_count: int = 0
         self._tool_fold_count: int = 0
         self._session_fold_count: int = 0
+        self._background_tasks: set[asyncio.Task[Any]] = set()
 
     async def run_pipeline(
         self,
         session: Any,
-        last_input_token_count: int,
+        current_token_count: int,
         last_api_call_time: float,
         side_query: SideQueryFn | None,
         session_id: str,
         folded_memories: list[dict],
     ) -> bool:
-        """主入口：根据条件选择压缩策略。
-        
-        新流程：
-        1. >80% 或空闲 >5 分钟：开始压缩
-        2. 先做工具折叠（可恢复）
-        3. 估算折叠后 token 数，<40% 则停止
-        4. 否则做会话折叠（side query 同时编译任务笔记和项目知识）
-        
-        Returns:
-            bool: 是否执行了压缩
-        """
-        utilization = last_input_token_count / self.effective_window if self.effective_window else 0
+        current_token_count = max(0, int(current_token_count))
+        utilization = current_token_count / self.effective_window if self.effective_window else 0
         idle_seconds = time.time() - last_api_call_time if last_api_call_time else 0
 
         folded = False
-
-        # 触发条件：>80% 或空闲 >5 分钟
         should_compress = (
             utilization > self.tool_fold_threshold
             or idle_seconds > self.idle_timeout_seconds
         )
 
-        print(f"[compressor] check: utilization={utilization:.2%}, idle={idle_seconds:.0f}s, threshold={self.tool_fold_threshold:.0%}, should_compress={should_compress}")
+        print(
+            f"[compressor] check: tokens={current_token_count}, utilization={utilization:.2%}, "
+            f"idle={idle_seconds:.0f}s, threshold={self.tool_fold_threshold:.0%}, should_compress={should_compress}"
+        )
 
         if not should_compress:
             return False
@@ -155,29 +171,36 @@ class ContextCompressor:
             "compact",
             metadata={
                 "trigger": trigger,
+                "token_count_before": current_token_count,
                 "utilization_before": round(utilization, 3),
                 "idle_seconds": round(idle_seconds, 1),
+                "tool_fold_threshold": self.tool_fold_threshold,
+                "session_fold_threshold": self.session_fold_threshold,
             },
         ) as span:
             hidden_before = _count_hidden_seqs(session)
+            message_tokens_before = estimate_visible_message_tokens(session)
 
-            # 第一步：工具折叠（可恢复）
             folded = await self._fold_tool_results(session, side_query)
             if span:
                 span.add_metadata(tool_fold=folded)
 
-            # 第二步：估算折叠后 token 数，<40% 则停止（跳过会话折叠）
-            if folded and side_query:
-                estimated_utilization = self._estimate_utilization_after_tool_fold(
-                    session, utilization
+            if folded:
+                estimated_tokens = self._estimate_tokens_after_fold(
+                    current_token_count,
+                    message_tokens_before,
+                    session,
                 )
+                estimated_utilization = estimated_tokens / self.effective_window if self.effective_window else 0
                 if span:
-                    span.add_metadata(utilization_after_tool_fold=round(estimated_utilization, 3))
+                    span.add_metadata(
+                        token_count_after_tool_fold=estimated_tokens,
+                        utilization_after_tool_fold=round(estimated_utilization, 3),
+                    )
                 if estimated_utilization < self.session_fold_threshold:
                     _finish_compaction_span(span, session, hidden_before, folded, False)
                     return folded
 
-            # 第三步：会话折叠（side query 同时编译任务笔记和项目知识）
             session_folded = await self._fold_session(
                 session, side_query, session_id, folded_memories
             )
@@ -188,42 +211,15 @@ class ContextCompressor:
 
         return folded
 
-    def _estimate_utilization_after_tool_fold(
-        self, session: Any, current_utilization: float
-    ) -> float:
-        """估算工具折叠后的 token 利用率。
-        
-        简化启发式：假设工具结果占总 token 的比例与工具结果消息占比成正比。
-        """
-        # 收集所有隐藏的 seq
-        hidden_seqs = set()
-        for event in session._log:
-            if event.get("type") == "events_hidden":
-                hidden_seqs.update(event.get("hidden_seqs", []))
-        
-        # 统计可见消息中工具结果的比例
-        tool_chars = 0
-        total_chars = 0
-        for event in session._log:
-            seq = event.get("seq")
-            if seq in hidden_seqs:
-                continue
-            t = event.get("type")
-            if t in ("user_message", "assistant_message", "tool_result_msg"):
-                content = event.get("content", "")
-                content_len = len(content) if isinstance(content, str) else len(str(content))
-                total_chars += content_len
-                if t == "tool_result_msg":
-                    tool_chars += content_len
-        
-        if total_chars == 0:
-            return current_utilization
-        
-        # 假设工具结果占总 token 的比例与字符比例成正比
-        tool_ratio = tool_chars / total_chars
-        # 估算折叠后的利用率
-        estimated_utilization = current_utilization * (1 - tool_ratio * 0.7)
-        return estimated_utilization
+    def _estimate_tokens_after_fold(
+        self,
+        current_token_count: int,
+        message_tokens_before: int,
+        session: Any,
+    ) -> int:
+        message_tokens_after = estimate_visible_message_tokens(session)
+        fixed_tokens = max(0, current_token_count - message_tokens_before)
+        return fixed_tokens + message_tokens_after
 
     async def compact_manual(
         self,
@@ -233,7 +229,7 @@ class ContextCompressor:
         folded_memories: list[dict],
     ) -> bool:
         """手动触发会话折叠。"""
-        if len(session._log) < 4:
+        if len(session.events) < 4:
             return False
 
         from agents.observability.trace import trace_span
@@ -245,70 +241,211 @@ class ContextCompressor:
             return folded
 
     async def _fold_tool_results(self, session: Any, side_query: SideQueryFn | None) -> bool:
-        """策略 A：工具调用折叠。
-        
-        保留最近 N 轮工具调用，更早的追加 events_hidden 事件。
-        摘要写入 tool_folded 事件。长结果直接截断内容。
-        """
-        # 收集所有隐藏的 seq
-        hidden_seqs = set()
-        for event in session._log:
-            if event.get("type") == "events_hidden":
-                hidden_seqs.update(event.get("hidden_seqs", []))
-        
-        # 找到所有可见的工具结果事件
-        tool_events = [
-            e for e in session._log
-            if e.get("type") == "tool_result_msg" and e.get("seq") not in hidden_seqs
-        ]
-        
-        if len(tool_events) <= self.keep_recent_tool_rounds:
+        groups = build_message_groups(session)
+        fold_indices = find_tool_fold_indices(groups, self.keep_recent_tool_rounds)
+        if not fold_indices:
             return False
-        
-        to_fold = tool_events[:-self.keep_recent_tool_rounds]
-        hidden_seqs_to_hide = []
-        abstracts = []
-        
-        for event in to_fold:
-            content = event.get("content", "")
-            call_id = event.get("call_id", "")
-            
-            if len(content) > self.single_result_char_limit:
-                if side_query:
-                    try:
-                        abstract = await side_query(
-                            "Summarize this tool result concisely:",
-                            content[:50000]
-                        )
-                    except Exception:
-                        abstract = None
-                    if not abstract:
-                        keep = (self.single_result_char_limit - 80) // 2
-                        abstract = content[:keep] + "\n[... truncated ...]\n" + content[-keep:]
-                        event["content"] = abstract
-                    else:
-                        event["content"] = abstract
-                else:
-                    keep = (self.single_result_char_limit - 80) // 2
-                    abstract = content[:keep] + "\n[... truncated ...]\n" + content[-keep:]
-                    event["content"] = abstract
-            else:
-                abstract = content
-            
-            hidden_seqs_to_hide.append(event["seq"])
-            abstracts.append({"call_id": call_id, "abstract": abstract})
-        
-        if hidden_seqs_to_hide:
-            session.hide_events(hidden_seqs_to_hide)
-            session.append("tool_folded", {
-                "abstracts": abstracts,
-                "trigger": "auto",
-            })
-            self._tool_fold_count += 1
-            self._record_fold_event()
-            return True
-        
-        return False
+
+        abstracts_by_key: dict[str, dict[str, Any]] = {}
+        assistant_texts_by_seq: dict[int, dict[str, Any]] = {}
+        pending_results: list[dict[str, Any]] = []
+        seqs_to_hide: list[int] = []
+
+        for index in fold_indices:
+            group = groups[index]
+            call_index = self._tool_call_index(group)
+
+            for event in group.events:
+                event_type = event.get("type")
+                seq = event.get("seq")
+                if event_type == "tool_folded":
+                    self._merge_tool_folded_event(
+                        event,
+                        abstracts_by_key,
+                        assistant_texts_by_seq,
+                    )
+                elif event_type == "assistant_message":
+                    text = str(event.get("content") or "").strip()
+                    if text and isinstance(seq, int):
+                        assistant_texts_by_seq[seq] = {
+                            "seq": seq,
+                            "text": clip_text(text, self.assistant_text_char_limit),
+                        }
+                elif event_type == "tool_result_msg":
+                    call_id = str(event.get("call_id") or "")
+                    call = call_index.get(call_id, {})
+                    pending_results.append({
+                        "key": call_id or f"__seq_{seq}",
+                        "seq": seq if isinstance(seq, int) else None,
+                        "call_id": call_id,
+                        "tool_name": call.get("tool_name", ""),
+                        "arguments": call.get("arguments", ""),
+                        "content": str(event.get("content") or ""),
+                    })
+
+            seqs_to_hide.extend(group.seqs)
+
+        seqs_to_hide = list(dict.fromkeys(seqs_to_hide))
+        if pending_results:
+            for abstract in await self._make_tool_abstracts(pending_results, side_query):
+                key = str(abstract.get("call_id") or "") or f"__seq_{abstract.get('seq')}"
+                abstracts_by_key[key] = abstract
+
+        abstracts = self._sort_fold_entries(abstracts_by_key.values())
+        assistant_texts = self._sort_fold_entries(assistant_texts_by_seq.values())
+        if not seqs_to_hide or (not abstracts and not assistant_texts):
+            return False
+
+        session.hide_events(seqs_to_hide)
+        session.append("tool_folded", {
+            "abstracts": abstracts,
+            "assistant_texts": assistant_texts,
+            "trigger": "auto",
+        })
+        self._tool_fold_count += 1
+        self._record_fold_event()
+        return True
+
+    def _merge_tool_folded_event(
+        self,
+        event: dict[str, Any],
+        abstracts_by_key: dict[str, dict[str, Any]],
+        assistant_texts_by_seq: dict[int, dict[str, Any]],
+    ) -> None:
+        for abstract in event.get("abstracts", []):
+            if not isinstance(abstract, dict):
+                continue
+            call_id = str(abstract.get("call_id") or "")
+            key = call_id or f"__seq_{abstract.get('seq')}"
+            abstracts_by_key[key] = abstract
+
+        for text_entry in event.get("assistant_texts", []):
+            if not isinstance(text_entry, dict):
+                continue
+            seq = text_entry.get("seq")
+            if isinstance(seq, int):
+                assistant_texts_by_seq[seq] = {
+                    "seq": seq,
+                    "text": str(text_entry.get("text") or ""),
+                }
+
+    def _sort_fold_entries(self, entries: Any) -> list[dict[str, Any]]:
+        items = [entry for entry in entries if isinstance(entry, dict)]
+
+        def sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, int, int]:
+            index, entry = item
+            seq = entry.get("seq")
+            if isinstance(seq, int):
+                return (0, seq, index)
+            return (1, index, index)
+
+        return [entry for _, entry in sorted(enumerate(items), key=sort_key)]
+
+    def _tool_call_index(self, group: Any) -> dict[str, dict[str, str]]:
+        index: dict[str, dict[str, str]] = {}
+        for event in group.events:
+            if event.get("type") != "assistant_message":
+                continue
+            for tool_call in event.get("tool_calls") or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                call_id = str(tool_call.get("id") or "")
+                if not call_id:
+                    continue
+                function = tool_call.get("function") or {}
+                index[call_id] = {
+                    "tool_name": str(function.get("name") or ""),
+                    "arguments": str(function.get("arguments") or ""),
+                }
+        return index
+
+    async def _make_tool_abstracts(
+        self,
+        items: list[dict[str, Any]],
+        side_query: SideQueryFn | None,
+    ) -> list[dict[str, Any]]:
+        abstracts: list[dict[str, Any]] = []
+        candidates: list[dict[str, Any]] = []
+
+        for item in items:
+            content = str(item.get("content") or "")
+            abstract = {
+                "seq": item.get("seq"),
+                "call_id": item.get("call_id", ""),
+                "tool_name": item.get("tool_name", ""),
+                "arguments": clip_text(str(item.get("arguments") or ""), 500),
+                "abstract": clip_text(content, self.tool_abstract_char_limit),
+            }
+            abstracts.append(abstract)
+            if len(content) > self.tool_abstract_char_limit:
+                candidates.append({
+                    "call_id": abstract["call_id"] or f"__seq_{abstract['seq']}",
+                    "tool_name": abstract["tool_name"],
+                    "arguments": abstract["arguments"],
+                    "content": clip_text(content, self.tool_abstract_input_char_limit),
+                })
+
+        if not side_query or not candidates:
+            return abstracts
+
+        candidates.sort(key=lambda candidate: len(candidate["content"]), reverse=True)
+        selected_candidates: list[dict[str, Any]] = []
+        remaining_budget = self.tool_abstract_batch_char_limit
+        for candidate in candidates:
+            if remaining_budget <= 0:
+                break
+            content = candidate["content"]
+            if len(content) > remaining_budget:
+                content = content[:remaining_budget] + "\n[... batch input truncated ...]"
+            selected_candidates.append({**candidate, "content": content})
+            remaining_budget -= len(content)
+
+        try:
+            raw = await side_query(
+                TOOL_ABSTRACT_SYSTEM,
+                "Compress these tool results:\n"
+                + json.dumps(selected_candidates, ensure_ascii=False),
+            )
+            summarized = self._parse_tool_abstracts(raw)
+        except Exception as exc:
+            logger.warning("[tool_fold] batch side query failed: %s: %s", type(exc).__name__, exc)
+            return abstracts
+
+        candidate_keys = {candidate["call_id"] for candidate in selected_candidates}
+        for abstract in abstracts:
+            key = abstract["call_id"] or f"__seq_{abstract['seq']}"
+            text = summarized.get(key)
+            if key in candidate_keys and text:
+                abstract["abstract"] = clip_text(text, self.tool_abstract_char_limit)
+        return abstracts
+
+    def _parse_tool_abstracts(self, raw: str) -> dict[str, str]:
+        text = str(raw or "").strip()
+        fenced = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+        if fenced:
+            text = fenced.group(1).strip()
+        obj = re.search(r"\{[\s\S]*\}", text)
+        if obj:
+            text = obj.group(0).strip()
+
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            logger.warning("[tool_fold] abstract response is not valid JSON: %s", exc)
+            return {}
+
+        if not isinstance(parsed, dict):
+            return {}
+
+        result: dict[str, str] = {}
+        for item in parsed.get("abstracts", []):
+            if not isinstance(item, dict):
+                continue
+            call_id = str(item.get("call_id") or "")
+            abstract = str(item.get("abstract") or "").strip()
+            if call_id and abstract:
+                result[call_id] = abstract
+        return result
 
     async def _fold_session(
         self,
@@ -317,117 +454,130 @@ class ContextCompressor:
         session_id: str,
         folded_memories: list[dict],
     ) -> bool:
-        """策略 B：会话折叠。
-        
-        保留最近 N 轮对话，更早的追加 events_hidden 事件。
-        一次 side query 同时编译任务笔记和项目知识。
-        任务笔记立即注入新上下文，项目知识异步写入 wiki。
-        """
-        # 先做工具折叠
-        await self._fold_tool_results(session, side_query)
-        
-        # 收集所有隐藏的 seq
-        hidden_seqs = set()
-        for event in session._log:
-            if event.get("type") == "events_hidden":
-                hidden_seqs.update(event.get("hidden_seqs", []))
-        
-        # 找到所有可见的对话事件
-        dialog_events = [
-            e for e in session._log
-            if e.get("type") in ("user_message", "assistant_message", "tool_result_msg")
-            and e.get("seq") not in hidden_seqs
-        ]
-        
-        keep_count = self.keep_recent_dialog_rounds * 3
-        if len(dialog_events) <= keep_count:
+        groups = build_message_groups(session)
+        cut_index = find_session_fold_cut(
+            groups,
+            self.keep_recent_dialog_rounds,
+            self.keep_recent_trajectory_tool_rounds,
+        )
+        if cut_index <= 0:
             return False
-        
-        to_fold = dialog_events[:-keep_count]
-        
-        transcript = self._build_transcript(to_fold)
-        if not transcript.strip():
+
+        folded_groups = groups[:cut_index]
+        user_group_count = sum(1 for group in groups if group.is_user)
+        fold_mode = "dialog" if user_group_count > self.keep_recent_dialog_rounds else "trajectory"
+        previous_notes = latest_session_notes(session)
+        transcript_groups = [group for group in folded_groups if group.kind != "session_folded"]
+        transcript = build_groups_transcript(transcript_groups)
+
+        if not transcript.strip() and not previous_notes.strip():
             return False
-        
-        # 一次 side query 同时编译会话笔记和项目知识
+
+        fallback_transcript = transcript
+        if previous_notes:
+            fallback_transcript = (
+                f"Previous session notes:\n{previous_notes}\n\n"
+                f"New conversation transcript:\n{transcript}"
+            )
+
         session_notes = ""
         project_knowledge = ""
         summary = ""
-        
+
         if side_query:
             try:
                 raw = await side_query(
-                    COMPILE_TASK_NOTES_AND_KNOWLEDGE_SYSTEM,
-                    self._build_compile_prompt(transcript)
+                    COMPILE_SESSION_NOTES_AND_KNOWLEDGE_SYSTEM,
+                    self._build_compile_prompt(transcript, previous_notes),
                 )
                 print(f"[side_query] raw response length={len(raw) if raw else 0}")
                 compiled = self._parse_compiled_result(raw)
                 session_notes = compiled.get("session_notes", "")
                 project_knowledge = compiled.get("project_knowledge", "")
-                print(f"[side_query] parsed: session_notes={len(session_notes)}chars, project_knowledge={len(project_knowledge)}chars")
-                
-                # 会话笔记作为摘要注入新上下文
+                print(
+                    f"[side_query] parsed: session_notes={len(session_notes)}chars, "
+                    f"project_knowledge={len(project_knowledge)}chars"
+                )
+
                 if session_notes:
                     summary = self._format_session_notes_as_summary(session_notes)
                 else:
-                    summary = format_folded_memory(fallback_folded_memory(transcript))
+                    summary = format_folded_memory(fallback_folded_memory(fallback_transcript))
             except Exception as e:
-                logger.error(f"[side_query] failed: {type(e).__name__}: {e}")
-                summary = format_folded_memory(fallback_folded_memory(transcript))
+                logger.error("[side_query] failed: %s: %s", type(e).__name__, e)
+                summary = format_folded_memory(fallback_folded_memory(fallback_transcript))
         else:
-            summary = format_folded_memory(fallback_folded_memory(transcript))
-        
-        hidden_seqs_to_hide = [e["seq"] for e in to_fold]
-        session.hide_events(hidden_seqs_to_hide)
-        
+            summary = format_folded_memory(fallback_folded_memory(fallback_transcript))
+
+        seqs_to_hide: list[int] = []
+        for group in folded_groups:
+            if fold_mode == "trajectory" and group.is_user:
+                continue
+            seqs_to_hide.extend(group.seqs)
+        seqs_to_hide = list(dict.fromkeys(seqs_to_hide))
+        if not seqs_to_hide:
+            return False
+
+        session.hide_events(seqs_to_hide)
         session.append("session_folded", {
             "summary": summary,
             "session_notes": session_notes,
             "project_knowledge": project_knowledge,
+            "previous_notes_chars": len(previous_notes),
+            "transcript_chars": len(transcript),
+            "fold_mode": fold_mode,
             "trigger": "auto",
         })
-        
-        # 保存折叠记忆
+
+        record = {
+            "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "trigger": "auto",
+            "fold_mode": fold_mode,
+            "session_id": session_id,
+            "summary": summary,
+            "session_notes": session_notes,
+            "project_knowledge": project_knowledge,
+        }
+        folded_memories.append(record)
         try:
-            record = {
-                "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "trigger": "auto",
-                "session_id": session_id,
-                "summary": summary,
-                "session_notes": session_notes,
-                "project_knowledge": project_knowledge,
-            }
-            folded_memories.append(record)
             await asyncio.to_thread(save_folded_session_memory, session_id, _sanitize_for_utf8(record))
-        except Exception:
-            pass
-        
-        # 异步写入 wiki
+        except Exception as exc:
+            logger.error("[session_fold] failed to persist folded memory: %s: %s", type(exc).__name__, exc)
+
         if session_notes or project_knowledge:
-            # 传播 contextvar 到异步任务
             from agents.core.workspace import _current_workspace
             workspace = _current_workspace.get()
-            asyncio.create_task(
+            task = asyncio.create_task(
                 self._write_wiki_async(session_id, session_notes, project_knowledge, workspace)
             )
-        
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+
         self._session_fold_count += 1
         self._record_fold_event()
         return True
 
-    def _build_compile_prompt(self, transcript: str) -> str:
-        """构建编译会话笔记和项目知识的 prompt。"""
-        return (
-            "Extract session notes and project knowledge from the following conversation history.\n\n"
-            "Conversation transcript:\n"
-            f"{transcript}"
+    def _build_compile_prompt(self, transcript: str, previous_notes: str = "") -> str:
+        sections: list[str] = []
+        if previous_notes.strip():
+            sections.append(
+                "Previous session notes (merge and update them, do not duplicate):\n"
+                f"{clip_text(previous_notes, 20000)}"
+            )
+        sections.append(
+            "New conversation transcript:\n"
+            f"{transcript or '(empty)'}"
         )
+        sections.append(
+            "Return one updated session_notes value that merges the previous notes and the new transcript. "
+            "Keep still-relevant goals, constraints, progress, decisions, failures, and next actions. "
+            "Remove information that has been superseded, completed with no continuing relevance, or proven wrong."
+        )
+        return "\n\n".join(sections)
+
 
     def _parse_compiled_result(self, raw: str) -> dict[str, str]:
-        """解析 side query 返回的 JSON 结果。"""
-        import re
         text = str(raw or "").strip()
-        # 尝试提取 JSON
         fenced = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
         if fenced:
             text = fenced.group(1).strip()
@@ -442,10 +592,9 @@ class ContextCompressor:
                     "session_notes": str(parsed.get("session_notes", "")),
                     "project_knowledge": str(parsed.get("project_knowledge", "")),
                 }
-        except Exception:
-            pass
-        
-        # 如果解析失败，将整个内容作为会话笔记
+        except json.JSONDecodeError as exc:
+            logger.warning("[side_query] compiled result is not valid JSON: %s", exc)
+
         return {
             "session_notes": text,
             "project_knowledge": "",
@@ -470,7 +619,6 @@ class ContextCompressor:
         workspace: Path | None = None,
     ) -> None:
         """异步写入 wiki，写入前预检索避免重复。"""
-        # 设置 contextvar
         if workspace is not None:
             from agents.core.workspace import set_workspace, reset_workspace
             token = set_workspace(workspace)
@@ -487,22 +635,28 @@ class ContextCompressor:
         session_notes: str,
         project_knowledge: str,
     ) -> None:
-        """实际执行 wiki 写入。"""
-        print(f"[wiki_write] start session={session_id} session_notes={len(session_notes)}chars knowledge={len(project_knowledge)}chars")
+        logger.info(
+            "[wiki_write] start session=%s session_notes=%dchars knowledge=%dchars",
+            session_id,
+            len(session_notes),
+            len(project_knowledge),
+        )
         try:
             from agents.wiki.wiki_manager import (
                 write_wiki_entry, preflight_wiki_search, merge_wiki_entry
             )
 
             if session_notes:
-                write_wiki_entry(
+                await asyncio.to_thread(
+                    write_wiki_entry,
                     wiki_type="session_notes",
                     name=f"session_{session_id}",
                     content=session_notes,
                     description=f"Session notes for session {session_id}",
-                    session_id=session_id,
+                    extra_meta={"session_id": session_id},
+                    skip_if_unchanged=True,
                 )
-                print(f"[wiki_write] session_notes written for session={session_id}")
+                logger.info("[wiki_write] session_notes updated for session=%s", session_id)
 
             if project_knowledge:
                 similar = await preflight_wiki_search(project_knowledge, "knowledge")
@@ -510,40 +664,42 @@ class ContextCompressor:
                 if similar:
                     top_entry, top_score = similar[0]
                     if top_score >= 0.85:
-                        merge_wiki_entry(top_entry, project_knowledge, mode="replace")
-                        print(f"[wiki_write] knowledge merged (replace) to {top_entry.rel_path} score={top_score:.2f}")
+                        await asyncio.to_thread(
+                            merge_wiki_entry,
+                            top_entry,
+                            project_knowledge,
+                            mode="replace",
+                        )
+                        logger.info(
+                            "[wiki_write] knowledge merged (replace) to %s score=%.2f",
+                            top_entry.rel_path,
+                            top_score,
+                        )
                         return
                     elif top_score >= 0.70:
-                        merge_wiki_entry(top_entry, project_knowledge, mode="append")
-                        print(f"[wiki_write] knowledge merged (append) to {top_entry.rel_path} score={top_score:.2f}")
+                        await asyncio.to_thread(
+                            merge_wiki_entry,
+                            top_entry,
+                            project_knowledge,
+                            mode="append",
+                        )
+                        logger.info(
+                            "[wiki_write] knowledge merged (append) to %s score=%.2f",
+                            top_entry.rel_path,
+                            top_score,
+                        )
                         return
 
-                write_wiki_entry(
+                await asyncio.to_thread(
+                    write_wiki_entry,
                     wiki_type="knowledge",
                     name=f"from_session_{session_id}",
                     content=project_knowledge,
                     description=f"Project knowledge extracted from session {session_id}",
                 )
-                print(f"[wiki_write] knowledge written for session={session_id}")
+                logger.info("[wiki_write] knowledge written for session=%s", session_id)
         except Exception as e:
-            print(f"[wiki_write] failed session={session_id}: {type(e).__name__}: {e}")
-
-    def _build_transcript(self, events: list[dict]) -> str:
-        """构建对话文本用于摘要。"""
-        lines = []
-        for e in events:
-            t = e.get("type", "")
-            if t == "user_message":
-                role = "user"
-            elif t == "assistant_message":
-                role = "assistant"
-            elif t == "tool_result_msg":
-                role = "tool result"
-            else:
-                continue
-            content = e.get("content", "")[:500]
-            lines.append(f"[{role}]: {content}")
-        return "\n".join(lines)
+            logger.error("[wiki_write] failed session=%s: %s: %s", session_id, type(e).__name__, e)
 
     def _record_fold_event(self) -> None:
         self._fold_last_time = time.time()

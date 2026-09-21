@@ -144,12 +144,13 @@ def test_workspace_structure_skips_noise(tmp_path, monkeypatch):
     assert "app.py" in structure
 
 
-# ─── 上下文窗口 200k ────────────────────────────────────────
+# ─── 上下文窗口 1M ─────────────────────────────────────────
 
-def test_context_window_default_200k():
+def test_context_window_default_1m():
     agent = _make_agent(model="unknown-model")
-    assert agent.context_window == 200000
-    assert agent.effective_window == 180000
+    assert agent.context_window == 1_000_000
+    assert agent.effective_window == 980_000
+    assert agent.auto_compact_threshold == 0.80
     # New status_line format doesn't include context window directly
     assert "unknown-model" in agent.status_line()
 
@@ -159,12 +160,14 @@ def test_status_line_shows_unknown_before_first_call():
     应显示 '-' 而不是误导性的 0。"""
     agent = _make_agent()
     assert agent.last_input_token_count == 0
+    assert agent.last_total_token_count == 0
+    assert agent.estimated_context_tokens == 0
     line = agent.status_line()
-    assert "ctx: -/" in line  # New format shows '-' before first call
+    assert "ctx: -/" in line
 
 
 def test_status_line_shows_tokens_after_api_report():
     agent = _make_agent()
-    agent.last_input_token_count = 12650
+    agent.set_last_usage_tokens(12000, 12650)
     line = agent.status_line()
-    assert "12650" in line  # New format shows exact token count
+    assert "12650" in line

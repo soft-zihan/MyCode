@@ -8,6 +8,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from agents.config import (
+    DEFAULT_AUTO_COMPACT_THRESHOLD,
+    DEFAULT_CONTEXT_WINDOW,
     load_config, save_config, list_endpoints, get_primary_endpoint,
     AppConfig, ModelEndpointConfig
 )
@@ -19,7 +21,8 @@ class EndpointConfig(BaseModel):
     model: str
     base_url: str
     api_key: str
-    context_window: int = 128000
+    context_window: int = DEFAULT_CONTEXT_WINDOW
+    auto_compact_threshold: float = DEFAULT_AUTO_COMPACT_THRESHOLD
     provider_name: str = ""
 
 
@@ -118,19 +121,19 @@ def api_get_config() -> dict[str, Any]:
 
 @router.put("/api/config")
 def api_update_config(data: ConfigUpdate) -> dict[str, Any]:
-    config = AppConfig(
-        endpoints={
-            k: ModelEndpointConfig(
-                model=v.model,
-                base_url=v.base_url,
-                api_key=v.api_key,
-                context_window=v.context_window,
-                provider_name=v.provider_name,
-            )
-            for k, v in data.endpoints.items()
-        },
-        routing=data.routing,
-    )
+    config = load_config()
+    config.endpoints = {
+        k: ModelEndpointConfig(
+            model=v.model,
+            base_url=v.base_url,
+            api_key=v.api_key,
+            context_window=v.context_window,
+            auto_compact_threshold=v.auto_compact_threshold,
+            provider_name=v.provider_name,
+        )
+        for k, v in data.endpoints.items()
+    }
+    config.routing = data.routing
     save_config(config)
     return {"status": "ok", "message": "Config saved successfully"}
 

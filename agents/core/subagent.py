@@ -23,7 +23,7 @@ def get_agent_model_ref_env(agent_type: str) -> str:
 # ─── Read-only tools (for explore and plan agents) ──────────
 
 # explore 子代理只能拿到这几个只读工具，避免它们修改项目文件或系统状态。
-READ_ONLY_TOOLS = {"read_file", "outline_file", "list_files", "grep_search"}
+READ_ONLY_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "web_search"}
 
 # reviewer 子 Agent 工具白名单（只读 + run_shell 执行验收命令）
 REVIEWER_TOOLS = {

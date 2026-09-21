@@ -1,9 +1,8 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import { MessageSquare, X, Edit3, Zap, StepForward, Eraser } from 'lucide-react';
+import { MessageSquare, Edit3, Zap, StepForward, Eraser, X, Check, Loader2, FileText } from 'lucide-react';
 import type { PermissionRequest } from '../../store/SessionStore';
 import { getPlanDraftArtifacts, updatePlanDraftArtifact } from '../../api/client';
+import { Markdown } from '../chat/markdown';
 
 interface PlanApprovalDialogProps {
   request: PermissionRequest;
@@ -22,6 +21,15 @@ const TAB_LABELS: Record<string, string> = {
   'proposal.md': 'Proposal',
 };
 
+/**
+ * 计划审批抽屉：右侧全高 drawer，长文档舒适阅读。
+ *
+ * - tab 切换草稿产物（spec/design/tasks/plan/proposal）
+ * - 支持直接编辑保存当前文档
+ * - 修改意见（feedback）注入回规划循环
+ * - 三种批准路由：execute / manual-execute / clear-and-execute
+ * - ⌘+Enter（Ctrl+Enter）快捷批准并自动执行
+ */
 export function PlanApprovalDialog({ request, sessionId, onApprove, onDeny }: PlanApprovalDialogProps) {
   const [viewMode, setViewMode] = useState<ViewMode>('preview');
   const [feedback, setFeedback] = useState('');
@@ -80,94 +88,84 @@ export function PlanApprovalDialog({ request, sessionId, onApprove, onDeny }: Pl
     }
   };
 
-  const handleStartFeedback = () => {
-    setViewMode('feedback');
-    setFeedback('');
-  };
-
   const handleSubmitFeedback = () => {
     onDeny(feedback.trim() || undefined);
   };
 
-  return (
-    <div className="border-t px-4 py-3 border-blue-300 bg-blue-50">
-      <div className="flex items-start gap-3">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-2">
-            <span className="text-sm font-medium text-blue-800">📋 计划审批</span>
-            <span className="text-xs px-1.5 py-0.5 rounded bg-blue-200 text-blue-800">exit_plan_mode</span>
-            {tabNames.length > 1 && viewMode !== 'feedback' && (
-              <div className="flex items-center gap-1 ml-2">
-                {tabNames.map((name) => (
-                  <button
-                    key={name}
-                    onClick={() => { setActiveTab(name); setViewMode('preview'); }}
-                    className={`px-2 py-0.5 text-xs rounded transition-colors ${
-                      activeTab === name
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-white text-blue-700 border border-blue-300 hover:bg-blue-50'
-                    }`}
-                  >
-                    {TAB_LABELS[name] || name}
-                  </button>
-                ))}
-              </div>
-            )}
-            <div className="flex-1" />
-            {viewMode === 'preview' && (
-              <div className="flex items-center gap-1">
-                {artifacts && activeTab && (
-                  <button
-                    onClick={handleStartEdit}
-                    className="flex items-center gap-1 px-2 py-1 text-xs text-blue-700 bg-white border border-blue-300 rounded hover:bg-blue-50 transition-colors"
-                    title="编辑当前文档"
-                  >
-                    <Edit3 className="w-3 h-3" />
-                    编辑
-                  </button>
-                )}
-                <button
-                  onClick={handleStartFeedback}
-                  className="flex items-center gap-1 px-2 py-1 text-xs text-blue-700 bg-white border border-blue-300 rounded hover:bg-blue-50 transition-colors"
-                  title="提出修改意见"
-                >
-                  <MessageSquare className="w-3 h-3" />
-                  修改意见
-                </button>
-              </div>
-            )}
-          </div>
+  // ⌘+Enter / Ctrl+Enter 快捷批准（仅 preview 态）
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && viewMode === 'preview') {
+        e.preventDefault();
+        onApprove('execute');
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [viewMode, onApprove]);
 
+  return (
+    <>
+      {/* Overlay */}
+      <div className="fixed inset-0 bg-black/20 z-40" onClick={() => viewMode === 'preview' && onDeny()} />
+
+      {/* Drawer */}
+      <div className="fixed right-0 top-0 h-full w-[600px] max-w-[92vw] bg-white shadow-2xl z-50 flex flex-col animate-slide-in-right border-l border-gray-200">
+        {/* Header */}
+        <div className="flex items-center gap-2 px-5 py-3.5 border-b border-gray-200 flex-shrink-0">
+          <FileText className="w-4 h-4 text-indigo-600" />
+          <h2 className="text-sm font-semibold text-gray-900">计划审批</h2>
+          <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 font-mono">exit_plan_mode</span>
+          <div className="flex-1" />
+          {tabNames.length > 1 && viewMode === 'preview' && (
+            <div className="flex items-center gap-0.5 bg-gray-100 rounded-lg p-0.5">
+              {tabNames.map((name) => (
+                <button
+                  key={name}
+                  onClick={() => setActiveTab(name)}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
+                    activeTab === name
+                      ? 'bg-white text-gray-900 shadow-sm'
+                      : 'text-gray-500 hover:text-gray-700'
+                  }`}
+                >
+                  {TAB_LABELS[name] || name}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto min-h-0">
           {viewMode === 'preview' && (
-            <div className="bg-white border border-blue-200 rounded p-3 max-h-96 overflow-y-auto">
-              <div className="prose prose-sm max-w-none">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {currentContent || '（空计划）'}
-                </ReactMarkdown>
-              </div>
+            <div className="px-6 py-5">
+              {currentContent ? (
+                <Markdown content={currentContent} linkifyFiles={false} />
+              ) : (
+                <p className="text-sm text-gray-400">（空计划）</p>
+              )}
             </div>
           )}
 
           {viewMode === 'edit' && (
-            <div className="space-y-2">
+            <div className="h-full flex flex-col p-5">
               <textarea
                 value={editedContent}
                 onChange={(e) => setEditedContent(e.target.value)}
-                className="w-full h-64 p-3 text-sm font-mono bg-white border border-blue-300 rounded resize-y focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="input-base flex-1 font-mono text-[13px] resize-none min-h-0"
                 placeholder="编辑计划内容..."
+                autoFocus
               />
-              {saveError && <p className="text-xs text-red-600">{saveError}</p>}
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={handleSaveEdit}
-                  disabled={isSaving}
-                  className="flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-white bg-blue-600 border border-blue-700 rounded hover:bg-blue-700 disabled:opacity-50 transition-colors"
-                >
-                  {isSaving ? '保存中...' : '保存修改'}
+              {saveError && <p className="mt-2 text-xs text-danger">{saveError}</p>}
+              <div className="flex items-center gap-2 mt-3">
+                <button onClick={handleSaveEdit} disabled={isSaving} className="btn-primary btn-sm">
+                  {isSaving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                  保存修改
                 </button>
                 <button
                   onClick={() => { setViewMode('preview'); setSaveError(null); }}
-                  className="px-3 py-1.5 text-sm font-medium text-blue-700 bg-white border border-blue-300 rounded hover:bg-blue-50 transition-colors"
+                  className="btn-ghost btn-sm"
                 >
                   取消
                 </button>
@@ -176,24 +174,23 @@ export function PlanApprovalDialog({ request, sessionId, onApprove, onDeny }: Pl
           )}
 
           {viewMode === 'feedback' && (
-            <div className="space-y-2">
+            <div className="p-5 space-y-3">
+              <p className="text-xs text-gray-500">修改意见将发回给 Agent，计划会继续修改后重新提交审批。</p>
               <textarea
                 value={feedback}
                 onChange={(e) => setFeedback(e.target.value)}
-                className="w-full h-32 p-3 text-sm bg-white border border-blue-300 rounded resize-y focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="请输入修改意见，AI 将根据您的意见修改计划..."
+                className="input-base h-40 resize-y"
+                placeholder="例如：任务 3 的接口设计不合理，应该……"
+                autoFocus
               />
               <div className="flex items-center gap-2">
-                <button
-                  onClick={handleSubmitFeedback}
-                  className="flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-white bg-orange-600 border border-orange-700 rounded hover:bg-orange-700 transition-colors"
-                >
+                <button onClick={handleSubmitFeedback} className="btn-primary btn-sm">
                   <MessageSquare className="w-3 h-3" />
                   提交意见
                 </button>
                 <button
                   onClick={() => { setViewMode('preview'); setFeedback(''); }}
-                  className="px-3 py-1.5 text-sm font-medium text-blue-700 bg-white border border-blue-300 rounded hover:bg-blue-50 transition-colors"
+                  className="btn-ghost btn-sm"
                 >
                   取消
                 </button>
@@ -202,42 +199,55 @@ export function PlanApprovalDialog({ request, sessionId, onApprove, onDeny }: Pl
           )}
         </div>
 
+        {/* Footer 操作栏 */}
         {viewMode === 'preview' && (
-          <div className="flex flex-col gap-2 flex-shrink-0">
-            <button
-              onClick={() => onApprove('execute')}
-              className="flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-white bg-blue-600 border border-blue-700 rounded hover:bg-blue-700 transition-colors"
-              title="批准后进入 acceptEdits 模式自动执行"
-            >
-              <Zap className="w-3 h-3" />
-              批准并自动执行
-            </button>
-            <button
-              onClick={() => onApprove('manual-execute')}
-              className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-blue-700 bg-white border border-blue-300 rounded hover:bg-blue-50 transition-colors"
-              title="批准后回到原权限模式，逐步确认执行"
-            >
-              <StepForward className="w-3 h-3" />
-              批准并逐步确认
-            </button>
-            <button
-              onClick={() => onApprove('clear-and-execute')}
-              className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-blue-700 bg-white border border-blue-300 rounded hover:bg-blue-50 transition-colors"
-              title="清空对话上下文后自动执行（长规划省 token）"
-            >
-              <Eraser className="w-3 h-3" />
-              清空上下文执行
-            </button>
-            <button
-              onClick={() => onDeny()}
-              className="flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-blue-700 bg-white border border-blue-300 rounded hover:bg-blue-50 transition-colors"
-            >
-              <X className="w-3 h-3" />
-              继续修改
-            </button>
+          <div className="flex-shrink-0 border-t border-gray-200 px-5 py-3.5 bg-gray-50/50">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => onApprove('execute')}
+                className="btn-primary"
+                title="批准后进入自动执行模式（⌘+Enter）"
+              >
+                <Zap className="w-3.5 h-3.5" />
+                批准并自动执行
+              </button>
+              <button
+                onClick={() => onApprove('manual-execute')}
+                className="btn-secondary"
+                title="批准后回到原权限模式，每步编辑仍需确认"
+              >
+                <StepForward className="w-3.5 h-3.5" />
+                逐步确认
+              </button>
+              <button
+                onClick={() => onApprove('clear-and-execute')}
+                className="btn-secondary"
+                title="清空对话上下文后自动执行（长规划省 token）"
+              >
+                <Eraser className="w-3.5 h-3.5" />
+                清空执行
+              </button>
+              <div className="flex-1" />
+              {artifacts && activeTab && (
+                <button onClick={handleStartEdit} className="btn-ghost" title="编辑当前文档">
+                  <Edit3 className="w-3.5 h-3.5" />
+                  编辑
+                </button>
+              )}
+              <button onClick={() => setViewMode('feedback')} className="btn-ghost" title="提出修改意见">
+                <MessageSquare className="w-3.5 h-3.5" />
+                修改意见
+              </button>
+              <button onClick={() => onDeny()} className="btn-ghost text-gray-400" title="拒绝，继续规划">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="mt-2 text-[11px] text-gray-400">
+              ⌘+Enter 快速批准 · 点击遮罩拒绝并继续规划
+            </p>
           </div>
         )}
       </div>
-    </div>
+    </>
   );
 }

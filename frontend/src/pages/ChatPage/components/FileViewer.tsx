@@ -107,7 +107,7 @@ export function FileViewer({ filePath, cwd, onClose, readOnly = true, editable =
             </span>
           )}
           {frontmatter?.checkpoint_id && (
-            <span className="flex items-center gap-1 text-[10px] text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded" title={`Checkpoint: ${frontmatter.checkpoint_id}`}>
+            <span className="flex items-center gap-1 text-[10px] text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded" title={`Checkpoint: ${frontmatter.checkpoint_id}`}>
               <GitCommit className="w-3 h-3" />
               {frontmatter.checkpoint_id.slice(-8)}
             </span>
@@ -119,7 +119,7 @@ export function FileViewer({ filePath, cwd, onClose, readOnly = true, editable =
               <button
                 onClick={() => setIsEditing(!isEditing)}
                 className={`p-1.5 rounded transition-colors ${
-                  isEditing ? 'bg-blue-100 text-blue-600' : 'hover:bg-gray-200 text-gray-500'
+                  isEditing ? 'bg-indigo-100 text-indigo-600' : 'hover:bg-gray-200 text-gray-500'
                 }`}
                 title={isEditing ? '预览模式' : '编辑模式'}
               >
@@ -140,7 +140,7 @@ export function FileViewer({ filePath, cwd, onClose, readOnly = true, editable =
                     disabled={!hasChanges || saving}
                     className={`flex items-center gap-1 px-2 py-1 text-xs rounded transition-colors ${
                       hasChanges && !saving
-                        ? 'bg-blue-500 text-white hover:bg-blue-600'
+                        ? 'bg-indigo-500 text-white hover:bg-indigo-600'
                         : 'bg-gray-200 text-gray-400 cursor-not-allowed'
                     }`}
                   >

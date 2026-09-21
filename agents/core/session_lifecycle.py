@@ -84,23 +84,14 @@ class SessionLifecycle:
         return describe_messages(messages, True)
 
     def _message_index_to_seqs(self, session: Any) -> dict[int, int]:
-        """显示消息索引 → 事件 seq 映射（与 get_messages_for_llm 生成逻辑严格一致）。
+        from .session import derive_messages_from_event
 
-        - system prompt 占 index 0：非事件、不进映射，天然不可删除
-        - 只统计可见事件：已隐藏事件不产生消息，索引必须按可见序列计
-        - tool_folded 产生 len(abstracts) 条消息（共享同一 seq）
-        - session_folded / user_message / assistant_message / tool_result_msg / memory_injection 各产生 1 条
-        """
         mapping: dict[int, int] = {}
         msg_idx = 1 if session.system_prompt else 0
-        for seq in session._visible_seqs:
-            event = session._log[seq]
-            t = event.get("type")
-            if t == "tool_folded":
-                for _ in event.get("abstracts", []):
-                    mapping[msg_idx] = seq
-                    msg_idx += 1
-            elif t in ("session_folded", "user_message", "assistant_message", "tool_result_msg", "memory_injection"):
+        for seq in session.visible_seqs:
+            event = session.event_at(seq)
+            message_count = len(derive_messages_from_event(event))
+            for _ in range(message_count):
                 mapping[msg_idx] = seq
                 msg_idx += 1
         return mapping

@@ -37,7 +37,7 @@ export function WikiPlanPanel({ cwd, sessionId, planSlug, permissionMode, onFile
         <button
           onClick={() => setSubTab('wiki')}
           className={`flex-1 px-2 py-1.5 text-xs font-medium transition-colors ${
-            subTab === 'wiki' ? 'text-blue-600 border-b-2 border-blue-600 bg-white' : 'text-gray-500 hover:text-gray-700'
+            subTab === 'wiki' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-white' : 'text-gray-500 hover:text-gray-700'
           }`}
         >
           <BookOpen className="w-3 h-3 inline mr-1" />
@@ -46,7 +46,7 @@ export function WikiPlanPanel({ cwd, sessionId, planSlug, permissionMode, onFile
         <button
           onClick={() => setSubTab('plan')}
           className={`flex-1 px-2 py-1.5 text-xs font-medium transition-colors ${
-            subTab === 'plan' ? 'text-blue-600 border-b-2 border-blue-600 bg-white' : 'text-gray-500 hover:text-gray-700'
+            subTab === 'plan' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-white' : 'text-gray-500 hover:text-gray-700'
           }`}
         >
           <Target className="w-3 h-3 inline mr-1" />

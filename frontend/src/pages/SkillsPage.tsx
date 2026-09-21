@@ -89,7 +89,7 @@ function SkillEvolutionDetail({
                 <span className={sample.ok ? 'text-green-500' : 'text-red-500'}>{sample.ok ? '✓' : '✗'}</span>
                 <span className="text-gray-500 font-mono">{sample.source_type}</span>
                 <span className={`px-1 py-0.5 rounded text-[10px] ${
-                  sample.split === 'promotion_test' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
+                  sample.split === 'promotion_test' ? 'bg-purple-100 text-purple-700' : 'bg-indigo-100 text-indigo-700'
                 }`}>{sample.split === 'promotion_test' ? 'test' : 'dev'}</span>
                 <span className="text-gray-600 truncate flex-1">{sample.latest_user}</span>
               </div>
@@ -120,14 +120,14 @@ function SkillEvolutionDetail({
           <div className="relative pl-4 border-l-2 border-gray-200 space-y-2 max-h-64 overflow-y-auto">
             {provenance.map((entry, idx) => (
               <div key={idx} className="relative">
-                <div className="absolute -left-[21px] top-1 w-3 h-3 rounded-full bg-blue-400 border-2 border-white" />
+                <div className="absolute -left-[21px] top-1 w-3 h-3 rounded-full bg-indigo-400 border-2 border-white" />
                 <div
                   className="text-xs cursor-pointer hover:bg-gray-50 rounded p-1.5"
                   onClick={() => setExpandedProv(expandedProv === idx ? null : idx)}
                 >
                   <div className="flex items-center gap-2">
                     <span className="text-gray-500 font-mono text-[10px]">{entry.time || ''}</span>
-                    <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded text-[10px]">{entry.action || 'event'}</span>
+                    <span className="px-1.5 py-0.5 bg-indigo-100 text-indigo-700 rounded text-[10px]">{entry.action || 'event'}</span>
                     {entry.version && <span className="font-mono text-gray-600">v{entry.version}</span>}
                   </div>
                   {entry.description && <div className="text-gray-600 mt-0.5">{entry.description}</div>}
@@ -310,7 +310,7 @@ export default function SkillsPage() {
   const statusConfig: Record<string, { color: string; icon: React.ReactNode; label: string }> = {
     healthy: { color: 'text-green-600 bg-green-50 border-green-200', icon: <CheckCircle className="w-3 h-3" />, label: 'Healthy' },
     watch: { color: 'text-yellow-600 bg-yellow-50 border-yellow-200', icon: <AlertTriangle className="w-3 h-3" />, label: 'Watch' },
-    incubating: { color: 'text-blue-600 bg-blue-50 border-blue-200', icon: <Circle className="w-3 h-3" />, label: 'Incubating' },
+    incubating: { color: 'text-indigo-600 bg-indigo-50 border-indigo-200', icon: <Circle className="w-3 h-3" />, label: 'Incubating' },
     unobserved: { color: 'text-gray-500 bg-gray-50 border-gray-200', icon: <EyeOff className="w-3 h-3" />, label: 'Unobserved' },
   };
 
@@ -368,7 +368,7 @@ export default function SkillsPage() {
                     onClick={() => setFilterSource(src)}
                     className={`px-2 py-0.5 text-[10px] rounded transition-colors ${
                       filterSource === src
-                        ? 'bg-blue-100 text-blue-700'
+                        ? 'bg-indigo-100 text-indigo-700'
                         : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                     }`}
                   >
@@ -385,7 +385,7 @@ export default function SkillsPage() {
                     onClick={() => handleSkillClick(skill)}
                     className={`px-3 py-2 cursor-pointer transition-colors group ${
                       selectedSkill?.name === skill.name
-                        ? 'bg-blue-50 border-l-2 border-blue-500'
+                        ? 'bg-indigo-50 border-l-2 border-indigo-500'
                         : 'hover:bg-gray-50'
                     } ${disabledSkills.has(skill.name) ? 'opacity-50' : ''}`}
                   >
@@ -432,7 +432,7 @@ export default function SkillsPage() {
           <button
             className={`px-4 py-2 text-sm font-medium transition-colors ${
               activeTab === 'skills'
-                ? 'text-blue-600 border-b-2 border-blue-600'
+                ? 'text-indigo-600 border-b-2 border-indigo-600'
                 : 'text-gray-500 hover:text-gray-700'
             }`}
             onClick={() => setActiveTab('skills')}
@@ -443,7 +443,7 @@ export default function SkillsPage() {
           <button
             className={`px-4 py-2 text-sm font-medium transition-colors ${
               activeTab === 'evolution'
-                ? 'text-blue-600 border-b-2 border-blue-600'
+                ? 'text-indigo-600 border-b-2 border-indigo-600'
                 : 'text-gray-500 hover:text-gray-700'
             }`}
             onClick={() => setActiveTab('evolution')}
@@ -496,7 +496,7 @@ export default function SkillsPage() {
                         <>
                           <button
                             onClick={() => setIsEditing(true)}
-                            className="flex items-center px-3 py-1.5 bg-blue-500 text-white text-sm rounded hover:bg-blue-600"
+                            className="flex items-center px-3 py-1.5 bg-indigo-500 text-white text-sm rounded hover:bg-indigo-600"
                           >
                             <Edit3 className="w-4 h-4 mr-1" />
                             Edit
@@ -517,7 +517,7 @@ export default function SkillsPage() {
                       <textarea
                         value={editContent}
                         onChange={(e) => setEditContent(e.target.value)}
-                        className="w-full h-full font-mono text-sm bg-gray-50 border border-gray-300 rounded p-4 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        className="w-full h-full font-mono text-sm bg-gray-50 border border-gray-300 rounded p-4 resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500"
                         spellCheck={false}
                       />
                     ) : (
@@ -541,7 +541,7 @@ export default function SkillsPage() {
             <div className="p-4 border-b border-gray-200 flex items-center justify-between">
               <div>
                 <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
-                  <Activity className="w-5 h-5 text-blue-500" />
+                  <Activity className="w-5 h-5 text-indigo-500" />
                   Skill Evolution
                 </h2>
                 <p className="text-xs text-gray-500 mt-0.5">
@@ -552,7 +552,7 @@ export default function SkillsPage() {
               <button
                 onClick={loadEvolutionData}
                 disabled={evoLoading}
-                className="flex items-center gap-1 px-3 py-1.5 bg-blue-500 text-white rounded text-xs hover:bg-blue-600 transition-colors disabled:opacity-50"
+                className="flex items-center gap-1 px-3 py-1.5 bg-indigo-500 text-white rounded text-xs hover:bg-indigo-600 transition-colors disabled:opacity-50"
               >
                 <RefreshCw className={`w-3 h-3 ${evoLoading ? 'animate-spin' : ''}`} />
                 Refresh
@@ -576,8 +576,8 @@ export default function SkillsPage() {
                       return (
                         <tr
                           key={skill.name}
-                          className={`border-b border-gray-100 cursor-pointer hover:bg-blue-50 transition-colors ${
-                            evoSelectedSkill === skill.name ? 'bg-blue-50' : ''
+                          className={`border-b border-gray-100 cursor-pointer hover:bg-indigo-50 transition-colors ${
+                            evoSelectedSkill === skill.name ? 'bg-indigo-50' : ''
                           }`}
                           onClick={() => loadEvoSkillDetail(skill.name)}
                         >

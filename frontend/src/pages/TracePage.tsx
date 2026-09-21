@@ -178,7 +178,7 @@ export default function TracePage() {
         const thinkingPreview = rest.thinking_preview || '';
         const duration = rest.duration_s ? `${(rest.duration_s * 1000).toFixed(0)}ms` : '0ms';
         if (assistantPreview) {
-          content = `🤖 ${assistantPreview.slice(0, 200)}`;
+          content = `[assistant] ${assistantPreview.slice(0, 200)}`;
           if (thinkingPreview) {
             content += `\n💭 ${thinkingPreview.slice(0, 100)}`;
           }
@@ -189,17 +189,17 @@ export default function TracePage() {
       }
       else if (kind === 'model.start' || kind === 'model_call.start') content = `Calling ${rest.model || 'model'}...`;
       else if (kind === 'model.end' || kind === 'model_call.end') content = `${rest.input_tokens || 0} in / ${rest.output_tokens || 0} out (${(rest.duration_s || 0) * 1000}ms)`;
-      else if (kind === 'tool.start' || kind === 'tool_call.start') content = `🔧 ${rest.tool || 'tool'}(${(rest.input || '').slice(0, 50)})`;
+      else if (kind === 'tool.start' || kind === 'tool_call.start') content = `[tool] ${rest.tool || 'tool'}(${(rest.input || '').slice(0, 50)})`;
       else if (kind === 'tool.end' || kind === 'tool_call.end') content = `${rest.success ? '✓' : '✗'} ${(rest.preview || '').slice(0, 100)}`;
       else if (kind === 'stream.text') content = rest.preview || '';
       else if (kind === 'stream.thinking') content = rest.preview || '';
       else if (kind === 'stream.tool_call') content = `${rest.name || 'tool'}(call_id: ${rest.call_id || ''})`;
       else if (kind === 'stream.tool_result') content = `${rest.name || 'tool'} result`;
-      else if (kind === 'stream.sub_agent_start') content = `🤖 Sub-agent ${rest.agent_type} started: ${rest.description || ''}`;
-      else if (kind === 'stream.sub_agent_end') content = `🤖 Sub-agent ${rest.agent_type} ${rest.status}`;
+      else if (kind === 'stream.sub_agent_start') content = `[sub-agent] ${rest.agent_type} started: ${rest.description || ''}`;
+      else if (kind === 'stream.sub_agent_end') content = `[sub-agent] ${rest.agent_type} ${rest.status}`;
       else if (kind?.startsWith('audit')) content = `${rest.tool || ''} → ${rest.decision || rest.operation || ''}`;
       else if (kind?.startsWith('cost')) content = JSON.stringify(rest).slice(0, 100);
-      else if (kind === 'error') content = `❌ ${rest.error_type || 'Error'}: ${rest.message || ''}`;
+      else if (kind === 'error') content = `[error] ${rest.error_type || 'Error'}: ${rest.message || ''}`;
       else content = JSON.stringify(rest, null, 2).slice(0, 200);
 
       return {
@@ -261,12 +261,12 @@ export default function TracePage() {
               <div
                 key={file.filename}
                 className={`px-3 py-2 cursor-pointer hover:bg-gray-50 ${
-                  selectedSession === file.session_id ? 'bg-blue-50 border-l-2 border-blue-500' : ''
+                  selectedSession === file.session_id ? 'bg-indigo-50 border-l-2 border-indigo-500' : ''
                 }`}
                 onClick={() => setSelectedSession(file.session_id)}
               >
                 <div className="flex items-center gap-1.5">
-                  <Activity className="w-3.5 h-3.5 text-blue-500" />
+                  <Activity className="w-3.5 h-3.5 text-indigo-500" />
                   <h3 className="text-xs font-medium text-gray-900 truncate">
                     {file.session_id.slice(0, 8)}
                   </h3>
@@ -303,7 +303,7 @@ export default function TracePage() {
           <div className="flex items-center justify-between">
             <div>
               <h1 className="text-xl font-bold text-gray-900 flex items-center gap-2">
-                <Activity className="w-5 h-5 text-blue-500" />
+                <Activity className="w-5 h-5 text-indigo-500" />
                 Trace Observer
               </h1>
               <p className="text-xs text-gray-500 mt-1">
@@ -318,7 +318,7 @@ export default function TracePage() {
                 )}
                 {langfuseSessionUrl && (
                   <span className="ml-2">
-                    <a href={langfuseSessionUrl} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline inline-flex items-center gap-1">
+                    <a href={langfuseSessionUrl} target="_blank" rel="noopener noreferrer" className="text-indigo-500 hover:underline inline-flex items-center gap-1">
                       Langfuse session
                       <ExternalLink className="w-3 h-3" />
                     </a>
@@ -326,7 +326,7 @@ export default function TracePage() {
                 )}
                 {!langfuseProjectId && langfuseEndpoint && (
                   <span className="ml-2">
-                    <a href={langfuseEndpoint} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline inline-flex items-center gap-1">
+                    <a href={langfuseEndpoint} target="_blank" rel="noopener noreferrer" className="text-indigo-500 hover:underline inline-flex items-center gap-1">
                       Open Langfuse
                       <ExternalLink className="w-3 h-3" />
                     </a>
@@ -367,7 +367,7 @@ export default function TracePage() {
                   loadTrace(true);
                   loadTraceStatus(true);
                 }}
-                className="flex items-center px-3 py-1.5 bg-blue-500 text-white rounded text-xs hover:bg-blue-600 transition-colors"
+                className="flex items-center px-3 py-1.5 bg-indigo-500 text-white rounded text-xs hover:bg-indigo-600 transition-colors"
               >
                 <RefreshCw className="w-3 h-3 mr-1" />
                 Refresh
@@ -378,13 +378,13 @@ export default function TracePage() {
 
         <div className="p-4 border-b border-gray-200">
           <div className="grid grid-cols-4 gap-3 mb-3">
-            <div className="p-2 bg-blue-50 rounded border border-blue-100">
-              <div className="flex items-center gap-1.5 text-blue-700">
+            <div className="p-2 bg-indigo-50 rounded border border-indigo-100">
+              <div className="flex items-center gap-1.5 text-indigo-700">
                 <Cpu className="w-3.5 h-3.5" />
                 <span className="text-xs font-medium">Model</span>
               </div>
-              <div className="text-lg font-bold text-blue-900">{stats.modelCalls}</div>
-              <div className="text-xs text-blue-600">{stats.totalInputTokens + stats.totalOutputTokens} tokens</div>
+              <div className="text-lg font-bold text-indigo-900">{stats.modelCalls}</div>
+              <div className="text-xs text-indigo-600">{stats.totalInputTokens + stats.totalOutputTokens} tokens</div>
             </div>
             <div className="p-2 bg-orange-50 rounded border border-orange-100">
               <div className="flex items-center gap-1.5 text-orange-700">

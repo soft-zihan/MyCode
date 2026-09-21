@@ -12,6 +12,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from agents.config import DEFAULT_CONTEXT_WINDOW
 from agents.core.workspace import workspace_scope
 from agents.core.session import list_sessions, delete_session, session_dir
 
@@ -178,6 +179,8 @@ def api_session_summary(session_id: str) -> dict[str, Any]:
             "context_window": agent.context_window,
             "effective_window": agent.effective_window,
             "last_input_token_count": agent.last_input_token_count,
+            "last_total_token_count": agent.last_total_token_count,
+            "estimated_context_tokens": agent.estimated_context_tokens,
         }
 
         result["metadata"] = {
@@ -231,9 +234,11 @@ def api_session_summary(session_id: str) -> dict[str, Any]:
             "input_tokens": latest_stats.get("input_tokens", 0),
             "output_tokens": latest_stats.get("output_tokens", 0),
             "cached_tokens": total_cached_tokens,
-            "context_window": latest_stats.get("context_window", 128000),
-            "effective_window": 108000,
+            "context_window": latest_stats.get("context_window", DEFAULT_CONTEXT_WINDOW),
+            "effective_window": latest_stats.get("effective_window", DEFAULT_CONTEXT_WINDOW),
             "last_input_token_count": latest_stats.get("last_input_token_count", 0),
+            "last_total_token_count": latest_stats.get("last_total_token_count", 0),
+            "estimated_context_tokens": latest_stats.get("estimated_context_tokens", 0),
         }
 
         if latest_stats and latest_stats.get("system_chars", 0) > 0:
@@ -701,20 +706,20 @@ async def api_compact_session(session_id: str) -> dict[str, Any]:
         svc = session_info["svc"]
         try:
             await svc.compact()
-            
-            # 获取压缩后的 token 计数
-            stats = svc.get_stats()
-            token_count = stats.get("last_input_tokens", 0)
-            context_window = stats.get("context_window", 200000)
-            
-            # 发送压缩事件到前端
+
+            agent = svc.agent
             from frontend.server.routers.websocket import broadcast_event
-            broadcast_event(session_id, {
-                "type": "context/compacted",
-                "message": "上下文已压缩",
-                "last_input_token_count": token_count,
-                "context_window": context_window,
-            })
+            broadcast_event(
+                {
+                    "type": "context/compacted",
+                    "session_id": session_id,
+                    "message": "上下文已压缩",
+                    "estimated_context_tokens": agent.estimated_context_tokens,
+                    "effective_window": agent.effective_window,
+                    "context_window": agent.context_window,
+                },
+                target_session_id=session_id,
+            )
             
             return {"success": True, "message": "Context compacted"}
         except Exception as e:
@@ -1597,6 +1602,8 @@ def api_session_stats(session_id: str) -> dict[str, Any]:
             "context_window": agent.context_window,
             "effective_window": agent.effective_window,
             "last_input_token_count": agent.last_input_token_count,
+            "last_total_token_count": agent.last_total_token_count,
+            "estimated_context_tokens": agent.estimated_context_tokens,
         }
     # Check if session exists by checking events file
     sessions_dir = session_dir()
@@ -1607,149 +1614,180 @@ def api_session_stats(session_id: str) -> dict[str, Any]:
         input_tokens = 0
         output_tokens = 0
         last_input_token_count = 0
-        context_window = 128000
+        last_total_token_count = 0
+        estimated_context_tokens = 0
+        context_window = DEFAULT_CONTEXT_WINDOW
+        effective_window = DEFAULT_CONTEXT_WINDOW
         with open(events_file) as f:
             for line in f:
                 try:
                     event = json.loads(line.strip())
-                    if event.get("type") == "stats":
-                        cached_tokens = event.get("cached_tokens", 0)
-                        total_cached_tokens = event.get("total_cached_tokens", total_cached_tokens + cached_tokens)
-                        input_tokens = event.get("input_tokens", 0)
-                        output_tokens = event.get("output_tokens", 0)
-                        last_input_token_count = event.get("last_input_token_count", 0)
-                        context_window = event.get("context_window", 128000)
-                except (json.JSONDecodeError, Exception):
+                except json.JSONDecodeError as exc:
+                    print(f"[session-stats] invalid event line in {events_file}: {exc}")
                     continue
+
+                if event.get("type") == "stats":
+                    cached_tokens = event.get("cached_tokens", 0)
+                    total_cached_tokens = event.get("total_cached_tokens", total_cached_tokens + cached_tokens)
+                    input_tokens = event.get("input_tokens", 0)
+                    output_tokens = event.get("output_tokens", 0)
+                    last_input_token_count = event.get("last_input_token_count", 0)
+                    last_total_token_count = event.get("last_total_token_count", 0)
+                    estimated_context_tokens = event.get("estimated_context_tokens", 0)
+                    context_window = event.get("context_window", DEFAULT_CONTEXT_WINDOW)
+                    effective_window = event.get("effective_window", context_window)
+
         return {
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "cached_tokens": total_cached_tokens,
             "context_window": context_window,
-            "effective_window": 108000,
+            "effective_window": effective_window,
             "last_input_token_count": last_input_token_count,
+            "last_total_token_count": last_total_token_count,
+            "estimated_context_tokens": estimated_context_tokens,
         }
     raise HTTPException(status_code=404, detail="Session not found")
 
 
 @router.get("/api/sessions/{session_id}/compression-stats")
 def api_compression_stats(session_id: str) -> dict[str, Any]:
-    from agents.session_manager import get_session_manager
-    sm = get_session_manager()
     session_info = _active_sessions.get(session_id)
     if session_info and session_info.get("svc"):
         svc = session_info["svc"]
         agent = svc.agent
         compressor = agent._compressor
-        token_count = agent.last_input_token_count
+        token_count = agent.estimated_context_tokens
         effective_window = compressor.effective_window
         utilization = token_count / effective_window if effective_window else 0
-        stats = compressor.get_stats()
-        folded_memories = []
-        try:
-            folded_memories = getattr(agent, "_folded_session_memories", [])
-        except Exception:
-            pass
+        folded_memories = [
+            {
+                "time": event.get("time", ""),
+                "trigger": event.get("trigger", "auto"),
+                "summary": event.get("summary", ""),
+                "session_notes": event.get("session_notes", ""),
+                "project_knowledge": event.get("project_knowledge", ""),
+            }
+            for event in agent.session.visible_events
+            if event.get("type") == "session_folded"
+        ]
         return {
             "utilization": round(utilization, 3),
             "token_count": token_count,
             "effective_window": effective_window,
             "context_window": agent.context_window,
-            **stats,
+            **compressor.get_stats(),
             "folded_memories": folded_memories,
         }
-    # Fallback: compute from JSONL events for inactive sessions
+
     sessions_dir = session_dir()
     events_file = sessions_dir / f"{session_id}.events.jsonl"
-
     if not events_file.exists():
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Parse events to find last stats event and compression events
+    from agents.core.context_events import collect_hidden_seqs
+
     token_count = 0
-    context_window = 128000
-    effective_window = 108800
-    compression_events = []
-    folded_memories = []
+    context_window = DEFAULT_CONTEXT_WINDOW
+    effective_window = DEFAULT_CONTEXT_WINDOW
+    tool_fold_count = 0
+    session_fold_count = 0
+    last_fold_time: int | None = None
+    folded_memories: list[dict[str, Any]] = []
+    events: list[dict[str, Any]] = []
 
     with open(events_file) as f:
         for line in f:
             try:
                 event = json.loads(line.strip())
-                event_type = event.get("type", "")
-
-                if event_type == "stats":
-                    token_count = event.get("last_input_token_count", 0)
-                    context_window = event.get("context_window", 128000)
-                    effective_window = event.get("effective_window", 108800)
-                elif event_type == "compression":
-                    compression_events.append(event)
-                elif event_type == "fold":
-                    folded_memories.append({
-                        "time": event.get("time", ""),
-                        "trigger": event.get("trigger", "auto"),
-                        "episode": event.get("episode", ""),
-                        "working": event.get("working", ""),
-                    })
-            except (json.JSONDecodeError, Exception):
+            except json.JSONDecodeError as exc:
+                print(f"[compression-stats] invalid event line in {events_file}: {exc}")
                 continue
+            events.append(event)
+
+    hidden_seqs = collect_hidden_seqs(events)
+    for event in events:
+        event_type = event.get("type", "")
+        if event_type == "stats":
+            token_count = int(event.get("estimated_context_tokens") or event.get("last_total_token_count") or 0)
+            context_window = int(event.get("context_window") or context_window)
+            effective_window = int(event.get("effective_window") or effective_window)
+        elif event_type == "tool_folded":
+            tool_fold_count += 1
+            last_fold_time = event.get("time", last_fold_time)
+        elif event_type == "session_folded":
+            session_fold_count += 1
+            last_fold_time = event.get("time", last_fold_time)
+            if event.get("seq") in hidden_seqs:
+                continue
+            folded_memories.append({
+                "time": event.get("time", ""),
+                "trigger": event.get("trigger", "auto"),
+                "summary": event.get("summary", ""),
+                "session_notes": event.get("session_notes", ""),
+                "project_knowledge": event.get("project_knowledge", ""),
+            })
 
     utilization = token_count / effective_window if effective_window else 0
-
-    # Compute compression stats from events
-    l1_triggered = sum(1 for e in compression_events if e.get("level") == "l1_budget")
-    l2_triggered = sum(1 for e in compression_events if e.get("level") == "l2_snip")
-    l3_triggered = sum(1 for e in compression_events if e.get("level") == "l3_microcompact")
-    l4_triggered = sum(1 for e in compression_events if e.get("level") == "l4_fold")
-
     return {
         "utilization": round(utilization, 3),
         "token_count": token_count,
         "effective_window": effective_window,
         "context_window": context_window,
-        "l1_budget": {"triggered": l1_triggered, "tokens_saved": 0},
-        "l2_snip": {"triggered": l2_triggered, "tokens_saved": 0},
-        "l3_microcompact": {"triggered": l3_triggered, "tokens_saved": 0},
-        "l4_fold": {"triggered": l4_triggered, "last_fold_time": None},
+        "tool_fold": {"triggered": tool_fold_count},
+        "session_fold": {"triggered": session_fold_count},
+        "total_folds": {
+            "triggered": tool_fold_count + session_fold_count,
+            "last_fold_time": last_fold_time,
+        },
         "folded_memories": folded_memories,
     }
 
 
 @router.get("/api/sessions/{session_id}/context-store")
 def api_context_store(session_id: str) -> dict[str, Any]:
-    """返回被隐藏的事件信息（in_message = False）。"""
-    from agents.session_manager import get_session_manager
-    sm = get_session_manager()
+    """返回被 events_hidden 隐藏的事件信息。"""
+    from agents.core.context_events import collect_hidden_seqs
+
+    def _content_size(event: dict[str, Any]) -> int:
+        content = event.get("content")
+        if isinstance(content, str):
+            return len(content)
+        if isinstance(content, (dict, list)):
+            return len(json.dumps(content, ensure_ascii=False, default=str))
+        return 0
+
+    def _build_payload(events: list[dict[str, Any]]) -> dict[str, Any]:
+        hidden_seqs = collect_hidden_seqs(events)
+        entries = []
+        for event in events:
+            seq = event.get("seq")
+            if not isinstance(seq, int) or seq not in hidden_seqs:
+                continue
+            entries.append({
+                "seq": seq,
+                "type": event.get("type"),
+                "call_id": event.get("call_id", ""),
+                "content_size": _content_size(event),
+            })
+        return {
+            "entries": entries,
+            "total_entries": len(entries),
+            "total_raw_size": sum(entry["content_size"] for entry in entries),
+            "active_entries": len([entry for entry in entries if entry.get("type") == "tool_result_msg"]),
+        }
+
     session_info = _active_sessions.get(session_id)
     if session_info and session_info.get("svc"):
         svc = session_info["svc"]
         session = svc.agent.session
-        entries = []
-        for event in session._log:
-            if not event.get("in_message", True):
-                entries.append({
-                    "seq": event.get("seq"),
-                    "type": event.get("type"),
-                    "call_id": event.get("call_id", ""),
-                    "content_size": len(event.get("content", "")),
-                })
-        return {
-            "entries": entries,
-            "total_entries": len(entries),
-            "total_raw_size": sum(e["content_size"] for e in entries),
-            "active_entries": len([e for e in entries if e.get("type") == "tool_result_msg"]),
-        }
-    # Check if session exists by checking events file
-    sessions_dir = session_dir()
-    events_file = sessions_dir / f"{session_id}.events.jsonl"
-    if events_file.exists():
-        return {
-            "entries": [],
-            "total_entries": 0,
-            "total_raw_size": 0,
-            "active_entries": 0,
-        }
-    raise HTTPException(status_code=404, detail="Session not found")
+        return _build_payload(list(session.events))
+
+    from agents.core.session import get_session_backend
+    events = get_session_backend().load_all_events(session_id)
+    if not events:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return _build_payload(list(events))
 
 
 @router.get("/api/sessions/{session_id}/file-changes")

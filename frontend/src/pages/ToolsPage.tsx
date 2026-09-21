@@ -504,14 +504,14 @@ export default function ToolsPage() {
                   <div
                     key={tool.name}
                     className={`px-3 py-1.5 cursor-pointer hover:bg-gray-50 ${
-                      selectedTool?.fullName === tool.name ? 'bg-blue-50 border-l-2 border-blue-500' : ''
+                      selectedTool?.fullName === tool.name ? 'bg-indigo-50 border-l-2 border-indigo-500' : ''
                     }`}
                     onClick={() => setSelectedTool(toolItem)}
                   >
                     <div className="flex items-center gap-1.5">
                       <h3 className="text-xs font-medium text-gray-900 truncate flex-1">{tool.name}</h3>
                       {isPlanTool && (
-                        <span className="text-[9px] px-1 py-0.5 bg-blue-100 text-blue-700 rounded">P</span>
+                        <span className="text-[9px] px-1 py-0.5 bg-indigo-100 text-indigo-700 rounded">P</span>
                       )}
                       {tool.deferred && (
                         <span className="text-[9px] px-1 py-0.5 bg-purple-100 text-purple-700 rounded">D</span>
@@ -583,7 +583,7 @@ export default function ToolsPage() {
                             <div
                               key={t.full_name}
                               className={`pl-8 pr-3 py-1.5 cursor-pointer hover:bg-gray-100 ${
-                                selectedTool?.fullName === t.full_name ? 'bg-blue-50 border-l-2 border-blue-500' : ''
+                                selectedTool?.fullName === t.full_name ? 'bg-indigo-50 border-l-2 border-indigo-500' : ''
                               }`}
                               onClick={() => setSelectedTool(toolItem)}
                             >
@@ -676,7 +676,7 @@ export default function ToolsPage() {
                     <h3 className="text-sm font-semibold text-gray-700 mb-2">执行模式</h3>
                     <p className="text-xs text-gray-600">
                       {details.executionMode === 'parallel' ? (
-                        <span className="text-blue-600">parallel - 可与其他工具并行执行</span>
+                        <span className="text-indigo-600">parallel - 可与其他工具并行执行</span>
                       ) : (
                         <span className="text-purple-600">sequential - 必须顺序执行</span>
                       )}
@@ -731,7 +731,7 @@ export default function ToolsPage() {
                       <div key={paramName} className="p-3 bg-gray-50 rounded-lg border border-gray-200">
                         <div className="flex items-center gap-2 mb-1">
                           <span className="font-mono text-sm font-semibold text-gray-900">{paramName}</span>
-                          <span className="text-xs px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded">{paramDef.type || 'any'}</span>
+                          <span className="text-xs px-1.5 py-0.5 bg-indigo-100 text-indigo-700 rounded">{paramDef.type || 'any'}</span>
                           {selectedTool.inputSchema.required?.includes(paramName) && (
                             <span className="text-xs px-1.5 py-0.5 bg-red-100 text-red-700 rounded">required</span>
                           )}

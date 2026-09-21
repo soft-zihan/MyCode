@@ -92,6 +92,7 @@ class TestConcurrencyBatching:
         assert "read_file" in CONCURRENCY_SAFE_TOOLS
         assert "list_files" in CONCURRENCY_SAFE_TOOLS
         assert "grep_search" in CONCURRENCY_SAFE_TOOLS
+        assert "web_search" in CONCURRENCY_SAFE_TOOLS
         assert "shell_status" in CONCURRENCY_SAFE_TOOLS
 
     def test_write_tools_not_concurrency_safe(self):

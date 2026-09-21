@@ -121,7 +121,18 @@ class Session:
     @property
     def events(self) -> tuple[dict[str, Any], ...]:
         return tuple(self._log)
-    
+
+    @property
+    def visible_seqs(self) -> tuple[int, ...]:
+        return tuple(self._visible_seqs)
+
+    @property
+    def visible_events(self) -> tuple[dict[str, Any], ...]:
+        return tuple(self.event_at(seq) for seq in self._visible_seqs)
+
+    def event_at(self, seq: int) -> dict[str, Any]:
+        return self._log[seq]
+
     @property
     def projections(self) -> dict[str, Any]:
         """获取投影缓存（title, updatedAt, cwd, running）。"""
@@ -376,17 +387,15 @@ class Session:
 
 def derive_messages_from_event(event: dict[str, Any]) -> list[dict[str, Any]]:
     """从单个事件派生 LLM 消息列表。"""
+    from .session_memory import format_tool_folded_summary
+
     t = event.get("type")
 
     if t == "tool_folded":
-        return [
-            {
-                "role": "tool",
-                "tool_call_id": abstract["call_id"],
-                "content": abstract["abstract"],
-            }
-            for abstract in event.get("abstracts", [])
-        ]
+        content = format_tool_folded_summary(event)
+        if not content:
+            return []
+        return [{"role": "assistant", "content": content}]
 
     if t == "session_folded":
         return [{"role": "assistant", "content": event.get("summary", "")}]

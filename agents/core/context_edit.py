@@ -45,8 +45,7 @@ def estimate_tokens(text: str) -> int:
     return int(cjk * 0.7 + other / 4)
 
 
-def _msg_tokens(msg: dict) -> int:
-    """估算一条消息内容的 token 数。"""
+def estimate_message_tokens(msg: dict) -> int:
     content = msg.get("content")
     if content is None:
         if msg.get("tool_calls"):
@@ -110,7 +109,7 @@ def describe_messages(messages: list[dict], use_openai: bool) -> list[dict]:
             "role": role,
             "label": label,
             "chars": _msg_chars(msg),
-            "tokens": _msg_tokens(msg),
+            "tokens": estimate_message_tokens(msg),
         })
     return rows
 

@@ -14,10 +14,10 @@ from typing import Any, Callable, Awaitable
 ToolDef = dict
 PermissionMode = str
 
-READ_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "compact_context", "shell_status", "search_history", "list_session_notes", "plan_status", "plan_list", "plan_read_artifact", "plan_explore", "plan_continue", "plan_retry", "plan_recall", "plan_check_expired"}
+READ_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "web_search", "compact_context", "shell_status", "search_history", "list_session_notes", "plan_status", "plan_list", "plan_read_artifact", "plan_explore", "plan_continue", "plan_retry", "plan_recall", "plan_check_expired"}
 EDIT_TOOLS = {"write_file", "edit_file", "skill_create", "write_workflow_pattern", "write_wiki_entry", "plan_propose", "plan_update", "plan_task_start", "plan_task_done", "plan_task_failed", "plan_complete", "plan_add_artifact", "plan_archive", "plan_save_explore", "plan_abandon", "plan_reopen", "plan_pause", "plan_resume", "plan_skip", "plan_redo", "plan_rollback", "ask_user", "todolist"}
 
-CONCURRENCY_SAFE_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "shell_status"}
+CONCURRENCY_SAFE_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "web_search", "shell_status"}
 
 MAX_RESULT_CHARS = 50000
 
@@ -76,6 +76,7 @@ TOOL_EXECUTION_MODES: dict[str, str] = {
     "outline_file": "parallel",
     "list_files": "parallel",
     "grep_search": "parallel",
+    "web_search": "parallel",
     "shell_status": "parallel",
     "search_history": "parallel",
     "list_session_notes": "parallel",
@@ -196,6 +197,21 @@ tool_definitions: list[ToolDef] = [
                 "include": {"type": "string", "description": 'File glob pattern to include (e.g., "*.ts", "*.py")'},
             },
             "required": ["pattern"],
+        },
+    },
+    {
+        "name": "web_search",
+        "description": "Search the public web using DuckDuckGo/multi-backend metasearch. Use this for facts, documents, URLs, dates, and current information. Prefer it over curl or grep for internet research.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "max_results": {"type": "integer", "description": "Maximum number of results to return (1-20, default: 8)"},
+                "region": {"type": "string", "description": "Search region, such as us-en, cn-zh, wt-wt (default: us-en)"},
+                "timelimit": {"type": "string", "enum": ["d", "w", "m", "y"], "description": "Optional recency filter: day, week, month, or year"},
+                "backend": {"type": "string", "description": "Optional search backend or comma-delimited backends (default: auto)"},
+            },
+            "required": ["query"],
         },
     },
     {

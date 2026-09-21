@@ -39,7 +39,7 @@ export function ReviewPanel({ snapshots, onAccept, onReject, onAcceptAll, onOpen
           <span className="text-sm font-medium text-gray-700">
             Code Review
           </span>
-          <span className="text-xs bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded-full">
+          <span className="text-xs bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded-full">
             {snapshots.length} file{snapshots.length !== 1 ? 's' : ''}
           </span>
           {newFiles.length > 0 && (
@@ -94,7 +94,7 @@ export function ReviewPanel({ snapshots, onAccept, onReject, onAcceptAll, onOpen
                     </span>
                     <button
                       onClick={() => onOpenFile(snap.file_path)}
-                      className="text-sm text-blue-600 hover:text-blue-800 hover:underline truncate"
+                      className="text-sm text-indigo-600 hover:text-indigo-800 hover:underline truncate"
                       title={snap.file_path}
                     >
                       {fileName}

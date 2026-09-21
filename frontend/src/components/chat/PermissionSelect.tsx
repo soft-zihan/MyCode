@@ -78,9 +78,9 @@ export const PermissionSelect: React.FC<PermissionSelectProps> = ({
       badge: 'bg-green-100 text-green-700',
     },
     blue: {
-      active: 'text-blue-700 bg-blue-50 border-blue-300',
-      hover: 'hover:bg-blue-50',
-      badge: 'bg-blue-100 text-blue-700',
+      active: 'text-indigo-700 bg-indigo-50 border-indigo-300',
+      hover: 'hover:bg-indigo-50',
+      badge: 'bg-indigo-100 text-indigo-700',
     },
   };
 
@@ -111,16 +111,16 @@ export const PermissionSelect: React.FC<PermissionSelectProps> = ({
                   setOpen(false);
                 }}
                 className={`permission-select-option w-full flex items-start gap-2.5 px-3 py-2.5 text-left transition-colors ${
-                  isActive ? 'bg-blue-50' : 'hover:bg-gray-50'
+                  isActive ? 'bg-indigo-50' : 'hover:bg-gray-50'
                 }`}
               >
                 <MIcon className={`w-4 h-4 mt-0.5 flex-shrink-0 ${
                   m.color === 'green' ? 'text-green-600' :
                   m.color === 'yellow' ? 'text-yellow-600' :
-                  m.color === 'blue' ? 'text-blue-600' : 'text-gray-500'
+                  m.color === 'blue' ? 'text-indigo-600' : 'text-gray-500'
                 }`} />
                 <div className="flex-1 min-w-0">
-                  <div className={`text-xs font-medium ${isActive ? 'text-blue-700' : 'text-gray-700'}`}>
+                  <div className={`text-xs font-medium ${isActive ? 'text-indigo-700' : 'text-gray-700'}`}>
                     {m.label}
                   </div>
                   <div className="text-[10px] text-gray-500 mt-0.5 leading-tight">
@@ -128,7 +128,7 @@ export const PermissionSelect: React.FC<PermissionSelectProps> = ({
                   </div>
                 </div>
                 {isActive && (
-                  <div className="w-1.5 h-1.5 rounded-full bg-blue-500 mt-1.5 flex-shrink-0" />
+                  <div className="w-1.5 h-1.5 rounded-full bg-indigo-500 mt-1.5 flex-shrink-0" />
                 )}
               </button>
             );

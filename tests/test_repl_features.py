@@ -106,8 +106,8 @@ def test_status_line_contains_model_and_tokens():
     agent = _make_agent()
     agent.total_input_tokens = 1234
     agent.total_output_tokens = 567
-    agent.last_input_token_count = 890
+    agent.set_last_usage_tokens(800, 890)
     line = agent.status_line()
     assert "deepseek-chat" in line
-    assert "890" in line  # New format shows exact token count
-    assert "session: 1234 in / 567 out" in line  # Session tokens
+    assert "890" in line
+    assert "session: 1234 in / 567 out" in line

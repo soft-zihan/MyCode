@@ -58,7 +58,7 @@ const SuggestionList = forwardRef<{ onKeyDown: (props: { event: KeyboardEvent })
 
     const getIcon = (item: SuggestionItem) => {
       switch (item.type) {
-        case 'file': return <File className="w-3.5 h-3.5 text-blue-500 flex-shrink-0" />;
+        case 'file': return <File className="w-3.5 h-3.5 text-indigo-500 flex-shrink-0" />;
         case 'folder': return <Folder className="w-3.5 h-3.5 text-yellow-500 flex-shrink-0" />;
         case 'command': return <Terminal className="w-3.5 h-3.5 text-green-500 flex-shrink-0" />;
       }

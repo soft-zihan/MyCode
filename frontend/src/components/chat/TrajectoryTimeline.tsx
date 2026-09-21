@@ -105,7 +105,7 @@ export const TrajectoryTimeline: React.FC<TrajectoryTimelineProps> = ({ events, 
   const getEventIcon = (type: TrajectoryEvent['type']) => {
     switch (type) {
       case 'turn':
-        return <Layers className="w-4 h-4 text-blue-500" />;
+        return <Layers className="w-4 h-4 text-indigo-500" />;
       case 'model':
         return <Bot className="w-4 h-4 text-purple-500" />;
       case 'tool':
@@ -128,7 +128,7 @@ export const TrajectoryTimeline: React.FC<TrajectoryTimelineProps> = ({ events, 
   const getEventColor = (type: TrajectoryEvent['type']) => {
     switch (type) {
       case 'turn':
-        return 'border-blue-200 bg-blue-50';
+        return 'border-indigo-200 bg-indigo-50';
       case 'model':
         return 'border-purple-200 bg-purple-50';
       case 'tool':
@@ -151,7 +151,7 @@ export const TrajectoryTimeline: React.FC<TrajectoryTimelineProps> = ({ events, 
   const getBarColor = (type: TrajectoryEvent['type']) => {
     switch (type) {
       case 'turn':
-        return 'bg-blue-400';
+        return 'bg-indigo-400';
       case 'model':
         return 'bg-purple-400';
       case 'tool':
@@ -290,7 +290,7 @@ export const TrajectoryTimeline: React.FC<TrajectoryTimelineProps> = ({ events, 
             <div className="w-3 h-3 rounded bg-orange-400" /> Tool
           </span>
           <span className="flex items-center gap-1">
-            <div className="w-3 h-3 rounded bg-blue-400" /> Turn
+            <div className="w-3 h-3 rounded bg-indigo-400" /> Turn
           </span>
           <span className="flex items-center gap-1">
             <div className="w-3 h-3 rounded bg-indigo-400" /> Sub-Agent
@@ -356,7 +356,7 @@ export const TrajectoryTimeline: React.FC<TrajectoryTimelineProps> = ({ events, 
                         target="_blank"
                         rel="noopener noreferrer"
                         onClick={(e) => e.stopPropagation()}
-                        className="text-xs px-1.5 py-0.5 bg-white border border-blue-200 text-blue-600 rounded hover:bg-blue-50 flex items-center gap-1"
+                        className="text-xs px-1.5 py-0.5 bg-white border border-indigo-200 text-indigo-600 rounded hover:bg-indigo-50 flex items-center gap-1"
                         title="Open Langfuse trace"
                       >
                         <ExternalLink className="w-2.5 h-2.5" />
@@ -422,7 +422,7 @@ export const TrajectoryTimeline: React.FC<TrajectoryTimelineProps> = ({ events, 
       <div className="p-3 border-b border-gray-200">
         <div className="flex items-center justify-between mb-2">
           <h3 className="text-sm font-semibold text-gray-900 flex items-center gap-1.5">
-            <Clock className="w-4 h-4 text-blue-500" />
+            <Clock className="w-4 h-4 text-indigo-500" />
             Timeline
             {sessionId && <span className="text-xs text-gray-400 font-normal">({sessionId})</span>}
           </h3>
@@ -431,7 +431,7 @@ export const TrajectoryTimeline: React.FC<TrajectoryTimelineProps> = ({ events, 
               onClick={() => setViewMode('sequence')}
               className={`px-2 py-1 text-xs rounded ${
                 viewMode === 'sequence'
-                  ? 'bg-blue-100 text-blue-700'
+                  ? 'bg-indigo-100 text-indigo-700'
                   : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               }`}
             >
@@ -441,7 +441,7 @@ export const TrajectoryTimeline: React.FC<TrajectoryTimelineProps> = ({ events, 
               onClick={() => setViewMode('duration')}
               className={`px-2 py-1 text-xs rounded ${
                 viewMode === 'duration'
-                  ? 'bg-blue-100 text-blue-700'
+                  ? 'bg-indigo-100 text-indigo-700'
                   : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               }`}
             >
@@ -454,7 +454,7 @@ export const TrajectoryTimeline: React.FC<TrajectoryTimelineProps> = ({ events, 
           placeholder="Search events..."
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          className="w-full px-2 py-1 text-xs border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+          className="w-full px-2 py-1 text-xs border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-indigo-500"
         />
       </div>
 

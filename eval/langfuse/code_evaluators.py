@@ -1,12 +1,12 @@
 """Code evaluators — 确定性规则断言，score 写回 Langfuse。
 
-评估对象：trace bundle = GET /api/public/traces/{id} 的响应
+评估对象：trace bundle = `LangfuseApiClient.fetch_trace(trace_id)` 返回的 JSON dict
 （内嵌 observations，自定义可过滤字段位于 obs["metadata"]）。
 
 指标（与 13-trace-eval-implementation-plan.md Phase 3 对应）：
 - tool_success            NUMERIC  工具调用成功率（无 TOOL observation 时跳过）
 - repeated_tool_calls     BOOLEAN  同一 (tool, input) 重复调用 >=3 次（True=检出重复，坏）
-- event_range_complete    BOOLEAN  turn span 携带完整 event_range（埋点质量自检）
+- event_range_complete    BOOLEAN  turn observation 携带完整 event_range（埋点质量自检）
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ def eval_repeated_tool_calls(bundle: dict[str, Any]) -> ScoreResult | None:
 
 
 def eval_event_range_complete(bundle: dict[str, Any]) -> ScoreResult | None:
-    """埋点质量自检：turn(chain) span 是否携带完整 event_range。"""
+    """埋点质量自检：turn(chain) observation 是否携带完整 event_range。"""
     turns = [
         o for o in bundle.get("observations", [])
         if o.get("type") == "CHAIN"
@@ -92,7 +92,7 @@ def eval_event_range_complete(bundle: dict[str, Any]) -> ScoreResult | None:
         "name": "event_range_complete",
         "value": complete,
         "data_type": "BOOLEAN",
-        "comment": f"{len(turns)} turn span(s) checked",
+        "comment": f"{len(turns)} turn observation(s) checked",
     }
 
 

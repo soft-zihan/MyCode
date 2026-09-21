@@ -179,11 +179,15 @@ class Agent:
         self._api_base = api_base
         self._api_key = api_key
         self._side_client_cache: tuple[tuple, tuple] | None = None
-        from agents.config import get_endpoint_by_model
+        from agents.config import (
+            DEFAULT_AUTO_COMPACT_THRESHOLD,
+            DEFAULT_CONTEXT_WINDOW,
+            get_endpoint_by_model,
+        )
         _ep = get_endpoint_by_model(model)
-        self.context_window = _ep.context_window if _ep else 200000
+        self.context_window = _ep.context_window if _ep else DEFAULT_CONTEXT_WINDOW
         self.effective_window = self.context_window - 20000
-        self.auto_compact_threshold = _ep.auto_compact_threshold if _ep else 0.70
+        self.auto_compact_threshold = _ep.auto_compact_threshold if _ep else DEFAULT_AUTO_COMPACT_THRESHOLD
         self.session_id = session_id or uuid.uuid4().hex[:8]
         self.session_start_time= time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
 
@@ -197,6 +201,8 @@ class Agent:
         self.total_output_tokens = 0
         self.total_cached_tokens = 0
         self.last_input_token_count = 0
+        self.last_total_token_count = 0
+        self.last_usage_seq = -1
         self.current_turns = 0
         self.last_api_call_time = 0
 
@@ -208,6 +214,7 @@ class Agent:
         from .skills.skill_orchestrator import SkillOrchestrator
         self._compressor = ContextCompressor(
             effective_window=self.effective_window,
+            tool_fold_threshold=self.auto_compact_threshold,
         )
         self._permission_gate = PermissionGate()
         self._session_lifecycle = SessionLifecycle()
@@ -375,13 +382,14 @@ class Agent:
                 if usage is not None:
                     input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
                     output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+                    total_tokens = int(getattr(usage, "total_tokens", 0) or 0) or (input_tokens + output_tokens)
                     cached_tokens = int(getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", 0) or 0)
                     cached_tokens = min(cached_tokens, input_tokens)
                     span.update(usage_details={
                         "input": input_tokens - cached_tokens,
                         "input_cached_tokens": cached_tokens,
                         "output": output_tokens,
-                        "total": input_tokens + output_tokens,
+                        "total": total_tokens,
                     })
 
                 span.update(output=json.dumps({
@@ -750,7 +758,7 @@ class Agent:
     def _build_fold_guidance_section(self) -> str:
         if self._custom_system_prompt is not None:
             return ""
-        utilization = self.last_input_token_count / self.effective_window if self.effective_window else 0.0
+        utilization = self.estimated_context_tokens / self.effective_window if self.effective_window else 0.0
         last_fold = "never" if not self._fold_last_time else f"{int((time.time() - self._fold_last_time) / 60)}m ago"
         return (
             "\n\n# Runtime Fold Guidance\n"
@@ -930,8 +938,24 @@ class Agent:
     def add_output_tokens(self, count: int) -> None:
         self.total_output_tokens += count
 
-    def set_last_input_tokens(self, count: int) -> None:
-        self.last_input_token_count = count
+    def set_last_usage_tokens(self, input_count: int, total_count: int) -> None:
+        self.last_input_token_count = max(0, int(input_count))
+        self.last_total_token_count = max(0, int(total_count))
+
+    def mark_last_usage_position(self, seq: int) -> None:
+        self.last_usage_seq = int(seq)
+
+    def reset_context_token_estimate(self) -> None:
+        self.last_input_token_count = 0
+        self.last_total_token_count = 0
+        self.last_usage_seq = -1
+
+    @property
+    def estimated_context_tokens(self) -> int:
+        if self.last_total_token_count <= 0:
+            return 0
+        from .core.context_events import estimate_tokens_after_seq
+        return self.last_total_token_count + estimate_tokens_after_seq(self.session, self.last_usage_seq)
 
     def increment_turns(self) -> None:
         self.current_turns += 1
@@ -1014,11 +1038,12 @@ class Agent:
             f"Tokens: {self.total_input_tokens} in / {self.total_output_tokens} out\n  Estimated cost: ${total:.4f}{budget_info}{turn_info}")
 
     def status_line(self) -> str:
-        if self.last_input_token_count > 0:
-            util = self.last_input_token_count / self.effective_window if self.effective_window else 0.0
-            ctx_part = f"ctx: {self.last_input_token_count}/{self.context_window} tokens ({util:.0%})"
+        estimated_tokens = self.estimated_context_tokens
+        if estimated_tokens > 0:
+            util = estimated_tokens / self.effective_window if self.effective_window else 0.0
+            ctx_part = f"ctx: {estimated_tokens}/{self.effective_window} effective tokens ({util:.0%})"
         else:
-            ctx_part = f"ctx: -/{self.context_window} tokens (未知，待首次调用)"
+            ctx_part = f"ctx: -/{self.effective_window} effective tokens (未知，待首次调用)"
         return (
             f"model: {self.model} | {ctx_part} | session: {self.total_input_tokens} in / {self.total_output_tokens} out"
         )

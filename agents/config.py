@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 
+DEFAULT_CONTEXT_WINDOW = 1_000_000
+DEFAULT_AUTO_COMPACT_THRESHOLD = 0.80
+
+
 def config_path() -> Path:
     """配置文件路径：~/.my-code/config.json"""
     return Path.home() / ".my-code" / "config.json"
@@ -23,8 +27,8 @@ class ModelEndpointConfig:
     model: str
     base_url: str
     api_key: str
-    context_window: int = 128000
-    auto_compact_threshold: float = 0.70
+    context_window: int = DEFAULT_CONTEXT_WINDOW
+    auto_compact_threshold: float = DEFAULT_AUTO_COMPACT_THRESHOLD
     provider_name: str = ""  # User-friendly name for the provider
 
     def to_dict(self) -> dict[str, Any]:
@@ -36,8 +40,8 @@ class ModelEndpointConfig:
             model=data.get("model", ""),
             base_url=data.get("base_url", ""),
             api_key=data.get("api_key", ""),
-            context_window=data.get("context_window", 128000),
-            auto_compact_threshold=data.get("auto_compact_threshold", 0.70),
+            context_window=data.get("context_window", DEFAULT_CONTEXT_WINDOW),
+            auto_compact_threshold=data.get("auto_compact_threshold", DEFAULT_AUTO_COMPACT_THRESHOLD),
             provider_name=data.get("provider_name", ""),
         )
 

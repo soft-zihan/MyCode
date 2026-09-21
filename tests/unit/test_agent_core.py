@@ -43,6 +43,8 @@ class TestAgentInit:
         assert agent.total_input_tokens == 0
         assert agent.total_output_tokens == 0
         assert agent.last_input_token_count == 0
+        assert agent.last_total_token_count == 0
+        assert agent.estimated_context_tokens == 0
 
     def test_initial_turn_number_zero(self):
         agent = _make_agent()
@@ -90,23 +92,25 @@ class TestAgentStatusLine:
 
     def test_status_line_shows_tokens_after_update(self):
         agent = _make_agent()
-        agent.last_input_token_count = 12650
+        agent.set_last_usage_tokens(12000, 12650)
         line = agent.status_line()
         assert "12650" in line
 
     def test_status_line_shows_dash_before_first_call(self):
         agent = _make_agent()
-        assert agent.last_input_token_count == 0
+        assert agent.estimated_context_tokens == 0
         line = agent.status_line()
         assert "ctx: -/" in line
 
 
 class TestAgentContextWindow:
 
-    def test_default_context_window_200k(self):
+    def test_default_context_window_1m(self):
         agent = _make_agent(model="unknown-model")
-        assert agent.context_window == 200000
-        assert agent.effective_window == 180000
+        assert agent.context_window == 1_000_000
+        assert agent.effective_window == 980_000
+        assert agent.auto_compact_threshold == 0.80
+        assert agent._compressor.tool_fold_threshold == 0.80
 
 
 class TestAgentSpawnSubAgent:

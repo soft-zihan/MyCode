@@ -130,7 +130,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42, help="抽样种子（默认 42）")
     parser.add_argument("--category", type=str, default=None, help="只跑指定 category")
     parser.add_argument("--include-image", action="store_true", help="包含带图片的题（默认跳过）")
-    parser.add_argument("--timeout", type=int, default=600, help="单题超时秒数（默认 600）")
+    parser.add_argument("--timeout", type=int, default=0, help="单题超时秒数（默认 0，不超时）")
     parser.add_argument("--model", type=str, default=None, help="覆盖模型")
     parser.add_argument("--api-base", type=str, default=None, help="覆盖 API base")
     args = parser.parse_args()

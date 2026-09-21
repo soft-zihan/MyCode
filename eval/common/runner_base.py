@@ -108,7 +108,7 @@ async def run_agent_task(
     model: str,
     api_base: str | None,
     api_key: str,
-    timeout_s: int = 600,
+    timeout_s: int = 0,
 ) -> dict[str, Any]:
     """运行单个评测任务，返回 {text, duration_s, tokens, trace_id, error, agent_session_id}。"""
     from agents.agent import Agent
@@ -150,7 +150,10 @@ async def run_agent_task(
                 )
                 result["agent_session_id"] = agent.session_id
                 agent_task = asyncio.create_task(agent.run_once(prompt))
-                out = await asyncio.wait_for(agent_task, timeout=timeout_s)
+                if timeout_s > 0:
+                    out = await asyncio.wait_for(agent_task, timeout=timeout_s)
+                else:
+                    out = await agent_task
                 result["text"] = out.get("text", "")
                 result["tokens"] = out.get("tokens", {})
             except asyncio.TimeoutError:

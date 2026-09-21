@@ -73,7 +73,7 @@ export function AppSidebar({ children }: AppSidebarProps) {
             to={item.path}
             className={`flex items-center gap-2 px-2.5 py-1.5 text-xs rounded transition-colors ${
               location.pathname === item.path
-                ? 'bg-blue-100 text-blue-600 font-medium'
+                ? 'bg-indigo-100 text-indigo-600 font-medium'
                 : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
             }`}
           >
@@ -107,7 +107,7 @@ export function AppSidebar({ children }: AppSidebarProps) {
                 to={item.path}
                 className={`p-2 rounded-lg transition-colors ${
                   location.pathname === item.path
-                    ? 'bg-blue-100 text-blue-600'
+                    ? 'bg-indigo-100 text-indigo-600'
                     : 'text-gray-500 hover:bg-gray-200 hover:text-gray-700'
                 }`}
                 title={item.label}
@@ -140,7 +140,7 @@ export function AppSidebar({ children }: AppSidebarProps) {
         className="absolute top-0 -right-1 w-2 h-full cursor-col-resize group"
         onMouseDown={handleMouseDown}
       >
-        <div className="absolute inset-y-0 left-0 w-0.5 bg-transparent group-hover:bg-blue-400 group-active:bg-blue-500 transition-colors" />
+        <div className="absolute inset-y-0 left-0 w-0.5 bg-transparent group-hover:bg-indigo-400 group-active:bg-indigo-500 transition-colors" />
       </div>
     </div>
   );

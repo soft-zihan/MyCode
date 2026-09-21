@@ -90,7 +90,7 @@ function TreeNodeItem({ node, level, onOpenFile }: {
             {node.isNew ? (
               <FilePlus className="w-4 h-4 text-green-500 flex-shrink-0" />
             ) : (
-              <FileText className="w-4 h-4 text-blue-500 flex-shrink-0" />
+              <FileText className="w-4 h-4 text-indigo-500 flex-shrink-0" />
             )}
             <span className="truncate flex-1">{node.name}</span>
             {node.isNew && (

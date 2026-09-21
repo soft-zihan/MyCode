@@ -15,7 +15,7 @@ interface OverviewBarProps {
 
 const getTypeColor = (type: TimelineEvent['type']): string => {
   switch (type) {
-    case 'turn': return 'bg-blue-400';
+    case 'turn': return 'bg-indigo-400';
     case 'model': return 'bg-purple-400';
     case 'tool': return 'bg-orange-400';
     case 'sub_agent': return 'bg-indigo-400';

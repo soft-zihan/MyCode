@@ -1,5 +1,6 @@
 import { useSessionStore } from '../../store';
 import { sessionStore } from '../../store';
+import { DEFAULT_CONTEXT_WINDOW } from '../../api/client';
 import { McpPanel } from './McpPanel';
 import { PromptsPanel } from './PromptsPanel';
 
@@ -40,7 +41,7 @@ export function ContextPanel({ sessionId, onFileSelect }: ContextPanelProps) {
   const stats = useSessionStore(() => sessionId ? sessionStore.getDetailedStats(sessionId) : null);
   const breakdown = useSessionStore(() => sessionId ? sessionStore.getBreakdown(sessionId) : null);
   const contextUsed = useSessionStore(() => sessionId ? sessionStore.getContextUsed(sessionId) : 0);
-  const contextTotal = useSessionStore(() => sessionId ? sessionStore.getContextTotal(sessionId) : 128000);
+  const contextTotal = useSessionStore(() => sessionId ? sessionStore.getContextTotal(sessionId) : DEFAULT_CONTEXT_WINDOW);
 
   if (!sessionId) {
     return (
@@ -79,9 +80,9 @@ export function ContextPanel({ sessionId, onFileSelect }: ContextPanelProps) {
           )}
         </div>
         <div className="grid grid-cols-3 gap-2">
-          <div className="text-center p-2 bg-blue-50 rounded">
-            <div className="text-[10px] text-blue-600">Input</div>
-            <div className="text-xs font-bold text-blue-900">{formatTokens(inputTokens)}</div>
+          <div className="text-center p-2 bg-indigo-50 rounded">
+            <div className="text-[10px] text-indigo-600">Input</div>
+            <div className="text-xs font-bold text-indigo-900">{formatTokens(inputTokens)}</div>
           </div>
           <div className="text-center p-2 bg-green-50 rounded">
             <div className="text-[10px] text-green-600">Output</div>
@@ -142,7 +143,7 @@ export function ContextPanel({ sessionId, onFileSelect }: ContextPanelProps) {
             )}
             {breakdown.messages_tokens > 0 && (
               <div
-                className="h-full bg-blue-500"
+                className="h-full bg-indigo-500"
                 style={{ width: `${(breakdown.messages_tokens / totalTokens) * 100}%` }}
                 title={`Messages: ${formatTokens(breakdown.messages_tokens)}`}
               />
@@ -201,7 +202,7 @@ export function ContextPanel({ sessionId, onFileSelect }: ContextPanelProps) {
 
             {/* Layer 3: Messages */}
             <div className="flex items-center gap-2 py-0.5 font-medium mt-2">
-              <div className="w-3 h-3 rounded-sm bg-blue-500" />
+              <div className="w-3 h-3 rounded-sm bg-indigo-500" />
               <span className="text-xs text-gray-700 flex-1">Messages</span>
               <span className="text-xs font-mono text-gray-900">{formatTokens(breakdown.messages_tokens)}</span>
               <span className="text-[10px] text-gray-400 w-8 text-right">{totalTokens > 0 ? Math.round((breakdown.messages_tokens / totalTokens) * 100) : 0}%</span>

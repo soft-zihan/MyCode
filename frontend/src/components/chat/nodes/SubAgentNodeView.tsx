@@ -1,8 +1,7 @@
 import { memo, useState } from 'react';
 import { Bot, ChevronDown, ChevronRight, Brain } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { ToolRow } from '../ToolRow';
+import { Markdown } from '../markdown';
 import type { SubAgentNode, ToolCallNode, SubAgentEventItem } from './types';
 import type { ToolCallEvent } from '../../../hooks';
 
@@ -51,10 +50,8 @@ export const SubAgentNodeView = memo(function SubAgentNodeView({ node }: SubAgen
         );
       case 'text':
         return (
-          <div key={`text-${idx}`} className="prose prose-xs max-w-none">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-              {item.content}
-            </ReactMarkdown>
+          <div key={`text-${idx}`}>
+            <Markdown content={item.content} linkifyFiles={false} compact />
           </div>
         );
       case 'tool_call':
@@ -133,11 +130,7 @@ export const SubAgentNodeView = memo(function SubAgentNodeView({ node }: SubAgen
                     </div>
                   )}
                   {node.text && (
-                    <div className="prose prose-xs max-w-none">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {node.text}
-                      </ReactMarkdown>
-                    </div>
+                    <Markdown content={node.text} linkifyFiles={false} compact />
                   )}
                   {node.toolCalls.length > 0 && (
                     <div className="space-y-1">

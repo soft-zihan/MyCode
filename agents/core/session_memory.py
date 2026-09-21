@@ -166,7 +166,7 @@ Guidelines:
 - If a field has no data, use an empty string or empty array rather than inventing details."""
 
 
-def _clip(text: str, limit: int = MAX_BLOCK_CHARS) -> str:
+def clip_text(text: str, limit: int = MAX_BLOCK_CHARS) -> str:
     text = str(text or "")
     if len(text) <= limit:
         return text
@@ -190,7 +190,7 @@ def _content_text(content: Any) -> str:
                 parts.append(
                     "TOOL_RESULT"
                     f" id={block.get('tool_use_id', '')}\n"
-                    f"{_clip(str(block.get('content') or ''))}"
+                    f"{clip_text(str(block.get('content') or ''))}"
                 )
             elif btype == "tool_use":
                 parts.append(
@@ -216,7 +216,7 @@ def build_openai_transcript(messages: list[dict[str, Any]]) -> str:
         lines = [f"## Message {i} ({role})"]
         content = _content_text(msg.get("content"))
         if content:
-            lines.append(_clip(content))
+            lines.append(clip_text(content))
         tool_calls = msg.get("tool_calls")
         if isinstance(tool_calls, list) and tool_calls:
             for tc in tool_calls:
@@ -232,7 +232,7 @@ def build_openai_transcript(messages: list[dict[str, Any]]) -> str:
         if role == "tool":
             lines.append(f"tool_call_id={msg.get('tool_call_id', '')}")
         parts.append("\n".join(lines))
-    return _clip("\n\n".join(parts), MAX_TRANSCRIPT_CHARS)
+    return clip_text("\n\n".join(parts), MAX_TRANSCRIPT_CHARS)
 
 
 def build_folding_user_prompt(transcript: str) -> str:
@@ -292,7 +292,7 @@ def fallback_folded_memory(transcript: str) -> dict[str, Any]:
         "episode_memory": {
             "task_description": "Previous conversation was compacted without structured JSON.",
             "key_events": [],
-            "current_progress": _clip(transcript, 6000),
+            "current_progress": clip_text(transcript, 6000),
         },
         "working_memory": {
             "immediate_goal": "Continue the user's current coding task from the compacted context.",
@@ -312,6 +312,49 @@ def format_folded_memory(memory: dict[str, Any]) -> str:
         "</session-folded-memory>\n\n"
         "Continue the task from this state."
     )
+
+
+def format_tool_folded_summary(event: dict[str, Any]) -> str:
+    abstracts = [a for a in event.get("abstracts", []) if isinstance(a, dict)]
+    assistant_texts = [a for a in event.get("assistant_texts", []) if isinstance(a, dict)]
+    if not abstracts and not assistant_texts:
+        return ""
+
+    entries: list[tuple[int, int, int, dict[str, Any]]] = []
+    for index, text_entry in enumerate(assistant_texts):
+        seq = text_entry.get("seq")
+        sort_seq = seq if isinstance(seq, int) else index
+        entries.append((0 if isinstance(seq, int) else 1, sort_seq, index, text_entry))
+    for index, abstract in enumerate(abstracts):
+        seq = abstract.get("seq")
+        sort_seq = seq if isinstance(seq, int) else index
+        entries.append((0 if isinstance(seq, int) else 1, sort_seq, index + len(assistant_texts), abstract))
+    entries.sort(key=lambda item: (item[0], item[1], item[2]))
+
+    lines = [
+        "<folded-tool-results>",
+        "Older tool calls were compacted. Use context_restore(key='snip:<call_id>') when the full result is needed.",
+    ]
+    for _, _, _, entry in entries:
+        if "call_id" in entry:
+            call_id = str(entry.get("call_id") or "")
+            tool_name = str(entry.get("tool_name") or "")
+            arguments = clip_text(str(entry.get("arguments") or ""), 500)
+            header = f"- call_id={call_id or 'unknown'}"
+            if tool_name:
+                header += f" tool={tool_name}"
+            if arguments:
+                header += f" arguments={arguments}"
+            lines.append(header)
+            body = clip_text(str(entry.get("abstract") or ""), MAX_BLOCK_CHARS)
+            lines.append("  result: " + body.replace("\n", "\n  "))
+        else:
+            seq = entry.get("seq")
+            body = clip_text(str(entry.get("text") or ""), MAX_BLOCK_CHARS)
+            lines.append(f"- assistant_text seq={seq if isinstance(seq, int) else 'unknown'}")
+            lines.append("  " + body.replace("\n", "\n  "))
+    lines.append("</folded-tool-results>")
+    return "\n".join(lines)
 
 
 # ─── 跨会话知识复用 ─────────────────────────────────────────────────────────

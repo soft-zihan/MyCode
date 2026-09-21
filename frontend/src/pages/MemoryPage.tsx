@@ -87,7 +87,7 @@ export default function MemoryPage() {
 
   const getTypeColor = (type: string) => {
     const colors: Record<string, string> = {
-      user: 'bg-blue-100 text-blue-800',
+      user: 'bg-indigo-100 text-indigo-800',
       feedback: 'bg-green-100 text-green-800',
       project: 'bg-purple-100 text-purple-800',
       reference: 'bg-yellow-100 text-yellow-800',
@@ -143,7 +143,7 @@ export default function MemoryPage() {
                   <div
                     key={memory.filename}
                     className={`px-3 py-2 cursor-pointer hover:bg-gray-50 ${
-                      selectedMemory?.filename === memory.filename ? 'bg-blue-50 border-l-2 border-blue-500' : ''
+                      selectedMemory?.filename === memory.filename ? 'bg-indigo-50 border-l-2 border-indigo-500' : ''
                     }`}
                     onClick={() => setSelectedMemory(memory)}
                   >
@@ -228,7 +228,7 @@ export default function MemoryPage() {
                     ) : (
                       <button
                         onClick={handleEdit}
-                        className="flex items-center px-3 py-1.5 text-sm bg-blue-500 text-white rounded hover:bg-blue-600"
+                        className="flex items-center px-3 py-1.5 text-sm bg-indigo-500 text-white rounded hover:bg-indigo-600"
                       >
                         <Edit3 className="w-4 h-4 mr-1" />
                         Edit
@@ -255,9 +255,9 @@ export default function MemoryPage() {
                 </div>
               </div>
               {showInfo && (
-                <div className="p-4 bg-blue-50 border-b border-blue-200">
-                  <h3 className="text-sm font-semibold text-blue-900 mb-2">Memory System Principles</h3>
-                  <div className="text-xs text-blue-800 space-y-2">
+                <div className="p-4 bg-indigo-50 border-b border-indigo-200">
+                  <h3 className="text-sm font-semibold text-indigo-900 mb-2">Memory System Principles</h3>
+                  <div className="text-xs text-indigo-800 space-y-2">
                     <p><strong>What is Memory?</strong> Memory is a persistent storage system that allows the AI agent to remember important information across conversations.</p>
                     <p><strong>Types:</strong></p>
                     <ul className="list-disc list-inside ml-2 space-y-1">
@@ -267,7 +267,7 @@ export default function MemoryPage() {
                       <li><strong>Reference:</strong> Important facts and documentation</li>
                     </ul>
                     <p><strong>Recall:</strong> Memories are automatically retrieved based on semantic similarity to the current conversation context using a side query model.</p>
-                    <p><strong>Storage:</strong> Memories are stored as Markdown files in <code className="bg-blue-100 px-1 rounded">~/.my-code/memories/</code></p>
+                    <p><strong>Storage:</strong> Memories are stored as Markdown files in <code className="bg-indigo-100 px-1 rounded">~/.my-code/memories/</code></p>
                   </div>
                 </div>
               )}
@@ -276,7 +276,7 @@ export default function MemoryPage() {
                   <textarea
                     value={editContent}
                     onChange={(e) => setEditContent(e.target.value)}
-                    className="w-full h-full text-sm text-gray-700 font-mono border border-gray-300 rounded p-3 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="w-full h-full text-sm text-gray-700 font-mono border border-gray-300 rounded p-3 resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     placeholder="Memory content..."
                   />
                 ) : (

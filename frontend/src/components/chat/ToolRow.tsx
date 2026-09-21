@@ -80,7 +80,7 @@ const getStateConfig = (status?: string): { state: RowState; dot: ReactNode } =>
     default:
       return { 
         state: 'running', 
-        dot: <Loader2 className="w-3 h-3 text-blue-500 animate-spin" />,
+        dot: <Loader2 className="w-3 h-3 text-indigo-500 animate-spin" />,
       };
   }
 };
@@ -124,21 +124,21 @@ const DiffView: React.FC<{ content: string }> = ({ content }) => {
   const lines = content.split('\n');
   
   return (
-    <div className="text-xs bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded p-2 overflow-x-auto max-h-48 overflow-y-auto font-mono">
+    <div className="text-xs bg-white border border-gray-200 rounded p-2 overflow-x-auto max-h-48 overflow-y-auto font-mono">
       {lines.map((line, i) => {
-        let className = 'text-gray-700 dark:text-gray-300';
+        let className = 'text-gray-700';
         let bgColor = '';
         
         if (line.startsWith('@@')) {
-          className = 'text-blue-600 dark:text-blue-400 font-medium';
+          className = 'text-indigo-600 font-medium';
         } else if (line.startsWith('- ')) {
-          className = 'text-red-700 dark:text-red-400';
-          bgColor = 'bg-red-50 dark:bg-red-900/20';
+          className = 'text-red-700';
+          bgColor = 'bg-red-50';
         } else if (line.startsWith('+ ')) {
-          className = 'text-green-700 dark:text-green-400';
-          bgColor = 'bg-green-50 dark:bg-green-900/20';
+          className = 'text-green-700';
+          bgColor = 'bg-green-50';
         } else if (line.startsWith('Successfully')) {
-          className = 'text-gray-500 dark:text-gray-400 italic';
+          className = 'text-gray-500 italic';
         }
         
         return (
@@ -171,16 +171,16 @@ export const ToolRow: React.FC<ToolRowProps> = ({ call }) => {
 
   return (
     <div 
-      className="group rounded-md border border-gray-200 dark:border-gray-700 overflow-hidden transition-colors hover:border-gray-300 dark:hover:border-gray-600"
+      className="group rounded-md border border-gray-200 overflow-hidden transition-colors hover:border-gray-300"
       data-state={state}
       data-variant={variant}
     >
       {/* Single-line summary row */}
       <div
         className={`flex items-center gap-2 px-2.5 py-1.5 cursor-pointer transition-colors ${
-          isRunning ? 'bg-blue-50/50 dark:bg-blue-900/10' : 
-          isError ? 'bg-red-50/50 dark:bg-red-900/10' : 
-          'hover:bg-gray-50 dark:hover:bg-gray-800/50'
+          isRunning ? 'bg-indigo-50/50' : 
+          isError ? 'bg-red-50/50' : 
+          'hover:bg-gray-50'
         }`}
         onClick={() => hasExpandableContent && setExpanded(!expanded)}
       >
@@ -191,24 +191,24 @@ export const ToolRow: React.FC<ToolRowProps> = ({ call }) => {
           ) : isRunning ? (
             dot
           ) : (
-            <span className="text-gray-500 dark:text-gray-400">{icon}</span>
+            <span className="text-gray-500">{icon}</span>
           )}
         </div>
         
         {/* Title */}
-        <span className="text-sm font-medium text-gray-900 dark:text-gray-100 flex-shrink-0">
+        <span className="text-sm font-medium text-gray-900 flex-shrink-0">
           {label}
         </span>
         
         {/* Separator dot */}
         {displaySummary && (
-          <span className="w-1 h-1 rounded-full bg-gray-300 dark:bg-gray-600 flex-shrink-0" aria-hidden />
+          <span className="w-1 h-1 rounded-full bg-gray-300 flex-shrink-0" aria-hidden />
         )}
         
         {/* Summary - truncated */}
         <span 
           className={`text-sm truncate min-w-0 ${
-            isError ? 'text-red-600 dark:text-red-400' : 'text-gray-500 dark:text-gray-400'
+            isError ? 'text-red-600' : 'text-gray-500'
           }`}
           title={displaySummary}
         >
@@ -218,7 +218,7 @@ export const ToolRow: React.FC<ToolRowProps> = ({ call }) => {
         {/* Right side: duration and expand indicator */}
         <div className="flex items-center gap-2 ml-auto flex-shrink-0">
           {call.duration_ms !== undefined && (
-            <span className="text-xs text-gray-400 dark:text-gray-500">
+            <span className="text-xs text-gray-400">
               {formatDuration(call.duration_ms)}
             </span>
           )}
@@ -234,20 +234,20 @@ export const ToolRow: React.FC<ToolRowProps> = ({ call }) => {
 
       {/* Expanded body */}
       {expanded && hasExpandableContent && (
-        <div className="border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/50">
+        <div className="border-t border-gray-200 bg-gray-50">
           {/* Input/Output card style */}
           <div className="p-2.5 space-y-2">
             {/* Output section */}
             {call.result && (
               <div className="space-y-1">
-                <span className="text-[10px] font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider">
+                <span className="text-[10px] font-medium text-gray-400 uppercase tracking-wider">
                   Output
                 </span>
                 {/* 对于 edit_file，显示 diff 格式 */}
                 {call.name === 'edit_file' ? (
                   <DiffView content={call.result.slice(0, 3000)} />
                 ) : (
-                  <pre className="text-xs bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded p-2 overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap text-gray-700 dark:text-gray-300 font-mono">
+                  <pre className="text-xs bg-white border border-gray-200 rounded p-2 overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap text-gray-700 font-mono">
                     {call.result.slice(0, 3000)}
                     {call.result.length > 3000 && '\n\n... (truncated)'}
                   </pre>
@@ -257,7 +257,7 @@ export const ToolRow: React.FC<ToolRowProps> = ({ call }) => {
             
             {/* File change indicator */}
             {call.snapshot && (
-              <div className="flex items-center gap-1.5 text-xs text-blue-600 dark:text-blue-400">
+              <div className="flex items-center gap-1.5 text-xs text-indigo-600">
                 <Edit3 className="w-3 h-3" />
                 <span className="font-medium">Modified:</span>
                 <span className="font-mono">{call.snapshot.file_path}</span>

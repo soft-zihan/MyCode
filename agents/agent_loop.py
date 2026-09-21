@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import time
@@ -154,13 +155,14 @@ def _model_output_for_trace(result: dict[str, Any]) -> str:
 def _usage_details_for_trace(usage: dict[str, Any]) -> dict[str, int]:
     input_tokens = int(usage.get("prompt_tokens") or 0)
     output_tokens = int(usage.get("completion_tokens") or 0)
+    total_tokens = int(usage.get("total_tokens") or 0)
     cached_tokens = int(usage.get("cached_tokens") or 0)
     cached_tokens = min(cached_tokens, input_tokens)
     return {
         "input": input_tokens - cached_tokens,
         "input_cached_tokens": cached_tokens,
         "output": output_tokens,
-        "total": input_tokens + output_tokens,
+        "total": total_tokens or (input_tokens + output_tokens),
     }
 
 
@@ -234,8 +236,6 @@ class AgentLoop:
 
             response = await self.call_model_stream()
 
-            self._update_token_stats(response)
-
             choice = response.get("choices", [{}])[0] if response.get("choices") else {}
             message = choice.get("message", {})
             
@@ -243,13 +243,15 @@ class AgentLoop:
             content = message.get("content") or ""
             tool_calls = message.get("tool_calls")
             
-            self._agent.session.append("assistant_message", {
+            assistant_event = self._agent.session.append("assistant_message", {
                 "turn": self._agent._current_turn,
                 "step": self._agent._current_step,
                 "thinking": thinking_content,
                 "content": content,
                 "tool_calls": tool_calls,
             })
+            self._agent.mark_last_usage_position(int(assistant_event.get("seq", -1)))
+            self._update_token_stats(response)
 
             self._agent.session.append("step/end", {
                 "turn": self._agent._current_turn,
@@ -362,44 +364,51 @@ class AgentLoop:
         a = self._agent
         a.last_api_call_time = time.time()
 
-        if response.get("usage"):
-            a.add_input_tokens(response["usage"]["prompt_tokens"])
-            a.add_output_tokens(response["usage"]["completion_tokens"])
-            a.set_last_input_tokens(response["usage"]["prompt_tokens"])
-            
-            if not a.is_sub_agent:
-                cached_tokens = response["usage"].get("cached_tokens", 0)
-                a.total_cached_tokens += cached_tokens
-                # 从 assembly_metrics 中提取细粒度数据
-                asm = response.get("_assembly_metrics", {})
-                a.session.append("stats", {
-                    "input_tokens": a.total_input_tokens,
-                    "output_tokens": a.total_output_tokens,
-                    "cached_tokens": cached_tokens,
-                    "total_cached_tokens": a.total_cached_tokens,
-                    "context_window": a.context_window,
-                    "last_input_token_count": a.last_input_token_count,
-                    # Token breakdown (chars)
-                    "system_chars": asm.get("system_chars", 0),
-                    "user_chars": asm.get("user_chars", 0),
-                    "assistant_chars": asm.get("assistant_chars", 0),
-                    "tool_result_chars": asm.get("tool_result_chars", 0),
-                    "tool_count": asm.get("tool_count", 0),
-                    # Tool result breakdown by name
-                    "tool_result_by_name": asm.get("tool_result_by_name", {}),
-                    # System prompt 细粒度 (chars)
-                    "system_base_chars": asm.get("system_base_chars", 0),
-                    "system_claude_md_chars": asm.get("system_claude_md_chars", 0),
-                    "system_agents_md_chars": asm.get("system_agents_md_chars", 0),
-                    "system_skills_chars": asm.get("system_skills_chars", 0),
-                    "system_memory_chars": asm.get("system_memory_chars", 0),
-                    "system_wiki_chars": asm.get("system_wiki_chars", 0),
-                    "system_agents_chars": asm.get("system_agents_chars", 0),
-                    "system_workspace_chars": asm.get("system_workspace_chars", 0),
-                    # Plan mode
-                    "is_plan_mode": asm.get("is_plan_mode", False),
-                    "plan_mode_chars": asm.get("plan_mode_chars", 0),
-                })
+        usage = response.get("usage") or {}
+        if not usage:
+            return
+
+        input_tokens = int(usage.get("prompt_tokens") or 0)
+        output_tokens = int(usage.get("completion_tokens") or 0)
+        total_tokens = int(usage.get("total_tokens") or 0) or (input_tokens + output_tokens)
+        if total_tokens <= 0:
+            logging.warning("model usage returned zero tokens: model=%s", a.model)
+
+        a.add_input_tokens(input_tokens)
+        a.add_output_tokens(output_tokens)
+        a.set_last_usage_tokens(input_tokens, total_tokens)
+
+        if not a.is_sub_agent:
+            cached_tokens = int(usage.get("cached_tokens") or 0)
+            a.total_cached_tokens += cached_tokens
+            asm = response.get("_assembly_metrics", {})
+            a.session.append("stats", {
+                "input_tokens": a.total_input_tokens,
+                "output_tokens": a.total_output_tokens,
+                "cached_tokens": cached_tokens,
+                "total_cached_tokens": a.total_cached_tokens,
+                "context_window": a.context_window,
+                "effective_window": a.effective_window,
+                "last_input_token_count": a.last_input_token_count,
+                "last_total_token_count": a.last_total_token_count,
+                "estimated_context_tokens": a.estimated_context_tokens,
+                "system_chars": asm.get("system_chars", 0),
+                "user_chars": asm.get("user_chars", 0),
+                "assistant_chars": asm.get("assistant_chars", 0),
+                "tool_result_chars": asm.get("tool_result_chars", 0),
+                "tool_count": asm.get("tool_count", 0),
+                "tool_result_by_name": asm.get("tool_result_by_name", {}),
+                "system_base_chars": asm.get("system_base_chars", 0),
+                "system_claude_md_chars": asm.get("system_claude_md_chars", 0),
+                "system_agents_md_chars": asm.get("system_agents_md_chars", 0),
+                "system_skills_chars": asm.get("system_skills_chars", 0),
+                "system_memory_chars": asm.get("system_memory_chars", 0),
+                "system_wiki_chars": asm.get("system_wiki_chars", 0),
+                "system_agents_chars": asm.get("system_agents_chars", 0),
+                "system_workspace_chars": asm.get("system_workspace_chars", 0),
+                "is_plan_mode": asm.get("is_plan_mode", False),
+                "plan_mode_chars": asm.get("plan_mode_chars", 0),
+            })
 
     async def _finalize_text_response(self) -> None:
         """完成文本响应：刷新 markdown、打印成本。"""
@@ -818,9 +827,13 @@ class AgentLoop:
                         break
                     
                     if chunk.usage:
+                        prompt_tokens = int(getattr(chunk.usage, "prompt_tokens", 0) or 0)
+                        completion_tokens = int(getattr(chunk.usage, "completion_tokens", 0) or 0)
+                        total_tokens = int(getattr(chunk.usage, "total_tokens", 0) or 0)
                         usage = {
-                            "prompt_tokens": chunk.usage.prompt_tokens,
-                            "completion_tokens": chunk.usage.completion_tokens,
+                            "prompt_tokens": prompt_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": total_tokens or (prompt_tokens + completion_tokens),
                             "cached_tokens": chunk.usage.prompt_tokens_details.cached_tokens if chunk.usage.prompt_tokens_details else 0,
                         }
 
@@ -891,7 +904,7 @@ class AgentLoop:
                         },
                         "finish_reason": finish_reason or "stop",
                     }],
-                    "usage": usage or {"prompt_tokens": 0, "completion_tokens": 0},
+                    "usage": usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
                     "_assembly_metrics": {
                         "assembly_ms": round(_assembly_ms, 2),
                         "tool_defs_ms": round(_tool_defs_ms, 2),
@@ -928,9 +941,10 @@ class AgentLoop:
                 model_timeout = int(os.environ.get("MYCODE_MODEL_TIMEOUT", "120"))
                 result = await asyncio.wait_for(_with_retry(_do), timeout=model_timeout)
                 usage = result.get("usage", {}) if isinstance(result, dict) else {}
-                input_tokens = usage.get("prompt_tokens", 0)
-                output_tokens = usage.get("completion_tokens", 0)
-                cached_tokens = usage.get("cached_tokens", 0)
+                input_tokens = int(usage.get("prompt_tokens", 0) or 0)
+                output_tokens = int(usage.get("completion_tokens", 0) or 0)
+                total_tokens = int(usage.get("total_tokens", 0) or 0) or (input_tokens + output_tokens)
+                cached_tokens = int(usage.get("cached_tokens", 0) or 0)
                 duration_s = round(time.time() - _model_t0, 2)
                 span.update(
                     output=_model_output_for_trace(result),
@@ -938,6 +952,7 @@ class AgentLoop:
                     metadata={
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
+                        "total_tokens": total_tokens,
                         "cached_tokens": cached_tokens,
                         "cache_hit_rate": round(cached_tokens / input_tokens, 3) if input_tokens else 0.0,
                         "duration_s": duration_s,

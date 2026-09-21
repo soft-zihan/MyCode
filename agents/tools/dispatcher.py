@@ -34,7 +34,7 @@ class ToolDispatcher:
             return 300
         if name == "exit_plan_mode":
             return 600
-        if name in ("read_file", "outline_file", "grep_search", "list_files"):
+        if name in ("read_file", "outline_file", "grep_search", "list_files", "web_search"):
             return 30
         return 60
 
@@ -198,10 +198,9 @@ class ToolDispatcher:
 
         call_id = key.removeprefix("snip:")
 
-        hidden_seqs = set()
-        for event in self.agent.session._log:
-            if event.get("type") == "events_hidden":
-                hidden_seqs.update(event.get("hidden_seqs", []))
+        from agents.core.context_events import collect_hidden_seqs
+
+        hidden_seqs = collect_hidden_seqs(self.agent.session.events)
 
         for event in self.agent.session._log:
             if event.get("type") == "tool_result_msg" and event.get("call_id") == call_id:
@@ -224,10 +223,9 @@ class ToolDispatcher:
 
         limit = int(inp.get("limit") or 20)
 
-        hidden_seqs = set()
-        for event in self.agent.session._log:
-            if event.get("type") == "events_hidden":
-                hidden_seqs.update(event.get("hidden_seqs", []))
+        from agents.core.context_events import collect_hidden_seqs
+
+        hidden_seqs = collect_hidden_seqs(self.agent.session.events)
 
         results = []
         for event in self.agent.session._log:
@@ -273,40 +271,30 @@ class ToolDispatcher:
         return "\n".join(result_lines)
 
     def _execute_list_session_notes_tool(self, inp: dict) -> str:
-        """执行 list_session_notes 工具。"""
         limit = int(inp.get("limit") or 10)
 
+        from agents.memory.frontmatter import parse_frontmatter
         from agents.wiki.wiki_manager import get_wiki_dir
-        wiki_dir = get_wiki_dir() / "session_notes"
 
+        wiki_dir = get_wiki_dir() / "session_notes"
         if not wiki_dir.exists():
             return "No session notes found."
 
         notes = []
-        for f in wiki_dir.glob("*.md"):
+        for filepath in wiki_dir.glob("*.md"):
             try:
-                content = f.read_text()
-                from agents.memory.frontmatter import parse_frontmatter
-                meta, body = parse_frontmatter(content)
-
-                # 文件名格式: session_{session_id}_{timestamp}.md
-                parts = f.stem.split("_")
-                if len(parts) >= 3:
-                    session_id = parts[1]
-                    timestamp = "_".join(parts[2:])
-                else:
-                    session_id = f.stem.replace("session_", "")
-                    timestamp = ""
-
+                parsed = parse_frontmatter(filepath.read_text())
+                meta = parsed.meta
+                body = parsed.body
+                session_id = str(meta.get("session_id") or filepath.stem.removeprefix("session_"))
                 notes.append({
                     "session_id": session_id,
-                    "timestamp": timestamp,
                     "title": meta.get("name", session_id),
                     "time": meta.get("modified", ""),
                     "content": body,
                 })
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"[list_session_notes] failed to read {filepath.name}: {type(exc).__name__}: {exc}")
 
         if not notes:
             return "No session notes found."
@@ -316,13 +304,11 @@ class ToolDispatcher:
 
         result_lines = [f"Found {len(notes)} session notes:"]
         for note in notes:
-            ts = f" [{note['timestamp']}]" if note['timestamp'] else ""
-            result_lines.append(f"  [{note['session_id']}{ts}] {note['title']} ({note['time']})")
+            result_lines.append(f"  [{note['session_id']}] {note['title']} ({note['time']})")
 
-        if notes:
-            latest = notes[0]
-            result_lines.append(f"\n--- Latest note ({latest['session_id']}) ---")
-            result_lines.append(latest['content'])
+        latest = notes[0]
+        result_lines.append(f"\n--- Latest note ({latest['session_id']}) ---")
+        result_lines.append(latest["content"])
 
         return "\n".join(result_lines)
 

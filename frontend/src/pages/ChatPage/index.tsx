@@ -12,6 +12,7 @@ import { SessionsPanel } from './components/SessionsPanel';
 import { ContextPanel } from '../../components/agent/ContextPanel';
 import { DeliverablesPanel } from '../../components/agent/DeliverablesPanel';
 import { QuestionDialog } from '../../components/agent/QuestionDialog';
+import { ApprovalBar } from '../../components/agent/ApprovalBar';
 import { PlanApprovalDialog } from '../../components/agent/PlanApprovalDialog';
 import { WikiPlanPanel } from '../../components/agent/WikiPlanPanel';
 import { TodoListPanel } from '../../components/chat/TodoListPanel';
@@ -180,10 +181,10 @@ export default function ChatPage() {
           {/* Chat Header */}
           <div className="px-3 md:px-4 py-3 border-b border-gray-200 bg-white flex items-center justify-between">
             <div className="flex items-center min-w-0 flex-1">
-              <MessageSquare className="w-5 h-5 mr-2 text-blue-500 flex-shrink-0" />
+              <MessageSquare className="w-5 h-5 mr-2 text-indigo-500 flex-shrink-0" />
               <h1 className="text-base md:text-lg font-semibold text-gray-900 truncate">Chat</h1>
               {currentProject && (
-                <span className="ml-2 px-2 py-0.5 bg-blue-50 text-blue-700 text-xs font-medium rounded border border-blue-200 truncate max-w-[120px] md:max-w-none">
+                <span className="ml-2 px-2 py-0.5 bg-indigo-50 text-indigo-700 text-xs font-medium rounded border border-indigo-200 truncate max-w-[120px] md:max-w-none">
                   {currentProject}
                 </span>
               )}
@@ -219,8 +220,8 @@ export default function ChatPage() {
                   <div className="w-24 h-2 bg-gray-200 rounded-full overflow-hidden">
                     <div 
                       className={`h-full transition-all ${
-                        (contextUsed / contextTotal) >= 0.9 ? 'bg-red-500' :
-                        (contextUsed / contextTotal) >= 0.7 ? 'bg-yellow-500' :
+                        (contextUsed / contextTotal) >= 0.95 ? 'bg-red-500' :
+                        (contextUsed / contextTotal) >= 0.8 ? 'bg-yellow-500' :
                         'bg-green-500'
                       }`}
                       style={{ width: `${Math.min((contextUsed / contextTotal) * 100, 100)}%` }}
@@ -235,7 +236,7 @@ export default function ChatPage() {
                     className={`p-1 rounded transition-colors ${
                       !currentSessionId || isStreaming || isCompacting
                         ? 'text-gray-300 cursor-not-allowed'
-                        : 'text-gray-600 hover:text-blue-600 hover:bg-blue-50'
+                        : 'text-gray-600 hover:text-indigo-600 hover:bg-indigo-50'
                     }`}
                     title={!currentSessionId ? 'Start a session first' : isStreaming ? 'Wait for response to complete' : isCompacting ? 'Compressing...' : '压缩上下文'}
                   >
@@ -248,7 +249,7 @@ export default function ChatPage() {
             <button
               onClick={() => setRightSidebarOpen(!rightSidebarOpen)}
               className={`p-2 rounded hover:bg-gray-100 transition-colors flex-shrink-0 ${
-                rightSidebarOpen ? 'text-blue-600' : 'text-gray-500'
+                rightSidebarOpen ? 'text-indigo-600' : 'text-gray-500'
               }`}
               title={rightSidebarOpen ? 'Close sidebar' : 'Open sidebar'}
             >
@@ -258,9 +259,9 @@ export default function ChatPage() {
 
           {/* Plan Mode Guidance */}
           {permissionMode === 'plan' && (
-            <div className="px-4 py-2 bg-blue-50 border-b border-blue-200">
-              <p className="text-xs text-blue-700">
-                <span className="font-medium">📋 计划模式：</span>
+            <div className="px-4 py-2 bg-indigo-50 border-b border-indigo-200">
+              <p className="text-xs text-indigo-700">
+                <span className="font-medium">计划模式：</span>
                 AI 将只读取文件并制定计划。计划完成后，您可以预览、编辑或提出修改意见，批准后才会执行。
               </p>
             </div>
@@ -312,37 +313,14 @@ export default function ChatPage() {
             />
           )}
 
-          {/* Other Permission Request Dialog */}
+          {/* Other Permission Request */}
           {pendingPermission && pendingPermission.tool_name !== 'exit_plan_mode' && (
-            <div className="border-t px-4 py-3 border-yellow-300 bg-yellow-50">
-              <div className="flex items-start gap-3">
-                <div className="flex-1">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-sm font-medium text-yellow-800">
-                      ⚠️ 需要授权
-                    </span>
-                    <span className="text-xs px-1.5 py-0.5 rounded bg-yellow-200 text-yellow-800">
-                      {pendingPermission.tool_name}
-                    </span>
-                  </div>
-                  <pre className="text-xs text-gray-700 bg-white border border-yellow-200 rounded p-2 overflow-x-auto overflow-y-auto whitespace-pre-wrap font-mono max-h-32">
-                    {pendingPermission.command}
-                  </pre>
-                </div>
-                <div className="flex gap-2 flex-shrink-0">
-                  <button
-                    onClick={() => handlePermissionDeny()}
-                    className="px-3 py-1.5 text-sm font-medium text-red-700 bg-white border border-red-300 rounded hover:bg-red-50 transition-colors">
-                    拒绝
-                  </button>
-                  <button
-                    onClick={() => handlePermissionApprove()}
-                    className="px-3 py-1.5 text-sm font-medium text-white bg-green-600 border border-green-700 rounded hover:bg-green-700 transition-colors">
-                    批准
-                  </button>
-                </div>
-              </div>
-            </div>
+            <ApprovalBar
+              toolName={pendingPermission.tool_name}
+              command={pendingPermission.command}
+              onApprove={() => handlePermissionApprove()}
+              onDeny={() => handlePermissionDeny()}
+            />
           )}
 
           {/* Question Dialog */}
@@ -370,7 +348,7 @@ export default function ChatPage() {
                 <div className="flex-1">
                   <div className="flex items-center gap-2 mb-2">
                     <span className="text-sm font-medium text-purple-800">
-                      {goalState.active ? '🎯 Goal Mode' : '📋 Confirm Goal'}
+                      {goalState.active ? 'Goal Mode' : 'Confirm Goal'}
                     </span>
                     {goalState.active && (
                       <span className="text-xs px-1.5 py-0.5 bg-purple-200 text-purple-800 rounded">
@@ -456,8 +434,8 @@ export default function ChatPage() {
                             {msg.content}
                             {msg.contextFiles && msg.contextFiles.length > 0 && (
                               <span className="ml-2 inline-flex items-center gap-0.5">
-                                <File className="w-3 h-3 text-blue-500" />
-                                <span className="text-xs text-blue-600">{msg.contextFiles.length}</span>
+                                <File className="w-3 h-3 text-indigo-500" />
+                                <span className="text-xs text-indigo-600">{msg.contextFiles.length}</span>
                               </span>
                             )}
                           </div>
@@ -484,12 +462,12 @@ export default function ChatPage() {
             )}
             {/* Context Files - 在输入框上方 */}
             {contextFiles.length > 0 && (
-              <div className="flex items-center gap-2 flex-wrap mb-2 px-2 py-1.5 bg-blue-50 rounded">
-                <span className="text-xs font-medium text-blue-700">Context:</span>
+              <div className="flex items-center gap-2 flex-wrap mb-2 px-2 py-1.5 bg-indigo-50 rounded">
+                <span className="text-xs font-medium text-indigo-700">Context:</span>
                 {contextFiles.map(file => (
                   <span
                     key={file}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 bg-white border border-blue-200 rounded text-xs text-blue-700"
+                    className="inline-flex items-center gap-1 px-2 py-0.5 bg-white border border-indigo-200 rounded text-xs text-indigo-700"
                   >
                     <File className="w-3 h-3" />
                     {file.split('/').pop()}
@@ -524,7 +502,7 @@ export default function ChatPage() {
                 <button
                   onClick={handleSendMessage}
                   disabled={!inputValue.trim()}
-                  className="p-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  className="p-2 bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   <Send className="w-5 h-5" />
                 </button>
@@ -535,7 +513,7 @@ export default function ChatPage() {
               <select
                 value={selectedModel}
                 onChange={(e) => setSelectedModel(e.target.value)}
-                className="px-2 py-1 border border-gray-300 rounded text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 max-w-[220px] truncate"
+                className="px-2 py-1 border border-gray-300 rounded text-xs focus:outline-none focus:ring-1 focus:ring-indigo-500 max-w-[220px] truncate"
                 title={selectedModel}
               >
                 {config && Object.entries(config.endpoints).map(([id, endpoint]) => {
@@ -565,20 +543,20 @@ export default function ChatPage() {
               className="absolute top-0 -left-1 w-2 h-full cursor-col-resize group z-10"
               onMouseDown={handleRightDragStart}
             >
-              <div className="absolute inset-y-0 right-0 w-0.5 bg-transparent group-hover:bg-blue-400 group-active:bg-blue-500 transition-colors" />
+              <div className="absolute inset-y-0 right-0 w-0.5 bg-transparent group-hover:bg-indigo-400 group-active:bg-indigo-500 transition-colors" />
             </div>
             {/* Tab buttons */}
             <div className="flex border-b border-gray-200 flex-shrink-0">
               <button
                 onClick={() => setRightTab('files')}
                 className={`flex-1 px-2 py-1.5 text-xs font-medium transition-colors ${
-                  rightTab === 'files' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'
+                  rightTab === 'files' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-gray-500 hover:text-gray-700'
                 }`}
               >
                 <File className="w-3 h-3 inline mr-1" />
                 Files
                 {fileSnapshots.length > 0 && (
-                  <span className="ml-1 px-1 py-0.5 bg-blue-500 text-white text-[9px] rounded-full">
+                  <span className="ml-1 px-1 py-0.5 bg-indigo-500 text-white text-[9px] rounded-full">
                     {fileSnapshots.length}
                   </span>
                 )}
@@ -586,7 +564,7 @@ export default function ChatPage() {
               <button
                 onClick={() => setRightTab('control')}
                 className={`flex-1 px-2 py-1.5 text-xs font-medium transition-colors ${
-                  rightTab === 'control' ? 'text-blue-600 border-b-2 border-blue-600' : 'text-gray-500 hover:text-gray-700'
+                  rightTab === 'control' ? 'text-indigo-600 border-b-2 border-indigo-600' : 'text-gray-500 hover:text-gray-700'
                 }`}
               >
                 <Sliders className="w-3 h-3 inline mr-1" />
@@ -603,7 +581,7 @@ export default function ChatPage() {
                     <button
                       onClick={() => setControlSubTab('context')}
                       className={`flex-1 px-2 py-1.5 text-xs font-medium transition-colors ${
-                        controlSubTab === 'context' ? 'text-blue-600 border-b-2 border-blue-600 bg-white' : 'text-gray-500 hover:text-gray-700'
+                        controlSubTab === 'context' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-white' : 'text-gray-500 hover:text-gray-700'
                       }`}
                     >
                       <Layers className="w-3 h-3 inline mr-1" />
@@ -612,7 +590,7 @@ export default function ChatPage() {
                     <button
                       onClick={() => setControlSubTab('wiki')}
                       className={`flex-1 px-2 py-1.5 text-xs font-medium transition-colors ${
-                        controlSubTab === 'wiki' ? 'text-blue-600 border-b-2 border-blue-600 bg-white' : 'text-gray-500 hover:text-gray-700'
+                        controlSubTab === 'wiki' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-white' : 'text-gray-500 hover:text-gray-700'
                       }`}
                     >
                       <BookOpen className="w-3 h-3 inline mr-1" />

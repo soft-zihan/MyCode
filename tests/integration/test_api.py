@@ -240,7 +240,10 @@ class TestSessionsAPI:
                 "output_tokens": 5,
                 "cached_tokens": 2,
                 "context_window": 128000,
+                "effective_window": 108000,
                 "last_input_token_count": 20,
+                "last_total_token_count": 25,
+                "estimated_context_tokens": 25,
                 "msg_count": 2,
                 "system_chars": 100,
                 "user_chars": 20,
@@ -256,7 +259,10 @@ class TestSessionsAPI:
         assert stats["output_tokens"] == 5
         assert stats["cached_tokens"] == 2
         assert stats["context_window"] == 128000
+        assert stats["effective_window"] == 108000
         assert stats["last_input_token_count"] == 20
+        assert stats["last_total_token_count"] == 25
+        assert stats["estimated_context_tokens"] == 25
 
     def test_session_summary_from_events(self, api, tmp_path):
         _write_session(
@@ -268,7 +274,10 @@ class TestSessionsAPI:
                 "output_tokens": 5,
                 "cached_tokens": 2,
                 "context_window": 128000,
+                "effective_window": 108000,
                 "last_input_token_count": 20,
+                "last_total_token_count": 25,
+                "estimated_context_tokens": 25,
                 "msg_count": 2,
                 "system_chars": 100,
                 "user_chars": 20,

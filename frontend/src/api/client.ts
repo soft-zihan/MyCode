@@ -405,12 +405,16 @@ export async function disableMcpServer(serverName: string): Promise<{ success: b
 
 // ── Config (JSON) ────────────────────────────────────────────────────────────
 
+export const DEFAULT_CONTEXT_WINDOW = 1_000_000;
+export const DEFAULT_AUTO_COMPACT_THRESHOLD = 0.8;
+
 export interface ModelEndpointConfig {
   model: string;
   base_url: string;
   api_key: string;
   provider_name?: string;
   context_window?: number;
+  auto_compact_threshold?: number;
 }
 
 export interface AgentRoutingConfig {
@@ -516,6 +520,8 @@ export interface SessionStats {
   context_window: number;
   effective_window: number;
   last_input_token_count: number;
+  last_total_token_count: number;
+  estimated_context_tokens: number;
 }
 
 export async function fetchSessionStats(sessionId: string): Promise<SessionStats> {
@@ -731,16 +737,23 @@ export async function clearRewind(sessionId: string, planId: string): Promise<vo
   if (!res.ok) throw new Error('Failed to clear rewind');
 }
 
+export interface FoldedMemory {
+  time: string | number;
+  trigger: string;
+  summary: string;
+  session_notes: string;
+  project_knowledge: string;
+}
+
 export interface CompressionStats {
   utilization: number;
   token_count: number;
   effective_window: number;
   context_window: number;
-  l1_budget: { triggered: number; tokens_saved: number };
-  l2_snip: { triggered: number; tokens_saved: number };
-  l3_microcompact: { triggered: number; tokens_saved: number };
-  l4_fold: { triggered: number; last_fold_time: string | null };
-  folded_memories: any[];
+  tool_fold: { triggered: number };
+  session_fold: { triggered: number };
+  total_folds: { triggered: number; last_fold_time: number | string | null };
+  folded_memories: FoldedMemory[];
 }
 
 export async function fetchCompressionStats(sessionId: string): Promise<CompressionStats> {
@@ -750,10 +763,10 @@ export async function fetchCompressionStats(sessionId: string): Promise<Compress
 }
 
 export interface ContextStoreEntry {
-  key: string;
-  raw_size: number;
-  abstract: string;
-  dropped: boolean;
+  seq: number;
+  type: string;
+  call_id: string;
+  content_size: number;
 }
 
 export interface ContextStoreData {

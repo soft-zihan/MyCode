@@ -18,7 +18,7 @@ const SESSION_NOTES_CATEGORY = {
   color: 'text-cyan-500',
   bgColor: 'bg-cyan-50',
   path: '.mycode/wiki/session_notes',
-  description: '会话笔记（临时但持久保存）',
+  description: '每 session 一份最新合并会话笔记',
 };
 
 // Category 2: Long-term Memory (knowledge, workflow_pattern, self_improvement, user, reference)
@@ -26,8 +26,8 @@ const MEMORY_CATEGORIES = [
   {
     name: 'Knowledge',
     icon: BookOpen,
-    color: 'text-blue-500',
-    bgColor: 'bg-blue-50',
+    color: 'text-indigo-500',
+    bgColor: 'bg-indigo-50',
     path: '.mycode/wiki/knowledge',
     description: '项目知识',
   },
@@ -181,7 +181,7 @@ function TreeNode({ node, level, onFileSelect, selectedPath }: {
     <div>
       <div
         className={`flex items-center gap-1.5 px-2 py-1 cursor-pointer text-xs hover:bg-gray-100 transition-colors ${
-          isSelected ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-700'
+          isSelected ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-700'
         }`}
         style={{ paddingLeft: `${level * 12 + 8}px` }}
         onClick={handleClick}
@@ -194,7 +194,7 @@ function TreeNode({ node, level, onFileSelect, selectedPath }: {
         ) : (
           <>
             <span className="w-3" />
-            <FileText className="w-3.5 h-3.5 text-blue-400" />
+            <FileText className="w-3.5 h-3.5 text-indigo-400" />
           </>
         )}
         <span className="truncate flex-1">{node.name}</span>
@@ -357,9 +357,9 @@ export function WikiPanel({ cwd, onFileSelect, selectedFile }: WikiPanelProps) {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-gray-200 bg-gradient-to-r from-blue-50 to-purple-50">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-gray-200 bg-gradient-to-r from-indigo-50 to-purple-50">
         <div className="flex items-center gap-2">
-          <BookOpen className="w-4 h-4 text-blue-500" />
+          <BookOpen className="w-4 h-4 text-indigo-500" />
           <span className="text-sm font-semibold text-gray-700">Wiki</span>
         </div>
         <div className="flex items-center gap-2">
@@ -395,7 +395,7 @@ export function WikiPanel({ cwd, onFileSelect, selectedFile }: WikiPanelProps) {
         
         {/* Category 2: Long-term Memory */}
         <div className="border-b border-gray-200">
-          <div className="px-3 py-1.5 bg-blue-50 text-[10px] font-medium text-blue-700 uppercase tracking-wide">
+          <div className="px-3 py-1.5 bg-indigo-50 text-[10px] font-medium text-indigo-700 uppercase tracking-wide">
             长期记忆
           </div>
           {memoryFiles.map(({ category, files }) => (

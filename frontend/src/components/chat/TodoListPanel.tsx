@@ -19,7 +19,7 @@ const getStatusIcon = (status: string) => {
     case 'completed':
       return <CheckCircle2 className="w-4 h-4 text-green-500" />;
     case 'in_progress':
-      return <Clock className="w-4 h-4 text-blue-500 animate-pulse" />;
+      return <Clock className="w-4 h-4 text-indigo-500 animate-pulse" />;
     case 'cancelled':
       return <XCircle className="w-4 h-4 text-gray-400" />;
     default:
@@ -47,9 +47,9 @@ const getStatusColor = (status: string) => {
     case 'cancelled':
       return 'text-gray-400 line-through';
     case 'in_progress':
-      return 'text-blue-700 dark:text-blue-300 font-medium';
+      return 'text-indigo-700 font-medium';
     default:
-      return 'text-gray-700 dark:text-gray-300';
+      return 'text-gray-700';
   }
 };
 
@@ -64,23 +64,23 @@ export const TodoListPanel: React.FC<TodoListPanelProps> = ({ todos }) => {
 
   return (
     <div className="mx-4 mb-2">
-      <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-sm overflow-hidden">
-        <div className="flex items-center gap-2 px-3 py-2 bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
+      <div className="rounded-lg border border-gray-200 bg-white shadow-sm overflow-hidden">
+        <div className="flex items-center gap-2 px-3 py-2 bg-gray-50 border-b border-gray-200">
           <ListTodo className="w-4 h-4 text-gray-500" />
-          <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
+          <span className="text-sm font-medium text-gray-700">
             任务清单
           </span>
-          <span className="text-xs text-gray-500 dark:text-gray-400 ml-auto">
+          <span className="text-xs text-gray-500 ml-auto">
             {completed}/{todos.length} 完成
             {inProgress > 0 && ` · ${inProgress} 进行中`}
           </span>
         </div>
 
-        <div className="divide-y divide-gray-100 dark:divide-gray-800">
+        <div className="divide-y divide-gray-100">
           {todos.map((todo) => (
             <div
               key={todo.id}
-              className="flex items-start gap-2 px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-800/50"
+              className="flex items-start gap-2 px-3 py-2 hover:bg-gray-50"
             >
               {getStatusIcon(todo.status)}
               <div className="flex-1 min-w-0">
@@ -96,8 +96,8 @@ export const TodoListPanel: React.FC<TodoListPanelProps> = ({ todos }) => {
         </div>
 
         {(pending > 0 || inProgress > 0) && (
-          <div className="px-3 py-1.5 bg-gray-50 dark:bg-gray-800 border-t border-gray-100 dark:border-gray-700">
-            <div className="h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+          <div className="px-3 py-1.5 bg-gray-50 border-t border-gray-100">
+            <div className="h-1.5 bg-gray-200 rounded-full overflow-hidden">
               <div
                 className="h-full bg-green-500 transition-all duration-300"
                 style={{ width: `${(completed / todos.length) * 100}%` }}

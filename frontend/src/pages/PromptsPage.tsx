@@ -72,7 +72,7 @@ export function PromptsPage() {
               <ArrowLeft className="w-4 h-4" />
             </button>
           )}
-          <FileText className="w-5 h-5 text-blue-500" />
+          <FileText className="w-5 h-5 text-indigo-500" />
           <h1 className="text-lg font-semibold text-gray-900">
             {selectedPrompt ? selectedPrompt.name : 'System Prompts'}
           </h1>
@@ -81,7 +81,7 @@ export function PromptsPage() {
           <button
             onClick={handleSave}
             disabled={saving}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-500 text-white text-sm font-medium rounded hover:bg-blue-600 disabled:opacity-50 transition-colors"
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-500 text-white text-sm font-medium rounded hover:bg-indigo-600 disabled:opacity-50 transition-colors"
           >
             <Save className="w-4 h-4" />
             {saving ? 'Saving...' : 'Save'}
@@ -118,7 +118,7 @@ export function PromptsPage() {
               <button
                 key={prompt.id}
                 onClick={() => handleSelectPrompt(prompt)}
-                className="w-full text-left p-4 rounded-lg border border-gray-200 hover:border-blue-300 hover:bg-blue-50 transition-colors"
+                className="w-full text-left p-4 rounded-lg border border-gray-200 hover:border-indigo-300 hover:bg-indigo-50 transition-colors"
               >
                 <div className="font-medium text-gray-900">{prompt.name}</div>
                 <div className="text-sm text-gray-500 mt-1">{prompt.description}</div>

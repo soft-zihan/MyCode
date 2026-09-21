@@ -1,5 +1,6 @@
 import { useSyncExternalStore, useCallback, useRef } from 'react';
 import type { ChatSnapshot } from '../components/chat/nodes/types';
+import { DEFAULT_CONTEXT_WINDOW } from '../api/client';
 
 export interface PermissionRequest {
   rpc_id: string;
@@ -89,7 +90,7 @@ export function createEmptySessionState(sessionId: string | null = null): Sessio
     lastSeq: -1,
     fileSnapshots: [],
     contextUsed: 0,
-    contextTotal: 128000,
+    contextTotal: DEFAULT_CONTEXT_WINDOW,
     statsInputTokens: 0,
     statsOutputTokens: 0,
     statsCachedTokens: 0,
@@ -343,7 +344,7 @@ class SessionStore {
   }
 
   getContextTotal(sessionId: string): number {
-    return this.sessions.get(sessionId)?.contextTotal ?? 128000;
+    return this.sessions.get(sessionId)?.contextTotal ?? DEFAULT_CONTEXT_WINDOW;
   }
 
   setContextStats(sessionId: string, used: number, total: number): void {

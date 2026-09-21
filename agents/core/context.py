@@ -56,7 +56,7 @@ class ContextManager:
         self.agent._last_tool_name = ""
         self.agent.total_input_tokens = 0
         self.agent.total_output_tokens = 0
-        self.agent.last_input_token_count = 0
+        self.agent.reset_context_token_estimate()
         from agents.logging import print_info
         print_info("Conversation cleared.")
 
@@ -64,7 +64,7 @@ class ContextManager:
         """清空历史信息，保留系统 prompt。"""
         self.agent.session._log.clear()
         self.agent.session.system_prompt = self.agent._system_prompt
-        self.agent.last_input_token_count = 0
+        self.agent.reset_context_token_estimate()
         self.agent._fold_last_time = 0.0
         self.agent._fold_count = 0
         self.agent._tool_error_streak = 0
@@ -82,14 +82,14 @@ class ContextManager:
         """自动检查并压缩。"""
         folded = await self.agent._compressor.run_pipeline(
             self.agent.session,
-            self.agent.last_input_token_count,
+            self.agent.estimated_context_tokens,
             self.agent.last_api_call_time,
             self.agent._build_side_query(max_tokens=6000),
             self.agent.session_id,
             self.agent._folded_session_memories,
         )
         if folded:
-            self.agent.last_input_token_count = 0
+            self.agent.reset_context_token_estimate()
 
     async def _compact_conversation(self, *, trigger: str = "manual") -> bool:
         """压缩会话。"""
@@ -102,7 +102,7 @@ class ContextManager:
         if compacted:
             from agents.logging import print_info
             print_info("Conversation compacted.")
-            self.agent.last_input_token_count = 0
+            self.agent.reset_context_token_estimate()
         return compacted
 
     async def _compact_openai(self, *, trigger: str) -> bool:
