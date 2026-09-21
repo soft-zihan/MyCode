@@ -221,7 +221,7 @@ class ToolDispatcher:
             try:
                 parsed = json.loads(result)
                 if isinstance(parsed, dict) and parsed.get("ok"):
-                    self.agent.refresh_runtime_system_prompt()
+                    self.agent.refresh_runtime_system_prompt(force=True)
             except Exception:
                 pass
         return result

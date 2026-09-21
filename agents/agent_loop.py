@@ -371,14 +371,17 @@ class AgentLoop:
             a.total_cached_tokens += cached_tokens
             asm = response.get("_assembly_metrics", {})
             a.session.append("stats", {
-                "input_tokens": a.total_input_tokens,
-                "output_tokens": a.total_output_tokens,
+                # per-call 语义：本次模型调用的 usage
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
                 "cached_tokens": cached_tokens,
+                "cache_hit_rate": round(cached_tokens / input_tokens, 3) if input_tokens else 0.0,
+                # 累计语义：会话至今总量
+                "total_input_tokens": a.total_input_tokens,
+                "total_output_tokens": a.total_output_tokens,
                 "total_cached_tokens": a.total_cached_tokens,
                 "context_window": a.context_window,
                 "effective_window": a.effective_window,
-                "last_input_token_count": a.last_input_token_count,
-                "last_total_token_count": a.last_total_token_count,
                 "estimated_context_tokens": a.estimated_context_tokens,
                 "system_chars": asm.get("system_chars", 0),
                 "user_chars": asm.get("user_chars", 0),
@@ -878,6 +881,12 @@ class AgentLoop:
                 _t3 = time.perf_counter()
                 sanitized_messages = _sanitize_for_utf8(raw_messages)
                 _sanitize_msgs_ms = (time.perf_counter() - _t3) * 1000
+
+                # 运行时易变状态尾部注入（prefix cache 保护：主 system prompt 会话内不变，
+                # 尾部消息每步变化不影响其前全部历史的缓存命中）
+                _guidance = a.build_runtime_guidance()
+                if _guidance:
+                    sanitized_messages = [*sanitized_messages, {"role": "system", "content": _guidance}]
 
                 create_params = {
                     "model": a.model,

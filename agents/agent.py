@@ -190,7 +190,10 @@ class Agent:
         _ep = get_endpoint_by_model(model)
         self.context_window = _ep.context_window if _ep else DEFAULT_CONTEXT_WINDOW
         self.effective_window = self.context_window - 20000
-        self.auto_compact_threshold = _ep.auto_compact_threshold if _ep else DEFAULT_AUTO_COMPACT_THRESHOLD
+        self.auto_compact_threshold = DEFAULT_AUTO_COMPACT_THRESHOLD
+        # thinking 解析链：请求级覆盖 > 端点配置 > None（跟随模型默认）
+        if self.thinking is None and _ep is not None:
+            self.thinking = _ep.thinking
         from agents.core.context_compressor import COMPRESSION_ARMS
         self.compression_arm = compression_arm or "full"
         if self.compression_arm not in COMPRESSION_ARMS:
@@ -803,24 +806,35 @@ class Agent:
             event_data["sub_agent_id"] = self._current_sub_agent_id
         self.session.append("text", event_data)
 
-    def _build_fold_guidance_section(self) -> str:
+    def build_runtime_guidance(self) -> str | None:
+        """运行时易变状态（上下文利用率/错误连击/fold 时间）。
+
+        作为请求尾部 ephemeral system message 注入，不写入主 system prompt——
+        主 prompt 任何位置变化都会使其后全部历史的 prefix cache 失效。
+        """
         if self._custom_system_prompt is not None:
-            return ""
+            return None
         utilization = self.estimated_context_tokens / self.effective_window if self.effective_window else 0.0
         last_fold = "never" if not self._fold_last_time else f"{int((time.time() - self._fold_last_time) / 60)}m ago"
         return (
-            "\n\n# Runtime Fold Guidance\n"
+            "# Runtime Fold Guidance\n"
             f"- Current context utilization: {utilization:.0%}\n"
             f"- Recent tool error streak: {self._tool_error_streak}\n"
             f"- Same tool repeat count: {self._same_tool_repeat_count}\n"
             f"- Last fold: {last_fold}\n"
             "- If the context is getting long, the same tool is being retried without progress, or tool failures are accumulating, call `compact_context` before trying more tools.\n"
-            "- If you folded very recently and the next step is clear, prefer continuing rather than folding again.\n"
+            "- If you folded very recently and the next step is clear, prefer continuing rather than folding again."
         )
 
-    def _refresh_runtime_system_prompt(self) -> None:
+    def _refresh_runtime_system_prompt(self, force: bool = False) -> None:
         if self._custom_system_prompt is not None:
             self.session.system_prompt = self._custom_system_prompt
+            return
+        # prefix cache 保护：普通模式下 system prompt 会话内冻结，不随 step 重建
+        # （build_system_prompt 重读 wiki index/workspace 结构，且旧实现把易变的
+        # fold guidance 拼进 prompt 末尾，导致每次调用前缀都不同、cache 率 <15%）。
+        # plan 模式例外：计划状态需实时反映。force 用于结构性变化（skill_create、/cd）。
+        if not force and self.permission_mode != "plan" and self.session.system_prompt:
             return
         from .core.workspace import set_workspace, reset_workspace
         _ws_token = set_workspace(self.workspace)
@@ -830,7 +844,6 @@ class Agent:
                 self._system_prompt = self._base_system_prompt + self._plan_mode_manager.build_plan_mode_prompt()
             else:
                 self._system_prompt = self._base_system_prompt
-            self._system_prompt += self._build_fold_guidance_section()
             self.session.system_prompt = self._system_prompt
         finally:
             reset_workspace(_ws_token)
@@ -1062,8 +1075,8 @@ class Agent:
     def clear_context_flag(self) -> None:
         self._context_cleared = False
 
-    def refresh_runtime_system_prompt(self) -> None:
-        self._refresh_runtime_system_prompt()
+    def refresh_runtime_system_prompt(self, force: bool = False) -> None:
+        self._refresh_runtime_system_prompt(force=force)
 
     def check_and_compact(self):
         return self._context_manager._check_and_compact()
@@ -1124,8 +1137,8 @@ class Agent:
             }
         return {"exceeded": False}
 
-    async def compact(self)->None:
-        await self._context_manager.compact()
+    async def compact(self) -> bool:
+        return await self._context_manager.compact()
 
     def restore_session(self, data: dict) -> None:
         from agents.core.session_lifecycle import SessionState

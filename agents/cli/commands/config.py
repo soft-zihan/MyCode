@@ -35,7 +35,7 @@ async def cmd_cd(agent: "Agent", args: str) -> None:
         print_error(f"Cannot change directory: {e}")
         return
     agent.workspace = new_dir
-    agent._refresh_runtime_system_prompt()
+    agent._refresh_runtime_system_prompt(force=True)
     print_info(f"Changed working directory to: {new_dir}")
 
 

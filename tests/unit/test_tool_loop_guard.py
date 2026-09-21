@@ -350,7 +350,7 @@ def _make_loop_stub_agent():
         check_budget=lambda: {"exceeded": False},
         tool_budget_exceeded=lambda: False,
         clear_context_flag=lambda: None,
-        refresh_runtime_system_prompt=lambda: None,
+        refresh_runtime_system_prompt=lambda force=False: None,
     )
 
     def append_user_message(content, **kwargs):

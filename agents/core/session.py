@@ -75,7 +75,7 @@ class Session:
         self.origin = origin
         self.agent_type = agent_type
         self.summary: str | None = None
-        self.system_prompt: str | None = None
+        self._system_prompt: str | None = None
         
         self._log: list[dict[str, Any]] = []
         self._subscribers: set[Callable[[dict], None]] = set()
@@ -176,9 +176,12 @@ class Session:
             self._log.append(event)
             
             # 新事件默认可见（events_hidden 本身不加入索引）
+            # 普通 append 走增量派生，不 bump generation（否则每步全量重烘焙 system，prefix cache 全失效）
             if type != "events_hidden":
                 self._visible_seqs.append(event["seq"])
-            self._surface_generation += 1
+            else:
+                # 隐藏事件 = surface 结构变化 → 全量重烘焙
+                self._surface_generation += 1
             
             # Persist to backend (skip for sub-agents)
             if self.origin != "sub_agent":
@@ -239,6 +242,17 @@ class Session:
             if event["seq"] >= since_seq:
                 yield event
     
+    @property
+    def system_prompt(self) -> str | None:
+        return self._system_prompt
+
+    @system_prompt.setter
+    def system_prompt(self, value: str | None) -> None:
+        if value != self._system_prompt:
+            self._system_prompt = value
+            # system 变化才需要重烘焙投影；不变则保持增量派生，保护 prefix cache
+            self._surface_generation += 1
+
     def get_messages_for_llm(self) -> list[dict[str, Any]]:
         """从事件日志构建 LLM 消息历史（增量派生）。
         
