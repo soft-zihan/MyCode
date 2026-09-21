@@ -494,15 +494,22 @@ def check_expired_plans() -> list[dict]:
 # ── Git ──
 
 def _git_commit(message: str) -> None:
+    """Commit 只收 `.mycode/plans/` 目录，不碰仓库其他未提交变更。"""
     plans_dir = get_plans_dir()
     try:
         subprocess.run(
-            ["git", "add", "-A"],
+            ["git", "add", "--", "."],
+            cwd=plans_dir, capture_output=True, timeout=10, check=True,
+        )
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--quiet", "--", "."],
             cwd=plans_dir, capture_output=True, timeout=10,
         )
+        if staged.returncode == 0:
+            return
         subprocess.run(
-            ["git", "commit", "-m", message, "--allow-empty"],
-            cwd=plans_dir, capture_output=True, timeout=10,
+            ["git", "commit", "-m", message, "--", "."],
+            cwd=plans_dir, capture_output=True, timeout=10, check=True,
         )
     except Exception:
         pass
@@ -605,63 +612,6 @@ def _get_current_commit(plan_dir: Path) -> str:
         return result.stdout.strip()
     except Exception:
         return ""
-
-
-def _auto_commit(plan_dir: Path, message: str, round_num: int = 1, allowed_files: list[str] | None = None) -> None:
-    """自动 commit 所有未提交的变更。
-    
-    Args:
-        plan_dir: Plan 目录
-        message: Commit 消息
-        round_num: 轮次号
-        allowed_files: 允许 commit 的文件列表（从 task 的 **文件** 字段提取）。
-                       如果提供，只 commit 这些文件；否则 commit 所有变更。
-    """
-    import subprocess
-    try:
-        # 检查是否有未提交的变更
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=plan_dir,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if not result.stdout.strip():
-            return
-        
-        # 如果提供了 allowed_files，只 add 这些文件
-        if allowed_files:
-            for file_path in allowed_files:
-                subprocess.run(
-                    ["git", "add", file_path],
-                    cwd=plan_dir,
-                    capture_output=True,
-                    timeout=10,
-                )
-        else:
-            # git add -A
-            subprocess.run(
-                ["git", "add", "-A"],
-                cwd=plan_dir,
-                capture_output=True,
-                timeout=10,
-                check=True,
-            )
-        
-        # git commit
-        commit_msg = message
-        if round_num > 1:
-            commit_msg += f" (fix round {round_num})"
-        subprocess.run(
-            ["git", "commit", "-m", commit_msg],
-            cwd=plan_dir,
-            capture_output=True,
-            timeout=10,
-            check=True,
-        )
-    except Exception:
-        pass
 
 
 def _update_task_status_in_file(slug: str, task_id: int, status: str) -> bool:

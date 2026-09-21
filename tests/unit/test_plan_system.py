@@ -252,3 +252,55 @@ class TestStrategies:
         snap = ex.get_strategy_snapshot()
         assert snap["execute"]["name"] == "tdd"
         assert snap["execute"]["source"] == "builtin"
+
+
+# ────────────────────────── Git 提交范围 ──────────────────────────
+
+class TestGitCommitScope:
+    """_git_commit 只允许提交 .mycode/plans/ 下的变更，不得卷入仓库其他文件。"""
+
+    def _init_repo(self, tmp_path: Path) -> None:
+        import subprocess
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "config", "user.email", "test@test"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "config", "user.name", "test"], cwd=tmp_path, check=True)
+        (tmp_path / "README.md").write_text("init")
+        subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=tmp_path, check=True)
+
+    def test_git_commit_only_plans_dir(self, tmp_path, monkeypatch):
+        import subprocess
+        self._init_repo(tmp_path)
+        plans_dir = tmp_path / ".mycode" / "plans"
+        (plans_dir / "slug-a").mkdir(parents=True)
+        (plans_dir / "slug-a" / "plan.md").write_text("# Plan A")
+        (tmp_path / "unrelated.py").write_text("secret WIP")
+
+        monkeypatch.setattr(pm, "get_plans_dir", lambda: plans_dir)
+        pm._git_commit("plan: create slug-a")
+
+        files = subprocess.run(
+            ["git", "show", "--name-only", "--format=", "HEAD"],
+            cwd=tmp_path, capture_output=True, text=True, check=True,
+        ).stdout.split()
+        assert files == [".mycode/plans/slug-a/plan.md"]
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=tmp_path, capture_output=True, text=True, check=True,
+        ).stdout
+        assert "unrelated.py" in status
+
+    def test_git_commit_no_change_no_commit(self, tmp_path, monkeypatch):
+        import subprocess
+        self._init_repo(tmp_path)
+        plans_dir = tmp_path / ".mycode" / "plans"
+        plans_dir.mkdir(parents=True)
+        monkeypatch.setattr(pm, "get_plans_dir", lambda: plans_dir)
+        before = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        pm._git_commit("plan: noop")
+        after = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert before == after
