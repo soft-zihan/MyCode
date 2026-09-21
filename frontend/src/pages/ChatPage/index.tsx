@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import { 
-  MessageSquare, PanelRight, Send, Square, Zap, File, X, Package, Cpu, Sliders, Layers, BookOpen
+  MessageSquare, PanelRight, Send, Square, Zap, File, X, Cpu, Sliders, Layers, BookOpen
 } from 'lucide-react';
 import { ReviewPanel } from '../../components/ReviewPanel';
 import { DiffViewer } from '../../components/DiffViewer';
@@ -10,7 +10,6 @@ import { FileTree } from './components/FileTree';
 import { FileViewer } from './components/FileViewer';
 import { SessionsPanel } from './components/SessionsPanel';
 import { ContextPanel } from '../../components/agent/ContextPanel';
-import { DeliverablesPanel } from '../../components/agent/DeliverablesPanel';
 import { QuestionDialog } from '../../components/agent/QuestionDialog';
 import { ApprovalBar } from '../../components/agent/ApprovalBar';
 import { PlanApprovalDialog } from '../../components/agent/PlanApprovalDialog';
@@ -39,7 +38,6 @@ export default function ChatPage() {
   const [rightSidebarOpen, setRightSidebarOpen] = useState(true);
   const [rightTab, setRightTab] = useState<'files' | 'control'>('files');
   const [controlSubTab, setControlSubTab] = useState<'context' | 'wiki'>('context');
-  const [changesExpanded, setChangesExpanded] = useState(false);
   const [fileList, setFileList] = useState<string[]>([]);
   const [rightSidebarWidth, setRightSidebarWidth] = useState(() => {
     const saved = localStorage.getItem(RIGHT_SIDEBAR_WIDTH_KEY);
@@ -160,10 +158,6 @@ export default function ChatPage() {
     }
   }, [currentCwd, fileTreeRefreshTrigger]);
 
-  const handleOpenFile = useCallback((filePath: string) => {
-    setSelectedFile(filePath);
-  }, []);
-
   const sidebarContent = (
     <SessionsPanel
       onSessionSelect={handleSessionSelect}
@@ -280,15 +274,6 @@ export default function ChatPage() {
               setSelectedFile(path);
             }}
             onFork={handleForkAtPoint}
-          />
-
-          {/* Review Panel */}
-          <ReviewPanel
-            snapshots={fileSnapshots}
-            onAccept={handleAcceptFile}
-            onReject={handleRejectFile}
-            onAcceptAll={handleAcceptAll}
-            onOpenFile={handleOpenFile}
           />
 
           {/* Rewind Dialog（对话 + 文件原子回退预览） */}
@@ -614,36 +599,28 @@ export default function ChatPage() {
                   </div>
                 </div>
               ) : (
-                <div className="flex-1 overflow-auto flex flex-col">
-                  <FileTree
-                    key={currentSessionId || 'default'}
-                    onFileSelect={setSelectedFile}
-                    onAddToChat={handleAddToChat}
-                    selectedFile={selectedFile}
-                    cwd={currentCwd}
-                    visible={true}
-                    refreshTrigger={fileTreeRefreshTrigger}
-                  />
-                  {fileSnapshots.length > 0 && (
-                    <div className="border-t border-gray-200">
-                      <button
-                        onClick={() => setChangesExpanded(!changesExpanded)}
-                        className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-gray-700 bg-gray-50 hover:bg-gray-100"
-                      >
-                        <Package className="w-3 h-3" />
-                        Changes ({fileSnapshots.length})
-                        <span className="ml-auto text-gray-400">
-                          {changesExpanded ? '▼' : '▶'}
-                        </span>
-                      </button>
-                      {changesExpanded && (
-                        <DeliverablesPanel
-                          snapshots={fileSnapshots}
-                          onOpenFile={setChangesSelectedFile}
-                        />
-                      )}
-                    </div>
-                  )}
+                <div className="flex-1 overflow-hidden flex flex-col min-h-0">
+                  <div className="flex-1 overflow-auto min-h-0">
+                    <FileTree
+                      key={currentSessionId || 'default'}
+                      onFileSelect={setSelectedFile}
+                      onAddToChat={handleAddToChat}
+                      selectedFile={selectedFile}
+                      cwd={currentCwd}
+                      visible={true}
+                      refreshTrigger={fileTreeRefreshTrigger}
+                    />
+                  </div>
+                  {/* Code Review：固定在 Files 栏底部，内容向上增长，最高 50% */}
+                  <div className="shrink-0 max-h-[50%] flex flex-col min-h-0">
+                    <ReviewPanel
+                      snapshots={fileSnapshots}
+                      onAccept={handleAcceptFile}
+                      onReject={handleRejectFile}
+                      onAcceptAll={handleAcceptAll}
+                      onOpenFile={setChangesSelectedFile}
+                    />
+                  </div>
                 </div>
               )}
             </div>

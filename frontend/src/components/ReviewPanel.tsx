@@ -26,18 +26,18 @@ export function ReviewPanel({ snapshots, onAccept, onReject, onAcceptAll, onOpen
   const editedFiles = snapshots.filter(s => !s.is_new);
 
   return (
-    <div className="border-t border-gray-200 bg-white">
+    <div className="border-t border-gray-200 bg-white flex flex-col max-h-full overflow-hidden">
       {/* Header */}
       <div
         role="button"
         tabIndex={0}
         onClick={() => setIsCollapsed(!isCollapsed)}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIsCollapsed(!isCollapsed); } }}
-        className="w-full flex items-center justify-between px-4 py-2.5 hover:bg-gray-50 transition-colors cursor-pointer"
+        className="w-full shrink-0 flex items-center justify-between px-4 py-2.5 hover:bg-gray-50 transition-colors cursor-pointer"
       >
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium text-gray-700">
-            Code Review
+            Changes
           </span>
           <span className="text-xs bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded-full">
             {snapshots.length} file{snapshots.length !== 1 ? 's' : ''}
@@ -70,7 +70,7 @@ export function ReviewPanel({ snapshots, onAccept, onReject, onAcceptAll, onOpen
 
       {/* File list */}
       {!isCollapsed && (
-        <div className="border-t border-gray-100 max-h-96 overflow-y-auto">
+        <div className="border-t border-gray-100 flex-1 min-h-0 overflow-y-auto">
           {snapshots.map((snap) => {
             const isExpanded = expandedFile === snap.file_path;
             const fileName = snap.file_path.split('/').pop() || snap.file_path;
