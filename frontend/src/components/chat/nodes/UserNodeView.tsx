@@ -29,7 +29,7 @@ export const UserNodeView = memo(function UserNodeView({ node, sessionId, userMe
 
   return (
     <div className="flex justify-end group">
-      <div className="max-w-full">
+      <div className="max-w-[85%] min-w-0">
         {node.contextFiles && node.contextFiles.length > 0 && (
           <div className="flex items-center gap-1 flex-wrap mb-1 px-2">
             <span className="text-[11px] text-gray-400">Context:</span>
@@ -44,8 +44,8 @@ export const UserNodeView = memo(function UserNodeView({ node, sessionId, userMe
             ))}
           </div>
         )}
-        <div className="rounded-2xl rounded-br-md px-4 py-2.5 bg-gray-100 text-gray-900 max-w-[85%] ml-auto">
-          <pre className="whitespace-pre-wrap text-sm font-sans leading-relaxed">{node.content}</pre>
+        <div className="rounded-2xl rounded-br-md px-4 py-2.5 bg-gray-100 text-gray-900">
+          <div className="whitespace-pre-wrap break-words text-sm font-sans leading-relaxed">{node.content}</div>
         </div>
         <div className="hidden group-hover:flex text-[11px] mt-1 px-1 items-center gap-2 text-gray-400 justify-end">
           <span>{new Date(node.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>

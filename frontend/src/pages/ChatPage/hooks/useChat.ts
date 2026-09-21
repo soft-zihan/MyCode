@@ -906,6 +906,12 @@ export function useChat() {
     }
   }, []);
 
+  useEffect(() => {
+    if (currentSessionId) {
+      fetchTodos(currentSessionId);
+    }
+  }, [currentSessionId, fetchTodos]);
+
   const handleQuestionRespond = useCallback(async (answer: string) => {
     if (!pendingQuestion || !currentSessionId) return;
     try {

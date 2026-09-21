@@ -271,8 +271,9 @@ export default function EvalPage() {
           <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 text-sm whitespace-pre-wrap">{error}</div>
         )}
 
-        <div className="grid grid-cols-1 xl:grid-cols-[380px_1fr] gap-6">
-          <div className="bg-white rounded-lg border border-gray-200 p-4 space-y-4 h-fit">
+        <div className="grid grid-cols-1 xl:grid-cols-[380px_1fr] gap-6 items-start">
+          <div className="space-y-6">
+          <div className="bg-white rounded-lg border border-gray-200 p-4 space-y-4">
             <h2 className="font-semibold text-gray-900">启动评测</h2>
 
             <label className="block text-sm">
@@ -431,7 +432,6 @@ export default function EvalPage() {
             </button>
           </div>
 
-          <div className="space-y-6">
             <div className="bg-white rounded-lg border border-gray-200 p-4">
               <div className="flex items-center justify-between gap-3 mb-3">
                 <h2 className="font-semibold text-gray-900">Runs</h2>
@@ -460,7 +460,14 @@ export default function EvalPage() {
                 {!runs.length && <div className="text-sm text-gray-500">暂无 run</div>}
               </div>
             </div>
+          </div>
 
+          <div className="space-y-6">
+            {!selectedRun && (
+              <div className="bg-white rounded-lg border border-gray-200 p-10 text-center text-sm text-gray-400">
+                选择左侧 Run 查看详情
+              </div>
+            )}
             {selectedRun && (
               <div className="bg-white rounded-lg border border-gray-200 p-4 space-y-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
