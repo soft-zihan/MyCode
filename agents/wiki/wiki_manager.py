@@ -177,6 +177,7 @@ def write_workflow_pattern(
     *,
     description: str = "",
     sub_dir: str = "",
+    extra_meta: dict[str, str] | None = None,
 ) -> Path:
     content = f"""## Symptom
 {symptom}
@@ -189,7 +190,7 @@ def write_workflow_pattern(
     return write_wiki_entry(
         "workflow_pattern", name, content,
         description=description or symptom[:80],
-        extra_meta={"kind": "failure"},
+        extra_meta={"kind": "failure", **(extra_meta or {})},
         sub_dir=sub_dir,
     )
 
@@ -278,6 +279,26 @@ def confirm_wiki_entry(rel_path: str) -> None:
 def list_pending_confirm_entries() -> list[WikiEntry]:
     entries = list_wiki_entries()
     return [e for e in entries if e.meta.get("pending_confirm") == "true"]
+
+
+def increment_usage(rel_path: str) -> None:
+    """citation 命中：usage_count+1、last_used=now。
+
+    不单独 git commit（与 increment_applied_count 一致），
+    由下一次编译/整理的 commit 顺带入库，避免每次引用一个 commit。
+    """
+    wiki_dir = get_wiki_dir()
+    filepath = wiki_dir / rel_path
+    if not filepath.exists():
+        return
+    try:
+        result = parse_frontmatter(filepath.read_text())
+        count = int(result.meta.get("usage_count", "0") or 0) + 1
+        result.meta["usage_count"] = str(count)
+        result.meta["last_used"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        filepath.write_text(format_frontmatter(result.meta, result.body))
+    except Exception as e:
+        logger.warning("[wiki] increment_usage failed for %s: %s: %s", rel_path, type(e).__name__, e)
 
 
 def increment_applied_count(rel_path: str) -> None:
@@ -678,7 +699,11 @@ async def select_relevant_wiki_entries(
 def format_wiki_for_injection(entries: list[WikiEntry]) -> str:
     parts = []
     for e in entries:
-        parts.append(f"<system-reminder>\nWiki ({e.type}): {e.rel_path}\n\n{e.content}\n</system-reminder>")
+        parts.append(
+            f"<system-reminder>\nWiki ({e.type}): {e.rel_path}\n\n{e.content}\n"
+            f"[若本次回复实际使用了该条目，在回复末尾输出 <wiki-citation>{e.rel_path}</wiki-citation>]"
+            f"\n</system-reminder>"
+        )
     return "\n\n".join(parts)
 
 

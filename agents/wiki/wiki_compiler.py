@@ -99,6 +99,12 @@ async def compile_single_session(session_path: Path, side_query: Any) -> dict[st
         from agents.core.frontmatter import parse_frontmatter
         result = parse_frontmatter(session_path.read_text())
         content = result.body
+
+        # 4.3：来源追溯 — 条目 frontmatter 记 source_segment
+        try:
+            source_segment = str(session_path.relative_to(get_wiki_dir()))
+        except ValueError:
+            source_segment = session_path.name
         
         if not content.strip() or content.strip() == "(empty session)":
             await asyncio.to_thread(mark_session_compiled, session_path)
@@ -130,6 +136,7 @@ async def compile_single_session(session_path: Path, side_query: Any) -> dict[st
                         root_cause=item.get("root_cause", ""),
                         workaround=item.get("workaround", ""),
                         description=description,
+                        extra_meta={"source_segment": source_segment},
                     )
                 elif item_type == "self_improvement":
                     await asyncio.to_thread(
@@ -138,7 +145,7 @@ async def compile_single_session(session_path: Path, side_query: Any) -> dict[st
                         name=name,
                         content=item.get("content", ""),
                         description=description,
-                        extra_meta={"pending_confirm": "true"},
+                        extra_meta={"pending_confirm": "true", "source_segment": source_segment},
                     )
                 else:
                     await asyncio.to_thread(
@@ -147,6 +154,7 @@ async def compile_single_session(session_path: Path, side_query: Any) -> dict[st
                         name=name,
                         content=item.get("content", ""),
                         description=description,
+                        extra_meta={"source_segment": source_segment},
                     )
                 
                 stats[item_type] += 1

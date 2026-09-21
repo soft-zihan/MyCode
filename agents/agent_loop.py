@@ -971,6 +971,8 @@ class AgentLoop:
 
                 stream = await a.openai_client.chat.completions.create(**create_params)
 
+                from agents.wiki.citation import CitationStripper, strip_citations
+                _citation_stripper = CitationStripper()
                 content = ""
                 if not a.is_sub_agent:
                     pass
@@ -1017,8 +1019,11 @@ class AgentLoop:
                         a.session.append("thinking", event_data)
 
                     if delta and delta.content:
-                        a.emit_text(delta.content)
-                        content += _safe_utf8_text(delta.content)
+                        raw_delta = _safe_utf8_text(delta.content)
+                        visible = _citation_stripper.feed(raw_delta)
+                        if visible:
+                            a.emit_text(visible)
+                        content += raw_delta
                         # Debug for title agent
                         if a.is_sub_agent and a._custom_system_prompt and "标题" in a._custom_system_prompt:
                             import sys
@@ -1040,6 +1045,10 @@ class AgentLoop:
                     if chunk.choices[0].finish_reason:
                         finish_reason = chunk.choices[0].finish_reason
 
+                _citation_tail = _citation_stripper.flush()
+                if _citation_tail:
+                    a.emit_text(_citation_tail)
+
                 assembled = None
                 if tool_calls:
                     assembled = [
@@ -1060,6 +1069,15 @@ class AgentLoop:
                     import sys
                     print(f"[TITLE-DEBUG] content='{content}', thinking='{thinking_content[:100] if thinking_content else None}...'", file=sys.stderr)
                 
+                # 4.1：落盘前剥离 citation（防回灌），命中路径计 usage
+                content, _cited_paths = strip_citations(content)
+                for _p in _cited_paths:
+                    try:
+                        from agents.wiki.wiki_manager import increment_usage
+                        increment_usage(_p)
+                    except Exception as _e:
+                        print(f"[wiki_citation] usage update failed for {_p}: {type(_e).__name__}: {_e}")
+
                 return {
                     "choices": [{
                         "message": {

@@ -95,6 +95,7 @@ async def remember(inp: dict, side_query=None) -> str:
                 root_cause=root_cause,
                 workaround=workaround,
                 description=description,
+                extra_meta={"source": "agent"},
             )
         else:
             path = await asyncio.to_thread(
@@ -103,6 +104,7 @@ async def remember(inp: dict, side_query=None) -> str:
                 name=name,
                 content=content,
                 description=description,
+                extra_meta={"source": "agent"},
             )
         _maybe_consolidate(side_query)
         from agents.wiki.wiki_manager import get_wiki_dir
