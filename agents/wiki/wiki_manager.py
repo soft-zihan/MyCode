@@ -26,7 +26,6 @@ VALID_WIKI_TYPES = {
     "reference",
     "workflow_pattern",
     "session_notes",
-    "project",  # Project documentation and test scripts
 }
 
 MAX_INDEX_LINES = 200
@@ -442,24 +441,6 @@ def load_wiki_index() -> str:
     return content
 
 
-def list_project_docs() -> list[str]:
-    """List project documentation files."""
-    project_dir = get_wiki_dir() / "project"
-    if not project_dir.exists():
-        return []
-    
-    docs = []
-    for f in project_dir.rglob("*.md"):
-        rel_path = f.relative_to(project_dir)
-        docs.append(str(rel_path))
-    for f in project_dir.rglob("*.py"):
-        if "test" in f.name.lower():
-            rel_path = f.relative_to(project_dir)
-            docs.append(str(rel_path))
-    
-    return sorted(docs)[:20]  # Limit to 20 entries
-
-
 # ── Wiki 召回（side query） ──
 
 # 从文件加载 side query 提示词
@@ -650,15 +631,6 @@ def init_wiki_git() -> None:
 def build_wiki_prompt_section() -> str:
     index = load_wiki_index()
     wiki_dir = str(get_wiki_dir())
-    project_docs = list_project_docs()
-
-    project_section = ""
-    if project_docs:
-        project_section = f"""
-## Project Documentation
-Available project docs and test scripts at `{wiki_dir}/project/`:
-{chr(10).join(f"- {p}" for p in project_docs[:10])}
-Read these for project-specific context and testing guidance."""
 
     return f"""# Wiki System
 
@@ -678,13 +650,7 @@ You have a persistent, file-based wiki system at `{wiki_dir}`.
 - workflow_pattern entries can be compiled into executable Skills when high-frequency
 - No manual action needed - recall is automatic
 
-### 3. Project Documentation (project/)
-- Project-specific docs and test scripts
-- Can be updated via project git repo or by you after completing work
-- When updating, ensure version alignment with project state
-{project_section}
-
-### 4. Plans (plans/)
+### 3. Plans (plans/)
 - Plan artifacts with their own lifecycle
 - Can be converted to/from wiki entries when appropriate
 
@@ -696,7 +662,6 @@ Wiki entries are automatically recalled based on your current task. You don't ne
 - When you discover a debugging lesson → self_improvement or knowledge
 - When you learn a user preference → user
 - When you find a reusable pattern → workflow_pattern
-- When you complete significant work → update project docs if needed
 
 ## What NOT to Save
 - Code patterns you can read from the codebase

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { 
   FolderTree, RefreshCw, FileText, BookOpen, Settings, Zap, Bot, 
-  MessageSquare, Folder
+  MessageSquare
 } from 'lucide-react';
 import { fetchWorkspaceTree, WorkspaceNode } from '../../api/client';
 
@@ -65,17 +65,7 @@ const MEMORY_CATEGORIES = [
   },
 ];
 
-// Category 3: Project Documentation
-const PROJECT_DOCS_CATEGORY = {
-  name: 'Project Docs',
-  icon: Folder,
-  color: 'text-green-500',
-  bgColor: 'bg-green-50',
-  path: '.mycode/wiki/project',
-  description: '项目文档和测试脚本',
-};
-
-// Category 4: Plans (shown in Plan tab, not here)
+// Category 3: Plans (shown in Plan tab, not here)
 // Plans are managed separately in PlanControlPanel
 
 // Config categories (not wiki content, but project configuration)
@@ -343,7 +333,6 @@ export function WikiPanel({ cwd, onFileSelect, selectedFile }: WikiPanelProps) {
     category: cat,
     files: filterTreeByPath(tree, cat.path),
   }));
-  const projectDocsFiles = filterTreeByPath(tree, PROJECT_DOCS_CATEGORY.path);
   const configFiles = CONFIG_CATEGORIES.map(cat => ({
     category: cat,
     files: filterTreeByPath(tree, cat.path),
@@ -351,7 +340,6 @@ export function WikiPanel({ cwd, onFileSelect, selectedFile }: WikiPanelProps) {
   
   const totalSessionNotes = sessionNotesFiles.length;
   const totalMemoryFiles = memoryFiles.reduce((sum, w) => sum + w.files.length, 0);
-  const totalProjectDocs = projectDocsFiles.length;
   const totalConfigFiles = configFiles.reduce((sum, c) => sum + c.files.length, 0);
   
   return (
@@ -364,7 +352,7 @@ export function WikiPanel({ cwd, onFileSelect, selectedFile }: WikiPanelProps) {
         </div>
         <div className="flex items-center gap-2">
           <span className="text-[10px] text-gray-500">
-            {totalSessionNotes + totalMemoryFiles + totalProjectDocs} docs · {totalConfigFiles} configs
+            {totalSessionNotes + totalMemoryFiles} docs · {totalConfigFiles} configs
           </span>
           <button
             onClick={fetchTree}
@@ -409,21 +397,6 @@ export function WikiPanel({ cwd, onFileSelect, selectedFile }: WikiPanelProps) {
               selectedFile={selectedFile}
             />
           ))}
-        </div>
-        
-        {/* Category 3: Project Documentation */}
-        <div className="border-b border-gray-200">
-          <div className="px-3 py-1.5 bg-green-50 text-[10px] font-medium text-green-700 uppercase tracking-wide">
-            项目文档
-          </div>
-          <CategorySection
-            category={PROJECT_DOCS_CATEGORY}
-            files={projectDocsFiles}
-            expanded={expandedCategories.has(PROJECT_DOCS_CATEGORY.name)}
-            onToggle={() => toggleCategory(PROJECT_DOCS_CATEGORY.name)}
-            onFileSelect={onFileSelect}
-            selectedFile={selectedFile}
-          />
         </div>
         
         {/* Config */}
