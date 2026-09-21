@@ -280,7 +280,6 @@ class EvalService:
         meta = {
             "model": state.model,
             "seed": options.seed,
-            "level": options.level,
             "category": options.category,
             "include_image": options.include_image,
             "suite": options.suite,

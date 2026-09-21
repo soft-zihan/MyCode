@@ -51,7 +51,7 @@ def load_tasks(only: list[str] | None = None, suite: str = "smoke") -> list[dict
     
     Args:
         only: 只加载指定 id 的任务
-        suite: 测试套件 - smoke(单元) / chain(全链路)；GAIA 用独立 benchmark（--level 3 --sample 10）
+        suite: 测试套件 - smoke(单元) / chain(全链路)；GAIA 用独立 benchmark（固定 Level 3，--sample 10）
     """
     path = SUITES[suite]
     tasks = [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
@@ -218,22 +218,27 @@ def check_assertions_for_phase(phase: dict, workspace: Path, events: list[dict],
             if not matches:
                 failures.append(f"文件未创建（匹配模式 {path_pattern}）")
             elif contains:
+                needles = [contains] if isinstance(contains, str) else list(contains or [])
                 found = False
                 for p in matches:
                     try:
-                        if contains in p.read_text(encoding="utf-8", errors="replace"):
-                            found = True
-                            break
+                        text = p.read_text(encoding="utf-8", errors="replace")
                     except Exception:
                         continue
+                    if any(n in text for n in needles):
+                        found = True
+                        break
                 if not found:
                     failures.append(f"匹配 {path_pattern} 的文件内容缺少 {contains!r}")
         else:
             p = workspace / path_pattern
             if not p.exists():
                 failures.append(f"文件未创建: {path_pattern}")
-            elif contains and contains not in p.read_text(encoding="utf-8", errors="replace"):
-                failures.append(f"文件 {path_pattern} 内容缺少 {contains!r}")
+            elif contains:
+                needles = [contains] if isinstance(contains, str) else list(contains or [])
+                text = p.read_text(encoding="utf-8", errors="replace")
+                if not any(n in text for n in needles):
+                    failures.append(f"文件 {path_pattern} 内容缺少 {contains!r}")
 
     errors = [e for e in turn_events if e.get("type") == "error"]
     if errors:
@@ -342,22 +347,27 @@ def check_assertions(task: dict, workspace: Path, events: list[dict], turn_event
             if not matches:
                 failures.append(f"文件未创建（匹配模式 {path_pattern}）")
             elif contains:
+                needles = [contains] if isinstance(contains, str) else list(contains or [])
                 found = False
                 for p in matches:
                     try:
-                        if contains in p.read_text(encoding="utf-8", errors="replace"):
-                            found = True
-                            break
+                        text = p.read_text(encoding="utf-8", errors="replace")
                     except Exception:
                         continue
+                    if any(n in text for n in needles):
+                        found = True
+                        break
                 if not found:
                     failures.append(f"匹配 {path_pattern} 的文件内容缺少 {contains!r}")
         else:
             p = workspace / path_pattern
             if not p.exists():
                 failures.append(f"文件未创建: {path_pattern}")
-            elif contains and contains not in p.read_text(encoding="utf-8", errors="replace"):
-                failures.append(f"文件 {path_pattern} 内容缺少 {contains!r}")
+            elif contains:
+                needles = [contains] if isinstance(contains, str) else list(contains or [])
+                text = p.read_text(encoding="utf-8", errors="replace")
+                if not any(n in text for n in needles):
+                    failures.append(f"文件 {path_pattern} 内容缺少 {contains!r}")
 
     errors = [e for e in turn_events if e.get("type") == "error"]
     if errors:
@@ -568,12 +578,16 @@ async def run_task(
                     while pending and time.time() < wait_deadline:
                         still = []
                         for spec in pending:
-                            matches = list(workspace.glob(spec["path"]))
+                            matches = [m for m in workspace.glob(spec["path"]) if m.is_file()]
                             needle = spec.get("contains")
+                            needles = [needle] if isinstance(needle, str) else list(needle or [])
                             ok = bool(matches) and (
-                                not needle or any(
-                                    needle in m.read_text(encoding="utf-8", errors="replace")
-                                    for m in matches if m.is_file()
+                                not needles or any(
+                                    any(n in text for n in needles)
+                                    for text in (
+                                        m.read_text(encoding="utf-8", errors="replace")
+                                        for m in matches
+                                    )
                                 )
                             )
                             if not ok:

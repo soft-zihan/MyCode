@@ -65,7 +65,6 @@ class EvalRunOptions:
     benchmark: BenchmarkName
     sample: int | None = None
     seed: int = 42
-    level: int | None = None
     category: str | None = None
     include_image: bool = False
     only: list[str] | None = None
@@ -88,7 +87,6 @@ class EvalRunOptions:
             "benchmark": self.benchmark,
             "sample": self.sample,
             "seed": self.seed,
-            "level": self.level,
             "category": self.category,
             "include_image": self.include_image,
             "thinking": self.thinking,

@@ -7,6 +7,7 @@ import {
   abortEvalRun,
   evalReportMarkdownUrl,
   fetchEvalBenchmarks,
+  fetchEvalTasks,
   fetchEvalLangfuseInfo,
   fetchEvalRun,
   fetchEvalRuns,
@@ -19,6 +20,7 @@ import {
 import type {
   EvalBenchmark,
   EvalBenchmarkSpec,
+  EvalTaskSpec,
   EvalRun,
   EvalTaskResult,
   LangfuseInfo,
@@ -68,6 +70,142 @@ function formatPercent(value?: number | null) {
   return `${(value * 100).toFixed(1)}%`;
 }
 
+const TASK_PAGE = 50;
+
+function BenchmarkCard({ spec, busy, onRunTask, onUseBenchmark }: {
+  spec: EvalBenchmarkSpec;
+  busy: boolean;
+  onRunTask: (benchmark: EvalBenchmark, taskId: string, suite?: string) => void;
+  onUseBenchmark: (benchmark: EvalBenchmark) => void;
+}) {
+  const [showTasks, setShowTasks] = useState(false);
+  const [limit, setLimit] = useState(TASK_PAGE);
+  const [suite, setSuite] = useState<string>(String(spec.default_options?.suite || spec.suites?.[0]?.id || ''));
+  const [tasks, setTasks] = useState<EvalTaskSpec[]>([]);
+  const [total, setTotal] = useState<number | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!showTasks) return;
+    let cancelled = false;
+    setLoadError(null);
+    fetchEvalTasks(spec.id, spec.suites ? suite : undefined)
+      .then((data) => { if (!cancelled) { setTasks(data.tasks); setTotal(data.total); } })
+      .catch((e) => { if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e)); });
+    return () => { cancelled = true; };
+  }, [showTasks, suite, spec.id, spec.suites]);
+
+  const detail = spec.detail;
+  const visible = tasks.slice(0, limit);
+  const activeSuite = spec.suites?.find((x) => x.id === suite);
+
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-4 space-y-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="font-semibold text-gray-900">{spec.name}</h2>
+          <p className="text-xs text-gray-500 mt-1 leading-relaxed">{spec.description}</p>
+        </div>
+        <button
+          onClick={() => onUseBenchmark(spec.id)}
+          className="shrink-0 flex items-center gap-1 px-3 py-1.5 rounded-md border border-indigo-300 text-indigo-600 text-xs hover:bg-indigo-50"
+        >
+          <Play className="w-3 h-3" />
+          去启动
+        </button>
+      </div>
+
+      {detail && (
+        <dl className="text-xs space-y-1.5">
+          {[
+            ['目的', detail.purpose],
+            ['数据来源', detail.data_source],
+            ['评分方式', detail.scoring],
+            ['执行方式', detail.execution],
+            ['预计耗时', detail.duration],
+          ].map(([label, value]) => (
+            <div key={label} className="flex gap-2">
+              <dt className="shrink-0 w-16 text-gray-400">{label}</dt>
+              <dd className="text-gray-700 leading-relaxed">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+
+      {detail && detail.commands.length > 0 && (
+        <div className="rounded-md bg-gray-900 p-2.5 space-y-1">
+          {detail.commands.map((cmd) => (
+            <code key={cmd} className="block font-mono text-[11px] text-green-300 break-all">$ {cmd}</code>
+          ))}
+        </div>
+      )}
+
+      {spec.suites && spec.suites.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap gap-2">
+            {spec.suites.map((x) => (
+              <button
+                key={x.id}
+                onClick={() => { setSuite(x.id); setLimit(TASK_PAGE); setShowTasks(true); }}
+                className={`px-2.5 py-1 rounded-full text-xs border transition-colors ${showTasks && suite === x.id ? 'border-indigo-400 bg-indigo-50 text-indigo-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}
+              >
+                {x.name}
+              </button>
+            ))}
+          </div>
+          {showTasks && activeSuite && (
+            <p className="text-xs text-gray-500 leading-relaxed">{activeSuite.description}</p>
+          )}
+        </div>
+      )}
+
+      <div>
+        <button
+          onClick={() => setShowTasks(!showTasks)}
+          className="flex items-center gap-1 text-xs text-indigo-600 hover:underline"
+        >
+          {showTasks ? '收起任务列表' : `任务列表${total !== null ? `（共 ${total} 个）` : ''}`}
+        </button>
+        {loadError && <div className="mt-1 text-xs text-red-600">{loadError}</div>}
+        {showTasks && (
+          <div className="mt-2 rounded-md border border-gray-200 divide-y divide-gray-100">
+            {visible.map((task) => (
+              <div key={task.id} className="flex items-center justify-between gap-2 px-2.5 py-1.5 hover:bg-gray-50">
+                <div className="min-w-0">
+                  <div className="font-mono text-xs text-gray-900 truncate">{task.id}</div>
+                  {task.name && task.name !== task.id && <div className="text-xs text-gray-500 truncate">{task.name}</div>}
+                  {task.meta && Object.values(task.meta).some(Boolean) && (
+                    <div className="text-[10px] text-gray-400 truncate">
+                      {Object.entries(task.meta).filter(([, v]) => v).map(([k, v]) => `${k}: ${v}`).join(' · ')}
+                    </div>
+                  )}
+                </div>
+                <button
+                  onClick={() => onRunTask(spec.id, task.id, spec.suites ? suite : undefined)}
+                  disabled={busy}
+                  className="shrink-0 flex items-center gap-1 px-2 py-1 rounded border border-green-300 text-green-700 text-xs hover:bg-green-50 disabled:opacity-40"
+                >
+                  <Play className="w-3 h-3" />
+                  运行
+                </button>
+              </div>
+            ))}
+            {!tasks.length && !loadError && <div className="p-3 text-xs text-gray-400 text-center">加载中…</div>}
+            {tasks.length > limit && (
+              <button
+                onClick={() => setLimit(limit + 200)}
+                className="w-full py-1.5 text-xs text-indigo-600 hover:bg-indigo-50"
+              >
+                显示更多（{visible.length}/{tasks.length}）
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function EvalPage() {
   const [benchmarks, setBenchmarks] = useState<EvalBenchmarkSpec[]>([]);
   const [runs, setRuns] = useState<EvalRun[]>([]);
@@ -86,6 +224,24 @@ export default function EvalPage() {
     () => benchmarks.find((benchmark) => benchmark.id === form.benchmark),
     [benchmarks, form.benchmark],
   );
+
+  const selectedSuite = useMemo(
+    () => selectedBenchmark?.suites?.find((suite) => suite.id === (form.suite || 'chain')),
+    [selectedBenchmark, form.suite],
+  );
+
+  const [smokeTasks, setSmokeTasks] = useState<EvalTaskSpec[]>([]);
+  const [activeTab, setActiveTab] = useState<'benchmarks' | 'runs'>('benchmarks');
+
+  useEffect(() => {
+    if (form.benchmark !== 'smoke') { setSmokeTasks([]); return; }
+    const suite = form.suite || 'chain';
+    let cancelled = false;
+    fetchEvalTasks('smoke', suite)
+      .then((data) => { if (!cancelled) setSmokeTasks(data.tasks); })
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+    return () => { cancelled = true; };
+  }, [form.benchmark, form.suite]);
 
   const loadRuns = useCallback(async () => {
     const data = await fetchEvalRuns(100);
@@ -180,7 +336,6 @@ export default function EvalPage() {
       ...spec?.default_options,
       benchmark,
       only: null,
-      level: benchmark === 'gaia' ? prev.level : null,
       category: benchmark === 'hle' ? prev.category : null,
       suite: benchmark === 'smoke' ? (prev.suite || 'chain') : prev.suite,
     }));
@@ -193,7 +348,6 @@ export default function EvalPage() {
       const payload: StartEvalRunRequest = {
         ...form,
         only: form.only && form.only.length ? form.only : null,
-        level: form.benchmark === 'gaia' ? form.level : null,
         category: form.benchmark === 'hle' ? form.category : null,
         suite: form.benchmark === 'smoke' ? (form.suite || 'chain') : form.suite,
         execution_mode: form.benchmark === 'smoke' ? 'backend_session' : (form.execution_mode || 'backend_session'),
@@ -201,6 +355,39 @@ export default function EvalPage() {
       const run = await startEvalRun(payload);
       setSelectedRunId(run.run_id);
       setSelectedRun(run);
+      setActiveTab('runs');
+      await refreshAll();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRunTask = async (benchmark: EvalBenchmark, taskId: string, suite?: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const payload: StartEvalRunRequest = {
+        benchmark,
+        sample: null,
+        seed: form.seed ?? 42,
+        only: [taskId],
+        suite: benchmark === 'smoke' ? (suite || 'chain') : undefined,
+        category: null,
+        timeout_s: 0,
+        execution_mode: 'backend_session',
+        sync_langfuse_dataset: true,
+        judge_after_run: false,
+        skip_langfuse: false,
+        keep_sessions: true,
+        thinking: form.thinking,
+        compression_arm: form.compression_arm,
+      };
+      const run = await startEvalRun(payload);
+      setSelectedRunId(run.run_id);
+      setSelectedRun(run);
+      setActiveTab('runs');
       await refreshAll();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -246,34 +433,8 @@ export default function EvalPage() {
     : null;
   const tasks: EvalTaskResult[] = selectedRun?.tasks || [];
 
-  return (
-    <PageLayout sidebarContent={null}>
-      <div className="h-full overflow-y-auto p-6 space-y-6 bg-gray-50">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-              <Activity className="w-6 h-6 text-indigo-600" />
-              Eval Runner
-            </h1>
-            <p className="text-sm text-gray-600 mt-1">
-              启动 GAIA / HLE / Comprehensive，实时观察 backend session，并同步 Langfuse Dataset。
-            </p>
-          </div>
-          <button
-            onClick={() => refreshAll().catch((e) => setError(e instanceof Error ? e.message : String(e)))}
-            className="flex items-center gap-2 px-3 py-2 rounded-md bg-white border border-gray-200 text-sm text-gray-700 hover:bg-gray-100"
-          >
-            <RefreshCw className="w-4 h-4" />
-            刷新
-          </button>
-        </div>
-
-        {error && (
-          <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 text-sm whitespace-pre-wrap">{error}</div>
-        )}
-
-        <div className="grid grid-cols-1 xl:grid-cols-[380px_1fr] gap-6 items-start">
-          <div className="space-y-6">
+  const sidebarContent = (
+    <div className="p-3 space-y-4">
           <div className="bg-white rounded-lg border border-gray-200 p-4 space-y-4">
             <h2 className="font-semibold text-gray-900">启动评测</h2>
 
@@ -290,7 +451,11 @@ export default function EvalPage() {
               </select>
             </label>
 
-            {selectedBenchmark && <p className="text-xs text-gray-500">{selectedBenchmark.description}</p>}
+            {selectedBenchmark && (
+              <div className="rounded-md bg-indigo-50 border border-indigo-100 p-2.5 text-xs text-gray-700 leading-relaxed">
+                {selectedBenchmark.description}
+              </div>
+            )}
 
             <div className="grid grid-cols-2 gap-3">
               <label className="block text-sm">
@@ -314,22 +479,6 @@ export default function EvalPage() {
               </label>
             </div>
 
-            {form.benchmark === 'gaia' && (
-              <label className="block text-sm">
-                <span className="text-gray-600">Level</span>
-                <select
-                  value={form.level ?? ''}
-                  onChange={(e) => updateForm('level', e.target.value ? Number(e.target.value) : null)}
-                  className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 bg-white"
-                >
-                  <option value="">全部</option>
-                  <option value="1">1</option>
-                  <option value="2">2</option>
-                  <option value="3">3</option>
-                </select>
-              </label>
-            )}
-
             {form.benchmark === 'hle' && (
               <label className="block text-sm">
                 <span className="text-gray-600">Category</span>
@@ -349,7 +498,7 @@ export default function EvalPage() {
                 onChange={(e) => updateForm('thinking', e.target.value === 'default' ? null : e.target.value === 'true')}
                 className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 bg-white"
               >
-                <option value="default">跟随全局配置</option>
+                <option value="default">跟随模型端点配置</option>
                 <option value="true">开</option>
                 <option value="false">关（更快，考验鲁棒性）</option>
               </select>
@@ -370,28 +519,70 @@ export default function EvalPage() {
             </label>
 
             {form.benchmark === 'smoke' && (
-              <label className="block text-sm">
-                <span className="text-gray-600">Suite</span>
-                <select
-                  value={form.suite || 'chain'}
-                  onChange={(e) => updateForm('suite', e.target.value)}
-                  className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 bg-white"
-                >
-                  <option value="chain">chain（全链路评测）</option>
-                  <option value="smoke">smoke（单元）</option>
-                </select>
-              </label>
+              <>
+                <label className="block text-sm">
+                  <span className="text-gray-600">Suite</span>
+                  <select
+                    value={form.suite || 'chain'}
+                    onChange={(e) => updateForm('suite', e.target.value)}
+                    className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 bg-white"
+                  >
+                    {(selectedBenchmark?.suites ?? []).map((suite) => (
+                      <option key={suite.id} value={suite.id}>{suite.name}</option>
+                    ))}
+                  </select>
+                </label>
+                {selectedSuite && <p className="text-xs text-gray-500">{selectedSuite.description}</p>}
+              </>
             )}
 
-            <label className="block text-sm">
-              <span className="text-gray-600">Only task ids（逗号分隔，可选）</span>
-              <input
-                value={(form.only || []).join(',')}
-                onChange={(e) => updateForm('only', e.target.value ? e.target.value.split(',').map((v) => v.trim()).filter(Boolean) : null)}
-                className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2"
-                placeholder="task-1,task-2"
-              />
-            </label>
+            {form.benchmark === 'smoke' ? (
+              <div className="text-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-600">评测案例（不勾选 = 全部运行）</span>
+                  <button
+                    type="button"
+                    onClick={() => updateForm('only', null)}
+                    className="text-xs text-indigo-600 hover:underline"
+                  >
+                    清空
+                  </button>
+                </div>
+                <div className="mt-1 rounded-md border border-gray-200 max-h-48 overflow-y-auto p-2 space-y-1">
+                  {smokeTasks.map((task) => {
+                    const checked = (form.only || []).includes(task.id);
+                    return (
+                      <label key={task.id} className="flex items-start gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          className="mt-0.5"
+                          checked={checked}
+                          onChange={(e) => {
+                            const cur = form.only || [];
+                            updateForm('only', e.target.checked ? [...cur, task.id] : cur.filter((v) => v !== task.id));
+                          }}
+                        />
+                        <span className="min-w-0">
+                          <span className="block font-mono text-xs text-gray-900">{task.id}</span>
+                          {task.name && task.name !== task.id && <span className="block text-xs text-gray-500 truncate">{task.name}</span>}
+                        </span>
+                      </label>
+                    );
+                  })}
+                  {!smokeTasks.length && <div className="text-xs text-gray-400">加载中…</div>}
+                </div>
+              </div>
+            ) : (
+              <label className="block text-sm">
+                <span className="text-gray-600">Only task ids（逗号分隔，可选）</span>
+                <input
+                  value={(form.only || []).join(',')}
+                  onChange={(e) => updateForm('only', e.target.value ? e.target.value.split(',').map((v) => v.trim()).filter(Boolean) : null)}
+                  className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2"
+                  placeholder="task-1,task-2"
+                />
+              </label>
+            )}
 
             <div className="grid grid-cols-2 gap-3">
               <label className="block text-sm">
@@ -452,11 +643,11 @@ export default function EvalPage() {
                 <h2 className="font-semibold text-gray-900">Runs</h2>
                 <span className="text-xs text-gray-500">{runs.length} 个</span>
               </div>
-              <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+              <div className="space-y-2">
                 {runs.map((run) => (
                   <button
                     key={run.run_id}
-                    onClick={() => setSelectedRunId(run.run_id)}
+                    onClick={() => { setSelectedRunId(run.run_id); setActiveTab('runs'); }}
                     className={`w-full text-left rounded-md border p-3 transition-colors ${selectedRunId === run.run_id ? 'border-indigo-400 bg-indigo-50' : 'border-gray-200 hover:bg-gray-50'}`}
                   >
                     <div className="flex items-center justify-between gap-2">
@@ -475,9 +666,63 @@ export default function EvalPage() {
                 {!runs.length && <div className="text-sm text-gray-500">暂无 run</div>}
               </div>
             </div>
-          </div>
+    </div>
+  );
 
-          <div className="space-y-6">
+  return (
+    <PageLayout sidebarContent={sidebarContent}>
+      <div className="h-full overflow-y-auto p-6 space-y-6 bg-gray-50">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
+              <Activity className="w-6 h-6 text-indigo-600" />
+              Eval Runner
+            </h1>
+            <p className="text-sm text-gray-600 mt-1">
+              评测集介绍与单任务直跑；启动面板在左侧栏，运行详情切到「运行」Tab。
+            </p>
+          </div>
+          <button
+            onClick={() => refreshAll().catch((e) => setError(e instanceof Error ? e.message : String(e)))}
+            className="flex items-center gap-2 px-3 py-2 rounded-md bg-white border border-gray-200 text-sm text-gray-700 hover:bg-gray-100"
+          >
+            <RefreshCw className="w-4 h-4" />
+            刷新
+          </button>
+        </div>
+
+        <div className="flex gap-1 border-b border-gray-200">
+          {([['benchmarks', '评测集'], ['runs', '运行']] as const).map(([id, label]) => (
+            <button
+              key={id}
+              onClick={() => setActiveTab(id)}
+              className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${activeTab === id ? 'border-indigo-600 text-indigo-700' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {error && (
+          <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 text-sm whitespace-pre-wrap">{error}</div>
+        )}
+
+        {activeTab === 'benchmarks' && (
+          <div className="grid grid-cols-1 2xl:grid-cols-2 gap-4 items-start">
+            {benchmarks.map((spec) => (
+              <BenchmarkCard
+                key={spec.id}
+                spec={spec}
+                busy={loading}
+                onRunTask={handleRunTask}
+                onUseBenchmark={handleBenchmarkChange}
+              />
+            ))}
+          </div>
+        )}
+
+        {activeTab === 'runs' && (
+          <>
             {!selectedRun && (
               <div className="bg-white rounded-lg border border-gray-200 p-10 text-center text-sm text-gray-400">
                 选择左侧 Run 查看详情
@@ -592,7 +837,7 @@ export default function EvalPage() {
 
             <div className="bg-white rounded-lg border border-gray-200 p-4">
               <h2 className="font-semibold text-gray-900 mb-3">实时事件</h2>
-              <div className="space-y-2 max-h-72 overflow-y-auto font-mono text-xs">
+              <div className="space-y-2 font-mono text-xs">
                 {events.map((event, index) => (
                   <div key={`${event.type}-${index}`} className="border border-gray-100 rounded p-2 bg-gray-50">
                     <div className="text-gray-900">{String(event.type)} {event.run_id ? `run=${event.run_id}` : ''} {event.task_id ? `task=${event.task_id}` : ''}</div>
@@ -602,8 +847,8 @@ export default function EvalPage() {
                 {!events.length && <div className="text-sm text-gray-500 font-sans">等待 eval/* WebSocket 事件</div>}
               </div>
             </div>
-          </div>
-        </div>
+          </>
+        )}
       </div>
     </PageLayout>
   );
