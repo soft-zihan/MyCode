@@ -21,6 +21,7 @@ import random
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +70,27 @@ def select_indices(total: int, sample: int, select: str, seed: int, indices: str
     return sorted(rng.sample(range(total), min(sample, total)))
 
 
+def _summarize(rows: list[dict[str, Any]], total_tasks: int) -> dict[str, Any]:
+    n = len(rows)
+    scored = [r for r in rows if isinstance(r["reward"], (int, float))]
+    total_comp = {k: sum((r["compression_events"] or {}).get(k, 0) for r in rows)
+                  for k in ("tool_folded", "session_folded", "events_hidden")}
+    return {
+        "total": total_tasks,
+        "completed": n,
+        "scored": len(scored),
+        "passed": sum(1 for r in rows if r["passed"]),
+        "correct": sum(1 for r in rows if r["passed"]),
+        "pass_at_1": round(sum(1 for r in rows if r["passed"]) / n, 4) if n else 0.0,
+        "avg_reward": round(sum(r["reward"] for r in scored) / len(scored), 4) if scored else None,
+        "errors": sum(1 for r in rows if r["agent_error"] or r["eval_error"]),
+        "compression_events_total": total_comp,
+        "total_input_tokens": sum((r["tokens"] or {}).get("input", 0) for r in rows),
+        "total_output_tokens": sum((r["tokens"] or {}).get("output", 0) for r in rows),
+        "avg_duration_s": round(sum(r["duration_s"] for r in rows) / n, 1) if n else 0.0,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="LOCA-bench 评测 runner（MyCode scaffold）")
     parser.add_argument("--config-set", default="64k",
@@ -88,6 +110,8 @@ def main() -> None:
     parser.add_argument("--api-base", default=None)
     parser.add_argument("--timeout", type=int, default=1800, help="单任务 agent 超时秒数（默认 1800）")
     parser.add_argument("--max-tool-uses", type=int, default=100, help="LOCA env wrapper 工具上限")
+    parser.add_argument("--parallel", type=int, default=1,
+                        help="任务级并发数（同臂内并行 agent 子进程，默认 1 串行）")
     parser.add_argument("--loca-repo", default=str(PROJECT_ROOT / "projects" / "LOCA-bench"))
     parser.add_argument("--loca-venv-python", default=None,
                         help="LOCA venv 解释器（默认 {loca_repo}/.venv/bin/python）")
@@ -111,8 +135,44 @@ def main() -> None:
     print(f"[loca] run_id={run_id} set={args.config_set} arm={args.arm} window={window} "
           f"model={model} tasks={len(picked)}/{len(configurations)} select={args.select}")
 
-    rows: list[dict[str, Any]] = []
-    for n, idx in enumerate(picked, 1):
+    from eval.common.models import EvalRunOptions, EvalRunState, EvalTaskResult
+    from eval.common.service import save_state
+
+    # 增量 state.json：CLI run 在前端 /eval 页实时可见（列表扫 *.state.json，详情走 load_state 兜底）
+    options = EvalRunOptions(
+        benchmark="loca",
+        sample=len(picked),
+        seed=args.seed,
+        thinking={"on": True, "off": False, "default": None}[args.thinking],
+        compression_arm=args.arm,
+        context_window=window,
+        timeout_s=args.timeout,
+        model=model,
+        api_base=api_base,
+    )
+    state = EvalRunState(
+        run_id=run_id,
+        benchmark="loca",
+        eval_session_id=run_id,
+        options=options,
+        status="running",
+        started_at=time.time(),
+        model=model,
+        api_base=api_base,
+        tasks=[
+            EvalTaskResult(
+                task_id=f"{args.config_set}-{idx}",
+                benchmark="loca",
+                status="pending",
+                name=configurations[idx].get("name", f"config_{idx}"),
+                expected="reward>=0.999",
+            )
+            for idx in picked
+        ],
+    )
+    save_state(state)
+
+    def run_one(n: int, idx: int) -> dict[str, Any]:
         entry = configurations[idx]
         name = entry.get("name", f"config_{idx}")
         task_dir = EVAL_WORKSPACES / run_id / f"{idx:03d}-{_sanitize(name)}"
@@ -148,10 +208,17 @@ def main() -> None:
 
         t0 = time.time()
         print(f"  [{n}/{len(picked)}] idx={idx} {name} …", flush=True)
-        proc = subprocess.run(side_cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True,
-                              timeout=args.timeout + 600)
-        if proc.returncode != 0 and not (task_dir / "loca_eval.json").exists():
-            print(f"    [SIDE ERROR] rc={proc.returncode} {(proc.stderr or '')[-500:]}", flush=True)
+        infra_error: str | None = None
+        tail: list[str] = []
+        try:
+            proc = subprocess.run(side_cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True,
+                                  timeout=args.timeout + 600)
+            if proc.returncode != 0 and not (task_dir / "loca_eval.json").exists():
+                infra_error = f"side rc={proc.returncode} {(proc.stderr or '')[-500:]}"
+            if proc.stdout:
+                tail = proc.stdout.strip().splitlines()[-2:]
+        except subprocess.TimeoutExpired:
+            infra_error = f"side subprocess timeout ({args.timeout + 600}s)"
 
         ev = json.loads((task_dir / "loca_eval.json").read_text()) if (task_dir / "loca_eval.json").exists() else {}
         ar = json.loads((task_dir / "agent_result.json").read_text()) if (task_dir / "agent_result.json").exists() else {}
@@ -168,33 +235,58 @@ def main() -> None:
             "compression_events": comp,
             "trace_id": ar.get("trace_id"),
             "agent_error": ev.get("agent_error") or ar.get("error"),
-            "eval_error": ev.get("eval_error"),
+            "eval_error": ev.get("eval_error") or infra_error,
             "step_info": ev.get("step_info"),
             "task_dir": str(task_dir),
         }
-        rows.append(row)
         mark = "✅" if row["passed"] else "❌"
-        print(f"    {mark} reward={reward} dur={row['duration_s']}s comp={comp} err={row['agent_error'] or row['eval_error'] or ''}", flush=True)
-        if proc.stdout:
-            for line in proc.stdout.strip().splitlines()[-2:]:
-                print(f"    | {line[:160]}", flush=True)
+        print(f"    {mark} [{n}/{len(picked)}] idx={idx} reward={reward} dur={row['duration_s']}s "
+              f"comp={comp} err={row['agent_error'] or row['eval_error'] or ''}", flush=True)
+        for line in tail:
+            print(f"    | {line[:160]}", flush=True)
+        return row
 
+    rows_by_task: dict[str, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=max(1, args.parallel)) as pool:
+        futures = {pool.submit(run_one, n, idx): idx for n, idx in enumerate(picked, 1)}
+        for fut in as_completed(futures):
+            idx = futures[fut]
+            try:
+                row = fut.result()
+            except Exception as e:
+                row = {
+                    "task_id": f"{args.config_set}-{idx}",
+                    "name": configurations[idx].get("name", f"config_{idx}"),
+                    "index": idx, "reward": None, "passed": False, "duration_s": 0.0,
+                    "tokens": {}, "compression_events": {}, "trace_id": None,
+                    "agent_error": f"runner exception: {type(e).__name__}: {e}",
+                    "eval_error": None, "step_info": None, "task_dir": "",
+                }
+            rows_by_task[row["task_id"]] = row
+            tr = next((t for t in state.tasks if t.task_id == row["task_id"]), None)
+            if tr is not None:
+                tr.status = "passed" if row["passed"] else (
+                    "error" if (row["agent_error"] or row["eval_error"]) else "failed")
+                tr.predicted = f"reward={row['reward']}"
+                tr.passed = row["passed"]
+                tr.duration_s = row["duration_s"]
+                tr.tokens = row["tokens"]
+                tr.trace_id = row["trace_id"]
+                tr.error = row["agent_error"] or row["eval_error"]
+                tr.metadata = {
+                    "reward": row["reward"],
+                    "compression_events": row["compression_events"],
+                    "step_info": row["step_info"],
+                    "index": row["index"],
+                    "task_dir": row["task_dir"],
+                }
+            state.summary = _summarize(list(rows_by_task.values()), len(picked))
+            save_state(state)
+
+    rows = [rows_by_task[f"{args.config_set}-{idx}"] for idx in picked]
     n = len(rows)
-    scored = [r for r in rows if isinstance(r["reward"], (int, float))]
-    total_comp = {k: sum((r["compression_events"] or {}).get(k, 0) for r in rows)
-                  for k in ("tool_folded", "session_folded", "events_hidden")}
-    summary = {
-        "total": n,
-        "scored": len(scored),
-        "passed": sum(1 for r in rows if r["passed"]),
-        "pass_at_1": round(sum(1 for r in rows if r["passed"]) / n, 4) if n else 0.0,
-        "avg_reward": round(sum(r["reward"] for r in scored) / len(scored), 4) if scored else None,
-        "errors": sum(1 for r in rows if r["agent_error"] or r["eval_error"]),
-        "compression_events_total": total_comp,
-        "total_input_tokens": sum((r["tokens"] or {}).get("input", 0) for r in rows),
-        "total_output_tokens": sum((r["tokens"] or {}).get("output", 0) for r in rows),
-        "avg_duration_s": round(sum(r["duration_s"] for r in rows) / n, 1) if n else 0.0,
-    }
+    summary = _summarize(rows, len(picked))
+    total_comp = summary["compression_events_total"]
     meta = {
         "benchmark_detail": "LOCA-bench (hkust-nlp)",
         "config_set": args.config_set,
@@ -210,6 +302,7 @@ def main() -> None:
         "loca_repo": str(loca_repo),
         "loca_commit": _loca_commit(loca_repo),
         "scaffold": "mycode-agent",
+        "parallel": args.parallel,
     }
 
     # BC-16 触发验证：压缩臂在压力窗口下零触发 = 实验无效信号
@@ -219,6 +312,12 @@ def main() -> None:
 
     json_path, md_path = write_reports("loca", run_id, meta, summary, rows,
                                        reports_dir=REPORTS_DIR, report_stem=run_id)
+    state.status = "completed"
+    state.finished_at = time.time()
+    state.summary = summary
+    state.report_json_path = str(json_path)
+    state.report_md_path = str(md_path)
+    save_state(state)
     print(f"[loca] completed {summary['passed']}/{n} pass@1={summary['pass_at_1']:.1%} "
           f"avg_reward={summary['avg_reward']} comp={total_comp}")
     print(f"[loca] report: {json_path}\n[loca]         {md_path}")

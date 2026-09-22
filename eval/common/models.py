@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-BenchmarkName = Literal["gaia", "hle", "smoke"]
+BenchmarkName = Literal["gaia", "hle", "smoke", "loca"]
 ExecutionMode = Literal["backend_session", "in_process"]
 RunStatus = Literal["pending", "running", "completed", "aborted", "failed"]
 TaskStatus = Literal["pending", "running", "passed", "failed", "error", "aborted"]
