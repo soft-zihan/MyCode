@@ -84,6 +84,7 @@ class McpConnection:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=merged_env,
+            start_new_session=True,  # 独立进程组：close 时整树回收，防 MCP server 的子进程孤儿化
         )
         # 后台持续读取 stdout。这里不阻塞 connect()，否则后续无法继续初始化。
         self._reader_task = asyncio.create_task(self._read_loop())
@@ -194,12 +195,16 @@ class McpConnection:
             self._reader_task.cancel()
             self._reader_task = None
         if self._process:
+            import os as _os
+            import signal as _signal
             try:
-                # 直接杀掉子进程，确保外部 MCP Server 不继续残留。
-                self._process.kill()
-            except ProcessLookupError:
-                # 进程已经退出时 kill 可能抛出该异常，忽略即可。
-                pass
+                # 按进程组杀：MCP server 及其派生的子进程一并回收。
+                _os.killpg(self._process.pid, _signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                try:
+                    self._process.kill()
+                except ProcessLookupError:
+                    pass
             self._process = None
         # 连接关闭后，所有还没收到响应的请求都不可能再完成，需要显式置为异常。
         for fut in self._pending.values():

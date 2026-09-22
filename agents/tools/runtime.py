@@ -57,16 +57,33 @@ class LocalRuntime:
         p.write_text(content)
     
     def run_command(self, command: str, timeout_s: float = 30) -> tuple[int, str, str]:
+        """执行命令。独立进程组（start_new_session）：超时时 killpg 杀整棵进程树。
+
+        subprocess.run 超时只杀直接子进程 /bin/sh，孙进程（node、chromium 等）会
+        孤儿化存活——浏览器类任务每次超时泄漏 200-400MB，长评测下累积成 OOM。
+        """
+        import os
+        import signal
         from agents.core.workspace import get_workspace
-        result = subprocess.run(
+        proc = subprocess.Popen(
             command,
             shell=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout_s,
             cwd=str(get_workspace()),
+            start_new_session=True,
         )
-        return result.returncode, result.stdout, result.stderr
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_s)
+            return proc.returncode, stdout, stderr
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+            proc.communicate()  # 收尸，避免僵尸
+            raise
     
     def list_files(self, base: str, pattern: str) -> list[str]:
         import os

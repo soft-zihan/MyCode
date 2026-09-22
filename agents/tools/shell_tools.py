@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+import atexit
+import os
+import signal
 import subprocess
 import threading
 import time as _time
@@ -77,6 +80,29 @@ def _watch_background(job_id: str) -> None:
             print_error(f"[shell] background done callback failed: {type(exc).__name__}: {exc}")
 
 
+def _kill_all_background_jobs() -> None:
+    """进程退出时回收所有未完成的 background job（按进程组杀，防孤儿泄漏）。"""
+    with _BG_LOCK:
+        jobs = list(BACKGROUND_JOBS.values())
+    for job in jobs:
+        proc = job.get("process")
+        if proc is None or job.get("done"):
+            continue
+        try:
+            pgid = os.getpgid(proc.pid)
+            if pgid != os.getpgid(0):  # 安全护栏：绝不杀自己的进程组
+                os.killpg(pgid, signal.SIGKILL)
+            else:
+                proc.kill()
+        except (ProcessLookupError, PermissionError):
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+atexit.register(_kill_all_background_jobs)
+
 def _start_background_shell(command: str) -> str:
     try:
         from agents.core.workspace import get_workspace
@@ -87,6 +113,7 @@ def _start_background_shell(command: str) -> str:
             stderr=subprocess.PIPE,
             text=True,
             cwd=str(get_workspace()),
+            start_new_session=True,  # 独立进程组：可整树回收（含孙进程 node/chromium）
         )
     except Exception as e:
         return f"Error starting background command: {e}"
