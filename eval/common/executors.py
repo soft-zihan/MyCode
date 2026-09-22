@@ -9,8 +9,8 @@ from typing import Any
 from eval.common.models import EvalRunOptions, EvalRunState, EvalTask
 from eval.common.runner_base import run_agent_task
 
-# 评测工作区必须在仓库之外：load_agents_md/load_claude_md 从 workspace 向上遍历
-# 收集规则文件，放在仓库内会让开发规则（AGENTS.md）污染评测 agent（BC-17）
+# 评测工作区必须在仓库之外：评测任务模拟"独立用户项目"，而规则加载会从
+# workspace 向上继承（正确的生产语义），嵌在仓库内会误继承开发 AGENTS.md（BC-17）
 WORKSPACES_DIR = Path.home() / ".mycode" / "eval_workspaces"
 
 
