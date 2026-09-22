@@ -107,7 +107,7 @@ def main() -> None:
     picked = select_indices(len(configurations), args.sample, args.select, args.seed, args.indices)
 
     model, api_base, _ = resolve_model_config(args.model, args.api_base)
-    run_id = f"loca-{time.strftime('%Y%m%d_%H%M%S')}"
+    run_id = f"loca-{args.arm}-{time.strftime('%Y%m%d_%H%M%S')}"  # arm 入 id：并行臂防碰撞 + 报告自归因
     print(f"[loca] run_id={run_id} set={args.config_set} arm={args.arm} window={window} "
           f"model={model} tasks={len(picked)}/{len(configurations)} select={args.select}")
 
