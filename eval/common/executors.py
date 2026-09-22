@@ -7,9 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from eval.common.models import EvalRunOptions, EvalRunState, EvalTask
-from eval.common.runner_base import REPORTS_DIR, run_agent_task
+from eval.common.runner_base import run_agent_task
 
-WORKSPACES_DIR = REPORTS_DIR / "workspaces"
+# 评测工作区必须在仓库之外：load_agents_md/load_claude_md 从 workspace 向上遍历
+# 收集规则文件，放在仓库内会让开发规则（AGENTS.md）污染评测 agent（BC-17）
+WORKSPACES_DIR = Path.home() / ".mycode" / "eval_workspaces"
 
 
 def sanitize_id(value: str) -> str:
