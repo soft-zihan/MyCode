@@ -80,7 +80,10 @@ class EvalRunOptions:
     base_url: str = "http://localhost:5555"
     ws_url: str = "ws://localhost:5555/ws/events"
     thinking: bool | None = None  # None=跟随全局配置
-    compression_arm: str | None = None  # None/full=现状; none/tool_only/session_only=压缩消融实验臂
+    thinking_feedback: bool | None = None  # None=跟随端点配置; True=历史思考以 reasoning_content 回传
+    compression_arm: str | None = None  # None/full=现状; truncate/tool_only/session_only=压缩消融实验臂
+    context_window: int | None = None  # 显式窗口覆盖（压缩消融的压力窗口维度，None=按端点/臂默认）
+    level: int | None = 3  # GAIA 难度档（默认 3=对比实验口径；None=全部）
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -90,7 +93,10 @@ class EvalRunOptions:
             "category": self.category,
             "include_image": self.include_image,
             "thinking": self.thinking,
+            "thinking_feedback": self.thinking_feedback,
             "compression_arm": self.compression_arm,
+            "context_window": self.context_window,
+            "level": self.level,
             "only": self.only,
             "suite": self.suite,
             "timeout_s": self.timeout_s,

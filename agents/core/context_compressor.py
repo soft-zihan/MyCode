@@ -24,6 +24,7 @@ from .context_events import (
     build_groups_transcript,
     build_message_groups,
     collect_hidden_seqs,
+    estimate_event_tokens,
     estimate_visible_message_tokens,
     find_session_fold_cut,
     find_tool_fold_indices,
@@ -39,10 +40,11 @@ from .session import save_folded_session_memory
 logger = logging.getLogger(__name__)
 
 SESSION_FOLD_THRESHOLD = 0.40
-# 压缩对比实验臂（GAIA 消融）：full=现状；none=完全不压缩（配合 1M 窗口）；
-# tool_only=仅工具结果折叠；session_only=仅会话折叠。实验臂只保留利用率触发，
-# 禁用 idle 触发——idle 折叠会连带执行另一种机制，污染单臂对比。
-COMPRESSION_ARMS = {"full", "none", "tool_only", "session_only"}
+# 压缩对比实验臂（GAIA 消融）：full=现状双层；truncate=朴素硬截断（无摘要，
+# 同触发点同目标水位，直接隐藏最旧消息组）；tool_only=仅工具结果折叠；
+# session_only=仅会话折叠。实验臂只保留利用率触发，禁用 idle 触发——
+# idle 折叠会连带执行另一种机制，污染单臂对比。
+COMPRESSION_ARMS = {"full", "truncate", "tool_only", "session_only"}
 KEEP_RECENT_TOOL_ROUNDS = 3
 KEEP_RECENT_DIALOG_ROUNDS = 2
 KEEP_RECENT_TRAJECTORY_TOOL_ROUNDS = 5
@@ -145,6 +147,7 @@ class ContextCompressor:
         self._fold_count: int = 0
         self._tool_fold_count: int = 0
         self._session_fold_count: int = 0
+        self._truncation_count: int = 0
         self._background_tasks: set[asyncio.Task[Any]] = set()
 
     async def run_pipeline(
@@ -156,9 +159,6 @@ class ContextCompressor:
         session_id: str,
         folded_memories: list[dict],
     ) -> bool:
-        if self.arm == "none":
-            return False
-
         current_token_count = max(0, int(current_token_count))
         utilization = current_token_count / self.effective_window if self.effective_window else 0
         idle_seconds = time.time() - last_api_call_time if last_api_call_time else 0
@@ -198,6 +198,15 @@ class ContextCompressor:
             hidden_before = _count_hidden_seqs(session)
             message_tokens_before = estimate_visible_message_tokens(session)
 
+            if self.arm == "truncate":
+                truncated = self._truncate_oldest_groups(
+                    session, current_token_count, message_tokens_before
+                )
+                if span:
+                    span.add_metadata(truncate=truncated)
+                _finish_compaction_span(span, session, hidden_before, truncated, False)
+                return truncated
+
             if self.arm == "session_only":
                 folded = False
                 if span:
@@ -236,6 +245,50 @@ class ContextCompressor:
             _finish_compaction_span(span, session, hidden_before, folded, session_folded)
 
         return folded
+
+    def _truncate_oldest_groups(
+        self,
+        session: Any,
+        current_token_count: int,
+        message_tokens_before: int,
+    ) -> bool:
+        """truncate 臂：朴素硬截断，无任何摘要。
+
+        与折叠臂共享同一触发点和目标水位（公平对比唯一变量=压缩机制）。
+        从最旧消息组开始整组隐藏（保持 tool_call/tool_result 配对完整），
+        直到估算 tokens 降到目标水位以下；首条用户消息（任务指令）永不截断，
+        对齐滑动窗口截断基线的标准做法（system + 首轮指令 + 最近上下文）。
+        """
+        groups = build_message_groups(session)
+        if not groups:
+            return False
+
+        overhead = max(0, current_token_count - message_tokens_before)
+        target_tokens = max(
+            0, int(self.effective_window * self.session_fold_threshold) - overhead
+        )
+        if message_tokens_before <= target_tokens:
+            return False
+
+        first_user_index = next(
+            (index for index, group in enumerate(groups) if group.is_user), None
+        )
+        seqs_to_hide: list[int] = []
+        remaining = message_tokens_before
+        for index, group in enumerate(groups):
+            if remaining <= target_tokens:
+                break
+            if index == first_user_index:
+                continue
+            seqs_to_hide.extend(group.seqs)
+            remaining -= sum(estimate_event_tokens(event) for event in group.events)
+
+        if not seqs_to_hide:
+            return False
+        session.hide_events(seqs_to_hide)
+        self._truncation_count += 1
+        self._record_fold_event()
+        return True
 
     def _estimate_tokens_after_fold(
         self,
@@ -662,6 +715,9 @@ class ContextCompressor:
             },
             "session_fold": {
                 "triggered": self._session_fold_count,
+            },
+            "truncate": {
+                "triggered": self._truncation_count,
             },
             "total_folds": {
                 "triggered": self._fold_count,

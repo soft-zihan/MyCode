@@ -29,6 +29,7 @@ class ModelEndpointConfig:
     api_key: str
     context_window: int = DEFAULT_CONTEXT_WINDOW
     thinking: bool | None = None  # None=跟随模型默认；True/False=显式开/关（qwen 系走 enable_thinking）
+    thinking_feedback: bool = False  # True=历史思考以 reasoning_content 回传模型；False=剥离（省 token）
     provider_name: str = ""  # User-friendly name for the provider
 
     def to_dict(self) -> dict[str, Any]:
@@ -42,6 +43,7 @@ class ModelEndpointConfig:
             api_key=data.get("api_key", ""),
             context_window=data.get("context_window", DEFAULT_CONTEXT_WINDOW),
             thinking=data.get("thinking"),
+            thinking_feedback=bool(data.get("thinking_feedback", False)),
             provider_name=data.get("provider_name", ""),
         )
 

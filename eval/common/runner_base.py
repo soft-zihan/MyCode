@@ -22,7 +22,8 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 REPORTS_DIR = PROJECT_ROOT / "eval" / "reports"
 
-FINAL_ANSWER_RE = re.compile(r"FINAL ANSWER\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
+# 容忍小模型笔误（如 "FINAL ANSWSE:"）：ANS 后任意字母均视为答案标记
+FINAL_ANSWER_RE = re.compile(r"FINAL\s+ANS\w*\s*[:：]\s*(.+)", re.IGNORECASE | re.DOTALL)
 
 
 def resolve_model_config(cli_model: str | None = None, cli_api_base: str | None = None) -> tuple[str, str, str]:
@@ -131,7 +132,9 @@ async def run_agent_task(
     api_key: str,
     timeout_s: int = 0,
     thinking: bool | None = None,
+    thinking_feedback: bool | None = None,
     compression_arm: str | None = None,
+    context_window: int | None = None,
     workspace: str,
 ) -> dict[str, Any]:
     """运行单个评测任务，返回 {text, duration_s, tokens, trace_id, error, agent_session_id}。
@@ -175,7 +178,9 @@ async def run_agent_task(
                     permission_mode="bypassPermissions",
                     is_sub_agent=True,
                     thinking=thinking,
+                    thinking_feedback=thinking_feedback,
                     compression_arm=compression_arm,
+                    context_window=context_window,
                     workspace=workspace,
                 )
                 result["agent_session_id"] = agent.session_id
@@ -203,6 +208,15 @@ async def run_agent_task(
                 )
 
             if agent and agent.session:
+                try:
+                    counts = {"tool_folded": 0, "session_folded": 0, "events_hidden": 0}
+                    for ev in agent.session.events:
+                        t = ev.get("type") if isinstance(ev, dict) else getattr(ev, "type", None)
+                        if t in counts:
+                            counts[t] += 1
+                    result["compression_events"] = counts
+                except Exception as e:
+                    result["compression_events_error"] = str(e)
                 try:
                     from agents.core.session import session_dir
                     import json

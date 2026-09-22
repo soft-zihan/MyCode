@@ -136,7 +136,9 @@ class Agent:
                  api_base: str | None=None,
                  api_key: str | None=None,
                  thinking: bool | None = None,
+                 thinking_feedback: bool | None = None,
                  compression_arm: str | None = None,
+                 context_window: int | None = None,
                  max_cost_usd: float | None=None,
                  max_turns: int | None=None,
                  max_tool_calls: int | None=None,
@@ -156,7 +158,9 @@ class Agent:
                 api_base = options.api_base
                 api_key = options.api_key
                 thinking = options.thinking
+                thinking_feedback = getattr(options, 'thinking_feedback', None)
                 compression_arm = options.compression_arm
+                context_window = getattr(options, 'context_window', None)
                 max_cost_usd = options.max_cost_usd
                 max_turns = options.max_turns
                 max_tool_calls = options.max_tool_calls
@@ -170,6 +174,7 @@ class Agent:
 
         self.permission_mode = permission_mode
         self.thinking = thinking
+        self.thinking_feedback = thinking_feedback
         self.model = model
         self.is_sub_agent = is_sub_agent
         self.tools = custom_tools if custom_tools is not None else tool_definitions
@@ -188,24 +193,28 @@ class Agent:
             get_endpoint_by_model,
         )
         _ep = get_endpoint_by_model(model)
-        self.context_window = _ep.context_window if _ep else DEFAULT_CONTEXT_WINDOW
-        self.effective_window = self.context_window - 20000
         self.auto_compact_threshold = DEFAULT_AUTO_COMPACT_THRESHOLD
         # thinking 解析链：请求级覆盖 > 端点配置 > None（跟随模型默认）
         if self.thinking is None and _ep is not None:
             self.thinking = _ep.thinking
+        # thinking_feedback 解析链：请求级覆盖 > 端点配置 > False（剥离历史思考）
+        if self.thinking_feedback is None:
+            self.thinking_feedback = bool(_ep.thinking_feedback) if _ep is not None else False
         from agents.core.context_compressor import COMPRESSION_ARMS
         self.compression_arm = compression_arm or "full"
         if self.compression_arm not in COMPRESSION_ARMS:
             raise ValueError(f"compression_arm must be one of {sorted(COMPRESSION_ARMS)}, got {self.compression_arm!r}")
-        if self.compression_arm == "none":
-            # 不压缩臂：窗口放大到 1M，让原始上下文直达模型（GAIA 压缩消融对照）
-            self.context_window = 1_000_000
-            self.effective_window = self.context_window - 20000
+        # 窗口解析优先级：显式覆盖（评测消融）> 端点配置 > 默认
+        if context_window is not None:
+            self.context_window = context_window
+        else:
+            self.context_window = _ep.context_window if _ep else DEFAULT_CONTEXT_WINDOW
+        self.effective_window = self.context_window - 20000
         self.session_id = session_id or uuid.uuid4().hex[:8]
         self.session_start_time= time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
 
         self.session = Session(self.session_id, origin="sub_agent" if is_sub_agent else None)
+        self.session.thinking_feedback = self.thinking_feedback
         self._current_turn: int = 0
         self._current_step: int = 0
         self._user_message_written_this_turn: bool = False

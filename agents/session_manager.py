@@ -30,7 +30,9 @@ class SessionManager:
         title: str | None = None,
         metadata: dict[str, Any] | None = None,
         thinking: bool | None = None,
+        thinking_feedback: bool | None = None,
         compression_arm: str | None = None,
+        context_window: int | None = None,
     ) -> tuple[Any, Session]:
         """创建新 session 和 agent。"""
         from agents.agent import Agent
@@ -63,11 +65,14 @@ class SessionManager:
             session_id=session.id,
             workspace=cwd,
             thinking=thinking,  # None 时由 Agent 解析端点级 thinking 配置
+            thinking_feedback=thinking_feedback,  # None 时由 Agent 解析端点级配置
             compression_arm=compression_arm,
+            context_window=context_window,
         )
         print(f"[DEBUG] session_manager.create: agent.session_id = {agent.session_id}, agent.session.id = {agent.session.id}")
         agent.session = session
         agent.session_id = session.id  # 确保 session_id 一致
+        session.thinking_feedback = agent.thinking_feedback  # Agent 构造时设置在被替换的 session 上，需重设
         session.system_prompt = agent._system_prompt  # 确保 session 的系统提示词被设置
         print(f"[DEBUG] session_manager.create: AFTER assignment - agent.session_id = {agent.session_id}, agent.session.id = {agent.session.id}, id(agent.session) = {id(agent.session)}")
         

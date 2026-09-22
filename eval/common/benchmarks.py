@@ -73,10 +73,11 @@ GAIA_MEDIA_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".mp3", ".mp4", ".wa
 class GaiaBenchmark(BenchmarkAdapter):
     benchmark: BenchmarkName = "gaia"
 
-    def load_raw_tasks(self, include_media: bool = False) -> list[dict[str, Any]]:
+    def load_raw_tasks(self, include_media: bool = False, level: int | None = 3) -> list[dict[str, Any]]:
         tasks = json.loads(GAIA_DATA_PATH.read_text(encoding="utf-8"))
-        # 只保留 Level 3（最难档，最能区分 agent 能力；L1/L2 噪声多、区分度低）
-        tasks = [task for task in tasks if task.get("Level") == 3]
+        # 默认 Level 3（对比实验口径）；level=None 时不过滤
+        if level is not None:
+            tasks = [task for task in tasks if task.get("Level") == level]
         if not include_media:
             # 视觉/音频/视频能力缺失（已知 gap），媒体依赖题只会产生恒定失败噪声
             def _media_dependent(t: dict[str, Any]) -> bool:
@@ -90,7 +91,7 @@ class GaiaBenchmark(BenchmarkAdapter):
 
     def load_tasks(self, options: EvalRunOptions) -> list[EvalTask]:
         raw_tasks = select_raw_tasks(
-            self.load_raw_tasks(include_media=options.include_image),
+            self.load_raw_tasks(include_media=options.include_image, level=options.level),
             options, "task_id",
         )
         tasks: list[EvalTask] = []

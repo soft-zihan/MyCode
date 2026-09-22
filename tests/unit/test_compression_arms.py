@@ -38,14 +38,48 @@ def _stub_folds(compressor: ContextCompressor, calls: dict) -> None:
     compressor._fold_session = fake_session_fold
 
 
-async def test_arm_none_never_compresses():
-    compressor = ContextCompressor(effective_window=100, tool_fold_threshold=0.5, arm="none")
-    calls = {"tool": 0, "session": 0}
-    _stub_folds(compressor, calls)
-    # 利用率爆表 + 长时间 idle 都不触发
-    result = await compressor.run_pipeline(_make_session(), 99999, time.time() - 10000, None, "s", [])
+async def test_arm_truncate_hides_oldest_no_summary():
+    """truncate 臂：硬截断最旧消息组至目标水位，无摘要，保留首条任务指令。"""
+    from agents.core.context_events import estimate_visible_message_tokens
+
+    session = _make_session()
+    for i in range(6):
+        session.append("assistant_message", {
+            "content": f"step {i} " + "x" * 200,
+            "tool_calls": [{"id": f"c{i}", "function": {"name": "bash", "arguments": "{}"}}],
+        })
+        session.append("tool_result_msg", {"call_id": f"c{i}", "content": f"result {i} " + "y" * 400})
+
+    compressor = ContextCompressor(effective_window=1000, tool_fold_threshold=0.5, arm="truncate")
+    current = estimate_visible_message_tokens(session)
+    assert current > 500, "测试前提：利用率须超过触发线"
+
+    result = await compressor.run_pipeline(session, current, time.time(), None, "s", [])
+    assert result is True
+
+    types = [e.get("type") for e in session.events]
+    assert "events_hidden" in types
+    assert "tool_folded" not in types and "session_folded" not in types, "截断臂不得产生摘要"
+
+    visible = session.visible_events
+    assert any(e.get("type") == "user_message" for e in visible), "首条任务指令必须保留"
+    assert estimate_visible_message_tokens(session) <= 1000 * 0.40
+    assert compressor.get_stats()["truncate"]["triggered"] == 1
+    # 派生消息不出现孤儿 tool 结果（tool_call/tool_result 整组隐藏）
+    msgs = session.get_messages_for_llm()
+    tool_ids_with_call = {
+        tc["id"] for m in msgs if m["role"] == "assistant" for tc in (m.get("tool_calls") or [])
+    }
+    assert all(m["tool_call_id"] in tool_ids_with_call for m in msgs if m["role"] == "tool")
+
+
+async def test_arm_truncate_ignores_idle_and_low_utilization():
+    compressor = ContextCompressor(
+        effective_window=10000, tool_fold_threshold=0.5, idle_timeout_seconds=1, arm="truncate",
+    )
+    session = _make_session()
+    result = await compressor.run_pipeline(session, 10, time.time() - 1000, None, "s", [])
     assert result is False
-    assert calls == {"tool": 0, "session": 0}
 
 
 async def test_arm_tool_only_skips_session_fold():
@@ -93,11 +127,30 @@ def test_invalid_arm_raises():
         ContextCompressor(effective_window=100, tool_fold_threshold=0.5, arm="bogus")
 
 
-def test_agent_none_arm_sets_1m_window(tmp_path, monkeypatch):
-    agent = _make_agent(tmp_path, monkeypatch, compression_arm="none")
-    assert agent.context_window == 1_000_000
-    assert agent.effective_window == 980_000
-    assert agent._compressor.arm == "none"
+def test_agent_truncate_arm_keeps_window(tmp_path, monkeypatch):
+    agent = _make_agent(tmp_path, monkeypatch, compression_arm="truncate", context_window=100_000)
+    assert agent.context_window == 100_000
+    assert agent.effective_window == 80_000
+    assert agent._compressor.arm == "truncate"
+
+
+def test_agent_thinking_feedback_default_false(tmp_path, monkeypatch):
+    agent = _make_agent(tmp_path, monkeypatch)
+    assert agent.thinking_feedback is False
+    assert agent.session.thinking_feedback is False
+
+
+def test_thinking_feedback_controls_reasoning_content():
+    off = _make_session("tf-off")
+    off.append("assistant_message", {"content": "answer", "thinking": "deep thought"})
+    asst = [m for m in off.get_messages_for_llm() if m["role"] == "assistant"][-1]
+    assert "thinking" not in asst and "reasoning_content" not in asst
+
+    on = _make_session("tf-on")
+    on.thinking_feedback = True
+    on.append("assistant_message", {"content": "answer", "thinking": "deep thought"})
+    asst2 = [m for m in on.get_messages_for_llm() if m["role"] == "assistant"][-1]
+    assert asst2["reasoning_content"] == "deep thought"
 
 
 def test_agent_default_arm_is_full(tmp_path, monkeypatch):

@@ -30,9 +30,11 @@ class AgentOptions:
     
     # 思考模式
     thinking: bool | None = None  # None=跟随模型默认
+    thinking_feedback: bool | None = None  # None=跟随端点配置; True=历史思考以 reasoning_content 回传
 
-    # 压缩对比实验臂（GAIA 消融）：None/full=现状, none=不压缩+1M窗口, tool_only, session_only
+    # 压缩对比实验臂（消融）：None/full=现状, truncate=朴素硬截断, tool_only, session_only
     compression_arm: str | None = None
+    context_window: int | None = None
     
     # 成本、轮次和工具调用限制
     max_cost_usd: float | None = None
@@ -70,7 +72,9 @@ class AgentOptions:
             "anthropic_base_url": self.anthropic_base_url,
             "api_key": self.api_key,
             "thinking": self.thinking,
+            "thinking_feedback": self.thinking_feedback,
             "compression_arm": self.compression_arm,
+            "context_window": self.context_window,
             "max_cost_usd": self.max_cost_usd,
             "max_turns": self.max_turns,
             "max_tool_calls": self.max_tool_calls,

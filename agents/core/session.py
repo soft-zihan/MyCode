@@ -76,6 +76,8 @@ class Session:
         self.agent_type = agent_type
         self.summary: str | None = None
         self._system_prompt: str | None = None
+        # 是否把历史思考以 reasoning_content 回传给模型（Agent 初始化时设置）
+        self.thinking_feedback: bool = False
         
         self._log: list[dict[str, Any]] = []
         self._subscribers: set[Callable[[dict], None]] = set()
@@ -294,7 +296,7 @@ class Session:
     
     def _derive_messages(self, event: dict[str, Any]) -> list[dict[str, Any]]:
         """从单个事件派生 LLM 消息列表。"""
-        return derive_messages_from_event(event)
+        return derive_messages_from_event(event, thinking_feedback=self.thinking_feedback)
 
 
     def hide_events(self, seqs: list[int]) -> None:
@@ -399,8 +401,15 @@ class Session:
         return session if session._log else None
     
 
-def derive_messages_from_event(event: dict[str, Any]) -> list[dict[str, Any]]:
-    """从单个事件派生 LLM 消息列表。"""
+def derive_messages_from_event(
+    event: dict[str, Any],
+    thinking_feedback: bool = False,
+) -> list[dict[str, Any]]:
+    """从单个事件派生 LLM 消息列表。
+
+    thinking_feedback=True 时以 qwen 约定的 reasoning_content 字段回传历史思考；
+    False 时剥离（历史行为塞 "thinking" 键，非协议字段，网关直接忽略）。
+    """
     from .session_memory import format_tool_folded_summary
 
     t = event.get("type")
@@ -419,8 +428,8 @@ def derive_messages_from_event(event: dict[str, Any]) -> list[dict[str, Any]]:
 
     if t == "assistant_message":
         msg: dict[str, Any] = {"role": "assistant", "content": event.get("content", "")}
-        if event.get("thinking"):
-            msg["thinking"] = event["thinking"]
+        if thinking_feedback and event.get("thinking"):
+            msg["reasoning_content"] = event["thinking"]
         if event.get("tool_calls"):
             msg["tool_calls"] = event["tool_calls"]
         return [msg]

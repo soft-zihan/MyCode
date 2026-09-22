@@ -25,25 +25,39 @@ from eval.common.models import EvalRunOptions  # noqa: E402
 def main() -> None:
     parser = argparse.ArgumentParser(description="GAIA 抽样评测 runner")
     parser.add_argument("--sample", type=int, default=10, help="抽样题数（默认 10）")
+    parser.add_argument("--level", choices=["1", "2", "3", "all"], default="3",
+                        help="GAIA 难度档（默认 3=对比实验口径；all=不过滤）")
     parser.add_argument("--seed", type=int, default=42, help="抽样种子（默认 42）")
     parser.add_argument("--thinking", choices=["on", "off", "default"], default="default",
                         help="推理模型 thinking 开关（default=跟随全局配置）")
-    parser.add_argument("--compression-arm", choices=["none", "tool_only", "session_only", "full"], default=None,
-                        help="压缩消融实验臂：none=不压缩+1M窗口, tool_only=仅工具折叠, session_only=仅会话折叠, full=现状（默认）")
+    parser.add_argument("--compression-arm", choices=["truncate", "tool_only", "session_only", "full"], default=None,
+                        help="压缩消融实验臂：truncate=朴素硬截断(无摘要), tool_only=仅工具折叠, session_only=仅会话折叠, full=现状（默认）")
+    parser.add_argument("--thinking-feedback", choices=["on", "off", "default"], default="default",
+                        help="历史思考是否以 reasoning_content 回传模型（default=跟随端点配置）")
     parser.add_argument("--timeout", type=int, default=0, help="单题超时秒数（默认 0，不超时）")
     parser.add_argument("--model", type=str, default=None, help="覆盖模型")
     parser.add_argument("--api-base", type=str, default=None, help="覆盖 API base")
+    parser.add_argument("--window", default=None,
+                        help="context_window 覆盖：100k/262k/整数（压缩消融压力窗口维度，默认按端点）")
     parser.add_argument("--execution-mode", choices=["backend_session", "in_process"], default="in_process")
     parser.add_argument("--judge", action="store_true", help="结束后运行 code evaluator + LLM judge")
     parser.add_argument("--no-dataset", action="store_true", help="不同步 Langfuse Dataset")
     parser.add_argument("--skip-langfuse", action="store_true", help="跳过 Langfuse")
     args = parser.parse_args()
 
+    window = None
+    if args.window:
+        w = args.window.strip().lower()
+        window = int(float(w[:-1]) * 1000) if w.endswith("k") else (
+            int(float(w[:-1]) * 1_000_000) if w.endswith("m") else int(w))
     options = EvalRunOptions(
         benchmark="gaia",
         sample=args.sample,
         seed=args.seed,
+        level=None if args.level == "all" else int(args.level),
+        context_window=window,
         thinking={"on": True, "off": False, "default": None}[args.thinking],
+        thinking_feedback={"on": True, "off": False, "default": None}[args.thinking_feedback],
         compression_arm=args.compression_arm,
         timeout_s=args.timeout,
         model=args.model,
