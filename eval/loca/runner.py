@@ -234,6 +234,7 @@ def main() -> None:
             "tokens": ar.get("tokens") or {},
             "compression_events": comp,
             "trace_id": ar.get("trace_id"),
+            "session_id": ar.get("agent_session_id"),
             "agent_error": ev.get("agent_error") or ar.get("error"),
             "eval_error": ev.get("eval_error") or infra_error,
             "step_info": ev.get("step_info"),
@@ -272,6 +273,7 @@ def main() -> None:
                 tr.duration_s = row["duration_s"]
                 tr.tokens = row["tokens"]
                 tr.trace_id = row["trace_id"]
+                tr.session_id = row.get("session_id")
                 tr.error = row["agent_error"] or row["eval_error"]
                 tr.metadata = {
                     "reward": row["reward"],
