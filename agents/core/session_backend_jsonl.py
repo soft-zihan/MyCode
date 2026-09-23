@@ -135,3 +135,58 @@ class JsonlSessionBackend:
                 if line.strip():
                     count += 1
         return count
+    
+    def list_session_ids(self) -> list[str]:
+        """List all session IDs that have stored events."""
+        suffix = ".events.jsonl"
+        return sorted(
+            f.name[: -len(suffix)]
+            for f in self.session_dir.glob(f"*{suffix}")
+        )
+    
+    def get_latest_event(self, session_id: str, event_type: str) -> dict[str, Any] | None:
+        """Get the latest event of the given type for a session (None if absent)."""
+        path = self._events_path(session_id)
+        if not path.exists():
+            return None
+        
+        latest: dict[str, Any] | None = None
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("type") == event_type:
+                    latest = event
+        return latest
+    
+    def get_last_event(self, session_id: str) -> dict[str, Any] | None:
+        """Get the last event by seq. 只读文件尾部 64KB，避免全量加载（容忍 torn tail）。"""
+        path = self._events_path(session_id)
+        if not path.exists():
+            return None
+        try:
+            size = path.stat().st_size
+            if size == 0:
+                return None
+            with open(path, "rb") as f:
+                f.seek(max(0, size - 65536))
+                tail = f.read().decode("utf-8", errors="ignore")
+        except OSError as e:
+            print(f"[jsonl-backend] tail read failed for {session_id}: {type(e).__name__}: {e}")
+            return None
+        
+        # 从最后一行往前找第一条可解析的事件
+        for line in reversed(tail.splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                return json.loads(line)
+            except json.JSONDecodeError:
+                continue
+        return None

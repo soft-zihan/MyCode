@@ -35,37 +35,42 @@ CREATE INDEX IF NOT EXISTS idx_events_type ON events(session_id, type);
 class SqliteSessionBackend:
     """SQLite-based session storage backend.
     
-    All sessions' events are stored in a single SQLite database:
-    ~/.mycode/sessions.db
+    All sessions' events are stored in a single SQLite database.
+    默认位置 ~/.mycode/sessions.db（session_dir() 的兄弟文件）；
+    db_path=None 时每次访问动态解析——MYCODE_SESSION_DIR / HOME 的运行时
+    重定向契约必须对整个进程生命周期有效（与 JsonlSessionBackend 相同，
+    全局单例不能在构造时固化第一个调用方的路径）。
     """
     
     def __init__(self, db_path: Path | None = None):
-        if db_path is None:
-            db_path = Path.home() / ".mycode" / "sessions.db"
-        self.db_path = db_path
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_db()
+        self._db_path_override = db_path
+        self._initialized: set[str] = set()
     
-    def _init_db(self) -> None:
-        """Initialize the database schema."""
-        conn = sqlite3.connect(self.db_path)
-        try:
-            conn.executescript(SCHEMA_SQL)
-            
-            # Check and set schema version
-            cursor = conn.execute("SELECT version FROM schema_version LIMIT 1")
-            row = cursor.fetchone()
-            if row is None:
-                conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
-            conn.commit()
-        finally:
-            conn.close()
+    @property
+    def db_path(self) -> Path:
+        if self._db_path_override is not None:
+            return Path(self._db_path_override)
+        from .session import session_dir
+        return session_dir().parent / "sessions.db"
     
     def _get_conn(self) -> sqlite3.Connection:
-        """Get a database connection."""
-        conn = sqlite3.connect(self.db_path)
+        """Get a database connection (lazy schema init, once per resolved path)."""
+        path = self.db_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(path)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
+        key = str(path)
+        if key not in self._initialized:
+            conn.executescript(SCHEMA_SQL)
+            cursor = conn.execute("SELECT version FROM schema_version LIMIT 1")
+            if cursor.fetchone() is None:
+                conn.execute(
+                    "INSERT INTO schema_version (version) VALUES (?)",
+                    (SCHEMA_VERSION,),
+                )
+            conn.commit()
+            self._initialized.add(key)
         return conn
     
     def append(self, session_id: str, event: dict[str, Any]) -> None:
@@ -187,5 +192,53 @@ class SqliteSessionBackend:
             )
             row = cursor.fetchone()
             return row[0] if row else 0
+        finally:
+            conn.close()
+    
+    def list_session_ids(self) -> list[str]:
+        """List all session IDs that have stored events."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.execute("SELECT DISTINCT session_id FROM events ORDER BY session_id")
+            return [row[0] for row in cursor.fetchall()]
+        finally:
+            conn.close()
+    
+    def get_latest_event(self, session_id: str, event_type: str) -> dict[str, Any] | None:
+        """Get the latest event of the given type for a session (None if absent).
+        
+        走 idx_events_type (session_id, type) 索引，O(log n)。
+        """
+        conn = self._get_conn()
+        try:
+            cursor = conn.execute(
+                "SELECT data FROM events WHERE session_id = ? AND type = ? ORDER BY seq DESC LIMIT 1",
+                (session_id, event_type),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            try:
+                return json.loads(row[0])
+            except json.JSONDecodeError:
+                return None
+        finally:
+            conn.close()
+    
+    def get_last_event(self, session_id: str) -> dict[str, Any] | None:
+        """Get the last event by seq (PRIMARY KEY 索引尾查，O(log n))."""
+        conn = self._get_conn()
+        try:
+            cursor = conn.execute(
+                "SELECT data FROM events WHERE session_id = ? ORDER BY seq DESC LIMIT 1",
+                (session_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            try:
+                return json.loads(row[0])
+            except json.JSONDecodeError:
+                return None
         finally:
             conn.close()

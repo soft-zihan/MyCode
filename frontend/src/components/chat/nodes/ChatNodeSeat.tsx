@@ -37,7 +37,7 @@ export const ChatNodeSeat = memo(function ChatNodeSeat({ node, sessionId, userMe
     case 'tool-call':
       return <ToolCallNodeView node={node} />;
     case 'sub-agent':
-      return <SubAgentNodeView node={node} />;
+      return <SubAgentNodeView node={node} sessionId={sessionId} />;
     case 'error':
       return <ErrorNodeView node={node} />;
     case 'system':

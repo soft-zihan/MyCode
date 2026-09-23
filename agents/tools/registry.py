@@ -410,13 +410,15 @@ tool_definitions: list[ToolDef] = [
     },
     {
         "name": "agent",
-        "description": "Launch a sub-agent to handle a task autonomously. Sub-agents have isolated context and return their result. Types: 'explore' (read-only), 'plan' (read-only, structured planning), 'general' (full tools).",
+        "description": "Launch a sub-agent to handle a task autonomously. Sub-agents have isolated context and return their result wrapped in a <subagent session_id=... state=...> tag. RESUME: pass session_id (from that tag) to continue the same sub-agent — it keeps full memory of its earlier work, so the prompt only needs the new instruction. Omit session_id to spawn a fresh sub-agent — then the prompt must contain ALL needed context. Built-in types: 'explore' (read-only search), 'reviewer' (code review + verification commands), 'general' (full tools); custom agent types are listed in the system prompt.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "description": {"type": "string", "description": "Short (3-5 word) description of the sub-agent's task"},
-                "prompt": {"type": "string", "description": "Detailed task instructions for the sub-agent"},
-                "type": {"type": "string", "enum": ["explore", "plan", "general"], "description": "Agent type. Default: general"},
+                "prompt": {"type": "string", "description": "Detailed task instructions. For a fresh sub-agent include full context; when resuming via session_id only the new instruction is needed"},
+                "type": {"type": "string", "enum": ["explore", "reviewer", "general"], "description": "Agent type. Default: general. Custom agent names (see system prompt) are also accepted; the enum is refreshed per request to include them"},
+                "session_id": {"type": "string", "description": "Optional. The session_id of a sub-agent you previously spawned (from its <subagent session_id=...> result tag). Pass it to continue that sub-agent with its memory retained; omit to spawn a new one"},
+                "background": {"type": "boolean", "description": "If true, launch in background and return immediately with the sub-agent's session_id (state=\"running\"). When it finishes, its result is automatically injected into this session and you will see it at the start of your next turn — do NOT sleep/poll or spawn a duplicate; if nothing else to do, end your reply"},
             },
             "required": ["description", "prompt"],
         },

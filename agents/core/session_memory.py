@@ -7,7 +7,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-from agents.core.workspace import get_workspace
 
 
 MAX_TRANSCRIPT_CHARS = 80_000
@@ -355,82 +354,3 @@ def format_tool_folded_summary(event: dict[str, Any]) -> str:
             lines.append("  " + body.replace("\n", "\n  "))
     lines.append("</folded-tool-results>")
     return "\n".join(lines)
-
-
-# ─── 跨会话知识复用 ─────────────────────────────────────────────────────────
-
-def get_project_folded_memories_dir() -> Path:
-    """获取当前项目的折叠记忆目录"""
-    d = get_workspace() / ".mycode" / "sessions"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def list_folded_session_memories() -> list[dict]:
-    """列出所有历史会话的折叠记忆"""
-    d = get_project_folded_memories_dir()
-    memories = []
-    for f in d.glob("*.folded-memory.latest.json"):
-        try:
-            record = json.loads(f.read_text())
-            record["_session_id"] = f.stem.replace(".folded-memory.latest", "")
-            memories.append(record)
-        except Exception:
-            pass
-    return memories
-
-
-def search_folded_memories(query: str, top_k: int = 3) -> list[dict]:
-    """搜索历史会话记忆（简单关键词匹配）"""
-    memories = list_folded_session_memories()
-    if not memories:
-        return []
-    
-    # 提取关键字段用于检索
-    texts = []
-    for m in memories:
-        episode = m.get("episode_memory", {})
-        working = m.get("working_memory", {})
-        text = f"{episode.get('task_description', '')} {working.get('immediate_goal', '')}"
-        texts.append(text)
-    
-    # 简单的关键词匹配
-    query_words = set(query.lower().split())
-    scores = []
-    for i, text in enumerate(texts):
-        text_words = set(text.lower().split())
-        score = len(query_words & text_words)
-        scores.append((score, i))
-    
-    # 按分数排序，取 top_k
-    scores.sort(reverse=True)
-    top_indices = [i for score, i in scores[:top_k] if score > 0]
-    
-    return [memories[i] for i in top_indices]
-
-
-def format_folded_memories_for_injection(memories: list[dict]) -> str:
-    """格式化折叠记忆，用于注入到系统提示"""
-    if not memories:
-        return ""
-    
-    parts = ["\n<related-session-memories>"]
-    parts.append("Previous sessions with similar tasks (for reference):")
-    
-    for i, m in enumerate(memories):
-        episode = m.get("episode_memory", {})
-        working = m.get("working_memory", {})
-        tool = m.get("tool_memory", {})
-        
-        parts.append(f"\n[Session {i+1}]")
-        parts.append(f"Task: {episode.get('task_description', 'N/A')}")
-        parts.append(f"Goal: {working.get('immediate_goal', 'N/A')}")
-        if working.get("current_challenges"):
-            parts.append(f"Challenges: {working['current_challenges']}")
-        if tool.get("derived_rules"):
-            parts.append(f"Rules learned: {'; '.join(tool['derived_rules'][:3])}")
-    
-    parts.append("\nUse these experiences to avoid repeating mistakes and leverage proven approaches.")
-    parts.append("</related-session-memories>")
-    
-    return "\n".join(parts)

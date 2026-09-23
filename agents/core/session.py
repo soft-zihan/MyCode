@@ -9,8 +9,6 @@ import json
 import os
 import time
 
-from agents.core.workspace import get_workspace
-
 from .session_backend import SessionBackend
 from .session_backend_jsonl import JsonlSessionBackend
 
@@ -26,10 +24,6 @@ def atomic_write_text(path: Path, content: str) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(content)
     tmp.rename(path)
-
-
-def atomic_write_json(path: Path, data: Any, indent: int = 2) -> None:
-    atomic_write_text(path, json.dumps(data, indent=indent, default=str))
 
 
 # Global backend instance
@@ -148,8 +142,8 @@ class Session:
     def append(self, type: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
         """唯一写入入口。自动区分持久化和只推送。
         
-        流式事件（thinking, text, tool_call, tool_result, stats）只推送不持久化。
-        聚合事件（user_message, assistant_message, tool_result_msg 等）持久化 + 推送。
+        流式事件（thinking, text, tool_call, tool_result）只推送不持久化。
+        聚合事件（user_message, assistant_message, tool_result_msg, stats 等）持久化 + 推送。
         
         纯同步方法，asyncio 下天然原子。
         """
@@ -185,13 +179,13 @@ class Session:
                 # 隐藏事件 = surface 结构变化 → 全量重烘焙
                 self._surface_generation += 1
             
-            # Persist to backend (skip for sub-agents)
-            if self.origin != "sub_agent":
-                try:
-                    backend = get_session_backend()
-                    backend.append(self.id, event)
-                except Exception as e:
-                    print(f"[session] backend.append 失败（事件仅在内存，存在丢失风险）: type={type} seq={event.get('seq')} err={e!r}")
+            # Persist to backend（U2：子会话事件同样落盘——可观测/可恢复/可续跑；
+            # 用户会话列表由 list 层按 origin 过滤，不靠"不落盘"实现隔离）
+            try:
+                backend = get_session_backend()
+                backend.append(self.id, event)
+            except Exception as e:
+                print(f"[session] backend.append 失败（事件仅在内存，存在丢失风险）: type={type} seq={event.get('seq')} err={e!r}")
             
             # Update projections
             try:
@@ -199,17 +193,16 @@ class Session:
                 registry = get_projection_registry()
                 self._projections = registry.apply_event(self._projections, event)
                 
-                if self.origin != "sub_agent":
-                    cache = get_projection_cache()
-                    cache.record_event(self.id)
-                    
-                    if type in ("turn/end", "session/title"):
-                        cache.force_write(self.id)
-                    
-                    if cache.should_write(self.id):
-                        rows = registry.checkpoint(self._projections, event["seq"])
-                        checkpoint = ProjectionCheckpoint.from_session(self, rows)
-                        cache.save_checkpoint(checkpoint)
+                cache = get_projection_cache()
+                cache.record_event(self.id)
+                
+                if type in ("turn/end", "session/title", "session/meta"):
+                    cache.force_write(self.id)
+                
+                if cache.should_write(self.id):
+                    rows = registry.checkpoint(self._projections, event["seq"])
+                    checkpoint = ProjectionCheckpoint.from_session(self, rows)
+                    cache.save_checkpoint(checkpoint)
             except Exception as e:
                 print(f"[session] 投影缓存更新失败: type={type} err={e!r}")
             
@@ -397,7 +390,15 @@ class Session:
             inherited_event_count=session.inherited_event_count,
         )
         session._projections = restore_projections(session_id, session._log, header)
-        
+
+        # U2：从 session/meta 投影恢复会话归属属性（子会话续跑依赖 origin/parent/agent_type）
+        if session._projections.get("origin"):
+            session.origin = session._projections["origin"]
+        if session._projections.get("parent_session"):
+            session.parent_session = session._projections["parent_session"]
+        if session._projections.get("agent_type"):
+            session.agent_type = session._projections["agent_type"]
+
         return session if session._log else None
     
 
@@ -425,6 +426,12 @@ def derive_messages_from_event(
 
     if t in ("user_message", "memory_injection"):
         return [{"role": "user", "content": event.get("content", "")}]
+
+    if t == "subagent/completed":
+        # U3a：后台子代理完成的 synthetic 通知——投影为 user 消息，
+        # 父模型下一次 turn 自动纳入上下文（v2 subagent-completion.ts 统一数据流）
+        content = event.get("text", "")
+        return [{"role": "user", "content": content}] if content else []
 
     if t == "assistant_message":
         msg: dict[str, Any] = {"role": "assistant", "content": event.get("content", "")}
@@ -457,24 +464,13 @@ def _ensure_dir() -> None:
     session_dir().mkdir(parents=True, exist_ok=True)
 
 
-def get_project_session_dir() -> Path:
-    d = get_workspace() / ".mycode" / "sessions"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+# U2：派生会话 origin（子代理 / eval 运行）——落盘可观测可钻取，
+# 但不进用户会话列表、不参与清理与"最近会话"（唯一判定源：session/meta 投影或内存属性）
+DERIVED_SESSION_ORIGINS = frozenset({"sub_agent", "eval"})
 
 
-
-
-
-def save_folded_session_memory(session_id: str, record: dict[str, Any]) -> None:
-    d = get_project_session_dir()
-    line = json.dumps(record, ensure_ascii=False, default=str)
-    with (d / f"{session_id}.folded-memory.jsonl").open("a", encoding="utf-8") as f:
-        f.write(line + "\n")
-    atomic_write_json(d / f"{session_id}.folded-memory.latest.json", record)
-
-
-
+def is_derived_session_meta(meta: dict[str, Any]) -> bool:
+    return (meta.get("origin") or "") in DERIVED_SESSION_ORIGINS
 
 
 def list_sessions() -> list[dict[str, Any]]:
@@ -537,6 +533,12 @@ def list_sessions() -> list[dict[str, Any]]:
                 metadata["name"] = rows["title"]["val"]
             if rows.get("plan_slug") and rows["plan_slug"].get("val"):
                 metadata["plan_slug"] = rows["plan_slug"]["val"]
+            if rows.get("origin") and rows["origin"].get("val"):
+                metadata["origin"] = rows["origin"]["val"]
+            if rows.get("parent_session") and rows["parent_session"].get("val"):
+                metadata["parent_session"] = rows["parent_session"]["val"]
+            if rows.get("agent_type") and rows["agent_type"].get("val"):
+                metadata["agent_type"] = rows["agent_type"]["val"]
             
             return metadata
         except Exception as e:
@@ -552,6 +554,26 @@ def list_sessions() -> list[dict[str, Any]]:
                 results.append(result)
                 seen_ids.add(result.get("id"))
     
+    # 3. 后端兜底：有事件但 projcache 未落盘的会话也要能列出（两后端一致行为）
+    try:
+        for sid in get_session_backend().list_session_ids():
+            if sid in seen_ids:
+                continue
+            results.append({
+                "id": sid,
+                "name": sid,
+                "cwd": "",
+                "startTime": "",
+                "model": "",
+                "parent_session": "",
+                "origin": "",
+                "agent_type": "",
+                "plan_slug": None,
+            })
+            seen_ids.add(sid)
+    except Exception as e:
+        print(f"[session] backend list_session_ids 失败: {e!r}")
+    
     _elapsed = _time.time() - _t0
     if _elapsed > 0.5:
         print(f"[PERF] list_sessions: {_elapsed:.2f}s for {len(results)} sessions")
@@ -559,16 +581,29 @@ def list_sessions() -> list[dict[str, Any]]:
 
 
 def delete_session(session_id: str) -> bool:
-    """删除指定会话的全部文件（事件日志/投影缓存/折叠记忆）。返回是否真的删除了。"""
+    """删除指定会话的全部数据（事件走 backend，投影缓存为文件）。返回是否真的删除了。
+
+    事件删除必须路由到当前 backend：sqlite 下直删 JSONL 文件会导致事件永久残留。
+    projcache 是 backend 无关的派生文件，两后端下都直接删。
+    U2：子会话已落盘，删除父会话时级联删除其子会话（从 sub_agent/start 事件派生，
+    子代理不能再派生子代理，一层即完整；递归调用天然覆盖未来多层）。
+    """
+    backend = get_session_backend()
+    try:
+        for ev in backend.load_all_events(session_id):
+            if ev.get("type") == "sub_agent/start" and ev.get("sub_session_id"):
+                child_id = ev["sub_session_id"]
+                if child_id != session_id:
+                    delete_session(child_id)
+    except Exception as e:
+        print(f"[session] 子会话级联删除失败: session={session_id} err={e!r}")
+    deleted = backend.session_exists(session_id)
+    if deleted:
+        backend.delete_session(session_id)
     d = session_dir()
-    patterns = (
-        f"{session_id}.events.jsonl",
+    for name in (
         f"{session_id}.projcache.json",
-        f"{session_id}.folded-memory.jsonl",
-        f"{session_id}.folded-memory.latest.json",
-    )
-    deleted = False
-    for name in patterns:
+    ):
         try:
             (d / name).unlink()
             deleted = True
@@ -584,8 +619,9 @@ def clean_sessions(keep_latest: int = 20, only_tmp: bool = False) -> int:
 
     only_tmp=True 时只删 cwd 位于临时目录（pytest/tmp）的测试污染会话；
     否则按时间排序只保留最近 keep_latest 个。
+    U2：只管理用户会话——子会话随父级联删除（delete_session），不占 keep_latest 名额。
     """
-    sessions = list_sessions()
+    sessions = [s for s in list_sessions() if not is_derived_session_meta(s)]
     sessions.sort(key=lambda s: s.get("startTime", ""), reverse=True)
     deleted = 0
     tmp_markers = ("/pytest-of-", "/tmp/", "/private/tmp/", "/var/folders/")
@@ -603,7 +639,8 @@ def clean_sessions(keep_latest: int = 20, only_tmp: bool = False) -> int:
 
 
 def get_latest_session_id() -> str | None:
-    sessions = list_sessions()
+    # U2：只考虑用户会话（派生会话不可作为"最近会话"续接入口）
+    sessions = [s for s in list_sessions() if not is_derived_session_meta(s)]
     if not sessions:
         return None
     sessions.sort(key=lambda s: s.get("startTime", ""), reverse=True)

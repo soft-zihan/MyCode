@@ -43,6 +43,11 @@ SUITES = {
     "chain": SUITE_DIR / "chain.jsonl",
 }
 DEFAULT_BASE_URL = "http://localhost:5555"
+
+# BC-19：chain 套件持久工作区必须在仓库外（BC-17 同族）。仓库内时 AGENTS.md
+# 向上遍历 + system prompt {{cwd}} 绝对路径会把"真项目"泄漏给评测 agent，
+# 导致其跑到仓库根干活/失控探索（gate6 task3、gate7 leg2 task1）。
+SMOKE_CHAIN_WORKSPACE = Path.home() / ".mycode" / "eval_workspaces" / "smoke-chain"
 DEFAULT_WS_URL = "ws://localhost:5555/ws/events"
 
 
@@ -133,7 +138,7 @@ def setup_workspace(task: dict) -> Path:
       用例的 wiki 造成跨用例污染并拖慢当前用例的折叠编译。
     """
     if task.get("use_real_workspace"):
-        ws = PROJECT_ROOT / "eval" / "workspace"
+        ws = SMOKE_CHAIN_WORKSPACE
         keep = {
             ws / ".mycode" / "wiki" / ".embed-cache",
             ws / ".mycode" / "wiki" / ".extract_state.json",
@@ -150,6 +155,8 @@ def setup_workspace(task: dict) -> Path:
             shutil.copyfile(PROJECT_ROOT / f["copy_from"], p)
         else:
             p.write_text(f["content"], encoding="utf-8")
+        if f["path"].endswith(".sh"):
+            p.chmod(0o755)
     return ws
 
 
@@ -171,6 +178,26 @@ def send_chat(base_url: str, message: str, session_id: str | None, cwd: str, thi
     resp = requests.post(f"{base_url}/api/chat/stream", json=payload, timeout=30)
     resp.raise_for_status()
     return resp.json()
+
+
+def _check_subagent_background(expect: dict, events: list[dict]) -> list[str]:
+    """U3a 后台子代理断言（phase 级 + task 级共用）。"""
+    failures: list[str] = []
+    if expect.get("subagent_background_launched"):
+        # background=true 生效：agent 工具结果带 state="running" 标签（发起即返回）
+        if not any(
+            e.get("type") == "tool_result" and 'state="running"' in str(e.get("result", ""))
+            for e in events
+        ):
+            failures.append('未观测到 agent 工具 state="running" 后台发起结果（background=true 未生效）')
+    if expect.get("subagent_completed"):
+        # 完成通知：synthetic subagent/completed 事件落父会话且带幂等键
+        completed = [e for e in events if e.get("type") == "subagent/completed"]
+        if not completed:
+            failures.append("未观测到 subagent/completed 事件（后台完成通知未送达）")
+        elif not completed[-1].get("notification_id"):
+            failures.append("subagent/completed 缺少 notification_id（幂等键未落盘）")
+    return failures
 
 
 def check_assertions_for_phase(phase: dict, workspace: Path, events: list[dict], turn_events: list[dict], window_events: list[dict]) -> list[str]:
@@ -207,6 +234,13 @@ def check_assertions_for_phase(phase: dict, workspace: Path, events: list[dict],
     if expect.get("sub_agent_events"):
         if not any(e.get("sub_agent_id") for e in window_events):
             failures.append("未观测到子智能体事件（sub_agent_id）")
+
+    if expect.get("sub_agent_resumed"):
+        # U2 续跑断言：必须观测到 sub_agent/resume 事件（agent 工具带 session_id 续聊）
+        if not any(e.get("type") == "sub_agent/resume" for e in window_events):
+            failures.append("未观测到 sub_agent/resume 事件（第二次调用未带 session_id 续跑）")
+
+    failures.extend(_check_subagent_background(expect, events))
 
     for f in expect.get("files", []):
         path_pattern = f["path"]
@@ -336,6 +370,13 @@ def check_assertions(task: dict, workspace: Path, events: list[dict], turn_event
     if expect.get("sub_agent_events"):
         if not any(e.get("sub_agent_id") for e in window_events):
             failures.append("未观测到子智能体事件（sub_agent_id）")
+
+    if expect.get("sub_agent_resumed"):
+        # U2 续跑断言：必须观测到 sub_agent/resume 事件（agent 工具带 session_id 续聊）
+        if not any(e.get("type") == "sub_agent/resume" for e in window_events):
+            failures.append("未观测到 sub_agent/resume 事件（第二次调用未带 session_id 续跑）")
+
+    failures.extend(_check_subagent_background(expect, events))
 
     for f in expect.get("files", []):
         path_pattern = f["path"]
@@ -599,6 +640,21 @@ async def run_task(
                         record["failures"].append(
                             f"wait_for_files 超时: {spec['path']} contains={spec.get('contains')!r}"
                         )
+
+                # U3a：wait_for_events——后台异步事件（如 subagent/completed）轮询等待，
+                # 确保 synthetic 通知已落盘注入，下一阶段模型上下文才确定性可见
+                for etype in phase_expect.get("wait_for_events", []):
+                    if budget_blown:
+                        break
+                    ev_deadline = time.time() + phase_expect.get("wait_timeout_s", 240)
+                    arrived = False
+                    while time.time() < ev_deadline:
+                        if any(e.get("type") == etype for e in listener.session_events(session_id)):
+                            arrived = True
+                            break
+                        await asyncio.sleep(1)
+                    if not arrived:
+                        record["failures"].append(f"wait_for_events 超时: {etype}")
 
                 # 提取回答内容（取最后一个 assistant_message）
                 events = listener.session_events(session_id)

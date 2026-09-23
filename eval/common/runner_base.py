@@ -184,6 +184,14 @@ async def run_agent_task(
                     workspace=workspace,
                 )
                 result["agent_session_id"] = agent.session_id
+                # U2/BC-21：子会话与 eval 会话均自动落盘（Session.append 不再按 origin 跳过），
+                # eval 会话补 session/meta 标记 origin=eval——会话列表/清理/最近会话统一过滤派生会话，
+                # 事件文件仍在 ~/.mycode/sessions/（规则 5 排错路径不变），无需手动补写 backend
+                agent.session.append("session/meta", {
+                    "origin": "eval",
+                    "benchmark": benchmark,
+                    "task_id": task_id,
+                })
                 agent_task = asyncio.create_task(agent.run_once(prompt))
                 if timeout_s > 0:
                     out = await asyncio.wait_for(agent_task, timeout=timeout_s)
@@ -217,16 +225,6 @@ async def run_agent_task(
                     result["compression_events"] = counts
                 except Exception as e:
                     result["compression_events_error"] = str(e)
-                try:
-                    from agents.core.session import session_dir
-                    import json
-                    events_path = session_dir() / f"{agent.session_id}.events.jsonl"
-                    with events_path.open("w", encoding="utf-8") as f:
-                        for event in agent.session.events:
-                            f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
-                    result["events_file"] = str(events_path)
-                except Exception as e:
-                    result["events_error"] = str(e)
 
         result["duration_s"] = round(time.time() - t0, 2)
         flush_tracing()

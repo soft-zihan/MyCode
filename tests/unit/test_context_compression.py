@@ -234,8 +234,7 @@ async def test_session_fold_merges_previous_notes_and_replaces_old_summary(monke
         tool_fold_threshold=0.7,
         keep_recent_dialog_rounds=2,
     )
-    folded_memories: list[dict] = []
-    assert await compressor._fold_session(session, side_query, "sess", folded_memories)
+    assert await compressor._fold_session(session, side_query, "sess")
     await asyncio.sleep(0)
 
     visible_folds = [event for event in session.visible_events if event.get("type") == "session_folded"]
@@ -292,8 +291,7 @@ async def test_session_fold_single_turn_trajectory_keeps_turn_running():
         tool_fold_threshold=0.7,
         keep_recent_trajectory_tool_rounds=5,
     )
-    folded_memories: list[dict] = []
-    assert await compressor._fold_session(session, None, "trajectory-fold", folded_memories)
+    assert await compressor._fold_session(session, None, "trajectory-fold")
 
     visible_types = [event.get("type") for event in session.visible_events]
     assert "session_folded" in visible_types
@@ -314,7 +312,6 @@ async def test_session_fold_single_turn_trajectory_keeps_turn_running():
 
     folded_event = next(event for event in session.visible_events if event.get("type") == "session_folded")
     assert folded_event["fold_mode"] == "trajectory"
-    assert folded_memories[0]["fold_mode"] == "trajectory"
 
 
 def test_session_notes_wiki_entry_is_updated_in_place(tmp_path):

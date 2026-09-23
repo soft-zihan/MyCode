@@ -25,7 +25,11 @@ const createSubAgentNode = (agentId: string): SubAgentNode => ({
   status: 'running',
   toolCalls: [],
   internalOrder: [],
+  startedAt: Date.now(),
 });
+
+/** U3a：从 agent 工具的 <subagent session_id="..." state="..."> 标签解析后台状态 */
+const SUBAGENT_TAG_RE = /<subagent session_id="([^"]+)" state="(running|backgrounded)">/;
 
 const appendToInternalOrder = (
   existing: SubAgentEventItem[],
@@ -282,7 +286,22 @@ export function useChatNodes(): UseChatNodesReturn {
         const fileSnapshot = data.snapshot as { file_path: string; old_content: string; new_content: string } | undefined;
         const subAgentId = data.sub_agent_id as string | undefined;
 
-        if ((data.name as string) === 'agent') break;
+        if ((data.name as string) === 'agent') {
+          // U3a：agent 工具不渲染工具卡，但结果标签携带后台状态——
+          // state="running"（后台发起）或 "backgrounded"（前台转后台）→ 标记节点
+          const m = SUBAGENT_TAG_RE.exec(result || '');
+          if (m) {
+            const subAgentKey = `subagent_${m[1]}`;
+            updateSnap(prev => {
+              const node = prev.nodes.get(subAgentKey);
+              if (!node || node.kind !== 'sub-agent' || node.backgrounded) return prev;
+              const newNodes = new Map(prev.nodes);
+              newNodes.set(subAgentKey, { ...node, backgrounded: true });
+              return { order: prev.order, nodes: newNodes };
+            });
+          }
+          break;
+        }
 
         const updateTool = (node: ChatNode): ChatNode => {
           if (node.kind !== 'tool-call') return node;
@@ -349,6 +368,7 @@ export function useChatNodes(): UseChatNodesReturn {
             status: 'running',
             toolCalls: [],
             internalOrder: [],
+            startedAt: Date.now(),
           };
           const newNodes = new Map(prev.nodes);
           newNodes.set(subAgentKey, subAgentNode);
@@ -377,13 +397,14 @@ export function useChatNodes(): UseChatNodesReturn {
           const summary = data.summary as string | undefined;
           const durationMs = data.duration_ms as number | undefined;
           const tokens = data.tokens as number | undefined;
+          const endStatus = (data.status as string) || 'completed';
           updateSnap(prev => {
             const node = prev.nodes.get(subAgentKey);
             if (!node || node.kind !== 'sub-agent') return prev;
             const newNodes = new Map(prev.nodes);
             newNodes.set(subAgentKey, { 
               ...node, 
-              status: 'completed',
+              status: endStatus === 'completed' || endStatus === 'budget_exceeded' ? 'completed' : 'error',
               text: summary || node.text,
               durationMs: durationMs ?? node.durationMs,
               tokens: tokens ?? node.tokens,
@@ -391,6 +412,42 @@ export function useChatNodes(): UseChatNodesReturn {
             return { order: prev.order, nodes: newNodes };
           });
         }
+        break;
+      }
+
+      case 'subagent/completed': {
+        // U3a：后台子代理完成通知（synthetic 事件走统一数据流）→ 完成卡片。
+        // 同一 append 已完成后端持久化+投影，前端只负责渲染
+        const subId = data.sub_session_id as string;
+        if (!subId) break;
+        const status = (data.status as string) || 'completed';
+        const text = data.text as string | undefined;
+        const agentType = (data.agent_type as string) || 'unknown';
+        const description = (data.description as string) || '';
+        const mappedStatus = status === 'completed' || status === 'budget_exceeded' ? 'completed' : 'error';
+        const subAgentKey = `subagent_${subId}`;
+        updateSnap(prev => {
+          const newNodes = new Map(prev.nodes);
+          const existing = prev.nodes.get(subAgentKey) as SubAgentNode | undefined;
+          if (existing) {
+            newNodes.set(subAgentKey, {
+              ...existing,
+              status: mappedStatus,
+              backgrounded: true,
+              completionText: text || existing.completionText,
+            });
+            return { order: prev.order, nodes: newNodes };
+          }
+          newNodes.set(subAgentKey, {
+            ...createSubAgentNode(subId),
+            agentType,
+            description,
+            status: mappedStatus,
+            backgrounded: true,
+            completionText: text,
+          });
+          return { order: [...prev.order, subAgentKey], nodes: newNodes };
+        });
         break;
       }
 
@@ -577,10 +634,17 @@ export function useChatNodes(): UseChatNodesReturn {
           handleSSEEvent(sessionId, { 
             type: 'sub_agent/end', 
             agent_id: agentId,
+            status: event.status,
             summary: event.summary,
             duration_ms: event.duration_ms,
             tokens: event.tokens,
           });
+          break;
+        }
+        
+        case 'subagent/completed': {
+          // U3a：历史回放同样渲染完成卡片（事件即数据源）
+          handleSSEEvent(sessionId, event);
           break;
         }
         

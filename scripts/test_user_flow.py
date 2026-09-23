@@ -14,11 +14,14 @@ import asyncio
 import json
 import websockets
 import requests
+import sys
 import time
 from pathlib import Path
 
 BASE_URL = "http://localhost:5555"
 WS_URL = "ws://localhost:5555/ws/events"
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 class UserFlowTest:
@@ -82,18 +85,17 @@ class UserFlowTest:
         """检查session状态"""
         print(f"\n[TEST] 检查session {self.session_id}")
         
-        # 检查events.jsonl
-        p = Path.home() / ".mycode" / "sessions" / f"{self.session_id}.events.jsonl"
-        if p.exists():
-            with open(p) as f:
-                events = [json.loads(l) for l in f if l.strip()]
-            print(f"[CHECK] events.jsonl: {len(events)} events")
+        # 检查落盘事件（经 SessionBackend，jsonl/sqlite 两后端一致）
+        from agents.core.session import get_session_backend
+        events = get_session_backend().load_all_events(self.session_id)
+        if events:
+            print(f"[CHECK] backend events: {len(events)} events")
             for e in events[-5:]:  # 显示最后5个事件
                 ct = str(e.get('content', ''))[:40] if e.get('content') else ''
                 seq = str(e.get('seq', '-'))
                 print(f"  seq={seq:>3s} {e.get('type'):25s} {ct}")
         else:
-            print(f"[CHECK] events.jsonl 不存在")
+            print(f"[CHECK] session {self.session_id} 无落盘事件")
         
         # 检查API
         r = requests.get(f"{BASE_URL}/api/sessions/{self.session_id}/events")

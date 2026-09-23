@@ -56,6 +56,9 @@ class AgentOptions:
     
     # 工作区（会话工作目录；None 时回退进程 CWD，仅 CLI 场景）
     workspace: Any | None = None
+
+    # 会话身份（None → Agent 生成随机短 id；恢复/评测场景显式指定）
+    session_id: str | None = None
     
     # Checkpoint 存储
     checkpoint_store: Any | None = None
@@ -84,6 +87,7 @@ class AgentOptions:
             "is_sub_agent": self.is_sub_agent,
             "parent_abort_event": self.parent_abort_event,
             "workspace": self.workspace,
+            "session_id": self.session_id,
             "checkpoint_store": self.checkpoint_store,
             "extra": self.extra,
         }

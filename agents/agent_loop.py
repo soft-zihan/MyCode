@@ -8,162 +8,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-import re
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from agents.tools.registry import CONCURRENCY_SAFE_TOOLS, get_active_tool_definitions
+from agents.core.model_caller import ModelCaller
+from agents.core.text_sanitization import safe_utf8_text
+from agents.tools.file_snapshot import capture_file_snapshot
+from agents.tools.registry import CONCURRENCY_SAFE_TOOLS
 from agents.observability.tool_tracker import ToolCallTracker, check_tool_warnings
 
 if TYPE_CHECKING:
     from agents.agent import Agent
-
-
-def _capture_file_snapshot(file_path: str) -> dict | None:
-    """Capture file content before/after modification for Code Review."""
-    try:
-        from agents.tools.runtime import get_runtime, DockerRuntime
-        rt = get_runtime()
-        if isinstance(rt, DockerRuntime):
-            abs_path = file_path
-            if not abs_path.startswith("/"):
-                abs_path = f"{rt.workdir}/{abs_path}"
-        else:
-            from agents.tools import resolve_tool_path
-            abs_path = str(resolve_tool_path(file_path, must_exist=False).resolve())
-        
-        path = Path(abs_path)
-        if path.exists():
-            content = path.read_text(encoding="utf-8", errors="replace")
-            return {"file_path": file_path, "content": content, "is_new": False}
-        else:
-            return {"file_path": file_path, "content": "", "is_new": True}
-    except Exception:
-        return None
-
-
-def _safe_utf8_text(text: str) -> str:
-    if not text:
-        return text
-    try:
-        text.encode("utf-8")
-        return text
-    except UnicodeEncodeError:
-        return text.encode("utf-8", errors="replace").decode("utf-8")
-
-
-def _sanitize_for_utf8(obj: Any) -> Any:
-    if isinstance(obj, str):
-        return _safe_utf8_text(obj)
-    if isinstance(obj, list):
-        return [_sanitize_for_utf8(x) for x in obj]
-    if isinstance(obj, dict):
-        return {k: _sanitize_for_utf8(v) for k, v in obj.items()}
-    return obj
-
-
-def _to_openai_tools(tools: list[dict]) -> list[dict]:
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": t["name"],
-                "description": t["description"],
-                "parameters": t["input_schema"],
-            },
-        }
-        for t in tools
-    ]
-
-
-_TRACE_TEXT_LIMIT = int(os.environ.get("MYCODE_TRACE_TEXT_LIMIT", "2000"))
-_TRACE_MESSAGE_LIMIT = int(os.environ.get("MYCODE_TRACE_MESSAGE_LIMIT", "50"))
-_TRACE_PAYLOAD_LIMIT = int(os.environ.get("MYCODE_TRACE_PAYLOAD_LIMIT", "100000"))
-
-
-def _truncate_trace_text(value: Any, limit: int = _TRACE_TEXT_LIMIT) -> str:
-    if value is None:
-        return ""
-    if not isinstance(value, str):
-        value = json.dumps(value, ensure_ascii=False, default=str)
-    return value[:limit]
-
-
-def _compact_message_for_trace(message: dict[str, Any]) -> dict[str, Any]:
-    compact: dict[str, Any] = {"role": message.get("role")}
-    content = message.get("content")
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, dict):
-                parts.append(_truncate_trace_text(item.get("text") or item, 500))
-            else:
-                parts.append(_truncate_trace_text(item, 500))
-        compact["content"] = "\n".join(parts)[:_TRACE_TEXT_LIMIT]
-    else:
-        compact["content"] = _truncate_trace_text(content)
-
-    if message.get("tool_calls"):
-        compact["tool_calls"] = [
-            {
-                "id": tc.get("id"),
-                "name": (tc.get("function") or {}).get("name"),
-                "arguments": _truncate_trace_text((tc.get("function") or {}).get("arguments"), 500),
-            }
-            for tc in message["tool_calls"]
-            if isinstance(tc, dict)
-        ]
-    if message.get("tool_call_id"):
-        compact["tool_call_id"] = message.get("tool_call_id")
-    return compact
-
-
-def _model_input_for_trace(messages: list[dict[str, Any]], tool_defs: list[dict[str, Any]]) -> str:
-    recent = messages[-_TRACE_MESSAGE_LIMIT:]
-    payload = {
-        "message_count": len(messages),
-        "omitted_message_count": max(0, len(messages) - len(recent)),
-        "messages": [_compact_message_for_trace(msg) for msg in recent if isinstance(msg, dict)],
-        "tools": [tool.get("name") for tool in tool_defs],
-    }
-    return json.dumps(payload, ensure_ascii=False, default=str)[:_TRACE_PAYLOAD_LIMIT]
-
-
-def _model_output_for_trace(result: dict[str, Any]) -> str:
-    choice = (result.get("choices") or [{}])[0]
-    message = choice.get("message") or {}
-    tool_calls = message.get("tool_calls") or []
-    payload = {
-        "finish_reason": choice.get("finish_reason"),
-        "content": _truncate_trace_text(message.get("content"), 4000),
-        "thinking": _truncate_trace_text(message.get("thinking"), 2000),
-        "tool_calls": [
-            {
-                "id": tc.get("id"),
-                "name": (tc.get("function") or {}).get("name"),
-                "arguments": _truncate_trace_text((tc.get("function") or {}).get("arguments"), 1000),
-            }
-            for tc in tool_calls
-            if isinstance(tc, dict)
-        ],
-    }
-    return json.dumps(payload, ensure_ascii=False, default=str)[:_TRACE_PAYLOAD_LIMIT]
-
-
-def _usage_details_for_trace(usage: dict[str, Any]) -> dict[str, int]:
-    input_tokens = int(usage.get("prompt_tokens") or 0)
-    output_tokens = int(usage.get("completion_tokens") or 0)
-    total_tokens = int(usage.get("total_tokens") or 0)
-    cached_tokens = int(usage.get("cached_tokens") or 0)
-    cached_tokens = min(cached_tokens, input_tokens)
-    return {
-        "input": input_tokens - cached_tokens,
-        "input_cached_tokens": cached_tokens,
-        "output": output_tokens,
-        "total": total_tokens or (input_tokens + output_tokens),
-    }
 
 
 class AgentLoop:
@@ -179,6 +34,7 @@ class AgentLoop:
     def __init__(self, agent: Agent):
         self._agent = agent
         self._tool_tracker = ToolCallTracker()
+        self._model_caller = ModelCaller(agent)
 
     def _auto_mark_bad_case(self, signal_type: str, diagnosis: dict, tool_name: str | None = None) -> None:
         import json
@@ -223,6 +79,7 @@ class AgentLoop:
         while True:
             if self._agent.abort_requested():
                 self._agent.mark_aborted()
+                await self._drop_queued("aborted")
                 break
 
             await self._consume_wiki_prefetch()
@@ -258,6 +115,10 @@ class AgentLoop:
             })
 
             if not tool_calls:
+                # U1：turn 收尾前 drain 双队列——steering/follow_up 尾到则同 run 内 continue
+                # 消费（不新起 turn/start，满足"追问不重启轮次"）
+                if await self._drain_steering() or await self._drain_follow_up():
+                    continue
                 await self._finalize_text_response()
                 break
 
@@ -266,19 +127,71 @@ class AgentLoop:
             if budget["exceeded"]:
                 from agents.logging import print_info
                 print_info(f"Budget exceeded: {budget['reason']}")
+                await self._drop_queued("budget_exceeded")
                 break
 
             guard_stop = await self._handle_tool_calls(tool_calls)
             if guard_stop:
+                await self._drop_queued("loop_guard")
                 self._finalize_loop_guard_stop()
                 break
 
+            # U1：step 边界（工具批次完成后、下次模型调用前）——steering 唯一注入点
+            # （v2 llm.ts promote 语义：注入进当前 run，不重启轮次）
+            await self._drain_steering()
+
             if self._agent.tool_budget_exceeded():
+                await self._drop_queued("tool_budget")
                 await self._finalize_tool_budget()
                 break
 
             self._agent.clear_context_flag()
             self._agent.refresh_runtime_system_prompt()
+
+    # ── U1 steer 接线：队列 drain/注入/丢弃审计 ──────────────────────
+
+    async def _inject_queued(self, msgs: list, queue_name: str) -> None:
+        """队列消息 → user_message 事件落盘（Event 唯一数据源）+ steer/delivered 审计事件。"""
+        a = self._agent
+        for m in msgs:
+            a.append_user_message(m.content)
+            a.session.append("steer/delivered", {
+                "content": m.content[:200],
+                "source": m.source,
+                "queue": queue_name,
+            })
+
+    async def _drain_steering(self) -> bool:
+        """step 边界注入 steering。返回是否有注入。"""
+        msgs = await self._agent.message_queue.drain_steering()
+        if not msgs:
+            return False
+        await self._inject_queued(msgs, "steering")
+        # 纠偏即新方向：旧方向的连击计数语义失效，重置（硬预算不动）
+        self._agent._tool_error_streak = 0
+        self._agent._same_tool_repeat_count = 0
+        self._agent._last_tool_name = ""
+        return True
+
+    async def _drain_follow_up(self) -> bool:
+        """turn 收尾边界注入 follow_up。返回是否有注入。"""
+        msgs = await self._agent.message_queue.drain_follow_up()
+        if not msgs:
+            return False
+        await self._inject_queued(msgs, "follow_up")
+        return True
+
+    async def _drop_queued(self, reason: str) -> None:
+        """终态 break（abort/预算/loop guard）丢弃残留队列——落盘审计，不静默吞。"""
+        q = self._agent.message_queue
+        dropped = await q.drain_steering() + await q.drain_follow_up()
+        if dropped:
+            self._agent.session.append("steer/dropped", {
+                "reason": reason,
+                "count": len(dropped),
+                "contents": [m.content[:100] for m in dropped],
+            })
+        await q.clear()
 
     async def _prepare_turn(self, user_message: str) -> None:
         """准备轮次：清理消息、重置状态、创建快照。"""
@@ -286,8 +199,9 @@ class AgentLoop:
         from pathlib import Path
         
         a = self._agent
-        user_message = _safe_utf8_text(user_message)
-        clean_message = re.sub(r"\n*<retrieved_skills>.*?</retrieved_skills>\s*", "", user_message, flags=re.DOTALL).strip()
+        user_message = safe_utf8_text(user_message)
+        # U0 清理：<retrieved_skills> 只有 strip 无 producer（死防御代码），删除
+        clean_message = user_message.strip()
         
         # 重置工具调用跟踪器
         self._tool_tracker.reset()
@@ -311,7 +225,13 @@ class AgentLoop:
                     traceback.print_exc()
         
         a.append_user_message(clean_message, snapshot_id=snapshot_id)
-        a.reset_repeat_chain()
+        # D3 hotfix：chat() 暂存的记忆/提醒注入落盘为 memory_injection 事件
+        # （user_message 之后、渲染为 user 消息；不动 system[0]，prefix cache 无损）
+        if a._pending_system_injections:
+            for injection in a._pending_system_injections:
+                a.append_memory_injection(injection)
+            a._pending_system_injections = []
+        a._repeat_guard.reset()
 
         if not a.is_sub_agent:
             sq = a.build_side_query()
@@ -337,7 +257,7 @@ class AgentLoop:
             if entries:
                 from agents.wiki.wiki_manager import format_wiki_for_injection
                 injection_text = format_wiki_for_injection(entries)
-                injection_text = _safe_utf8_text(injection_text)
+                injection_text = safe_utf8_text(injection_text)
                 a.append_memory_injection(injection_text)
                 for e in entries:
                     a._wiki_surfaced_at[e.rel_path] = a._turn_number
@@ -366,39 +286,41 @@ class AgentLoop:
         a.add_output_tokens(output_tokens)
         a.set_last_usage_tokens(input_tokens, total_tokens)
 
-        if not a.is_sub_agent:
-            cached_tokens = int(usage.get("cached_tokens") or 0)
-            a.total_cached_tokens += cached_tokens
-            asm = response.get("_assembly_metrics", {})
-            a.session.append("stats", {
-                # per-call 语义：本次模型调用的 usage
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cached_tokens": cached_tokens,
-                "cache_hit_rate": round(cached_tokens / input_tokens, 3) if input_tokens else 0.0,
-                # 累计语义：会话至今总量
-                "total_input_tokens": a.total_input_tokens,
-                "total_output_tokens": a.total_output_tokens,
-                "total_cached_tokens": a.total_cached_tokens,
-                "context_window": a.context_window,
-                "effective_window": a.effective_window,
-                "estimated_context_tokens": a.estimated_context_tokens,
-                "system_chars": asm.get("system_chars", 0),
-                "user_chars": asm.get("user_chars", 0),
-                "assistant_chars": asm.get("assistant_chars", 0),
-                "tool_result_chars": asm.get("tool_result_chars", 0),
-                "tool_count": asm.get("tool_count", 0),
-                "tool_result_by_name": asm.get("tool_result_by_name", {}),
-                "system_base_chars": asm.get("system_base_chars", 0),
-                "system_claude_md_chars": asm.get("system_claude_md_chars", 0),
-                "system_agents_md_chars": asm.get("system_agents_md_chars", 0),
-                "system_skills_chars": asm.get("system_skills_chars", 0),
-                "system_wiki_chars": asm.get("system_wiki_chars", 0),
-                "system_agents_chars": asm.get("system_agents_chars", 0),
-                "system_workspace_chars": asm.get("system_workspace_chars", 0),
-                "is_plan_mode": asm.get("is_plan_mode", False),
-                "plan_mode_chars": asm.get("plan_mode_chars", 0),
-            })
+        # BC-21 修复：stats 事件对子代理/eval 会话不再全抑制——落盘并打 is_sub_agent 标记，
+        # 子会话压缩/cache 行为可观测（评测臂诊断依赖），展示层按标记自行过滤
+        cached_tokens = int(usage.get("cached_tokens") or 0)
+        a.total_cached_tokens += cached_tokens
+        asm = response.get("_assembly_metrics", {})
+        a.session.append("stats", {
+            "is_sub_agent": a.is_sub_agent,
+            # per-call 语义：本次模型调用的 usage
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cached_tokens": cached_tokens,
+            "cache_hit_rate": round(cached_tokens / input_tokens, 3) if input_tokens else 0.0,
+            # 累计语义：会话至今总量
+            "total_input_tokens": a.total_input_tokens,
+            "total_output_tokens": a.total_output_tokens,
+            "total_cached_tokens": a.total_cached_tokens,
+            "context_window": a.context_window,
+            "effective_window": a.effective_window,
+            "estimated_context_tokens": a.estimated_context_tokens,
+            "system_chars": asm.get("system_chars", 0),
+            "user_chars": asm.get("user_chars", 0),
+            "assistant_chars": asm.get("assistant_chars", 0),
+            "tool_result_chars": asm.get("tool_result_chars", 0),
+            "tool_count": asm.get("tool_count", 0),
+            "tool_result_by_name": asm.get("tool_result_by_name", {}),
+            "system_base_chars": asm.get("system_base_chars", 0),
+            "system_claude_md_chars": asm.get("system_claude_md_chars", 0),
+            "system_agents_md_chars": asm.get("system_agents_md_chars", 0),
+            "system_skills_chars": asm.get("system_skills_chars", 0),
+            "system_wiki_chars": asm.get("system_wiki_chars", 0),
+            "system_agents_chars": asm.get("system_agents_chars", 0),
+            "system_workspace_chars": asm.get("system_workspace_chars", 0),
+            "is_plan_mode": asm.get("is_plan_mode", False),
+            "plan_mode_chars": asm.get("plan_mode_chars", 0),
+        })
 
     async def _finalize_text_response(self) -> None:
         """完成文本响应：刷新 markdown、打印成本。"""
@@ -650,7 +572,7 @@ class AgentLoop:
                 tool_name=stop_info.get("tool", ct["fn"]),
             )
 
-        repeat_warning = a.check_repeat_guard(ct["fn"], ct["inp"])
+        repeat_warning = a._repeat_guard.check(ct["fn"], ct["inp"])
         if repeat_warning:
             res = res + "\n\n" + repeat_warning
 
@@ -682,15 +604,15 @@ class AgentLoop:
         async def _run_oai_safe(ct_item: dict) -> tuple[dict, Any, str, dict | None]:
             pre_snapshot = None
             if ct_item["fn"] in ("write_file", "edit_file"):
-                pre_snapshot = _capture_file_snapshot(ct_item["inp"].get("file_path", ""))
+                pre_snapshot = capture_file_snapshot(ct_item["inp"].get("file_path", ""))
             
             result = await a.execute_tool_call(ct_item["fn"], ct_item["inp"])
-            raw = _safe_utf8_text(result.text)
+            raw = safe_utf8_text(result.text)
             res = a.persist_large_result(ct_item["fn"], raw)
             
             post_snapshot = None
             if ct_item["fn"] in ("write_file", "edit_file") and pre_snapshot:
-                post_snapshot = _capture_file_snapshot(ct_item["inp"].get("file_path", ""))
+                post_snapshot = capture_file_snapshot(ct_item["inp"].get("file_path", ""))
             
             file_snapshot = None
             if pre_snapshot and post_snapshot:
@@ -739,7 +661,6 @@ class AgentLoop:
     async def _execute_sequential_batch(self, items: list[dict]) -> tuple[bool, bool, str | None]:
         """顺序执行工具批次。返回 (是否触发上下文清理, 是否触发 loop guard, guard reason)。"""
         from agents.logging import print_info
-        import time
 
         print_info(f"[DEBUG] _execute_sequential_batch: start, {len(items)} tools")
         a = self._agent
@@ -747,6 +668,7 @@ class AgentLoop:
         guard_stop = False
         guard_reason: str | None = None
 
+        i = -1
         for i, ct in enumerate(items):
             fn_name = ct["fn"]
             print_info(f"[DEBUG] _execute_sequential_batch: tool {i+1}/{len(items)}: {fn_name}")
@@ -761,412 +683,111 @@ class AgentLoop:
                 guard_reason = guard_reason or decision.reason
                 break
 
-            t0 = time.time()
-            print_info(f"[DEBUG] _execute_sequential_batch: calling execute_tool_call for {fn_name}")
-            
-            pre_snapshot = None
-            if fn_name in ("write_file", "edit_file"):
-                pre_snapshot = _capture_file_snapshot(ct["inp"].get("file_path", ""))
-            
-            result = await a.execute_tool_call(ct["fn"], ct["inp"])
-            print_info(f"[DEBUG] _execute_sequential_batch: execute_tool_call done for {fn_name}, took {time.time()-t0:.2f}s")
-            raw = _safe_utf8_text(result.text)
-            res = a.persist_large_result(ct["fn"], raw)
-            
-            post_snapshot = None
-            if fn_name in ("write_file", "edit_file") and pre_snapshot:
-                post_snapshot = _capture_file_snapshot(ct["inp"].get("file_path", ""))
-            
-            file_snapshot = None
-            if pre_snapshot and post_snapshot:
-                file_snapshot = {
-                    "file_path": pre_snapshot["file_path"],
-                    "is_new": pre_snapshot["is_new"],
-                    "old_content": pre_snapshot["content"],
-                    "new_content": post_snapshot["content"],
-                }
-            
-            text_failure = a.looks_like_tool_failure(ct["fn"], result.text, res)
-            success = result.status == "ok" and result.outcome == "success" and not text_failure
-            outcome = result.outcome if result.outcome != "success" else ("error" if text_failure else "success")
-            metadata = dict(result.metadata or {})
-            metadata["text_failure"] = text_failure
-            a.publish_tool_result_event(
-                ct["tc"]["id"],
-                ct["fn"],
-                res,
-                result.status,
-                snapshot=file_snapshot,
-                outcome=outcome,
-                metadata=metadata,
-            )
-            a.record_tool_outcome(ct["fn"], success)
-            print_info(f"[DEBUG] _execute_sequential_batch: tool {fn_name} completed")
-
-            if a.context_cleared:
-                a.clear_context_flag()
-                a.append_user_message(res)
-                context_break = True
-                break
-
-            warning_result = check_tool_warnings(
-                self._tool_tracker,
-                ct["fn"],
-                ct["inp"],
-                success=success,
-                outcome=outcome,
-                metadata=metadata,
-            )
-            res, force_stop, stop_reason = self._apply_warning_result(ct, res, warning_result)
-            if force_stop:
+            context_break, tool_guard_stop, tool_guard_reason = await self._run_sequential_tool(ct)
+            if tool_guard_stop:
                 guard_stop = True
-                guard_reason = guard_reason or stop_reason
-
-            a.append_tool_message(ct["tc"]["id"], res, ct["fn"])
+                guard_reason = guard_reason or tool_guard_reason
             if guard_stop or context_break:
                 break
 
         if guard_stop or context_break:
-            for remaining in items[i + 1:]:
-                if remaining["allowed"]:
-                    cancel_result = (
-                        "Action cancelled: context cleared."
-                        if context_break
-                        else f"Action cancelled: loop guard stopped turn ({guard_reason or 'tool loop'})."
-                    )
-                    a.publish_tool_result_event(
-                        remaining["tc"]["id"],
-                        remaining["fn"],
-                        cancel_result,
-                        "error" if guard_stop else "cancelled",
-                        outcome="blocked" if guard_stop else "cancelled",
-                        metadata={"reason": guard_reason} if guard_reason else None,
-                    )
-                    a.append_tool_message(remaining["tc"]["id"], cancel_result, remaining["fn"])
+            self._cancel_remaining_tools(items, i + 1, context_break, guard_stop, guard_reason)
 
         return context_break, guard_stop, guard_reason
 
-    async def call_model_stream(self, *, tools_enabled: bool = True) -> dict:
-        """流式模型调用。"""
-        from agents.observability.trace import trace_span
-        from agents.agent import _with_retry, ContentLevelError
+    async def _run_sequential_tool(self, ct: dict) -> tuple[bool, bool, str | None]:
+        """单工具顺序执行：前后快照 → 调用 → 大结果落盘 → 事件 → 失败判定 → 警告检查。
+
+        返回 (context_break, guard_stop, guard_reason)；context_break 时提前返回
+        （与原实现一致：不再走警告检查与 append_tool_message）。
+        """
+        from agents.logging import print_info
+        import time
 
         a = self._agent
-        _model_t0 = time.time()
+        fn_name = ct["fn"]
+        t0 = time.time()
+        print_info(f"[DEBUG] _execute_sequential_batch: calling execute_tool_call for {fn_name}")
 
-        with trace_span(
-            "model_call",
-            model=a.model,
-            metadata={
-                "provider": "openai",
-                "turn_number": a._current_turn,
-                "step_number": a._current_step,
-                "is_sub_agent": a.is_sub_agent,
-            },
-        ) as span:
+        pre_snapshot = None
+        if fn_name in ("write_file", "edit_file"):
+            pre_snapshot = capture_file_snapshot(ct["inp"].get("file_path", ""))
 
-            async def _do():
-                await a.check_and_compact()
+        result = await a.execute_tool_call(ct["fn"], ct["inp"])
+        print_info(f"[DEBUG] _execute_sequential_batch: execute_tool_call done for {fn_name}, took {time.time()-t0:.2f}s")
+        raw = safe_utf8_text(result.text)
+        res = a.persist_large_result(ct["fn"], raw)
 
-                _asm_t0 = time.perf_counter()
+        post_snapshot = None
+        if fn_name in ("write_file", "edit_file") and pre_snapshot:
+            post_snapshot = capture_file_snapshot(ct["inp"].get("file_path", ""))
 
-                _t1 = time.perf_counter()
-                tool_defs = get_active_tool_definitions(a.tools) if tools_enabled else []
-                _tool_defs_ms = (time.perf_counter() - _t1) * 1000
+        file_snapshot = None
+        if pre_snapshot and post_snapshot:
+            file_snapshot = {
+                "file_path": pre_snapshot["file_path"],
+                "is_new": pre_snapshot["is_new"],
+                "old_content": pre_snapshot["content"],
+                "new_content": post_snapshot["content"],
+            }
 
-                _t2 = time.perf_counter()
-                raw_messages = a.messages
-                _msg_history_ms = (time.perf_counter() - _t2) * 1000
+        text_failure = a.looks_like_tool_failure(ct["fn"], result.text, res)
+        success = result.status == "ok" and result.outcome == "success" and not text_failure
+        outcome = result.outcome if result.outcome != "success" else ("error" if text_failure else "success")
+        metadata = dict(result.metadata or {})
+        metadata["text_failure"] = text_failure
+        a.publish_tool_result_event(
+            ct["tc"]["id"],
+            ct["fn"],
+            res,
+            result.status,
+            snapshot=file_snapshot,
+            outcome=outcome,
+            metadata=metadata,
+        )
+        a.record_tool_outcome(ct["fn"], success)
+        print_info(f"[DEBUG] _execute_sequential_batch: tool {fn_name} completed")
 
-                _t3 = time.perf_counter()
-                sanitized_messages = _sanitize_for_utf8(raw_messages)
-                _sanitize_msgs_ms = (time.perf_counter() - _t3) * 1000
+        if a.context_cleared:
+            a.clear_context_flag()
+            a.append_user_message(res)
+            return True, False, None
 
-                # 运行时易变状态尾部注入（prefix cache 保护：主 system prompt 会话内不变，
-                # 尾部消息每步变化不影响其前全部历史的缓存命中）
-                _guidance = a.build_runtime_guidance()
-                if _guidance:
-                    sanitized_messages = [*sanitized_messages, {"role": "system", "content": _guidance}]
+        warning_result = check_tool_warnings(
+            self._tool_tracker,
+            ct["fn"],
+            ct["inp"],
+            success=success,
+            outcome=outcome,
+            metadata=metadata,
+        )
+        res, force_stop, stop_reason = self._apply_warning_result(ct, res, warning_result)
 
-                create_params = {
-                    "model": a.model,
-                    "messages": sanitized_messages,
-                    "stream": True,
-                    "stream_options": {"include_usage": True},
-                }
-                if a.thinking is not None and "qwen" in a.model.lower():
-                    create_params["extra_body"] = {"enable_thinking": bool(a.thinking)}
-                if tool_defs:
-                    _t4 = time.perf_counter()
-                    openai_tools = _to_openai_tools(tool_defs)
-                    _convert_tools_ms = (time.perf_counter() - _t4) * 1000
+        a.append_tool_message(ct["tc"]["id"], res, ct["fn"])
+        return False, bool(force_stop), (stop_reason if force_stop else None)
 
-                    _t5 = time.perf_counter()
-                    create_params["tools"] = _sanitize_for_utf8(openai_tools)
-                    _sanitize_tools_ms = (time.perf_counter() - _t5) * 1000
-                else:
-                    _convert_tools_ms = 0
-                    _sanitize_tools_ms = 0
-
-                _assembly_ms = (time.perf_counter() - _asm_t0) * 1000
-
-                _msg_count = len(raw_messages)
-                _msg_chars = sum(len(str(m.get("content", ""))) for m in raw_messages)
-                _tool_count = len(tool_defs)
-
-                span.update(
-                    input=_model_input_for_trace(sanitized_messages, tool_defs),
-                    model_parameters={
-                        "model": a.model,
-                        "stream": True,
-                        "message_count": _msg_count,
-                        "tool_count": _tool_count,
-                    },
+    def _cancel_remaining_tools(self, items: list[dict], from_index: int,
+                                context_break: bool, guard_stop: bool,
+                                guard_reason: str | None) -> None:
+        """guard/清理中断后，为剩余工具补发取消结果（保持 tool_call/tool_result 配对完整）。"""
+        a = self._agent
+        for remaining in items[from_index:]:
+            if remaining["allowed"]:
+                cancel_result = (
+                    "Action cancelled: context cleared."
+                    if context_break
+                    else f"Action cancelled: loop guard stopped turn ({guard_reason or 'tool loop'})."
                 )
-
-                # 计算 token breakdown（细粒度）
-                _system_chars = 0
-                _user_chars = 0
-                _assistant_chars = 0
-                _tool_result_chars = 0
-                # System prompt 各部分
-                _system_base_chars = 0
-                _system_claude_md_chars = 0
-                _system_agents_md_chars = 0
-                _system_skills_chars = 0
-                _system_wiki_chars = 0
-                _system_agents_chars = 0
-                _system_workspace_chars = 0
-                
-                for msg in raw_messages:
-                    role = msg.get("role", "")
-                    content = msg.get("content", "")
-                    if isinstance(content, str):
-                        chars = len(content)
-                    elif isinstance(content, list):
-                        chars = sum(len(item.get("text", "")) for item in content if isinstance(item, dict) and item.get("type") == "text")
-                    else:
-                        chars = 0
-                    if role == "system":
-                        _system_chars = chars
-                    elif role == "user":
-                        _user_chars += chars
-                    elif role == "assistant":
-                        _assistant_chars += chars
-                    elif role == "tool":
-                        _tool_result_chars += chars
-                
-                # 计算 system prompt 各部分（重新构建以获取各部分大小）
-                try:
-                    from agents.core.prompt import (
-                        load_claude_md, load_agents_md, build_skill_descriptions,
-                        build_wiki_prompt_section,
-                        build_agent_descriptions, build_workspace_structure
-                    )
-                    _system_claude_md_chars = len(load_claude_md())
-                    _system_agents_md_chars = len(load_agents_md())
-                    _system_skills_chars = len(build_skill_descriptions())
-                    _system_wiki_chars = len(build_wiki_prompt_section())
-                    _system_agents_chars = len(build_agent_descriptions())
-                    _system_workspace_chars = len(build_workspace_structure())
-                    _system_base_chars = _system_chars - _system_claude_md_chars - _system_agents_md_chars - _system_skills_chars - _system_wiki_chars - _system_agents_chars - _system_workspace_chars
-                except Exception:
-                    _system_base_chars = _system_chars
-                
-                # 计算 plan mode 的额外 token 占用
-                _plan_mode_chars = 0
-                _is_plan_mode = a.permission_mode == "plan"
-                if _is_plan_mode and hasattr(a, '_plan_mode_manager') and a._plan_mode_manager:
-                    try:
-                        _plan_mode_chars = len(a._plan_mode_manager.build_plan_mode_prompt())
-                    except Exception:
-                        _plan_mode_chars = 0
-
-                stream = await a.openai_client.chat.completions.create(**create_params)
-
-                from agents.wiki.citation import CitationStripper, strip_citations
-                _citation_stripper = CitationStripper()
-                content = ""
-                if not a.is_sub_agent:
-                    pass
-                tool_calls: dict[int, dict] = {}
-                finish_reason = ""
-                usage = None
-
-                stream_idle_timeout = int(os.environ.get("MYCODE_STREAM_IDLE_TIMEOUT", "60"))
-                chunk_iter = stream.__aiter__()
-                while True:
-                    try:
-                        chunk = await asyncio.wait_for(chunk_iter.__anext__(), timeout=stream_idle_timeout)
-                    except asyncio.TimeoutError:
-                        raise ContentLevelError(f"stream_idle_timeout after {stream_idle_timeout}s")
-                    except StopAsyncIteration:
-                        break
-
-                    if a.abort_requested():
-                        a.mark_aborted()
-                        break
-                    
-                    if chunk.usage:
-                        prompt_tokens = int(getattr(chunk.usage, "prompt_tokens", 0) or 0)
-                        completion_tokens = int(getattr(chunk.usage, "completion_tokens", 0) or 0)
-                        total_tokens = int(getattr(chunk.usage, "total_tokens", 0) or 0)
-                        usage = {
-                            "prompt_tokens": prompt_tokens,
-                            "completion_tokens": completion_tokens,
-                            "total_tokens": total_tokens or (prompt_tokens + completion_tokens),
-                            "cached_tokens": chunk.usage.prompt_tokens_details.cached_tokens if chunk.usage.prompt_tokens_details else 0,
-                        }
-
-                    if not chunk.choices:
-                        continue
-                    delta = chunk.choices[0].delta
-
-                    reasoning = getattr(delta, "reasoning_content", None)
-                    if reasoning:
-                        a.append_thinking_text(reasoning)
-                        # 流式事件只发送 SSE，不持久化到事件日志
-                        event_data = {"content": reasoning, "turn": a._current_turn, "step": a._current_step}
-                        if a.current_sub_agent_id:
-                            event_data["sub_agent_id"] = a.current_sub_agent_id
-                        a.session.append("thinking", event_data)
-
-                    if delta and delta.content:
-                        raw_delta = _safe_utf8_text(delta.content)
-                        visible = _citation_stripper.feed(raw_delta)
-                        if visible:
-                            a.emit_text(visible)
-                        content += raw_delta
-                        # Debug for title agent
-                        if a.is_sub_agent and a._custom_system_prompt and "标题" in a._custom_system_prompt:
-                            import sys
-                            print(f"[TITLE-DEBUG] delta.content='{delta.content}'", file=sys.stderr)
-
-                    if delta and delta.tool_calls:
-                        for tc in delta.tool_calls:
-                            existing = tool_calls.get(tc.index)
-                            if existing:
-                                if tc.function and tc.function.arguments:
-                                    existing["arguments"] += _safe_utf8_text(tc.function.arguments)
-                            else:
-                                tool_calls[tc.index] = {
-                                    "id": _safe_utf8_text(tc.id or ""),
-                                    "name": _safe_utf8_text((tc.function.name if tc.function else "") or ""),
-                                    "arguments": _safe_utf8_text((tc.function.arguments if tc.function else "") or ""),
-                                }
-
-                    if chunk.choices[0].finish_reason:
-                        finish_reason = chunk.choices[0].finish_reason
-
-                _citation_tail = _citation_stripper.flush()
-                if _citation_tail:
-                    a.emit_text(_citation_tail)
-
-                assembled = None
-                if tool_calls:
-                    assembled = [
-                        {"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": tc["arguments"]}}
-                        for _, tc in sorted(tool_calls.items())
-                    ]
-                    assembled = [tc for tc in assembled if tc["id"] and tc["function"]["name"]]
-
-                thinking_content = a.get_thinking_content()
-
-                if not content and not assembled and not finish_reason:
-                    raise ContentLevelError("empty_response")
-                if not content and not assembled and finish_reason == "length":
-                    raise ContentLevelError("truncated_response")
-                
-                # Debug: log content for title agent
-                if a.is_sub_agent and a._custom_system_prompt and "标题" in a._custom_system_prompt:
-                    import sys
-                    print(f"[TITLE-DEBUG] content='{content}', thinking='{thinking_content[:100] if thinking_content else None}...'", file=sys.stderr)
-                
-                # 4.1：落盘前剥离 citation（防回灌），命中路径计 usage
-                content, _cited_paths = strip_citations(content)
-                for _p in _cited_paths:
-                    try:
-                        from agents.wiki.wiki_manager import increment_usage
-                        increment_usage(_p)
-                    except Exception as _e:
-                        print(f"[wiki_citation] usage update failed for {_p}: {type(_e).__name__}: {_e}")
-
-                return {
-                    "choices": [{
-                        "message": {
-                            "role": "assistant",
-                            "content": content or None,
-                            "tool_calls": assembled,
-                            "thinking": thinking_content,
-                        },
-                        "finish_reason": finish_reason or "stop",
-                    }],
-                    "usage": usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-                    "_assembly_metrics": {
-                        "assembly_ms": round(_assembly_ms, 2),
-                        "tool_defs_ms": round(_tool_defs_ms, 2),
-                        "msg_history_ms": round(_msg_history_ms, 2),
-                        "sanitize_msgs_ms": round(_sanitize_msgs_ms, 2),
-                        "convert_tools_ms": round(_convert_tools_ms, 2),
-                        "sanitize_tools_ms": round(_sanitize_tools_ms, 2),
-                        "msg_count": _msg_count,
-                        "msg_chars": _msg_chars,
-                        "tool_count": _tool_count,
-                        # Token breakdown
-                        "system_chars": _system_chars,
-                        "user_chars": _user_chars,
-                        "assistant_chars": _assistant_chars,
-                        "tool_result_chars": _tool_result_chars,
-                        # Tool result breakdown by name
-                        "tool_result_by_name": dict(getattr(a, '_tool_result_chars', {})),
-                        # System prompt 细粒度
-                        "system_base_chars": _system_base_chars,
-                        "system_claude_md_chars": _system_claude_md_chars,
-                        "system_agents_md_chars": _system_agents_md_chars,
-                        "system_skills_chars": _system_skills_chars,
-                        "system_wiki_chars": _system_wiki_chars,
-                        "system_agents_chars": _system_agents_chars,
-                        "system_workspace_chars": _system_workspace_chars,
-                        # Plan mode
-                        "is_plan_mode": _is_plan_mode,
-                        "plan_mode_chars": _plan_mode_chars,
-                    },
-                }
-
-            try:
-                model_timeout = int(os.environ.get("MYCODE_MODEL_TIMEOUT", "120"))
-                result = await asyncio.wait_for(_with_retry(_do), timeout=model_timeout)
-                usage = result.get("usage", {}) if isinstance(result, dict) else {}
-                input_tokens = int(usage.get("prompt_tokens", 0) or 0)
-                output_tokens = int(usage.get("completion_tokens", 0) or 0)
-                total_tokens = int(usage.get("total_tokens", 0) or 0) or (input_tokens + output_tokens)
-                cached_tokens = int(usage.get("cached_tokens", 0) or 0)
-                duration_s = round(time.time() - _model_t0, 2)
-                span.update(
-                    output=_model_output_for_trace(result),
-                    usage_details=_usage_details_for_trace(usage),
-                    metadata={
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens,
-                        "total_tokens": total_tokens,
-                        "cached_tokens": cached_tokens,
-                        "cache_hit_rate": round(cached_tokens / input_tokens, 3) if input_tokens else 0.0,
-                        "duration_s": duration_s,
-                        "success": True,
-                    },
+                a.publish_tool_result_event(
+                    remaining["tc"]["id"],
+                    remaining["fn"],
+                    cancel_result,
+                    "error" if guard_stop else "cancelled",
+                    outcome="blocked" if guard_stop else "cancelled",
+                    metadata={"reason": guard_reason} if guard_reason else None,
                 )
+                a.append_tool_message(remaining["tc"]["id"], cancel_result, remaining["fn"])
 
-                asm = result.get("_assembly_metrics", None) if isinstance(result, dict) else None
-                if asm:
-                    span.add_metadata(assembly_metrics=asm)
-
-                return result
-            except asyncio.TimeoutError:
-                duration_s = round(time.time() - _model_t0, 2)
-                span.add_metadata(timeout_s=model_timeout, duration_s=duration_s)
-                span.record_error(TimeoutError(f"Model call timed out after {model_timeout}s"))
-                raise TimeoutError(f"Model call timed out after {model_timeout}s")
-            except Exception as e:
-                span.add_metadata(duration_s=round(time.time() - _model_t0, 2))
-                span.record_error(e)
-                raise
+    async def call_model_stream(self, *, tools_enabled: bool = True) -> dict:
+        """流式模型调用——委托 ModelCaller（测试 monkeypatch 缝，run() 必经 self 调用）。"""
+        return await self._model_caller.call(tools_enabled=tools_enabled)

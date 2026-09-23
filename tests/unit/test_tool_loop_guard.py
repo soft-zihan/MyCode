@@ -6,6 +6,8 @@ import pytest
 from agents.agent import Agent
 from agents.agent_loop import AgentLoop
 from agents.core.session import Session
+from agents.core.steer_queue import MessageQueue
+from agents.core.subagent_runner import execute_agent_tool
 from agents.core.subagent import get_sub_agent_max_tool_calls
 from agents.observability.tool_tracker import ToolCallTracker, check_tool_warnings
 from agents.tools.dispatcher import ToolDispatcher
@@ -166,11 +168,17 @@ async def test_agent_timeout_writes_sub_agent_end(monkeypatch):
 
     agent = FakeAgent()
     dispatcher = TimeoutDispatcher(agent_ref=agent)
-    with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(
-            dispatcher._execute_agent_tool({"type": "general", "prompt": "long task"}),
-            timeout=0.05,
-        )
+    # U2：runner 内层超时不再上抛——返回带 <subagent> 标签的 timeout 结果（模型可续跑）
+    result = await asyncio.wait_for(
+        execute_agent_tool(dispatcher.agent, {"type": "general", "prompt": "long task"}, timeout_s=dispatcher.get_tool_timeout("agent")),
+        timeout=0.05,
+    )
+    assert result.status == "error"
+    assert result.outcome == "timeout"
+    assert result.text == (
+        f'<subagent session_id="{result.metadata["sub_session_id"]}" state="timeout">'
+        'Sub-agent timed out after 0s</subagent>'
+    )
 
     end_events = [e for e in agent.session.events if e.get("type") == "sub_agent/end"]
     assert len(end_events) == 1
@@ -190,9 +198,11 @@ async def test_sub_agent_end_uses_child_tool_counters(monkeypatch):
 
     agent = ProgressFakeAgent()
     dispatcher = ToolDispatcher(agent_ref=agent)
-    result = await dispatcher._execute_agent_tool({"type": "general", "prompt": "progress task"})
+    result = await execute_agent_tool(dispatcher.agent, {"type": "general", "prompt": "progress task"}, timeout_s=dispatcher.get_tool_timeout("agent"))
 
-    assert result.text == "progress"
+    assert result.text == (
+        f'<subagent session_id="{result.metadata["sub_session_id"]}" state="completed">progress</subagent>'
+    )
     assert result.status == "ok"
     assert result.outcome == "success"
     assert result.metadata["tool_call_count"] == 8
@@ -340,6 +350,7 @@ async def test_concurrent_batch_blocks_near_duplicate_web_search_before_executio
 def _make_loop_stub_agent():
     agent = SimpleNamespace(
         session=Session(session_id="loop-stub", origin="test"),
+        message_queue=MessageQueue(),
         _current_turn=1,
         _current_step=0,
         _tool_call_count=0,
@@ -521,11 +532,13 @@ async def test_sub_agent_tool_budget_returns_partial_result(monkeypatch):
 
     agent = BudgetFakeAgent()
     dispatcher = ToolDispatcher(agent_ref=agent)
-    result = await dispatcher._execute_agent_tool({"type": "explore", "prompt": "budget task"})
+    result = await execute_agent_tool(dispatcher.agent, {"type": "explore", "prompt": "budget task"}, timeout_s=dispatcher.get_tool_timeout("agent"))
 
     assert agent.spawn_kwargs["max_tool_calls"] == 5
     assert isinstance(result, ToolExecutionResult)
-    assert result.text == "partial evidence"
+    assert result.text == (
+        f'<subagent session_id="{result.metadata["sub_session_id"]}" state="budget_exceeded">partial evidence</subagent>'
+    )
     assert result.status == "ok"
     assert result.outcome == "budget_exceeded"
     assert result.metadata["max_tool_calls"] == 5

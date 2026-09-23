@@ -51,83 +51,47 @@ def set_last_extract_pos(session_id: str, pos: int) -> None:
 
 
 def get_all_session_ids() -> list[str]:
-    """获取所有 session ID（扫描 events.jsonl 文件）。"""
-    from agents.core.session import session_dir
-    sdir = session_dir()
-    if not sdir.exists():
-        return []
-    
-    session_ids = []
-    for f in sdir.glob("*.events.jsonl"):
-        session_id = f.stem.replace(".events", "")
-        session_ids.append(session_id)
-    return session_ids
+    """获取所有 session ID（走 SessionBackend，两后端一致）。"""
+    from agents.core.session import get_session_backend
+    return get_session_backend().list_session_ids()
 
 
 def get_session_workspace(session_id: str) -> str | None:
     """读取 session 的工作区（session/created 事件的 cwd，顶层字段）。
 
-    只扫描文件头部若干行；找不到返回 None。
+    只读事件头部窗口（seq < 10）；找不到返回 None。
     """
-    from agents.core.session import session_dir
-    path = session_dir() / f"{session_id}.events.jsonl"
+    from agents.core.session import get_session_backend
     try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            for i, line in enumerate(f):
-                if i >= 5:
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    e = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if e.get("type") == "session/created":
-                    cwd = e.get("cwd")
-                    if cwd:
-                        return str(Path(cwd).resolve())
-                    return None
-    except OSError:
+        head_events = get_session_backend().get_events(session_id, from_seq=0, to_seq=10)
+    except Exception as e:
+        print(f"[wiki_capture] head events read failed for {session_id}: {e!r}")
         return None
+    for e in head_events:
+        if e.get("type") == "session/created":
+            cwd = e.get("cwd")
+            if cwd:
+                return str(Path(cwd).resolve())
+            return None
     return None
 
 
 def get_session_max_seq(session_id: str) -> int:
-    """获取指定 session 的最大 seq（只读文件尾部，避免全量加载）。"""
-    from agents.core.session import session_dir
-    path = session_dir() / f"{session_id}.events.jsonl"
-    if not path.exists():
+    """获取指定 session 的最大 seq（backend 尾部高效查询，避免全量加载）。"""
+    from agents.core.session import get_session_backend
+    last = get_session_backend().get_last_event(session_id)
+    if last is None:
         return 0
-    
     try:
-        size = path.stat().st_size
-        if size == 0:
-            return 0
-        with open(path, "rb") as f:
-            f.seek(max(0, size - 65536))
-            tail = f.read().decode("utf-8", errors="ignore")
-    except OSError as e:
-        print(f"[wiki_capture] read tail failed for {session_id}: {type(e).__name__}: {e}")
+        return int(last.get("seq", 0))
+    except (TypeError, ValueError):
         return 0
-    
-    # 从最后一行往前找第一条可解析的事件（容忍 torn tail）
-    for line in reversed(tail.splitlines()):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            return int(json.loads(line).get("seq", 0))
-        except (json.JSONDecodeError, TypeError, ValueError):
-            continue
-    return 0
 
 
 def get_session_events_from_seq(session_id: str, from_seq: int) -> list[dict]:
-    """从指定 seq 之后读取 session 事件。"""
-    from agents.core.session_backend_jsonl import JsonlSessionBackend
-    backend = JsonlSessionBackend()
-    return backend.get_events(session_id, from_seq=from_seq + 1)
+    """从指定 seq 之后读取 session 事件（走全局 backend）。"""
+    from agents.core.session import get_session_backend
+    return get_session_backend().get_events(session_id, from_seq=from_seq + 1)
 
 
 def find_sessions_needing_compilation(threshold: int = 10) -> list[tuple[str, int, int]]:
@@ -141,30 +105,36 @@ def find_sessions_needing_compilation(threshold: int = 10) -> list[tuple[str, in
         [(session_id, last_extract_pos, max_seq), ...]
         其中 max_seq - last_extract_pos > threshold，
         且会话空闲 ≥ capture.idleMinutes（2.4：避免提取进行中的会话，
-        以 events.jsonl mtime 为最后活动时间；进行中场景由压缩触发覆盖）
+        以最后事件的 time 字段为最后活动时间，两后端一致；
+        进行中场景由压缩触发覆盖）
     """
     import time
-    from agents.core.session import session_dir
+    from agents.core.session import get_session_backend
     from agents.wiki.evolution.settings import get_setting
 
-    idle_seconds = float(get_setting("capture.idleMinutes", 30)) * 60
-    now = time.time()
+    idle_ms = float(get_setting("capture.idleMinutes", 30)) * 60 * 1000
+    now_ms = int(time.time() * 1000)
     sessions_needing = []
     wiki_workspace = str(get_wiki_dir().parent.parent.resolve())
+    backend = get_session_backend()
 
-    for session_id in get_all_session_ids():
+    for session_id in backend.list_session_ids():
         last_pos = get_last_extract_pos(session_id)
-        max_seq = get_session_max_seq(session_id)
+        last_event = backend.get_last_event(session_id)
+        try:
+            max_seq = int(last_event.get("seq", 0)) if last_event else 0
+        except (TypeError, ValueError):
+            max_seq = 0
         
         # 如果有未提取的事件且超过阈值
         if max_seq > last_pos and (max_seq - last_pos) > threshold:
             if get_session_workspace(session_id) != wiki_workspace:
                 continue
-            events_path = session_dir() / f"{session_id}.events.jsonl"
             try:
-                if now - events_path.stat().st_mtime < idle_seconds:
-                    continue
-            except OSError:
+                last_time = int(last_event.get("time", 0)) if last_event else 0
+            except (TypeError, ValueError):
+                last_time = 0
+            if now_ms - last_time < idle_ms:
                 continue
             sessions_needing.append((session_id, last_pos, max_seq))
     

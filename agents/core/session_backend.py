@@ -56,3 +56,18 @@ class SessionBackend(Protocol):
     def get_event_count(self, session_id: str) -> int:
         """Get the total number of events for a session."""
         ...
+    
+    def list_session_ids(self) -> list[str]:
+        """List all session IDs that have stored events."""
+        ...
+    
+    def get_latest_event(self, session_id: str, event_type: str) -> dict[str, Any] | None:
+        """Get the latest event of the given type for a session (None if absent)."""
+        ...
+    
+    def get_last_event(self, session_id: str) -> dict[str, Any] | None:
+        """Get the last (highest seq) event of a session, efficiently (None if absent).
+        
+        用途：max_seq 探测与最后活动时间（event["time"]，毫秒 epoch）。
+        """
+        ...

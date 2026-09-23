@@ -85,7 +85,6 @@ class ContextManager:
             self.agent.last_api_call_time,
             self.agent._build_side_query(max_tokens=6000),
             self.agent.session_id,
-            self.agent._folded_session_memories,
         )
         if folded:
             self.agent.reset_context_token_estimate()
@@ -96,7 +95,6 @@ class ContextManager:
             self.agent.session,
             self.agent._build_side_query(max_tokens=6000),
             self.agent.session_id,
-            self.agent._folded_session_memories,
         )
         if compacted:
             from agents.logging import print_info

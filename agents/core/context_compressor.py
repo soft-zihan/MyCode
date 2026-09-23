@@ -35,7 +35,6 @@ from .session_memory import (
     fallback_folded_memory,
     format_folded_memory,
 )
-from .session import save_folded_session_memory
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +61,7 @@ Return only valid JSON:
 
 Rules:
 - Preserve file paths, commands, important outputs, test results, errors, decisions, and unresolved issues.
+- Preserve exact identifiers verbatim (never paraphrase or shorten): sub-agent session_id values from <subagent session_id=...> tags, job IDs, URLs, branch names, keys/tokens shown in outputs. Losing them breaks resumption.
 - Keep each abstract concise and under 1200 characters.
 - Do not invent details that are absent from the tool result.
 """
@@ -69,16 +69,6 @@ Rules:
 # 会话笔记和项目知识编译的 system prompt - 从文件加载
 _PROMPTS_DIR = Path(__file__).parent.parent / "prompts" / "side_query"
 COMPILE_SESSION_NOTES_AND_KNOWLEDGE_SYSTEM = (_PROMPTS_DIR / "compile_session.txt").read_text(encoding="utf-8")
-
-
-def _sanitize_for_utf8(value: Any) -> Any:
-    if isinstance(value, str):
-        return value.encode("utf-8", errors="replace").decode("utf-8")
-    if isinstance(value, list):
-        return [_sanitize_for_utf8(v) for v in value]
-    if isinstance(value, dict):
-        return {k: _sanitize_for_utf8(v) for k, v in value.items()}
-    return value
 
 
 def _count_hidden_seqs(session: Any) -> int:
@@ -157,7 +147,6 @@ class ContextCompressor:
         last_api_call_time: float,
         side_query: SideQueryFn | None,
         session_id: str,
-        folded_memories: list[dict],
     ) -> bool:
         current_token_count = max(0, int(current_token_count))
         utilization = current_token_count / self.effective_window if self.effective_window else 0
@@ -237,7 +226,7 @@ class ContextCompressor:
                     return folded
 
             session_folded = await self._fold_session(
-                session, side_query, session_id, folded_memories
+                session, side_query, session_id
             )
             folded = session_folded or folded
             if span:
@@ -305,7 +294,6 @@ class ContextCompressor:
         session: Any,
         side_query: SideQueryFn | None,
         session_id: str,
-        folded_memories: list[dict],
     ) -> bool:
         """手动触发会话折叠。"""
         if len(session.events) < 4:
@@ -315,7 +303,7 @@ class ContextCompressor:
 
         with trace_span("compact", metadata={"trigger": "manual"}) as span:
             hidden_before = _count_hidden_seqs(session)
-            folded = await self._fold_session(session, side_query, session_id, folded_memories, trigger="manual")
+            folded = await self._fold_session(session, side_query, session_id, trigger="manual")
             _finish_compaction_span(span, session, hidden_before, folded, folded)
             return folded
 
@@ -531,7 +519,6 @@ class ContextCompressor:
         session: Any,
         side_query: SideQueryFn | None,
         session_id: str,
-        folded_memories: list[dict],
         trigger: str = "auto",
     ) -> bool:
         groups = build_message_groups(session)
@@ -609,21 +596,6 @@ class ContextCompressor:
             "trigger": trigger,
         })
 
-        record = {
-            "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "trigger": trigger,
-            "fold_mode": fold_mode,
-            "session_id": session_id,
-            "summary": summary,
-            "session_notes": session_notes,
-            "project_knowledge": project_knowledge,
-        }
-        folded_memories.append(record)
-        try:
-            await asyncio.to_thread(save_folded_session_memory, session_id, _sanitize_for_utf8(record))
-        except Exception as exc:
-            logger.error("[session_fold] failed to persist folded memory: %s: %s", type(exc).__name__, exc)
-
         if self.wiki_enabled:
             from agents.core.workspace import _current_workspace
             from agents.wiki.pipeline import on_session_folded
@@ -658,6 +630,7 @@ class ContextCompressor:
         sections.append(
             "Return one updated session_notes value that merges the previous notes and the new transcript. "
             "Keep still-relevant goals, constraints, progress, decisions, failures, and next actions. "
+            "Preserve exact identifiers verbatim (sub-agent session_id from <subagent ...> tags, file paths, URLs, job IDs) — they are required to resume work. "
             "Remove information that has been superseded, completed with no continuing relevance, or proven wrong."
         )
         return "\n\n".join(sections)

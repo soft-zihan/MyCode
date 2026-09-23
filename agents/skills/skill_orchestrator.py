@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 import time
 from typing import Any, Awaitable, Callable
 
@@ -91,13 +90,14 @@ class SkillOrchestrator:
 
     # ── 对话消息提取 ──
 
-    def _strip_runtime_injections(self, text: str) -> str:
-        return re.sub(r"\n*<retrieved_skills>.*?</retrieved_skills>\s*", "", str(text or ""), flags=re.DOTALL).strip()
+    def _normalize_text(self, text: str) -> str:
+        # U0 清理：<retrieved_skills> 只有 strip 无 producer（死防御代码），删除
+        return str(text or "").strip()
 
     def _message_text(self, msg: dict[str, Any]) -> str:
         content = msg.get("content")
         if isinstance(content, str):
-            return self._strip_runtime_injections(content)
+            return self._normalize_text(content)
         if isinstance(content, list):
             parts: list[str] = []
             for block in content:
@@ -106,7 +106,7 @@ class SkillOrchestrator:
                         parts.append(str(block.get("text") or ""))
                     elif "content" in block and block.get("type") not in {"tool_result", "tool_use"}:
                         parts.append(str(block.get("content") or ""))
-            return self._strip_runtime_injections("\n".join(parts))
+            return self._normalize_text("\n".join(parts))
         return ""
 
     def get_recent_dialog_messages(self, messages: list[dict[str, Any]], *, max_messages: int = 8) -> list[dict[str, str]]:

@@ -26,6 +26,37 @@ class ChatMessage(BaseModel):
     thinking: Optional[bool] = None
 
 
+def build_message_with_context(message: str, context_files: Optional[list[str]]) -> str:
+    """把 context_files 内容拼进消息（api_chat / api_chat_stream / steer 共用）。"""
+    if not context_files:
+        return message
+    context = ""
+    for item_path in context_files:
+        try:
+            full_path = project_root / item_path
+            if full_path.exists():
+                if full_path.is_dir():
+                    structure = f"\n\n--- {item_path}/ (directory structure) ---\n"
+                    try:
+                        entries = sorted(full_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+                        for entry in entries[:50]:
+                            prefix = "📁 " if entry.is_dir() else "📄 "
+                            structure += f"{prefix}{entry.name}\n"
+                        if len(entries) > 50:
+                            structure += f"... and {len(entries) - 50} more entries\n"
+                    except PermissionError:
+                        structure += "(Permission denied)\n"
+                    context += structure
+                else:
+                    content = full_path.read_text(encoding="utf-8")
+                    context += f"\n\n--- {item_path} ---\n{content}"
+        except Exception as e:
+            context += f"\n\n--- {item_path} ---\nError reading: {e}"
+    if not context:
+        return message
+    return f"{message}\n\nContext files:{context}"
+
+
 @router.post("/api/chat")
 async def api_chat(data: ChatMessage) -> dict[str, Any]:
     try:
@@ -59,33 +90,7 @@ async def api_chat(data: ChatMessage) -> dict[str, Any]:
         )
         svc = AgentService(agent)
         
-        context = ""
-        if data.context_files:
-            for item_path in data.context_files:
-                try:
-                    full_path = project_root / item_path
-                    if full_path.exists():
-                        if full_path.is_dir():
-                            structure = f"\n\n--- {item_path}/ (directory structure) ---\n"
-                            try:
-                                entries = sorted(full_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
-                                for entry in entries[:50]:
-                                    prefix = "📁 " if entry.is_dir() else "📄 "
-                                    structure += f"{prefix}{entry.name}\n"
-                                if len(entries) > 50:
-                                    structure += f"... and {len(entries) - 50} more entries\n"
-                            except PermissionError:
-                                structure += "(Permission denied)\n"
-                            context += structure
-                        else:
-                            content = full_path.read_text(encoding="utf-8")
-                            context += f"\n\n--- {item_path} ---\n{content}"
-                except Exception as e:
-                    context += f"\n\n--- {item_path} ---\nError reading: {e}"
-        
-        full_message = data.message
-        if context:
-            full_message = f"{data.message}\n\nContext files:{context}"
+        full_message = build_message_with_context(data.message, data.context_files)
         
         await svc.chat(full_message)
         
@@ -154,33 +159,7 @@ async def api_chat_stream(data: ChatMessage) -> dict[str, Any]:
                 agent.set_permission_mode(data.permission_mode)
         
         # Build context
-        context = ""
-        if data.context_files:
-            for item_path in data.context_files:
-                try:
-                    full_path = project_root / item_path
-                    if full_path.exists():
-                        if full_path.is_dir():
-                            structure = f"\n\n--- {item_path}/ (directory structure) ---\n"
-                            try:
-                                entries = sorted(full_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
-                                for entry in entries[:50]:
-                                    prefix = "📁 " if entry.is_dir() else "📄 "
-                                    structure += f"{prefix}{entry.name}\n"
-                                if len(entries) > 50:
-                                    structure += f"... and {len(entries) - 50} more entries\n"
-                            except PermissionError:
-                                structure += "(Permission denied)\n"
-                            context += structure
-                        else:
-                            content = full_path.read_text(encoding="utf-8")
-                            context += f"\n\n--- {item_path} ---\n{content}"
-                except Exception as e:
-                    context += f"\n\n--- {item_path} ---\nError reading: {e}"
-        
-        full_message = data.message
-        if context:
-            full_message = f"{data.message}\n\nContext files:{context}"
+        full_message = build_message_with_context(data.message, data.context_files)
         
         # session/created 事件已由 session_manager.create 追加到事件流
         # （持久化 + cwd 投影 + WS 全体广播，单一数据源）

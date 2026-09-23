@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import os
 import time
 from pathlib import Path
 
@@ -27,20 +25,16 @@ def ws(tmp_path, monkeypatch):
 
 
 def _write_session(tmp_home: Path, session_id: str, cwd: str | None, max_seq: int, age_s: float = 3600):
-    sdir = tmp_home / ".mycode" / "sessions"
-    sdir.mkdir(parents=True, exist_ok=True)
-    path = sdir / f"{session_id}.events.jsonl"
-    lines = []
+    """经当前 backend 写入合成会话（jsonl/sqlite 一致）；空闲判定用事件 time 字段。"""
+    from agents.core.session import get_session_backend
+    backend = get_session_backend()
+    t = int((time.time() - age_s) * 1000)
     seq = 0
     if cwd is not None:
-        lines.append(json.dumps({"type": "session/created", "session_id": session_id, "cwd": cwd, "seq": seq}))
+        backend.append(session_id, {"type": "session/created", "session_id": session_id, "cwd": cwd, "seq": seq, "time": t})
     for i in range(max_seq):
         seq += 1
-        lines.append(json.dumps({"type": "user_message", "session_id": session_id, "content": f"m{i}", "seq": seq}))
-    path.write_text("\n".join(lines) + "\n")
-    old = time.time() - age_s
-    os.utime(path, (old, old))
-    return path
+        backend.append(session_id, {"type": "user_message", "session_id": session_id, "content": f"m{i}", "seq": seq, "time": t})
 
 
 def test_get_session_workspace_reads_cwd(ws, tmp_path):

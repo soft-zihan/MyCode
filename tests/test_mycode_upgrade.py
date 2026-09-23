@@ -171,3 +171,33 @@ def test_status_line_shows_tokens_after_api_report():
     agent.set_last_usage_tokens(12000, 12650)
     line = agent.status_line()
     assert "12650" in line
+
+
+# ─── D3 hotfix：system prompt 冻结（opencode-v2 对齐）─────────
+
+def test_d3_injections_land_as_events_and_keep_system_prompt_frozen(tmp_path, monkeypatch):
+    """memory/wiki 提醒走 memory_injection 落盘通道，system[0] 不再被拼接污染。"""
+    import asyncio
+    from agents.agent_loop import AgentLoop
+
+    monkeypatch.setenv("MYCODE_SESSION_DIR", str(tmp_path / "sessions"))
+    agent = _make_agent()
+    agent.is_sub_agent = True  # 跳过快照/wiki 预取（与本测试无关）
+    agent.session.system_prompt = "BASE SYSTEM"
+    injection = "<related-session-memories>历史会话记忆</related-session-memories>"
+    agent._pending_system_injections = [injection]
+
+    asyncio.run(AgentLoop(agent)._prepare_turn("用户问题"))
+
+    # 1) system prompt 冻结：注入不改 system[0]
+    assert agent.session.system_prompt == "BASE SYSTEM"
+    msgs = agent.session.get_messages_for_llm()
+    assert msgs[0] == {"role": "system", "content": "BASE SYSTEM"}
+    # 2) 注入渲染为 user_message 之后的 user 消息（cache 无损、位置正确）
+    contents = [m.get("content", "") for m in msgs if m["role"] == "user"]
+    assert "用户问题" in contents
+    mem_idx = next(i for i, c in enumerate(contents) if "related-session-memories" in c)
+    assert contents.index("用户问题") < mem_idx
+    # 3) 暂存清空 + 事件已落盘（事件流可追溯，规则 3）
+    assert agent._pending_system_injections == []
+    assert any(e["type"] == "memory_injection" for e in agent.session._log)

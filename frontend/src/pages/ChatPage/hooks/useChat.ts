@@ -5,7 +5,7 @@ import {
   compactSession, updatePermissionMode,
   forkSession, respondToPermission, respondToQuestion,
   stageRewind, commitRewind,
-  fetchSessionSummary,
+  fetchSessionSummary, steerSession,
   DEFAULT_CONTEXT_WINDOW,
 } from '../../../api/client';
 import type { RewindPlan } from '../../../api/client';
@@ -612,14 +612,33 @@ export function useChat() {
     }
     
     if (isStreaming) {
-      logger.info('[MSG] queued as steer:', inputValue.trim().slice(0, 30));
-      setPendingSteerMessages(prev => [...prev, {
-        content: inputValue.trim(),
-        contextFiles: [...contextFiles],
-        model: selectedModel || undefined,
-      }]);
+      // U1: 运行中插话走 steer 端点（后端 MessageQueue 在下一 step 边界注入当前轮），
+      // 不再本地排队等 turn 结束重发。仅当服务端报"不活跃"（竞态：turn 恰好结束）
+      // 才退回重发队列，作为新 turn 发送。
+      const steerContent = inputValue.trim();
+      const steerCtx = [...contextFiles];
+      logger.info('[MSG] steer via API:', steerContent.slice(0, 30));
       setInputValue('');
       setContextFiles([]);
+      // 乐观 UI：后端将落盘 user_message 事件，但 WS 侧只更新投影不回显气泡
+      addUserMessage(currentSessionIdRef.current!, steerContent, steerCtx.length > 0 ? steerCtx : undefined, undefined, selectedModel || undefined);
+      const fallbackToResend = () => {
+        setPendingSteerMessages(prev => [...prev, {
+          content: steerContent,
+          contextFiles: steerCtx,
+          model: selectedModel || undefined,
+        }]);
+      };
+      try {
+        const result = await steerSession(currentSessionIdRef.current!, steerContent, steerCtx.length > 0 ? steerCtx : undefined);
+        if (!result.success) {
+          logger.info('[MSG] steer rejected, fallback to resend:', result.message);
+          fallbackToResend();
+        }
+      } catch (err) {
+        logger.error('[MSG] steer failed, fallback to resend:', err);
+        fallbackToResend();
+      }
       return;
     }
     

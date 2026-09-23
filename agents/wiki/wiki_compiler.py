@@ -395,7 +395,7 @@ async def check_and_compile_pending_sessions(side_query: Any, threshold: int = 2
 
     两个来源：
     1. 未编译的 segment 文件（编译失败/中断残留）→ 直接重试编译
-    2. 水位线落后 max_seq 超过 threshold 的 session（未触发过压缩）→ 从 events.jsonl 补捕获再编译
+    2. 水位线落后 max_seq 超过 threshold 的 session（未触发过压缩）→ 从事件后端补捕获再编译
 
     水位线只在编译成功后推进，失败留待下次重试。
 

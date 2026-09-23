@@ -30,7 +30,8 @@ from pathlib import Path
 
 BASE_URL = "http://localhost:5555"
 WS_URL = "ws://localhost:5555/ws/events"
-SESSION_DIR = Path.home() / ".mycode" / "sessions"
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 class EventCollector:
@@ -114,38 +115,21 @@ class EventCollector:
         r = requests.get(f"{BASE_URL}/api/sessions/{sid}/events", params={"limit": limit})
         return r.json() if r.ok else None
     
-    def check_jsonl(self, sid):
-        """检查events.jsonl文件"""
-        p = SESSION_DIR / f"{sid}.events.jsonl"
-        if not p.exists():
-            print(f"[CHECK] {sid}.events.jsonl 不存在")
+    def check_events(self, sid):
+        """检查落盘事件（经 SessionBackend，jsonl/sqlite 两后端一致）"""
+        from agents.core.session import get_session_backend
+        events = get_session_backend().load_all_events(sid)
+        if not events:
+            print(f"[CHECK] session {sid} 无落盘事件")
             return []
         
-        with open(p) as f:
-            events = [json.loads(l) for l in f if l.strip()]
-        
-        print(f"[CHECK] {sid}.events.jsonl: {len(events)} events")
+        print(f"[CHECK] backend events: {len(events)} events")
         for e in events:
             ct = str(e.get('content', ''))[:40] if e.get('content') else ''
             seq = str(e.get('seq', '-'))
             print(f"  seq={seq:>3s} {e.get('type'):25s} {ct}")
         
         return events
-    
-    def check_json(self, sid):
-        """检查.json文件"""
-        p = SESSION_DIR / f"{sid}.json"
-        if not p.exists():
-            print(f"[CHECK] {sid}.json 不存在")
-            return None
-        
-        with open(p) as f:
-            data = json.load(f)
-        
-        events = data.get('events', [])
-        print(f"[CHECK] {sid}.json: {len(events)} events")
-        
-        return data
     
     def save(self, path='/tmp/ws_events.json'):
         """保存所有事件"""
@@ -200,8 +184,8 @@ async def test_basic(collector, wait_time=15):
     sid = collector.send_msg("你好，请简短回复")
     await collector.recv_loop(wait_time)
     
-    print(f"\n--- 检查events.jsonl ---")
-    collector.check_jsonl(sid)
+    print(f"\n--- 检查落盘事件 ---")
+    collector.check_events(sid)
     
     print(f"\n--- 检查GET /api/sessions/{sid}/events ---")
     api_events = collector.get_events(sid)
@@ -220,8 +204,8 @@ async def test_subagent(collector, sid, wait_time=30):
     collector.send_msg("请并行调用两个子智能体向我打招呼", sid)
     await collector.recv_loop(wait_time)
     
-    print(f"\n--- 检查events.jsonl ---")
-    events = collector.check_jsonl(sid)
+    print(f"\n--- 检查落盘事件 ---")
+    events = collector.check_events(sid)
     
     sub_events = [e for e in events if 'sub_agent' in e.get('type', '')]
     print(f"  子智能体事件数: {len(sub_events)}")
@@ -240,9 +224,9 @@ async def test_fork(collector, sid, wait_time=2):
     
     await collector.recv_loop(wait_time)
     
-    print(f"\n--- 检查新session的events.jsonl ---")
+    print(f"\n--- 检查新session的落盘事件 ---")
     if new_sid:
-        collector.check_jsonl(new_sid)
+        collector.check_events(new_sid)
         
         print(f"\n--- 检查GET /api/sessions/{new_sid}/events ---")
         fork_api = collector.get_events(new_sid)
@@ -264,8 +248,8 @@ async def test_abort(collector, wait_time=5):
     collector.abort(sid)
     await collector.recv_loop(wait_time)
     
-    print(f"\n--- 检查abort后的events.jsonl ---")
-    collector.check_jsonl(sid)
+    print(f"\n--- 检查abort后的落盘事件 ---")
+    collector.check_events(sid)
     
     return sid
 

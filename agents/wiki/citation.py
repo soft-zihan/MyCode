@@ -6,7 +6,7 @@
 本模块负责：
 - CitationStripper：流式增量剥离器（逐 token 转发场景，hold 疑似标签前缀）
 - strip_citations：一次性剥离（落盘 assistant_message 前，防 citation 进
-  events.jsonl 被下次提取回灌）
+  事件日志被下次提取回灌）
 - 解析出的 path → wiki_manager.increment_usage（usage_count+1、last_used，
   不单独 git commit）
 """

@@ -15,15 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-
-def _sanitize_for_utf8(value: Any) -> Any:
-    if isinstance(value, str):
-        return value.encode("utf-8", errors="replace").decode("utf-8")
-    if isinstance(value, list):
-        return [_sanitize_for_utf8(v) for v in value]
-    if isinstance(value, dict):
-        return {k: _sanitize_for_utf8(v) for k, v in value.items()}
-    return value
+from agents.core.text_sanitization import sanitize_for_utf8
 
 
 @dataclass
@@ -50,7 +42,7 @@ class SessionLifecycle:
         """从事件日志恢复 Session 状态。"""
         if isinstance(data.get("events"), list):
             session._log.clear()
-            session._log.extend(_sanitize_for_utf8(data["events"]))
+            session._log.extend(sanitize_for_utf8(data["events"]))
         
         # 恢复 plan_slug
         if data.get("plan_slug"):
@@ -145,3 +137,43 @@ class SessionLifecycle:
         session.hide_events(seqs_to_delete)
         
         return f"Kept {len(seqs_to_keep)} message(s), removed {len(seqs_to_delete)}."
+
+
+# ── Agent 级生命周期操作（U0 从 Agent 迁入；Agent 保留同名门面）──
+
+def restore_agent_session(agent: Any, data: dict) -> None:
+    from agents.logging import print_info
+
+    state = SessionState(session_id=agent.session_id, model=agent.model)
+    agent._session_lifecycle.restore(state, data, agent.session)
+    print_info(f"Session restored ({agent._get_message_count()} messages).")
+
+
+async def rewind_agent_turns(agent: Any, n: int = 1) -> str:
+    """统一回退：对话回退 N 轮 + 文件恢复到快照（原子操作）。"""
+    from agents.core.rewind_service import get_rewind_service
+    svc = get_rewind_service()
+    plan = await svc.stage(
+        agent.session_id, turns=n, session=agent.session, workspace=str(agent.workspace)
+    )
+    result = await svc.commit(plan.id, session=agent.session)
+    msg = (
+        f"Rewound {n} turn(s): removed {result['removed_user_messages']} user messages, "
+        f"{result['removed_events']} events"
+    )
+    if result["restored_files"]:
+        msg += f", restored {len(result['restored_files'])} files"
+    return msg
+
+
+def fork_agent_session(agent: Any) -> str:
+    state = SessionState(
+        session_id=agent.session_id,
+        model=agent.model,
+        start_time=agent.session_start_time,
+        cwd=str(agent.workspace),
+    )
+    result, new_session = agent._session_lifecycle.fork(state, agent.session)
+    agent.session = new_session
+    agent.session_id = new_session.id
+    return result

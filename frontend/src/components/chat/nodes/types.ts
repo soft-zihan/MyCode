@@ -61,6 +61,12 @@ export interface SubAgentNode extends BaseNode {
   internalOrder: SubAgentEventItem[];
   tokens?: number;
   durationMs?: number;
+  /** U3a：已转后台/后台发起（完成后自动通知，主会话不阻塞） */
+  backgrounded?: boolean;
+  /** U3a：节点创建时刻（ms），用于"阻塞超 3s 显示转后台按钮" */
+  startedAt?: number;
+  /** U3a：subagent/completed 注入的最终结果文本（带 <subagent> 标签） */
+  completionText?: string;
 }
 
 export interface ErrorNode extends BaseNode {

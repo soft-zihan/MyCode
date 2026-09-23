@@ -232,7 +232,7 @@ def test_create_keeps_process_cwd_and_records_workspace_event(monkeypatch, tmp_p
     """核心回归：create() 不再 os.chdir；cwd 进事件流 → 投影；进程 CWD 恒定。"""
     from agents.session_manager import SessionManager
 
-    sessions_dir = _isolate_agent_env(monkeypatch, tmp_path)
+    _isolate_agent_env(monkeypatch, tmp_path)
     launch = tmp_path / "launch"
     ws = tmp_path / "ws"
     launch.mkdir()
@@ -248,8 +248,11 @@ def test_create_keeps_process_cwd_and_records_workspace_event(monkeypatch, tmp_p
     assert len(created) == 1
     assert created[0]["cwd"] == str(ws)
     assert session.projections.get("cwd") == str(ws)
-    # 事件已落盘（重建的数据源）
-    assert any(sessions_dir.glob("*.events.jsonl"))
+    # 事件已落盘（重建的数据源；经 backend 验证，jsonl/sqlite 一致）
+    from agents.core.session import get_session_backend
+    backend = get_session_backend()
+    assert backend.session_exists(session.id)
+    assert any(e["type"] == "session/created" for e in backend.load_all_events(session.id))
 
 
 async def test_restore_recovers_workspace_from_events(monkeypatch, tmp_path):

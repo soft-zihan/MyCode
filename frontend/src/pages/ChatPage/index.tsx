@@ -1,10 +1,11 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useMemo } from 'react';
 import { 
   MessageSquare, PanelRight, Send, Square, Zap, File, X, Cpu, Sliders, Layers, BookOpen
 } from 'lucide-react';
 import { ReviewPanel } from '../../components/ReviewPanel';
 import { DiffViewer } from '../../components/DiffViewer';
 import { ChatView } from '../../components/chat/nodes';
+import type { SubAgentNode } from '../../components/chat/nodes';
 import { RewindDialog } from '../../components/chat/RewindDialog';
 import { FileTree } from './components/FileTree';
 import { FileViewer } from './components/FileViewer';
@@ -15,6 +16,7 @@ import { ApprovalBar } from '../../components/agent/ApprovalBar';
 import { PlanApprovalDialog } from '../../components/agent/PlanApprovalDialog';
 import { WikiPlanPanel } from '../../components/agent/WikiPlanPanel';
 import { TodoListPanel } from '../../components/chat/TodoListPanel';
+import { BackgroundTasksPanel } from '../../components/chat/BackgroundTasksPanel';
 import { PageLayout } from '../../components/PageLayout';
 import { useChat } from './hooks/useChat';
 import { Composer } from '../../components/chat/Composer';
@@ -131,6 +133,18 @@ export default function ChatPage() {
     handleConfirmGoal,
     handleCancelGoal,
   } = useChat();
+
+  // U3a：后台任务列表纯从事件流派生（sub-agent 节点 backgrounded && running），零专用 API
+  const backgroundTasks = useMemo(() => {
+    const list: SubAgentNode[] = [];
+    for (const key of chatSnapshot.order) {
+      const node = chatSnapshot.nodes.get(key);
+      if (node && node.kind === 'sub-agent' && node.backgrounded && node.status === 'running') {
+        list.push(node);
+      }
+    }
+    return list;
+  }, [chatSnapshot]);
 
   // Fetch file list for @ mentions
   useEffect(() => {
@@ -320,6 +334,9 @@ export default function ChatPage() {
           {todos && todos.length > 0 && (
             <TodoListPanel todos={todos} />
           )}
+
+          {/* U3a: Background Tasks Panel */}
+          <BackgroundTasksPanel tasks={backgroundTasks} />
 
           {/* Goal Mode UI */}
           {goalState && (

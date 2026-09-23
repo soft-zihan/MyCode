@@ -65,6 +65,25 @@ class TestHealth:
         assert r.json()["status"] == "ok"
 
 
+class TestSteerEndpoint:
+    """U1：steer 端点护栏——非运行中会话拒绝，前端凭 success=false 退回普通发送。"""
+
+    def test_steer_rejects_inactive_session(self, api):
+        r = api.post("/api/sessions/nonexistent-session/steer", json={"message": "hi"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["success"] is False
+
+    def test_steer_request_accepts_context_files(self, api):
+        # schema 校验：context_files 字段存在且可选（非运行中仍走拒绝分支）
+        r = api.post(
+            "/api/sessions/nonexistent-session/steer",
+            json={"message": "hi", "context_files": ["README.md"]},
+        )
+        assert r.status_code == 200
+        assert r.json()["success"] is False
+
+
 class TestSessionsAPI:
     def test_list_sessions_empty(self, api):
         r = api.get("/api/sessions")

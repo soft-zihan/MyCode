@@ -30,7 +30,7 @@ def _stub_folds(compressor: ContextCompressor, calls: dict) -> None:
         calls["tool"] += 1
         return True
 
-    async def fake_session_fold(session, side_query, session_id, folded_memories):
+    async def fake_session_fold(session, side_query, session_id):
         calls["session"] += 1
         return True
 
@@ -54,7 +54,7 @@ async def test_arm_truncate_hides_oldest_no_summary():
     current = estimate_visible_message_tokens(session)
     assert current > 500, "测试前提：利用率须超过触发线"
 
-    result = await compressor.run_pipeline(session, current, time.time(), None, "s", [])
+    result = await compressor.run_pipeline(session, current, time.time(), None, "s")
     assert result is True
 
     types = [e.get("type") for e in session.events]
@@ -78,7 +78,7 @@ async def test_arm_truncate_ignores_idle_and_low_utilization():
         effective_window=10000, tool_fold_threshold=0.5, idle_timeout_seconds=1, arm="truncate",
     )
     session = _make_session()
-    result = await compressor.run_pipeline(session, 10, time.time() - 1000, None, "s", [])
+    result = await compressor.run_pipeline(session, 10, time.time() - 1000, None, "s")
     assert result is False
 
 
@@ -86,7 +86,7 @@ async def test_arm_tool_only_skips_session_fold():
     compressor = ContextCompressor(effective_window=100, tool_fold_threshold=0.5, arm="tool_only")
     calls = {"tool": 0, "session": 0}
     _stub_folds(compressor, calls)
-    result = await compressor.run_pipeline(_make_session(), 90, time.time(), None, "s", [])
+    result = await compressor.run_pipeline(_make_session(), 90, time.time(), None, "s")
     assert result is True
     assert calls == {"tool": 1, "session": 0}
 
@@ -95,7 +95,7 @@ async def test_arm_session_only_skips_tool_fold():
     compressor = ContextCompressor(effective_window=100, tool_fold_threshold=0.5, arm="session_only")
     calls = {"tool": 0, "session": 0}
     _stub_folds(compressor, calls)
-    result = await compressor.run_pipeline(_make_session(), 90, time.time(), None, "s", [])
+    result = await compressor.run_pipeline(_make_session(), 90, time.time(), None, "s")
     assert result is True
     assert calls == {"tool": 0, "session": 1}
 
@@ -107,7 +107,7 @@ async def test_experimental_arm_ignores_idle_trigger():
     )
     calls = {"tool": 0, "session": 0}
     _stub_folds(compressor, calls)
-    result = await compressor.run_pipeline(_make_session(), 10, time.time() - 1000, None, "s", [])
+    result = await compressor.run_pipeline(_make_session(), 10, time.time() - 1000, None, "s")
     assert result is False
     assert calls == {"tool": 0, "session": 0}
 
@@ -118,7 +118,7 @@ async def test_full_arm_keeps_idle_trigger():
     )
     calls = {"tool": 0, "session": 0}
     _stub_folds(compressor, calls)
-    await compressor.run_pipeline(_make_session(), 10, time.time() - 1000, None, "s", [])
+    await compressor.run_pipeline(_make_session(), 10, time.time() - 1000, None, "s")
     assert calls["tool"] == 1
 
 
@@ -173,7 +173,7 @@ async def test_wiki_prefetch_rearms_after_consume(tmp_path, monkeypatch):
         queries.append(query)
         return []
 
-    monkeypatch.setattr("agents.agent.select_relevant_wiki_entries", fake_select)
+    monkeypatch.setattr("agents.wiki.wiki_manager.select_relevant_wiki_entries", fake_select)
 
     agent.start_wiki_prefetch("m1", object())
     first = agent._wiki_prefetch

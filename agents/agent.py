@@ -16,16 +16,17 @@ import openai
 from agents.tools.mcp import McpManager
 from agents.agent_loop import AgentLoop
 from agents.tools.executor import persist_large_result, detect_failure
-from agents.wiki.wiki_manager import (
-    select_relevant_wiki_entries,
-    format_wiki_for_injection,
-    build_wiki_prompt_section,
-    list_pending_confirm_entries,
-    init_wiki_git,
-    WikiEntry,
-)
-from agents.core.model_registry import ModelEndpoint, resolve_agent_endpoint, resolve_side_endpoint
+from agents.observability.tool_tracker import RepeatGuard
+from agents.wiki.wiki_manager import start_wiki_prefetch as run_wiki_prefetch
+from agents.core.model_registry import ModelEndpoint, resolve_agent_endpoint
 from agents.core.prompt import build_system_prompt
+from agents.core import prompt_runtime
+from agents.core.side_query import SideQueryFactory
+from agents.core import session_lifecycle
+from agents.core.subagent_runner import spawn_sub_agent
+from agents.core.steer_queue import MessageQueue
+from agents.core.text_sanitization import safe_utf8_text
+from agents.core.turn_runner import TurnRunner
 from agents.core.session_memory import (
     FOLD_SESSION_MEMORY_SYSTEM,
     build_folding_user_prompt,
@@ -34,12 +35,9 @@ from agents.core.session_memory import (
     format_folded_memory,
     parse_folded_memory,
 )
-from agents.core.session import save_folded_session_memory, Session
-from agents.core.subagent import get_sub_agent_config
-from agents.tools import ToolDef, tool_definitions, execute_tool, CONCURRENCY_SAFE_TOOLS, check_permission, \
-    get_active_tool_definitions
-from agents.logging import print_info, print_divider, print_assistant_text, print_sub_agent_start, print_sub_agent_end, \
-    print_error, print_retry
+from agents.core.session import Session
+from agents.tools import ToolDef, tool_definitions
+from agents.logging import print_info, print_assistant_text, print_error, print_retry
 from agents.plan.plan_mode import PlanModeManager
 from agents.tools.dispatcher import ToolDispatcher
 from agents.core.context import ContextManager
@@ -60,25 +58,6 @@ def _is_retryable(error: Exception) -> bool:
     if isinstance(error, ContentLevelError):
         return True
     return False
-
-
-def _safe_utf8_text(value: object) -> str:
-    return str(value).encode("utf-8", errors="replace").decode("utf-8")
-
-
-def _sanitize_for_utf8(value: Any) -> Any:
-    if isinstance(value, str):
-        return _safe_utf8_text(value)
-    if isinstance(value, list):
-        return [_sanitize_for_utf8(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_sanitize_for_utf8(item) for item in value)
-    if isinstance(value, dict):
-        return {
-            _sanitize_for_utf8(key): _sanitize_for_utf8(item)
-            for key, item in value.items()
-        }
-    return value
 
 
 async def _with_retry(fn, max_retries: int = 3):
@@ -114,20 +93,6 @@ def _get_max_output_tokens(model: str) -> int:
     return 16384
 
 
-def _to_openai_tools(tools: list[ToolDef]) -> list[dict]:
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": t["name"],
-                "description": t["description"],
-                "parameters": t["input_schema"],
-            },
-        }
-        for t in tools
-    ]
-
-
 class Agent:
     def __init__(self,
                  *,
@@ -150,49 +115,52 @@ class Agent:
                  workspace: Any = None,
                  session_id: str | None=None,
                  options: Any | None=None,):
-        if options is not None:
-            from agents.core.options import AgentOptions
-            if isinstance(options, AgentOptions):
-                permission_mode = options.permission_mode
-                model = options.model
-                api_base = options.api_base
-                api_key = options.api_key
-                thinking = options.thinking
-                thinking_feedback = getattr(options, 'thinking_feedback', None)
-                compression_arm = options.compression_arm
-                context_window = getattr(options, 'context_window', None)
-                max_cost_usd = options.max_cost_usd
-                max_turns = options.max_turns
-                max_tool_calls = options.max_tool_calls
-                confirm_fn = options.confirm_fn
-                custom_system_prompt = options.custom_system_prompt
-                custom_tools = options.custom_tools
-                is_sub_agent = options.is_sub_agent
-                parent_abort_event = options.parent_abort_event
-                workspace = options.workspace
-                session_id = getattr(options, 'session_id', None)
+        # 段1：参数归一——显式 kwargs 收敛为 AgentOptions（传入 options 实例则整体覆盖，
+        # 与原"options 展开"语义一致；非 AgentOptions 的 options 值按原语义忽略）
+        from agents.core.options import AgentOptions
+        if not isinstance(options, AgentOptions):
+            options = AgentOptions(
+                permission_mode=permission_mode, model=model, api_base=api_base, api_key=api_key,
+                thinking=thinking, thinking_feedback=thinking_feedback,
+                compression_arm=compression_arm, context_window=context_window,
+                max_cost_usd=max_cost_usd, max_turns=max_turns, max_tool_calls=max_tool_calls,
+                confirm_fn=confirm_fn, custom_system_prompt=custom_system_prompt,
+                custom_tools=custom_tools, is_sub_agent=is_sub_agent,
+                parent_abort_event=parent_abort_event, workspace=workspace,
+                session_id=session_id,
+            )
+        self._init_config(options)
+        self._init_state(options)
+        self._init_runtime_state(options)
+        self._init_prompt(options)
+        self._loop = AgentLoop(self)
+        self._turn_runner = TurnRunner(self)
+        self._tool_dispatcher = ToolDispatcher(agent_ref=self)
+        self._context_manager = ContextManager(agent_ref=self)
 
-        self.permission_mode = permission_mode
-        self.thinking = thinking
-        self.thinking_feedback = thinking_feedback
-        self.model = model
-        self.is_sub_agent = is_sub_agent
-        self.tools = custom_tools if custom_tools is not None else tool_definitions
-        self.max_cost_usd = max_cost_usd
-        self.max_turns = max_turns
-        self.max_tool_calls = max_tool_calls
-        self.confirm_fn = confirm_fn
-        self._custom_system_prompt = custom_system_prompt
-        self.workspace: Path = Path(workspace).resolve() if workspace else Path.cwd()
-        self._api_base = api_base
-        self._api_key = api_key
-        self._side_client_cache: tuple[tuple, tuple] | None = None
+    def _init_config(self, opts: "AgentOptions") -> None:
+        """段2：基础配置 + 端点解析（thinking/压缩臂/上下文窗口）+ 会话身份。"""
+        self.permission_mode = opts.permission_mode
+        self.thinking = opts.thinking
+        self.thinking_feedback = opts.thinking_feedback
+        self.model = opts.model
+        self.is_sub_agent = opts.is_sub_agent
+        self.tools = opts.custom_tools if opts.custom_tools is not None else tool_definitions
+        self.max_cost_usd = opts.max_cost_usd
+        self.max_turns = opts.max_turns
+        self.max_tool_calls = opts.max_tool_calls
+        self.confirm_fn = opts.confirm_fn
+        self._custom_system_prompt = opts.custom_system_prompt
+        self.workspace: Path = Path(opts.workspace).resolve() if opts.workspace else Path.cwd()
+        self._api_base = opts.api_base
+        self._api_key = opts.api_key
+        self._side_query = SideQueryFactory(self)
         from agents.config import (
             DEFAULT_AUTO_COMPACT_THRESHOLD,
             DEFAULT_CONTEXT_WINDOW,
             get_endpoint_by_model,
         )
-        _ep = get_endpoint_by_model(model)
+        _ep = get_endpoint_by_model(opts.model)
         self.auto_compact_threshold = DEFAULT_AUTO_COMPACT_THRESHOLD
         # thinking 解析链：请求级覆盖 > 端点配置 > None（跟随模型默认）
         if self.thinking is None and _ep is not None:
@@ -201,23 +169,27 @@ class Agent:
         if self.thinking_feedback is None:
             self.thinking_feedback = bool(_ep.thinking_feedback) if _ep is not None else False
         from agents.core.context_compressor import COMPRESSION_ARMS
-        self.compression_arm = compression_arm or "full"
+        self.compression_arm = opts.compression_arm or "full"
         if self.compression_arm not in COMPRESSION_ARMS:
             raise ValueError(f"compression_arm must be one of {sorted(COMPRESSION_ARMS)}, got {self.compression_arm!r}")
         # 窗口解析优先级：显式覆盖（评测消融）> 端点配置 > 默认
-        if context_window is not None:
-            self.context_window = context_window
+        if opts.context_window is not None:
+            self.context_window = opts.context_window
         else:
             self.context_window = _ep.context_window if _ep else DEFAULT_CONTEXT_WINDOW
         self.effective_window = self.context_window - 20000
-        self.session_id = session_id or uuid.uuid4().hex[:8]
-        self.session_start_time= time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
+        self.session_id = opts.session_id or uuid.uuid4().hex[:8]
+        self.session_start_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-        self.session = Session(self.session_id, origin="sub_agent" if is_sub_agent else None)
+    def _init_state(self, opts: "AgentOptions") -> None:
+        """段3：会话 + token/turn 计数 + 核心组件（compressor/permission/lifecycle/skill）。"""
+        self.session = Session(self.session_id, origin="sub_agent" if opts.is_sub_agent else None)
         self.session.thinking_feedback = self.thinking_feedback
         self._current_turn: int = 0
         self._current_step: int = 0
         self._user_message_written_this_turn: bool = False
+        # D3 hotfix：待注入的记忆/提醒（chat() 计算，_prepare_turn 落盘为 memory_injection 事件）
+        self._pending_system_injections: list[str] = []
         self._permission_waiters: dict[str, asyncio.Future] = {}
 
         self.total_input_tokens = 0
@@ -250,9 +222,11 @@ class Agent:
             refresh_system_prompt=self._refresh_runtime_system_prompt,
         )
 
+    def _init_runtime_state(self, opts: "AgentOptions") -> None:
+        """段4：运行时纯状态（abort/缓冲/MCP/wiki 预取/steer 队列/守卫计数）。"""
         self._aborted = False
         self._abort_event = asyncio.Event()
-        self._parent_abort_event = parent_abort_event
+        self._parent_abort_event = opts.parent_abort_event
         self._current_task: asyncio.Task | None = None
         self._current_trace_id: str | None = None
         self._confirmed_paths: set[str] = set()
@@ -279,24 +253,26 @@ class Agent:
         self._wiki_prefetch: asyncio.Task | None = None
         self._wiki_prefetch_consumed = False
 
-        self._folded_session_memories: list[dict[str, Any]] = []
         self._fold_last_time: float = 0.0
         self._fold_count: int = 0
+        # U1：steering/follow_up 双队列（steer() 写入，agent_loop step 边界 drain）
+        self.message_queue = MessageQueue()
         self._tool_error_streak: int = 0
         self._same_tool_repeat_count: int = 0
         self._last_tool_name: str = ""
-        self._repeat_chain_key: str = ""
-        self._repeat_chain_count: int = 0
+        self._repeat_guard = RepeatGuard()
         self._loop_guard_stop_reason: str | None = None
         self._tool_budget_stop_reason: str | None = None
         self._tool_result_chars: dict[str, int] = {}  # 每个工具的结果字符数统计
         self._tool_call_count: int = 0
         self._failed_tool_call_count: int = 0
 
+    def _init_prompt(self, opts: "AgentOptions") -> None:
+        """段5：system prompt（含 plan 模式）+ OpenAI client（workspace 上下文内构建）。"""
         from .core.workspace import set_workspace, reset_workspace
         _ws_token = set_workspace(self.workspace)
         try:
-            self._base_system_prompt = custom_system_prompt or build_system_prompt()
+            self._base_system_prompt = opts.custom_system_prompt or build_system_prompt()
 
             self._plan_mode_manager = PlanModeManager(
                 workspace=self.workspace,
@@ -311,15 +287,11 @@ class Agent:
             else:
                 self._system_prompt = self._base_system_prompt
 
-            self._openai_client = openai.AsyncOpenAI(base_url=api_base, api_key=api_key)
+            self._openai_client = openai.AsyncOpenAI(base_url=opts.api_base, api_key=opts.api_key)
 
             self._refresh_runtime_system_prompt()
         finally:
             reset_workspace(_ws_token)
-        self._loop = AgentLoop(self)
-
-        self._tool_dispatcher = ToolDispatcher(agent_ref=self)
-        self._context_manager = ContextManager(agent_ref=self)
 
     def _resolve_thinking_mode(self) -> str:
         if not self.thinking:
@@ -348,90 +320,10 @@ class Agent:
         return self._current_task is not None and not self._current_task.done()
 
     def _get_side_client(self):
-        endpoint = resolve_side_endpoint(primary=self._primary_endpoint())
-        if (endpoint.model == self.model
-                and endpoint.base_url == self._api_base):
-            return None
-        cache_key = (endpoint.model, endpoint.base_url, True)
-        cached = getattr(self, "_side_client_cache", None)
-        if cached and cached[0] == cache_key:
-            return cached[1]
-        client = openai.AsyncOpenAI(base_url=endpoint.base_url, api_key=endpoint.api_key)
-        result = (client, endpoint.model, True)
-        self._side_client_cache = (cache_key, result)
-        return result
+        return self._side_query.get_client()
 
     def _build_side_query(self, *, max_tokens: int = 256):
-        side = self._get_side_client()
-        if side is not None:
-            client, model, use_openai = side
-        elif self._openai_client:
-            client, model, use_openai = self._openai_client, self.model, True
-        else:
-            return None
-
-        async def _sq_openai(system: str, user_message: str) -> str:
-            from agents.observability.trace import trace_span
-
-            messages = [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_message},
-            ]
-            normalized_max_tokens = max(1, int(max_tokens))
-            input_payload = json.dumps({
-                "model": model,
-                "max_tokens": normalized_max_tokens,
-                "messages": messages,
-            }, ensure_ascii=False, default=str)[:4000]
-
-            with trace_span(
-                "side_query",
-                name=f"side_query.{model}",
-                model=model,
-                input=input_payload,
-                metadata={"max_tokens": normalized_max_tokens},
-            ) as span:
-                resp = await client.chat.completions.create(
-                    model=model,
-                    max_tokens=normalized_max_tokens,
-                    messages=messages,
-                )
-                if not resp.choices:
-                    logging.warning("side_query returned no OpenAI-compatible choices: model=%s", model)
-                    span.update(output="")
-                    span.record_error(RuntimeError("side_query returned no choices"))
-                    return ""
-
-                choice = resp.choices[0]
-                content = choice.message.content or ""
-                usage = getattr(resp, "usage", None)
-                if usage is not None:
-                    input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-                    output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-                    total_tokens = int(getattr(usage, "total_tokens", 0) or 0) or (input_tokens + output_tokens)
-                    cached_tokens = int(getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", 0) or 0)
-                    cached_tokens = min(cached_tokens, input_tokens)
-                    span.update(usage_details={
-                        "input": input_tokens - cached_tokens,
-                        "input_cached_tokens": cached_tokens,
-                        "output": output_tokens,
-                        "total": total_tokens,
-                    })
-
-                span.update(output=json.dumps({
-                    "content": content[:4000],
-                    "finish_reason": getattr(choice, "finish_reason", None),
-                }, ensure_ascii=False, default=str))
-
-                if not content.strip():
-                    logging.warning(
-                        "side_query returned empty OpenAI-compatible response: model=%s finish_reason=%s message=%s",
-                        model,
-                        getattr(choice, "finish_reason", ""),
-                        choice.message,
-                    )
-                return content
-        return _sq_openai
+        return self._side_query.build(max_tokens=max_tokens)
 
     def abort(self) -> None:
         self._aborted = True
@@ -463,18 +355,13 @@ class Agent:
         label: str,
         max_tool_calls: int | None = None,
     ) -> "Agent":
-        endpoint = resolve_agent_endpoint(label, model_ref=model_ref, primary=self._primary_endpoint())
-        return Agent(
-            model=endpoint.model,
-            api_base=endpoint.base_url,
-            api_key=endpoint.api_key,
-            custom_system_prompt=system_prompt,
-            custom_tools=tools,
-            is_sub_agent=True,
+        return spawn_sub_agent(
+            self,
+            system_prompt=system_prompt,
+            tools=tools,
+            model_ref=model_ref,
+            label=label,
             max_tool_calls=max_tool_calls,
-            permission_mode="plan" if self.permission_mode == "plan" else "bypassPermissions",
-            parent_abort_event=self._abort_event,
-            workspace=self.workspace,
         )
 
     def set_confirm_fn(self, fn:Callable[[str], Awaitable[bool]]) -> None:
@@ -550,10 +437,9 @@ class Agent:
         self.permission_mode = mode
         self._emit_permission_mode_event()
 
-    def steer(self, message: str) -> None:
-        if not hasattr(self, '_steer_queue') or self._steer_queue is None:
-            self._steer_queue = []
-        self._steer_queue.append(message)
+    async def steer(self, message: str) -> None:
+        """运行中插话：写入 steering 队列，由 agent_loop 在 step 边界注入为 user 事件（v2 promote 语义）。"""
+        await self.message_queue.steer(message)
 
     async def save(self) -> None:
         pass
@@ -566,243 +452,14 @@ class Agent:
     def aborted(self) -> bool:
         return self._aborted
 
-    async def chat(self, user_message:str)->None:
-        from .core.workspace import set_workspace, reset_workspace
-        from .observability.trace import trace_context
-
-        trace_tags = ["sub-agent"] if self.is_sub_agent else ["main-agent"]
-        if self.permission_mode == "plan":
-            trace_tags.append("plan-mode")
-
-        _ws_token = set_workspace(self.workspace)
-        try:
-            with trace_context(
-                session_id=self.session_id if not self.is_sub_agent else None,
-                trace_name="agent-turn",
-                tags=trace_tags,
-            ):
-                await self._chat_inner(user_message)
-        finally:
-            reset_workspace(_ws_token)
-
-    async def _chat_inner(self, user_message:str)->None:
-        print(f"[DEBUG] agent.chat: STARTED - self.session_id = {self.session_id}, is_sub_agent = {self.is_sub_agent}")
-        if not self._mcp_initialized and not self.is_sub_agent:
-            print(f"[DEBUG] agent.chat: initializing MCP")
-            self._mcp_initialized = True
-            from .observability.trace import trace_span
-            with trace_span("mcp.init") as span:
-                try:
-                    await asyncio.wait_for(
-                        self._mcp_manager.load_and_connect(),
-                        timeout=30.0
-                    )
-                    mcp_defs = self._mcp_manager.get_tool_definitions()
-                    if mcp_defs:
-                        from agents.tools.mcp_registry import global_registry
-                        for mcp_def in mcp_defs:
-                            parts = mcp_def["name"].split("__")
-                            if len(parts) >= 3:
-                                server_name = parts[1]
-                                global_registry.register_mcp(mcp_def, server=server_name)
-                        self.tools = self.tools + mcp_defs
-                    span.add_metadata(success=True, tool_count=len(mcp_defs) if mcp_defs else 0)
-                except asyncio.TimeoutError:
-                    error = TimeoutError("MCP init timeout (30s)")
-                    span.update(output="timeout", metadata={"success": False})
-                    span.record_error(error)
-                    print_error("MCP init timeout (30s) - continuing without MCP tools")
-                except Exception as e:
-                    span.update(output=str(e)[:2000], metadata={"success": False})
-                    span.record_error(e)
-                    print_error(f"MCP init failed: {e}")
-            print(f"[DEBUG] agent.chat: MCP init done")
-
-        print(f"[DEBUG] agent.chat: before cross_session_memory")
-        from agents.config import load_config
-        _app_cfg = load_config()
-        if not self.is_sub_agent and _app_cfg.cross_session_memory:
-            from agents.core.session_memory import search_folded_memories, format_folded_memories_for_injection
-            related_memories = search_folded_memories(user_message, top_k=3)
-            if related_memories:
-                memory_context = format_folded_memories_for_injection(related_memories)
-                self._system_prompt += memory_context
-                self.session.system_prompt = self._system_prompt
-
-        if not self.is_sub_agent and self._turn_number == 0:
-            try:
-                pending = list_pending_confirm_entries()
-                if pending:
-                    names = ", ".join(e.name for e in pending[:5])
-                    confirm_msg = f"\n<system-reminder>\n有 {len(pending)} 条待确认的调试经验：{names}。输入 /wiki-confirm 确认或 /wiki-reject 拒绝。\n</system-reminder>"
-                    self._system_prompt += confirm_msg
-                    self.session.system_prompt = self._system_prompt
-            except Exception:
-                pass
-
-        original_user_message = _safe_utf8_text(user_message)
-        ready_skill_extraction_window: dict[str, Any] | None = None
-        self._skill_orchestrator.last_retrieved_skill_reference = None
-
-        if not self.is_sub_agent:
-            ready_skill_extraction_window = self._skill_orchestrator.pop_pending_extraction_window(
-                original_user_message, self._tool_error_streak
-            )
-
-        self._aborted = False
-        self._abort_event.clear()
-        self._turn_number += 1
-        self._turn_output_buffer = []
-        self._turn_thinking_buffer = []
-        self._turn_event_buffer = []
-        self._loop_guard_stop_reason = None
-        self._tool_budget_stop_reason = None
-        self._user_message_written_this_turn = False
-
-        self._current_turn += 1
-
-        from .observability.trace import trace_span
-
-        _turn_event_start_seq = self.session.seq
-        _turn_t0 = time.time()
-        _turn_start_input_tokens = self.total_input_tokens
-        _turn_start_output_tokens = self.total_output_tokens
-        with trace_span(
-            "turn",
-            input=user_message[:4000],
-            metadata={
-                "session_id": self.session_id,
-                "model": self.model,
-                "workspace": str(self.workspace),
-                "permission_mode": self.permission_mode,
-                "turn_id": f"{self.session_id}:{self._current_turn}",
-                "turn_number": self._current_turn,
-                "event_range_start_seq": _turn_event_start_seq,
-                "is_sub_agent": self.is_sub_agent,
-            },
-        ) as turn_span:
-            self._current_trace_id = turn_span.get_trace_id()
-            self.session.append("turn/start", {
-                "turn": self._current_turn,
-                "trace_id": self._current_trace_id,
-            })
-            coro = self._chat_openai(user_message)
-            self._current_task = asyncio.create_task(coro)
-            try:
-                await self._current_task
-            except asyncio.CancelledError:
-                self._aborted = True
-                if not self._user_message_written_this_turn:
-                    self.session.append("user_message", {"content": original_user_message})
-                    self._user_message_written_this_turn = True
-                turn_span.add_metadata(aborted=True, event_range_end_seq=self.session.seq)
-                self.session.append("turn/end", {
-                    "turn": self._current_turn,
-                    "reason": "aborted",
-                    "sub_agent_id": self._current_sub_agent_id,
-                    "trace_id": self._current_trace_id,
-                })
-                raise
-            except Exception as e:
-                print_error(f"[ERROR] {type(e).__name__}: {e}")
-                turn_span.record_error(e)
-                turn_span.add_metadata(event_range_end_seq=self.session.seq)
-                self.session.append("error", {"message": str(e), "error_type": type(e).__name__, "sub_agent_id": self._current_sub_agent_id})
-                self.session.append("turn/end", {
-                    "turn": self._current_turn,
-                    "reason": "error",
-                    "error": str(e),
-                    "sub_agent_id": self._current_sub_agent_id,
-                    "trace_id": self._current_trace_id,
-                })
-                return
-            finally:
-                self._current_task = None
-                self._current_trace_id = None
-            assistant_text = "".join(self._turn_output_buffer or []).strip()
-            self._turn_output_buffer = None
-            self._turn_thinking_buffer = None
-            self._turn_event_buffer = None
-
-            if self._loop_guard_stop_reason:
-                turn_end_reason = "loop_guard"
-            elif self._tool_budget_stop_reason:
-                turn_end_reason = "budget_exceeded"
-            else:
-                turn_end_reason = "completed"
-            turn_end_event = {
-                "turn": self._current_turn,
-                "reason": turn_end_reason,
-                "sub_agent_id": self._current_sub_agent_id,
-                "trace_id": self._current_trace_id,
-            }
-            if self._loop_guard_stop_reason:
-                turn_end_event["loop_guard_reason"] = self._loop_guard_stop_reason
-            if self._tool_budget_stop_reason:
-                turn_end_event["tool_budget_reason"] = self._tool_budget_stop_reason
-                turn_end_event["tool_call_count"] = self._tool_call_count
-                turn_end_event["max_tool_calls"] = self.max_tool_calls
-            self.session.append("turn/end", turn_end_event)
-            turn_span.update(
-                output=assistant_text[:20000],
-                metadata={
-                    "event_range_end_seq": self.session.seq,
-                    "aborted": self._aborted,
-                    "loop_guard_reason": self._loop_guard_stop_reason,
-                    "tool_budget_reason": self._tool_budget_stop_reason,
-                    "tool_call_count": self._tool_call_count,
-                    "failed_tool_call_count": self._failed_tool_call_count,
-                    "max_tool_calls": self.max_tool_calls,
-                    "input_tokens_delta": self.total_input_tokens - _turn_start_input_tokens,
-                    "output_tokens_delta": self.total_output_tokens - _turn_start_output_tokens,
-                    "duration_s": round(time.time() - _turn_t0, 2),
-                },
-            )
-        self._last_assistant_text = assistant_text
-        if not self.is_sub_agent and not self._aborted:
-            self._skill_orchestrator.turns_since_last_evolution += 1
-            if ready_skill_extraction_window and self._skill_orchestrator.should_trigger_evolution():
-                self._skill_orchestrator.schedule_background_task(
-                    self._skill_orchestrator.run_online_skill_evolution(ready_skill_extraction_window),
-                    plan_mode=(self.permission_mode == "plan"),
-                )
-                self._skill_orchestrator.record_evolution_event()
-
-            self._skill_orchestrator.set_pending_extraction_window(
-                messages=self._skill_orchestrator.get_recent_dialog_messages(self.session.get_messages_for_llm(), max_messages=8),
-                original_user_message=original_user_message,
-                assistant_text=assistant_text,
-                retrieved_reference=self._skill_orchestrator.last_retrieved_skill_reference,
-                tool_error_streak=self._tool_error_streak,
-            )
-        if not self.is_sub_agent:
-            try:
-                print_divider()
-            except Exception:
-                pass
+    async def chat(self, user_message: str) -> None:
+        await self._turn_runner.chat(user_message)
 
     async def run_once(self, prompt: str) -> dict:
-        self._output_buffer = []
-        prev_in = self.total_input_tokens
-        prev_out = self.total_output_tokens
-        await self.chat(prompt)
-        text = "".join(self._output_buffer)
-        self._output_buffer = None
-        stop_reason = self._loop_guard_stop_reason or self._tool_budget_stop_reason
-        return {
-            "text": text,
-            "tokens": {
-                "input": self.total_input_tokens - prev_in,
-                "output": self.total_output_tokens - prev_out
-            },
-            "stop_reason": stop_reason,
-            "tool_budget_exceeded": bool(self._tool_budget_stop_reason),
-            "tool_call_count": self._tool_call_count,
-            "failed_tool_call_count": self._failed_tool_call_count,
-        }
+        return await self._turn_runner.run_once(prompt)
 
     def _emit_text(self, text: str) -> None:
-        text = _safe_utf8_text(text)
+        text = safe_utf8_text(text)
         if self._turn_output_buffer is not None:
             self._turn_output_buffer.append(text)
         if self._output_buffer is not None:
@@ -816,46 +473,10 @@ class Agent:
         self.session.append("text", event_data)
 
     def build_runtime_guidance(self) -> str | None:
-        """运行时易变状态（上下文利用率/错误连击/fold 时间）。
-
-        作为请求尾部 ephemeral system message 注入，不写入主 system prompt——
-        主 prompt 任何位置变化都会使其后全部历史的 prefix cache 失效。
-        """
-        if self._custom_system_prompt is not None:
-            return None
-        utilization = self.estimated_context_tokens / self.effective_window if self.effective_window else 0.0
-        last_fold = "never" if not self._fold_last_time else f"{int((time.time() - self._fold_last_time) / 60)}m ago"
-        return (
-            "# Runtime Fold Guidance\n"
-            f"- Current context utilization: {utilization:.0%}\n"
-            f"- Recent tool error streak: {self._tool_error_streak}\n"
-            f"- Same tool repeat count: {self._same_tool_repeat_count}\n"
-            f"- Last fold: {last_fold}\n"
-            "- If the context is getting long, the same tool is being retried without progress, or tool failures are accumulating, call `compact_context` before trying more tools.\n"
-            "- If you folded very recently and the next step is clear, prefer continuing rather than folding again."
-        )
+        return prompt_runtime.build_runtime_guidance(self)
 
     def _refresh_runtime_system_prompt(self, force: bool = False) -> None:
-        if self._custom_system_prompt is not None:
-            self.session.system_prompt = self._custom_system_prompt
-            return
-        # prefix cache 保护：普通模式下 system prompt 会话内冻结，不随 step 重建
-        # （build_system_prompt 重读 wiki index/workspace 结构，且旧实现把易变的
-        # fold guidance 拼进 prompt 末尾，导致每次调用前缀都不同、cache 率 <15%）。
-        # plan 模式例外：计划状态需实时反映。force 用于结构性变化（skill_create、/cd）。
-        if not force and self.permission_mode != "plan" and self.session.system_prompt:
-            return
-        from .core.workspace import set_workspace, reset_workspace
-        _ws_token = set_workspace(self.workspace)
-        try:
-            self._base_system_prompt = build_system_prompt()
-            if self.permission_mode == "plan":
-                self._system_prompt = self._base_system_prompt + self._plan_mode_manager.build_plan_mode_prompt()
-            else:
-                self._system_prompt = self._base_system_prompt
-            self.session.system_prompt = self._system_prompt
-        finally:
-            reset_workspace(_ws_token)
+        prompt_runtime.refresh_runtime_system_prompt(self, force=force)
 
     def _record_tool_outcome(self, tool_name: str, success: bool) -> None:
         if tool_name == self._last_tool_name:
@@ -872,44 +493,6 @@ class Agent:
         """Public alias for _record_tool_outcome (used by agent_loop)."""
         self._record_tool_outcome(tool_name, success)
 
-    @staticmethod
-    def _canonicalize_arguments(args: dict) -> str:
-        def sort_json(value):
-            if isinstance(value, dict):
-                return {k: sort_json(v) for k, v in sorted(value.items())}
-            if isinstance(value, list):
-                return [sort_json(v) for v in value]
-            return value
-        return json.dumps(sort_json(args), ensure_ascii=False, sort_keys=True)
-
-    def _check_repeat_guard(self, tool_name: str, inp: dict) -> str | None:
-        key = json.dumps([tool_name, self._canonicalize_arguments(inp)], ensure_ascii=False)
-        if key == self._repeat_chain_key:
-            self._repeat_chain_count += 1
-        else:
-            self._repeat_chain_key = key
-            self._repeat_chain_count = 1
-        if self._repeat_chain_count == 3:
-            return (
-                "You are repeating the exact same tool call with identical arguments. "
-                "Carefully analyze the previous result before calling again: if the task is "
-                "not complete, try a different approach or different arguments instead of "
-                "repeating the call."
-            )
-        if self._repeat_chain_count in (5, 8):
-            preview = self._canonicalize_arguments(inp)[:500]
-            return (
-                f"Repeated tool call detected:\n"
-                f"- tool: {tool_name}\n"
-                f"- consecutive_calls: {self._repeat_chain_count}\n"
-                f"- arguments: {preview}\n"
-                f"The repeated calls are not making progress. Do not call this tool with "
-                f"these exact arguments again. Inspect the latest result and choose a "
-                f"different action, different arguments, or finish the task if enough "
-                f"evidence has been gathered."
-            )
-        return None
-
     def _record_fold_event(self) -> None:
         self._compressor._record_fold_event()
         self._fold_last_time = self._compressor._fold_last_time
@@ -917,8 +500,7 @@ class Agent:
         self._tool_error_streak = 0
         self._same_tool_repeat_count = 0
         self._last_tool_name = ""
-        self._repeat_chain_key = ""
-        self._repeat_chain_count = 0
+        self._repeat_guard.reset()
 
     def _looks_like_tool_failure(self, tool_name: str, raw: str, result: str) -> bool:
         return detect_failure(tool_name, raw, result)
@@ -968,31 +550,11 @@ class Agent:
         if tool_name:
             self._tool_result_chars[tool_name] = self._tool_result_chars.get(tool_name, 0) + len(content)
 
-    def reset_repeat_chain(self) -> None:
-        self._repeat_chain_key = ""
-        self._repeat_chain_count = 0
-
     def build_side_query(self, *, max_tokens: int = 2000):
         return self._build_side_query(max_tokens=max_tokens)
 
     def start_wiki_prefetch(self, user_message: str, side_query) -> None:
-        if self.is_sub_agent:
-            return
-        if self._wiki_prefetch is not None:
-            # BC-8：闩锁只在上一轮 prefetch 仍在途或尚未消费时生效。
-            # 已消费则清空引用允许本轮重新召回——否则整个 session 只有第一轮
-            # 会召回，中途 remember 写入的条目对后续轮次永远不可见。
-            if not self._wiki_prefetch.done() or not self._wiki_prefetch_consumed:
-                return
-            self._wiki_prefetch = None
-        cooled_wiki_paths = {
-            path for path, turn in self._wiki_surfaced_at.items()
-            if self._turn_number - turn < self.WIKI_RECALL_COOLDOWN_TURNS
-        }
-        self._wiki_prefetch_consumed = False
-        self._wiki_prefetch = asyncio.create_task(
-            select_relevant_wiki_entries(user_message, side_query, cooled_wiki_paths)
-        )
+        run_wiki_prefetch(self, user_message, side_query)
 
     def add_input_tokens(self, count: int) -> None:
         self.total_input_tokens += count
@@ -1078,9 +640,6 @@ class Agent:
     def looks_like_tool_failure(self, tool_name: str, raw: str, result: str) -> bool:
         return self._looks_like_tool_failure(tool_name, raw, result)
 
-    def check_repeat_guard(self, tool_name: str, inp: dict) -> str | None:
-        return self._check_repeat_guard(tool_name, inp)
-
     def clear_context_flag(self) -> None:
         self._context_cleared = False
 
@@ -1150,42 +709,13 @@ class Agent:
         return await self._context_manager.compact()
 
     def restore_session(self, data: dict) -> None:
-        from agents.core.session_lifecycle import SessionState
-        from agents.logging import print_info
-
-        state = SessionState(session_id=self.session_id, model=self.model)
-        self._session_lifecycle.restore(state, data, self.session)
-        print_info(f"Session restored ({self._get_message_count()} messages).")
+        session_lifecycle.restore_agent_session(self, data)
 
     async def rewind_turns(self, n: int = 1) -> str:
-        """统一回退：对话回退 N 轮 + 文件恢复到快照（原子操作）。"""
-        from agents.core.rewind_service import get_rewind_service
-        svc = get_rewind_service()
-        plan = await svc.stage(
-            self.session_id, turns=n, session=self.session, workspace=str(self.workspace)
-        )
-        result = await svc.commit(plan.id, session=self.session)
-        msg = (
-            f"Rewound {n} turn(s): removed {result['removed_user_messages']} user messages, "
-            f"{result['removed_events']} events"
-        )
-        if result["restored_files"]:
-            msg += f", restored {len(result['restored_files'])} files"
-        return msg
+        return await session_lifecycle.rewind_agent_turns(self, n)
 
     def fork_session(self) -> str:
-        from agents.core.session_lifecycle import SessionState
-
-        state = SessionState(
-            session_id=self.session_id,
-            model=self.model,
-            start_time=self.session_start_time,
-            cwd=str(self.workspace),
-        )
-        result, new_session = self._session_lifecycle.fork(state, self.session)
-        self.session = new_session
-        self.session_id = new_session.id
-        return result
+        return session_lifecycle.fork_agent_session(self)
 
     def describe_context(self) -> list[dict]:
         return self._context_manager.describe_context()
@@ -1199,8 +729,6 @@ class Agent:
     def _get_message_count(self) -> int:
         return self._context_manager._get_message_count()
 
-    WIKI_RECALL_COOLDOWN_TURNS = 5
-
     async def _check_and_compact(self)->None:
         await self._context_manager._check_and_compact()
 
@@ -1212,259 +740,6 @@ class Agent:
 
     def _persist_large_result(self, tool_name: str, result: str) -> str:
         return persist_large_result(tool_name, result)
-
-    def _format_plan_tasks_block(self, exec_result: dict) -> str:
-        """把 start_plan_execution 结果格式化为注入对话的任务清单+执行指令（含策略插件）。"""
-        msg = "\n\n## Plan Tasks Ready\n"
-        msg += f"Status: {exec_result.get('status', 'unknown')}\n"
-        msg += f"Total tasks: {exec_result.get('total_tasks', 0)}\n"
-        msg += f"Pending tasks: {exec_result.get('pending_tasks', 0)}\n\n"
-
-        tasks = exec_result.get("tasks", [])
-        if not tasks:
-            return msg + "No pending tasks found."
-
-        msg += "## Task List\n\n"
-        for task in tasks:
-            msg += f"### Task {task['id']}: {task['title']}\n"
-            msg += f"- **File**: `{task.get('file', 'N/A')}`\n"
-            msg += f"- **Acceptance**: {task.get('acceptance', 'N/A')}\n"
-            msg += f"- **Status**: {task['status']}\n\n"
-
-        msg += "\n## Instructions\n\n"
-        msg += "Please execute these tasks one by one. For each task:\n"
-        msg += "1. Call `plan_task_start(slug, task_id)` before starting\n"
-        msg += "2. Implement the task (write code, create files, etc.)\n"
-        msg += "3. Verify the implementation (run the acceptance command, check output)\n"
-        msg += "4. Call `plan_task_done(slug, task_id, commit, verification)` after success — verification is REQUIRED: a JSON object with the verify `command` and its `exit_code`\n"
-        msg += "5. If failed, call `plan_task_failed(slug, task_id, error)`\n"
-        msg += "6. After all tasks are done, call `plan_complete(slug)`\n"
-
-        slug = exec_result.get("slug", "")
-        if slug:
-            try:
-                from agents.plan.plan_executor import PlanExecutor
-                executor = PlanExecutor.for_plan(slug)
-                execute_guide = executor.build_execute_instructions()
-                if execute_guide:
-                    msg += f"\n## Execution Strategy: {executor.strategy_config.get('execute', 'direct')}\n\n{execute_guide}\n"
-                converge_guide = executor.build_converge_guidance()
-                if converge_guide:
-                    msg += f"\n## Pre-Completion Converge Check（调用 plan_complete 前必须完成）\n\n{converge_guide}\n"
-            except Exception as e:
-                print(f"[WARN] plan strategy injection failed: {e!r}")
-
-        return msg
-
-    async def _execute_plan_mode_tool(self, name):
-        from .observability.trace import trace_event
-
-        if name == "enter_plan_mode":
-            if self.permission_mode == "plan":
-                return "Already in plan mode."
-            self._enter_plan_mode_internal()
-            return (
-                f"Entered plan mode. You are now in read-only mode.\n\n"
-                f"Your plan directory: {self._plan_mode_manager.plan_dir}\n"
-                f"双轨规划（二选一）：\n"
-                f"- 轻量轨（默认）：只写 plan.md（## 背景 / ## 方案 / ## 任务清单（checkbox：- [ ] 1. 描述）/ ## 验收）\n"
-                f"- 重量轨（复杂任务）：写 spec.md（含验收标准）+ design.md + tasks.md\n\n"
-                f"When your plan is complete, call exit_plan_mode."
-            )
-
-        if name == "exit_plan_mode":
-            if self.permission_mode != "plan":
-                return "Not in plan mode."
-            
-            # 校验产物完整性
-            validation = self._plan_mode_manager.validate_plan_artifacts()
-            if not validation["valid"]:
-                errors = "\n".join(f"- {e}" for e in validation["errors"])
-                return f"Plan artifacts validation failed:\n{errors}\n\nPlease complete your plan before exiting."
-            
-            # 读取产物内容（自动判定轻量轨/重量轨）
-            draft = self._plan_mode_manager.read_draft_artifacts()
-            granularity = validation.get("granularity", draft["granularity"])
-            spec_content = draft["spec"]
-            plan_content = draft["design"]
-            tasks_content = draft["tasks"]
-            plan_md = draft["plan"]
-            if granularity == "minimal" and not tasks_content:
-                from agents.plan.plan_mode import PlanModeManager
-                tasks_content = PlanModeManager.checkbox_tasks_to_structured(plan_md)
-
-            full_plan = "\n\n".join(
-                part for part in (
-                    plan_md.strip() if granularity == "minimal" and plan_md.strip() else "",
-                    f"## Spec\n{spec_content}" if spec_content.strip() else "",
-                    f"## Design\n{plan_content}" if plan_content.strip() else "",
-                    f"## Tasks\n{tasks_content}" if granularity != "minimal" and tasks_content.strip() else "",
-                ) if part
-            ) or "(empty plan)"
-
-            if self._plan_mode_manager.plan_approval_fn:
-                result = await self._plan_mode_manager.plan_approval_fn(full_plan)
-                choice = result.get("choice", "manual-execute")
-
-                if choice == "keep-planning":
-                    feedback = result.get("feedback") or "Please revise the plan."
-
-                    trace_event(
-                        "plan_mode.rejected",
-                        input=feedback[:2000] if feedback else "",
-                        metadata={"feedback": feedback[:2000] if feedback else ""},
-                    )
-
-                    return (
-                        f"User rejected the plan and wants to keep planning.\n\n"
-                        f"User feedback: {feedback}\n\n"
-                        f"Please revise your plan based on this feedback. When done, call exit_plan_mode again."
-                    )
-
-                if choice in ("clear-and-execute", "execute"):
-                    plan_result = self._plan_mode_manager.handle_plan_system_integration(
-                        spec_content, plan_content, tasks_content, self.session,
-                        granularity=granularity, plan_md=plan_md,
-                    )
-                    target_mode = "acceptEdits"
-                else:
-                    target_mode = self._plan_mode_manager.pre_plan_mode or "default"
-                    plan_result = None
-
-                saved_plan_dir = self._plan_mode_manager.plan_dir
-                self.permission_mode = target_mode
-                self._plan_mode_manager.pre_plan_mode = None
-                self._plan_mode_manager.plan_dir = None
-                self._system_prompt = self._base_system_prompt
-                self.session.system_prompt = self._system_prompt
-                self._emit_permission_mode_event()
-
-                trace_event(
-                    "plan_mode.approved",
-                    metadata={
-                        "target_mode": target_mode,
-                        "context_cleared": choice == "clear-and-execute",
-                        "plan_slug": plan_result.get("slug", "") if plan_result else "",
-                    },
-                )
-
-                if choice == "clear-and-execute":
-                    self._context_manager.clear_history_keep_system()
-                    self._context_cleared = True
-                    print_info(f"Plan approved. Context cleared, executing in {target_mode} mode.")
-
-                    result_msg = f"User approved the plan. Context was cleared. Permission mode: {target_mode}\n\n"
-                    if plan_result:
-                        result_msg += f"Plan system entry created: {plan_result.get('slug', '')}\n\n"
-                    result_msg += f"Plan directory: {saved_plan_dir}\n\n"
-                    result_msg += f"## Approved Plan:\n{full_plan}\n\n"
-
-                    if plan_result and plan_result.get("slug"):
-                        from agents.plan.plan_manager import start_plan_execution
-                        plan_slug = plan_result["slug"]
-                        print_info(f"Starting plan execution: {plan_slug}")
-
-                        exec_result = start_plan_execution(plan_slug)
-                        result_msg += self._format_plan_tasks_block(exec_result)
-                    else:
-                        result_msg += "Proceed with implementation."
-
-                    return result_msg
-
-                print_info(f"Plan approved. Executing in {target_mode} mode.")
-                result_msg = (
-                    f"User approved the plan. Permission mode: {target_mode}\n\n"
-                    f"## Approved Plan:\n{full_plan}\n\n"
-                )
-
-                if plan_result and plan_result.get("slug"):
-                    from agents.plan.plan_manager import start_plan_execution
-                    plan_slug = plan_result["slug"]
-                    print_info(f"Starting plan execution: {plan_slug}")
-
-                    exec_result = start_plan_execution(plan_slug)
-                    result_msg += self._format_plan_tasks_block(exec_result)
-                else:
-                    result_msg += "Proceed with implementation."
-
-                return result_msg
-
-            confirmed = await self._confirm_dangerous(
-                f"Plan completed. Exit plan mode?\n\n{full_plan}",
-                extra_data={"plan_dir": str(self._plan_mode_manager.plan_dir)} if self._plan_mode_manager.plan_dir else None,
-                tool_name="exit_plan_mode",
-            )
-
-            if not confirmed:
-                feedback = self._permission_gate.last_feedback or "User rejected the plan without comments."
-                trace_event(
-                    "plan_mode.rejected",
-                    input=feedback[:2000],
-                    metadata={"feedback": feedback[:2000]},
-                )
-
-                return (
-                    "User rejected the plan and wants to keep planning.\n\n"
-                    f"User feedback: {feedback}\n\n"
-                    "Please revise your plan based on this feedback. When done, call exit_plan_mode again."
-                )
-
-            choice = self._permission_gate.last_choice or "execute"
-            plan_result = self._plan_mode_manager.handle_plan_system_integration(
-                spec_content, plan_content, tasks_content, self.session,
-                granularity=granularity, plan_md=plan_md,
-            )
-
-            saved_plan_dir = self._plan_mode_manager.plan_dir
-            if choice == "manual-execute":
-                target_mode = self._plan_mode_manager.pre_plan_mode or "default"
-            else:  # execute / clear-and-execute → 自动执行
-                target_mode = "acceptEdits"
-            self.permission_mode = target_mode
-            self._plan_mode_manager.pre_plan_mode = None
-            self._plan_mode_manager.plan_dir = None
-            self._system_prompt = self._base_system_prompt
-            self.session.system_prompt = self._system_prompt
-            self._emit_permission_mode_event()
-
-            trace_event(
-                "plan_mode.approved",
-                metadata={
-                    "target_mode": target_mode,
-                    "choice": choice,
-                    "context_cleared": choice == "clear-and-execute",
-                    "plan_slug": plan_result.get("slug", "") if plan_result else "",
-                },
-            )
-
-            if choice == "clear-and-execute":
-                self._context_manager.clear_history_keep_system()
-                self._context_cleared = True
-                print_info(f"Plan approved. Context cleared, executing in {target_mode} mode.")
-                result_msg = f"User approved the plan. Context was cleared. Permission mode: {target_mode}\n\n"
-                if plan_result:
-                    result_msg += f"Plan system entry created: {plan_result.get('slug', '')}\n\n"
-                result_msg += f"Plan directory: {saved_plan_dir}\n\n"
-            else:
-                print_info(f"Plan approved. Executing in {target_mode} mode.")
-                result_msg = f"User approved the plan. Permission mode: {target_mode}\n\n"
-                if plan_result:
-                    result_msg += f"Plan system entry created: {plan_result.get('slug', '')}\n\n"
-            result_msg += f"## Approved Plan:\n{full_plan}\n\n"
-
-            if plan_result and plan_result.get("slug"):
-                from agents.plan.plan_manager import start_plan_execution
-                plan_slug = plan_result["slug"]
-                print_info(f"Starting plan execution: {plan_slug}")
-
-                exec_result = start_plan_execution(plan_slug)
-                result_msg += self._format_plan_tasks_block(exec_result)
-            else:
-                result_msg += "Proceed with implementation."
-
-            return result_msg
-
-        return f"Unknown plan mode tool: {name}"
 
     def _clear_history_keep_system(self) -> None:
         self._context_manager.clear_history_keep_system()

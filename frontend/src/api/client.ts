@@ -490,22 +490,31 @@ export async function updatePermissionMode(sessionId: string, mode: string): Pro
   return res.json();
 }
 
-export async function steerSession(sessionId: string, message: string): Promise<void> {
+export interface SteerResult {
+  success: boolean;
+  message: string;
+}
+
+export async function steerSession(sessionId: string, message: string, contextFiles?: string[]): Promise<SteerResult> {
   const res = await fetch(`${API_BASE}/sessions/${sessionId}/steer`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId, message }),
+    body: JSON.stringify({
+      message,
+      context_files: contextFiles && contextFiles.length > 0 ? contextFiles : undefined,
+    }),
   });
-  if (!res.ok) throw new Error('Failed to steer session');
+  if (!res.ok) throw new Error(`Failed to steer session: ${res.status}`);
+   return res.json();
 }
 
-export async function followUpSession(sessionId: string, message: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/follow-up`, {
+/** U3a：把正在前台阻塞的子代理转为后台（run 不中断，完成后经 subagent/completed 通知） */
+export async function backgroundSubagent(sessionId: string, subSessionId: string): Promise<SteerResult> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/subagents/${subSessionId}/background`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId, message }),
   });
-  if (!res.ok) throw new Error('Failed to follow-up session');
+  if (!res.ok) throw new Error(`Failed to background subagent: ${res.status}`);
+  return res.json();
 }
 
 export async function forkSession(

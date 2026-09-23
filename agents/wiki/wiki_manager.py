@@ -703,6 +703,34 @@ async def select_relevant_wiki_entries(
             return []
 
 
+WIKI_RECALL_COOLDOWN_TURNS = 5
+
+
+def start_wiki_prefetch(agent: Any, user_message: str, side_query: Any) -> None:
+    """启动本轮 wiki 召回预取（U0 从 Agent 迁入；U2 后子代理会话落盘再评估放开）。
+
+    agent 需具备：is_sub_agent/_wiki_prefetch/_wiki_prefetch_consumed/
+    _wiki_surfaced_at/_turn_number 状态（Agent 门面 start_wiki_prefetch 委托至此）。
+    """
+    if agent.is_sub_agent:
+        return
+    if agent._wiki_prefetch is not None:
+        # BC-8：闩锁只在上一轮 prefetch 仍在途或尚未消费时生效。
+        # 已消费则清空引用允许本轮重新召回——否则整个 session 只有第一轮
+        # 会召回，中途 remember 写入的条目对后续轮次永远不可见。
+        if not agent._wiki_prefetch.done() or not agent._wiki_prefetch_consumed:
+            return
+        agent._wiki_prefetch = None
+    cooled_wiki_paths = {
+        path for path, turn in agent._wiki_surfaced_at.items()
+        if agent._turn_number - turn < WIKI_RECALL_COOLDOWN_TURNS
+    }
+    agent._wiki_prefetch_consumed = False
+    agent._wiki_prefetch = asyncio.create_task(
+        select_relevant_wiki_entries(user_message, side_query, cooled_wiki_paths)
+    )
+
+
 def _keyword_fallback_select(query: str, candidates: list[WikiEntry], limit: int = 5) -> list[WikiEntry]:
     """确定性关键词兜底选择：query 分词与条目文本重叠计数，0 分不选。"""
     q = query.lower()

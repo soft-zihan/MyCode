@@ -25,7 +25,7 @@ def _get_live_agent(session_id: str):
 
 
 async def _ensure_agent(session_id: str):
-    """获取或从 events.jsonl hydrate agent（session 不存在返回 None）。"""
+    """获取或 hydrate agent（走 SessionBackend 加载事件；session 不存在返回 None）。"""
     from agents.session_manager import get_session_manager
     result = await get_session_manager().restore(session_id)
     return result[0] if result else None
@@ -54,6 +54,7 @@ def api_frontend_log(data: FrontendLogRequest) -> dict[str, Any]:
 
 class SteerRequest(BaseModel):
     message: str
+    context_files: Optional[list[str]] = None
 
 
 class RewindRequest(BaseModel):
@@ -86,7 +87,9 @@ class PermissionModeRequest(BaseModel):
 
 @router.get("/api/sessions")
 def api_list_sessions() -> list[dict[str, Any]]:
-    sessions = list_sessions()
+    # U2：派生会话（子代理/eval）已落盘但不进用户会话列表；钻取走 GET /api/sessions/{sub_id}
+    from agents.core.session import is_derived_session_meta
+    sessions = [s for s in list_sessions() if not is_derived_session_meta(s)]
     # 统一 startTime 为字符串用于排序
     def sort_key(s):
         start_time = s.get("startTime", "")
@@ -162,9 +165,9 @@ def api_get_session_projections(session_id: str) -> dict[str, Any]:
 def api_session_summary(session_id: str) -> dict[str, Any]:
     result: dict[str, Any] = {}
 
-    sessions_dir = session_dir()
-    events_file = sessions_dir / f"{session_id}.events.jsonl"
-    if not events_file.exists():
+    from agents.core.session import get_session_backend
+    backend = get_session_backend()
+    if not backend.session_exists(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
     from agents.core.session import Session
@@ -181,15 +184,7 @@ def api_session_summary(session_id: str) -> dict[str, Any]:
         result["projections"] = {}
     result["permission_mode"] = "default"
 
-    latest_stats = {}
-    with open(events_file) as f:
-        for line in f:
-            try:
-                event = json.loads(line.strip())
-                if event.get("type") == "stats":
-                    latest_stats = event
-            except (json.JSONDecodeError, Exception):
-                continue
+    latest_stats = backend.get_latest_event(session_id, "stats") or {}
 
     result["stats"] = {
         "input_tokens": latest_stats.get("input_tokens", 0),
@@ -204,10 +199,7 @@ def api_session_summary(session_id: str) -> dict[str, Any]:
         "estimated_context_tokens": latest_stats.get("estimated_context_tokens", 0),
     }
 
-    if latest_stats and latest_stats.get("system_chars", 0) > 0:
-        result["breakdown"] = _compute_breakdown_from_stats(latest_stats, None)
-    else:
-        result["breakdown"] = _compute_breakdown_from_jsonl(events_file, latest_stats)
+    result["breakdown"] = _compute_breakdown_from_stats(latest_stats, None)
 
     return result
 
@@ -413,116 +405,6 @@ def _compute_breakdown_from_agent(agent: Any) -> dict[str, Any]:
         "tool_tokens": tool_tokens,
         "tool_result_by_name": tool_result_by_name,
         "total_tokens": actual_input_tokens if actual_input_tokens > 0 else total_chars // 4,
-        "is_plan_mode": is_plan_mode,
-        "plan_mode_tokens": plan_mode_tokens,
-    }
-
-
-def _compute_breakdown_from_jsonl(events_file: Path, latest_stats: dict) -> dict[str, Any]:
-    if not latest_stats:
-        return {
-            "base_prompt_tokens": 0, "claude_md_tokens": 0, "skills_tokens": 0,
-            "wiki_tokens": 0, "agents_tokens": 0,
-            "tools_tokens": 0, "builtin_tool_count": 0, "mcp_tool_count": 0,
-            "messages_tokens": 0, "message_count": 0,
-            "user_tokens": 0, "assistant_tokens": 0, "tool_tokens": 0,
-            "tool_result_by_name": {},
-            "total_tokens": 0, "is_plan_mode": False, "plan_mode_tokens": 0,
-        }
-
-    actual_input_tokens = latest_stats.get("last_input_token_count", 0)
-    system_chars = latest_stats.get("system_chars", 0)
-    user_chars = latest_stats.get("user_chars", 0)
-    assistant_chars = latest_stats.get("assistant_chars", 0)
-    tool_result_chars = latest_stats.get("tool_result_chars", 0)
-
-    system_base_chars = latest_stats.get("system_base_chars", 0)
-    system_claude_md_chars = latest_stats.get("system_claude_md_chars", 0)
-    system_skills_chars = latest_stats.get("system_skills_chars", 0)
-    system_wiki_chars = latest_stats.get("system_wiki_chars", 0)
-    system_agents_chars = latest_stats.get("system_agents_chars", 0)
-    system_workspace_chars = latest_stats.get("system_workspace_chars", 0)
-    message_count = latest_stats.get("msg_count", 0)
-
-    if system_chars == 0 and user_chars == 0:
-        system_chars = 6000
-        system_base_chars = int(system_chars * 0.5)
-        system_claude_md_chars = int(system_chars * 0.2)
-        system_skills_chars = int(system_chars * 0.1)
-        system_wiki_chars = int(system_chars * 0.05)
-        system_agents_chars = int(system_chars * 0.05)
-        system_workspace_chars = int(system_chars * 0.05)
-
-    try:
-        from frontend.server.mcp_manager import global_mcp_manager
-        tool_defs = global_mcp_manager.get_tool_definitions()
-        tools_json = json.dumps([{
-            'name': t.get('name', ''),
-            'description': t.get('description', ''),
-            'parameters': t.get('parameters', {}),
-        } for t in tool_defs], ensure_ascii=False)
-        tools_chars = len(tools_json)
-        mcp_tool_count = len(tool_defs)
-        builtin_tool_count = 0
-    except Exception:
-        tools_chars = 0
-        builtin_tool_count = latest_stats.get("tool_count", 0)
-        mcp_tool_count = 0
-
-    total_chars = system_chars + tools_chars + user_chars + assistant_chars + tool_result_chars
-
-    if actual_input_tokens > 0 and total_chars > 0:
-        scale = actual_input_tokens / (total_chars / 4)
-        user_tokens = int((user_chars / 4) * scale)
-        assistant_tokens = int((assistant_chars / 4) * scale)
-        tool_tokens = int((tool_result_chars / 4) * scale)
-        tools_definition_tokens = int((tools_chars / 4) * scale)
-        base_prompt_tokens = int(((system_base_chars + system_workspace_chars) / 4) * scale)
-        claude_md_tokens = int((system_claude_md_chars / 4) * scale)
-        skills_tokens = int((system_skills_chars / 4) * scale)
-        wiki_tokens = int((system_wiki_chars / 4) * scale)
-        agents_tokens = int((system_agents_chars / 4) * scale)
-    else:
-        user_tokens = user_chars // 4
-        assistant_tokens = assistant_chars // 4
-        tool_tokens = tool_result_chars // 4
-        tools_definition_tokens = tools_chars // 4
-        base_prompt_tokens = (system_base_chars + system_workspace_chars) // 4
-        claude_md_tokens = system_claude_md_chars // 4
-        skills_tokens = system_skills_chars // 4
-        wiki_tokens = system_wiki_chars // 4
-        agents_tokens = system_agents_chars // 4
-
-    messages_tokens = user_tokens + assistant_tokens + tool_tokens
-
-    is_plan_mode = latest_stats.get("is_plan_mode", False)
-    plan_mode_chars = latest_stats.get("plan_mode_chars", 0)
-    plan_mode_tokens = int((plan_mode_chars / 4) * scale) if actual_input_tokens > 0 and total_chars > 0 else plan_mode_chars // 4
-
-    tool_result_by_name_chars = latest_stats.get("tool_result_by_name", {})
-    tool_result_by_name = {}
-    if tool_result_by_name_chars and tool_tokens > 0:
-        total_tool_chars = sum(tool_result_by_name_chars.values())
-        if total_tool_chars > 0:
-            for tool_name, chars in tool_result_by_name_chars.items():
-                tool_result_by_name[tool_name] = int(tool_tokens * (chars / total_tool_chars))
-
-    return {
-        "base_prompt_tokens": base_prompt_tokens,
-        "claude_md_tokens": claude_md_tokens,
-        "skills_tokens": skills_tokens,
-        "wiki_tokens": wiki_tokens,
-        "agents_tokens": agents_tokens,
-        "tools_tokens": tools_definition_tokens,
-        "builtin_tool_count": builtin_tool_count,
-        "mcp_tool_count": mcp_tool_count,
-        "messages_tokens": messages_tokens,
-        "message_count": message_count,
-        "user_tokens": user_tokens,
-        "assistant_tokens": assistant_tokens,
-        "tool_tokens": tool_tokens,
-        "tool_result_by_name": tool_result_by_name,
-        "total_tokens": actual_input_tokens,
         "is_plan_mode": is_plan_mode,
         "plan_mode_tokens": plan_mode_tokens,
     }
@@ -771,44 +653,29 @@ async def api_update_permission_mode(session_id: str, data: PermissionModeReques
 async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
     """获取实际发给模型的 token 分解
     
-    从事件日志最新 stats 事件读取细粒度 breakdown 数据
+    从事件日志最新 stats 事件读取细粒度 breakdown 数据（走 backend，两后端一致）
     """
-    # Fallback: 从 JSONL 事件恢复
-    sessions_dir = session_dir()
-    events_file = sessions_dir / f"{session_id}.events.jsonl"
+    from agents.core.session import get_session_backend
+    backend = get_session_backend()
     
-    if not events_file.exists():
-        return {
-            "base_prompt_tokens": 0, "claude_md_tokens": 0, "skills_tokens": 0,
-            "wiki_tokens": 0, "agents_tokens": 0,
-            "tools_tokens": 0, "builtin_tool_count": 0, "mcp_tool_count": 0,
-            "messages_tokens": 0, "message_count": 0,
-            "user_tokens": 0, "assistant_tokens": 0, "tool_tokens": 0,
-            "total_tokens": 0,
-            "is_plan_mode": False, "plan_mode_tokens": 0,
-        }
+    _zero_breakdown = {
+        "base_prompt_tokens": 0, "claude_md_tokens": 0, "skills_tokens": 0,
+        "wiki_tokens": 0, "agents_tokens": 0,
+        "tools_tokens": 0, "builtin_tool_count": 0, "mcp_tool_count": 0,
+        "messages_tokens": 0, "message_count": 0,
+        "user_tokens": 0, "assistant_tokens": 0, "tool_tokens": 0,
+        "total_tokens": 0,
+        "is_plan_mode": False, "plan_mode_tokens": 0,
+    }
+    
+    if not backend.session_exists(session_id):
+        return _zero_breakdown
     
     # 从最新的 stats 事件读取
-    latest_stats = {}
-    with open(events_file) as f:
-        for line in f:
-            try:
-                event = json.loads(line.strip())
-                if event.get("type") == "stats":
-                    latest_stats = event
-            except:
-                continue
+    latest_stats = backend.get_latest_event(session_id, "stats") or {}
     
     if not latest_stats:
-        return {
-            "base_prompt_tokens": 0, "claude_md_tokens": 0, "skills_tokens": 0,
-            "wiki_tokens": 0, "agents_tokens": 0,
-            "tools_tokens": 0, "builtin_tool_count": 0, "mcp_tool_count": 0,
-            "messages_tokens": 0, "message_count": 0,
-            "user_tokens": 0, "assistant_tokens": 0, "tool_tokens": 0,
-            "total_tokens": 0,
-            "is_plan_mode": False, "plan_mode_tokens": 0,
-        }
+        return _zero_breakdown
     
     actual_input_tokens = latest_stats.get("last_input_token_count", 0)
     system_chars = latest_stats.get("system_chars", 0)
@@ -827,25 +694,20 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
         tool_result_chars = 0
         message_count = 0
         
-        with open(events_file) as f:
-            for line in f:
-                try:
-                    event = json.loads(line.strip())
-                    event_type = event.get("type", "")
-                    
-                    if event_type == "system_prompt":
-                        system_chars = len(event.get("content", ""))
-                    elif event_type == "user_message":
-                        user_chars += len(event.get("content", ""))
-                        message_count += 1
-                    elif event_type == "assistant_message":
-                        assistant_chars += len(event.get("content", ""))
-                        message_count += 1
-                    elif event_type == "tool_result_msg":
-                        tool_result_chars += len(event.get("content", ""))
-                        message_count += 1
-                except:
-                    continue
+        for event in backend.load_all_events(session_id):
+            event_type = event.get("type", "")
+            
+            if event_type == "system_prompt":
+                system_chars = len(event.get("content", ""))
+            elif event_type == "user_message":
+                user_chars += len(event.get("content", ""))
+                message_count += 1
+            elif event_type == "assistant_message":
+                assistant_chars += len(event.get("content", ""))
+                message_count += 1
+            elif event_type == "tool_result_msg":
+                tool_result_chars += len(event.get("content", ""))
+                message_count += 1
         
         # 估算 system prompt 各部分（使用默认值）
         if system_chars == 0:
@@ -950,10 +812,33 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
 @router.post("/api/sessions/{session_id}/steer")
 async def api_steer_session(session_id: str, data: SteerRequest) -> dict[str, Any]:
     agent = _get_live_agent(session_id)
-    if agent is not None:
-        agent.steer(data.message)
-        return {"success": True, "message": "Steer message queued"}
-    return {"success": False, "message": "Session not active or steer not supported"}
+    # U1：非运行中直接拒绝——前端凭 success=false 退回普通发送，杜绝"消息被吃了"的假 steer
+    if agent is None or not agent.is_processing:
+        return {"success": False, "message": "Session not active"}
+    from frontend.server.routers.chat import build_message_with_context
+    message = build_message_with_context(data.message, data.context_files)
+    # steer/queued 落盘 + WS 广播，前端乐观 UI 凭事件流转状态（queued→delivered）
+    agent.session.append("steer/queued", {"content": message[:200]})
+    await agent.steer(message)
+    return {"success": True, "message": "Steer message queued"}
+
+
+@router.post("/api/sessions/{session_id}/subagents/{sub_session_id}/background")
+async def api_background_subagent(session_id: str, sub_session_id: str) -> dict[str, Any]:
+    """U3a：把正在前台阻塞的子代理 run 转为后台（v2 job.background 语义）。
+
+    标记后前台 block 立即以 state="backgrounded" 返回、主会话可继续对话；
+    run 不中断，完成后经 subagent/completed synthetic 事件注入父会话。
+    """
+    from agents.core.job_registry import get_job
+
+    job = get_job(sub_session_id)
+    if job is None or job.done.is_set():
+        return {"success": False, "message": "Sub-agent is not running"}
+    if job.parent_session_id != session_id:
+        raise HTTPException(status_code=404, detail="Not a sub-agent of this session")
+    job.mark_background()
+    return {"success": True, "message": "Sub-agent moved to background"}
 
 
 @router.post("/api/sessions/{session_id}/fork")
@@ -967,7 +852,7 @@ async def api_fork_session(session_id: str, data: Optional[ForkRequest] = None) 
     print(f"[FORK] source session_id={session_id}, data={data}")
     
     from agents.session_manager import get_session_manager
-    from agents.core.session import Session, get_session_backend, session_dir
+    from agents.core.session import Session, get_session_backend
     
     sm = get_session_manager()
     agent = sm.get_agent(session_id)
@@ -1045,10 +930,10 @@ async def api_fork_session(session_id: str, data: Optional[ForkRequest] = None) 
     }
     copied_events.append(title_event)
     
-    from agents.core.session_backend_jsonl import JsonlSessionBackend
-    new_backend = JsonlSessionBackend()
+    # 写入必须走全局 backend：硬编码 JsonlSessionBackend 曾导致 sqlite 下
+    # fork 出的会话读不到（读走 sqlite、写落 JSONL，D5 读写分裂）
     for event in copied_events:
-        new_backend.append(new_session_id, event)
+        backend.append(new_session_id, event)
     print(f"[FORK] wrote {len(copied_events)} events to {new_session_id}")
     
     try:
@@ -1285,9 +1170,9 @@ async def api_plan_draft_artifact_update(session_id: str, data: DraftArtifactReq
 
 @router.get("/api/sessions/{session_id}/compression-stats")
 def api_compression_stats(session_id: str) -> dict[str, Any]:
-    sessions_dir = session_dir()
-    events_file = sessions_dir / f"{session_id}.events.jsonl"
-    if not events_file.exists():
+    from agents.core.session import get_session_backend
+    backend = get_session_backend()
+    if not backend.session_exists(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
     from agents.core.context_events import collect_hidden_seqs
@@ -1299,16 +1184,7 @@ def api_compression_stats(session_id: str) -> dict[str, Any]:
     session_fold_count = 0
     last_fold_time: int | None = None
     folded_memories: list[dict[str, Any]] = []
-    events: list[dict[str, Any]] = []
-
-    with open(events_file) as f:
-        for line in f:
-            try:
-                event = json.loads(line.strip())
-            except json.JSONDecodeError as exc:
-                print(f"[compression-stats] invalid event line in {events_file}: {exc}")
-                continue
-            events.append(event)
+    events: list[dict[str, Any]] = backend.load_all_events(session_id)
 
     hidden_seqs = collect_hidden_seqs(events)
     for event in events:

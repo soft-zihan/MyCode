@@ -169,15 +169,18 @@ class TestAgentSessionLifecycle:
         assert agent._turn_number == 1
 
     @pytest.mark.asyncio
-    async def test_event_append_persists_session_file(self, tmp_path, monkeypatch):
+    async def test_event_append_persists_via_backend(self, tmp_path, monkeypatch):
+        """append 的事件经当前 backend 落盘（jsonl/sqlite 一致）。"""
         monkeypatch.setenv("MYCODE_SESSION_DIR", str(tmp_path / "sessions"))
         import agents.core.session as core_session
         core_session._backend = None
         try:
             agent = _make_agent()
             agent.session.append("user_message", {"content": "hello"})
-            session_file = tmp_path / "sessions" / f"{agent.session_id}.events.jsonl"
-            assert session_file.exists()
+            backend = core_session.get_session_backend()
+            assert backend.session_exists(agent.session_id)
+            events = backend.load_all_events(agent.session_id)
+            assert any(e.get("content") == "hello" for e in events)
         finally:
             core_session._backend = None
 

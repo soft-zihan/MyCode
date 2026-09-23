@@ -86,14 +86,12 @@ class AppConfig:
     """应用配置"""
     endpoints: dict[str, ModelEndpointConfig]
     routing: dict[str, str]
-    cross_session_memory: bool = True
     plan_strategies: PlanStrategyConfig = field(default_factory=PlanStrategyConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "endpoints": {k: v.to_dict() for k, v in self.endpoints.items()},
             "routing": self.routing,
-            "cross_session_memory": self.cross_session_memory,
             "plan_strategies": self.plan_strategies.to_dict(),
         }
 
@@ -111,7 +109,6 @@ class AppConfig:
         return cls(
             endpoints=endpoints,
             routing=routing_data,
-            cross_session_memory=data.get("cross_session_memory", True),
             plan_strategies=PlanStrategyConfig.from_dict(strategies_data),
         )
 

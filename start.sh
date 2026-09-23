@@ -16,10 +16,12 @@ err()  { echo "[$(date '+%H:%M:%S')] ❌ $*" >&2; }
 kill_port() {
     local port=$1
     local pids
-    pids=$(lsof -ti:"$port" 2>/dev/null || true)
+    # 只杀监听者（-sTCP:LISTEN）：曾误杀所有连着该端口的客户端
+    # （如持有 SSE 长连接的 eval.smoke.runner → exit 137）
+    pids=$(lsof -ti:"$port" -sTCP:LISTEN 2>/dev/null || true)
     if [[ -n "$pids" ]]; then
         echo "$pids" | xargs kill -9 2>/dev/null || true
-        log "已清理端口 $port 上的进程: $pids"
+        log "已清理端口 $port 上的监听进程: $pids"
     fi
 }
 

@@ -312,6 +312,28 @@ def _apply_plan_slug(state: str | None, event: dict[str, Any]) -> str | None:
     return state
 
 
+def _init_meta_str() -> str | None:
+    return None
+
+
+def _apply_origin(state: str | None, event: dict[str, Any]) -> str | None:
+    if event.get("type") == "session/meta" and event.get("origin"):
+        return event.get("origin")
+    return state
+
+
+def _apply_parent_session(state: str | None, event: dict[str, Any]) -> str | None:
+    if event.get("type") == "session/meta" and event.get("parent_session"):
+        return event.get("parent_session")
+    return state
+
+
+def _apply_agent_type(state: str | None, event: dict[str, Any]) -> str | None:
+    if event.get("type") == "session/meta" and event.get("agent_type"):
+        return event.get("agent_type")
+    return state
+
+
 register_projection("title", _init_title, _apply_title, state_version=1)
 register_projection("updated_at", _init_updated_at, _apply_updated_at, state_version=1)
 register_projection("cwd", _init_cwd, _apply_cwd, state_version=1)
@@ -319,6 +341,9 @@ register_projection("running", _init_running, _apply_running, state_version=1)
 register_projection("context_used", _init_context_used, _apply_context_used, state_version=2)
 register_projection("context_total", _init_context_total, _apply_context_total, state_version=2)
 register_projection("plan_slug", _init_plan_slug, _apply_plan_slug, state_version=1)
+register_projection("origin", _init_meta_str, _apply_origin, state_version=1)
+register_projection("parent_session", _init_meta_str, _apply_parent_session, state_version=1)
+register_projection("agent_type", _init_meta_str, _apply_agent_type, state_version=1)
 
 
 class ProjectionCache:

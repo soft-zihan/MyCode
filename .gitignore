@@ -263,7 +263,6 @@ project-learning/
 
 /wiki/
 # eval/ — 跟踪源码与测试夹具，忽略运行时数据/产物
-eval/workspace/
 eval/reports/
 eval/cassettes/
 experiments/
@@ -273,3 +272,5 @@ output/
 data/
 projects/
 .mycode/
+mindmap/
+.gitignore

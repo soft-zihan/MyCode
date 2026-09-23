@@ -1,8 +1,9 @@
 """子智能体 Session 生命周期测试。
 
-当前架构：
-- 子 Agent 拥有独立的内存 Session，用于 WebSocket 广播和消息派生。
-- 子 Session 不写入主会话事件后端；父会话通过 sub_agent/start/end 事件记录生命周期。
+U2 架构：
+- 子 Agent 拥有独立 Session，事件与主会话一样落盘（可观测/可恢复/可续跑）。
+- 子会话首事件 session/meta 携带归属（origin/parent_session/agent_type），
+  是列表过滤与续跑归属校验的唯一数据源；父会话通过 sub_agent/start/end 记录生命周期。
 """
 
 from __future__ import annotations
@@ -39,8 +40,9 @@ def test_session_init_with_parent(session_env):
     assert session.agent_type == "explore"
 
 
-def test_sub_agent_session_is_memory_only(session_env):
-    from agents.core.session import Session
+def test_sub_agent_session_is_persisted_with_meta(session_env):
+    """U2：子会话事件落盘（可观测/可续跑），session/meta 保存归属且重载可恢复。"""
+    from agents.core.session import Session, get_session_backend, is_derived_session_meta
 
     sub_session = Session(
         session_id="child_1",
@@ -48,12 +50,29 @@ def test_sub_agent_session_is_memory_only(session_env):
         origin="sub_agent",
         agent_type="explore",
     )
+    sub_session.append("session/meta", {
+        "origin": "sub_agent",
+        "parent_session": "parent_1",
+        "agent_type": "explore",
+    })
     sub_session.append("user_message", {"content": "task"})
     sub_session.append("assistant_message", {"content": "result"})
 
-    assert len(sub_session._log) == 2
-    assert not (session_env / "child_1.events.jsonl").exists()
-    assert Session.load_from_events("child_1") is None
+    assert len(sub_session._log) == 3
+    assert get_session_backend().session_exists("child_1")
+
+    loaded = Session.load_from_events("child_1")
+    assert loaded is not None
+    assert len(loaded.events) == 3
+    assert loaded.origin == "sub_agent"
+    assert loaded.parent_session == "parent_1"
+    assert loaded.agent_type == "explore"
+
+    # 派生会话（sub_agent/eval）不进用户会话列表/清理/最近会话
+    assert is_derived_session_meta({"origin": "sub_agent"})
+    assert is_derived_session_meta({"origin": "eval"})
+    assert not is_derived_session_meta({"origin": None})
+    assert not is_derived_session_meta({})
 
 
 def test_parent_session_records_sub_agent_lifecycle(session_env):

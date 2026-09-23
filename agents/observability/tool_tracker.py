@@ -481,6 +481,51 @@ class ToolCallTracker:
         self.last_decision = None
 
 
+class RepeatGuard:
+    """同工具+同参数连续重复调用检测（U0 从 Agent._check_repeat_guard 迁入）。
+
+    与 ToolCallTracker 的窗口检测互补：本守卫只看"连续同 key"链，
+    第 3 次注入自省警告、第 5/8 次注入带参数预览的强警告。
+    状态在每轮开始与上下文折叠后重置（原 Agent._record_fold_event 语义）。
+    """
+
+    def __init__(self) -> None:
+        self._chain_key: str = ""
+        self._chain_count: int = 0
+
+    def reset(self) -> None:
+        self._chain_key = ""
+        self._chain_count = 0
+
+    def check(self, tool_name: str, inp: dict) -> str | None:
+        key = json.dumps([tool_name, canonical_args(inp)], ensure_ascii=False)
+        if key == self._chain_key:
+            self._chain_count += 1
+        else:
+            self._chain_key = key
+            self._chain_count = 1
+        if self._chain_count == 3:
+            return (
+                "You are repeating the exact same tool call with identical arguments. "
+                "Carefully analyze the previous result before calling again: if the task is "
+                "not complete, try a different approach or different arguments instead of "
+                "repeating the call."
+            )
+        if self._chain_count in (5, 8):
+            preview = canonical_args(inp)[:500]
+            return (
+                f"Repeated tool call detected:\n"
+                f"- tool: {tool_name}\n"
+                f"- consecutive_calls: {self._chain_count}\n"
+                f"- arguments: {preview}\n"
+                f"The repeated calls are not making progress. Do not call this tool with "
+                f"these exact arguments again. Inspect the latest result and choose a "
+                f"different action, different arguments, or finish the task if enough "
+                f"evidence has been gathered."
+            )
+        return None
+
+
 def check_tool_warnings(
     tracker: ToolCallTracker,
     tool_name: str,

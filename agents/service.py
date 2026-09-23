@@ -89,9 +89,6 @@ class AgentService:
     def abort(self) -> None:
         self._agent.abort()
 
-    def steer(self, message: str) -> None:
-        self._agent.steer(message)
-
     def set_permission_mode(self, mode: str) -> None:
         self._agent.set_permission_mode(mode)
 
