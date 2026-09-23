@@ -231,7 +231,8 @@ class TurnRunner:
             })
             raise
         except Exception as e:
-            print_error(f"[ERROR] {type(e).__name__}: {e}")
+            import traceback
+            print_error(f"[ERROR] {type(e).__name__}: {e}\n{traceback.format_exc()}")
             turn_span.record_error(e)
             turn_span.add_metadata(event_range_end_seq=a.session.seq)
             a.session.append("error", {"message": str(e), "error_type": type(e).__name__, "sub_agent_id": a._current_sub_agent_id})

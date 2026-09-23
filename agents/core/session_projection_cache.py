@@ -173,8 +173,9 @@ class ProjectionRegistry:
         for key, unit in self._units.items():
             try:
                 new_state[key] = unit.apply(state.get(key), event)
-            except Exception:
-                pass
+            except Exception as e:
+                # 单个投影单元故障不拖垮整个 fold，但必须可见（禁止静默吞）
+                print(f"[projcache] 投影单元 {key} 应用事件 {event.get('type')} 失败: {e!r}")
         return new_state
 
     def fold_events(self, init_val: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -384,8 +385,8 @@ class ProjectionCache:
             path.write_text(json.dumps(checkpoint.to_dict(), indent=2, default=str))
             self._last_write_time[checkpoint.session_id] = time.time()
             self._pending_writes[checkpoint.session_id] = 0
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[projcache] checkpoint 写入失败 {path.name}: {e!r}")
 
     def should_write(self, session_id: str) -> bool:
         count = self._pending_writes.get(session_id, 0)

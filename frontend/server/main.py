@@ -71,6 +71,16 @@ async def startup_event():
     set_workspace(project_root)
     print(f"[STARTUP] Workspace set to: {get_workspace()}")
 
+    # U6 崩溃恢复：启动扫描——悬挂会话标记 interrupted（保守版，不自动续跑）
+    try:
+        from agents.core.session_crash_recovery import scan_and_mark_interrupted
+        repaired = scan_and_mark_interrupted()
+        if repaired:
+            ids = [r["session_id"] for r in repaired]
+            print(f"[STARTUP] Crash recovery: 标记 {len(repaired)} 个悬挂会话 interrupted: {ids}")
+    except Exception as e:
+        print(f"[STARTUP] Crash recovery scan failed (non-fatal): {e!r}")
+
     # 可观测性初始化（OTel → Langfuse，失败不阻塞主流程）
     try:
         from agents.observability import init_tracing
@@ -107,6 +117,14 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Flush traces and cleanup MCP connections at shutdown."""
+    # U6：先优雅收口活跃会话（abort → 限时等待 → 合成 turn/end{shutdown}）
+    try:
+        from agents.core.session_crash_recovery import shutdown_active_sessions
+        closed = await shutdown_active_sessions()
+        if closed:
+            print(f"[SHUTDOWN] Force-closed sessions: {closed}")
+    except Exception as e:
+        print(f"[SHUTDOWN] Session shutdown failed: {e!r}")
     try:
         from agents.observability import shutdown_tracing
         shutdown_tracing()

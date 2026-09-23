@@ -354,7 +354,17 @@ class Session:
             return None
 
         from .session_crash_recovery import validate_and_repair_events
-        events = validate_and_repair_events(events, session_id)
+        repaired = validate_and_repair_events(events, session_id)
+        if len(repaired) > len(events):
+            # U6：修复落盘（"恢复是数据库的属性而非加载器的属性"，v2 execution.ts 哲学）——
+            # 合成 closer 回写后端，保证磁盘流 seq 连续、turn 配对；否则内存修复占用的
+            # seq 会在后续 append 时留下永久空洞，且每次加载重复修复
+            for ev in repaired[len(events):]:
+                try:
+                    backend.append(session_id, ev)
+                except Exception as e:
+                    print(f"[session] crash-recovery closer 落盘失败 {session_id}: {e!r}")
+        events = repaired
 
         events_by_seq: dict[int, dict] = {}
         for event in events:
@@ -362,10 +372,15 @@ class Session:
             if seq is not None and seq not in events_by_seq:
                 events_by_seq[seq] = event
 
-        max_seq = -1
-        for seq in sorted(events_by_seq.keys()):
-            session._log.append(events_by_seq[seq])
-            max_seq = max(max_seq, seq)
+        # seq 空洞（历史 crash 残留）用占位事件填平：维持 "_log 以 seq 为下标"
+        # 的全局不变量（get_event/get_messages_for_llm 直接按 seq 索引，空洞会
+        # 错位甚至 IndexError）。占位仅内存不落盘，derive_messages 对未知类型返回 []
+        max_seq = max(events_by_seq.keys())
+        for seq in range(max_seq + 1):
+            event = events_by_seq.get(seq)
+            if event is None:
+                event = {"type": "seq_gap", "seq": seq, "time": 0, "session_id": session_id}
+            session._log.append(event)
 
         session._next_seq = max_seq + 1
 

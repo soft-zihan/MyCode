@@ -4,6 +4,13 @@ DeepSeek 对齐：
 - Torn Tail 检测：加载时检测 seq 不连续
 - 自动修复：合成缺失的闭合事件（turn/end）
 - Revision 递增
+
+U6（v2 execution.ts / restart.ts 对齐，保守版）：
+- 启动扫描：projcache running=True 的会话经事件流核验后，落盘
+  turn/end{reason:"interrupted"} + session/interrupted（不自动续跑，等用户决定）
+- 优雅 shutdown：abort 活跃 agent → 超时未收尾者合成 turn/end{reason:"shutdown"}
+- claim 语义靠"turn/start 无配对闭合事件即悬挂"从事件流派生，不加新表
+  （结构化 claim 表归 U7 sqlite-first 决策点）
 """
 
 from __future__ import annotations
@@ -11,6 +18,9 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from typing import Any
+
+# 闭合 turn 的事件集合（D4 一致性：abort 端点写 turn/cancel，同样终结 running）
+_TURN_CLOSER_TYPES = ("turn/end", "turn/cancel")
 
 
 @dataclass
@@ -58,14 +68,14 @@ def detect_torn_tail(events: list[dict[str, Any]]) -> TornTailReport:
             gap_count += 1
         expected_seq = seq + 1
     
-    # 检查是否有中断的 turn（缺少 turn/end）
+    # 检查是否有中断的 turn（缺少闭合事件）
     interrupted_turn = False
     turn_depth = 0
     for event in events:
         event_type = event.get("type", "")
         if event_type == "turn/start":
             turn_depth += 1
-        elif event_type == "turn/end":
+        elif event_type in _TURN_CLOSER_TYPES:
             turn_depth -= 1
     
     # 如果 turn_depth > 0，说明有未闭合的 turn
@@ -108,7 +118,7 @@ def synthesize_closers(
         if event_type == "turn/start":
             turn_depth += 1
             last_turn_start_seq = seq
-        elif event_type == "turn/end":
+        elif event_type in _TURN_CLOSER_TYPES:
             turn_depth -= 1
     
     # 为每个未闭合的 turn 合成 turn/end
@@ -179,3 +189,139 @@ def validate_and_repair_events(
               f"gaps={report.gap_count}, interrupted_turn={report.interrupted_turn}")
     
     return repaired_events
+
+
+# ============================================================
+# U6：启动扫描 + 优雅 shutdown
+# ============================================================
+
+
+def unpaired_turn_depth(events: list[dict[str, Any]]) -> int:
+    """事件流中未闭合的 turn 数（claim 语义：turn/start 无配对闭合即悬挂）。"""
+    depth = 0
+    for event in events:
+        t = event.get("type", "")
+        if t == "turn/start":
+            depth += 1
+        elif t in _TURN_CLOSER_TYPES:
+            depth -= 1
+    return max(depth, 0)
+
+
+def _projcache_running_candidates() -> list[str]:
+    """projcache running=True 的会话 ID（廉价初筛，事件流才是最终裁决）。"""
+    import json
+
+    from agents.core.session import session_dir
+
+    candidates = []
+    for f in session_dir().glob("*.projcache.json"):
+        try:
+            rows = json.loads(f.read_text()).get("rows", {})
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"[CRASH_RECOVERY] projcache 读取失败 {f.name}: {e!r}")
+            continue
+        if (rows.get("running") or {}).get("val") is True:
+            candidates.append(f.name[: -len(".projcache.json")])
+    return candidates
+
+
+def _refresh_projection_cache(session: Any) -> None:
+    """从事件流全量重折叠投影并落盘 checkpoint（清理脏 running 缓存）。"""
+    from .session_projection_cache import (
+        ProjectionCheckpoint,
+        get_projection_cache,
+        get_projection_registry,
+    )
+
+    registry = get_projection_registry()
+    state = registry.fold_events(registry.init_state(), session.events)
+    last_seq = max(session.seq - 1, 0)
+    rows = registry.checkpoint(state, last_seq)
+    get_projection_cache().save_checkpoint(ProjectionCheckpoint.from_session(session, rows))
+
+
+def scan_and_mark_interrupted() -> list[dict[str, Any]]:
+    """U6 启动扫描：悬挂会话标记 interrupted（保守版——不自动续跑，等用户决定）。
+
+    流程：projcache running=True 初筛 → 事件流核验未闭合 turn →
+    load_from_events 合成 closer 落盘（turn/end{reason:"crash_recovery"}）→
+    补 session/interrupted 用户可见标记 → 强制刷新投影缓存。
+    脏缓存（事件流已平衡）只重建 checkpoint 不写事件；孤儿缓存直接清理。
+    """
+    from agents.core.session import Session, get_session_backend
+
+    backend = get_session_backend()
+    repaired: list[dict[str, Any]] = []
+    for sid in _projcache_running_candidates():
+        try:
+            events = backend.load_all_events(sid)
+        except Exception as e:
+            print(f"[CRASH_RECOVERY] {sid} 事件读取失败: {e!r}")
+            continue
+        if not events:
+            # 孤儿 projcache（零事件）：缓存无对应事件流，直接清理
+            from .session_projection_cache import get_projection_cache
+            get_projection_cache().delete_checkpoint(sid)
+            print(f"[CRASH_RECOVERY] {sid} projcache 无对应事件，已清理孤儿缓存")
+            continue
+        depth = unpaired_turn_depth(events)
+        session = Session.load_from_events(sid)
+        if session is None:
+            continue
+        if depth == 0:
+            _refresh_projection_cache(session)
+            continue
+        # load_from_events 已合成 turn/end{reason:"crash_recovery"} 并落盘
+        # （配对修复）；这里补用户/前端可见的中断标记，并强制刷新投影缓存
+        # （turn/end 不再经扫描 append，节流写可能漏掉 running=False）
+        session.append("session/interrupted", {
+            "reason": "startup_scan",
+            "message": "服务已重启，上一轮执行被中断。可以继续对话。",
+        })
+        _refresh_projection_cache(session)
+        repaired.append({"session_id": sid, "unpaired_turns": depth})
+        print(f"[CRASH_RECOVERY] {sid} 标记 interrupted（unpaired turns={depth}）")
+    return repaired
+
+
+async def shutdown_active_sessions(timeout_s: float = 2.0) -> list[str]:
+    """U6 优雅 shutdown：abort 活跃 agent → 限时等各自收尾（agent 的
+    CancelledError 路径自写 turn/end{reason:"aborted"}）→ 超时仍悬挂者
+    合成 turn/end{reason:"shutdown"} + session/interrupted 落盘。
+    """
+    import asyncio
+
+    from agents.session_manager import get_session_manager
+
+    sm = get_session_manager()
+    live: list[tuple[Any, Any]] = []
+    for session in sm.active_sessions():
+        agent = sm.get_agent(session.id)
+        if agent is not None and getattr(agent, "is_processing", False):
+            live.append((session, agent))
+    if not live:
+        return []
+
+    for _, agent in live:
+        agent.abort()
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    pending = list(live)
+    while pending and loop.time() < deadline:
+        await asyncio.sleep(0.05)
+        pending = [(s, a) for s, a in pending if getattr(a, "is_processing", False)]
+
+    force_closed: list[str] = []
+    for session, _agent in pending:
+        depth = unpaired_turn_depth(session.events)
+        if depth > 0:
+            for _ in range(depth):
+                session.append("turn/end", {"reason": "shutdown", "synthesized": True})
+            session.append("session/interrupted", {
+                "reason": "shutdown",
+                "message": "服务已关闭，上一轮执行被中断。",
+            })
+        force_closed.append(session.id)
+    return force_closed

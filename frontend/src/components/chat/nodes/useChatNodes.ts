@@ -462,8 +462,10 @@ export function useChatNodes(): UseChatNodesReturn {
         break;
       }
 
+      case 'session/interrupted':
       case 'system': {
-        const message = data.message as string;
+        // U6：session/interrupted（启动扫描/shutdown 合成）复用 system 节点渲染
+        const message = (data.message as string) || '服务已重启，上一轮执行被中断';
         updateSnap(prev => {
           const newNodes = new Map(prev.nodes);
           const key = nextKey('system');
@@ -644,6 +646,12 @@ export function useChatNodes(): UseChatNodesReturn {
         
         case 'subagent/completed': {
           // U3a：历史回放同样渲染完成卡片（事件即数据源）
+          handleSSEEvent(sessionId, event);
+          break;
+        }
+        
+        case 'session/interrupted': {
+          // U6：历史回放渲染中断提示
           handleSSEEvent(sessionId, event);
           break;
         }
