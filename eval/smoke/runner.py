@@ -197,6 +197,17 @@ def _check_subagent_background(expect: dict, events: list[dict]) -> list[str]:
             failures.append("未观测到 subagent/completed 事件（后台完成通知未送达）")
         elif not completed[-1].get("notification_id"):
             failures.append("subagent/completed 缺少 notification_id（幂等键未落盘）")
+    if expect.get("subagent_cancelled"):
+        # U4 硬中止：审计事件 + cancelled 终态 + 幂等取消通知三件套
+        if not any(e.get("type") == "sub_agent/cancel" for e in events):
+            failures.append("未观测到 sub_agent/cancel 审计事件（subagent_cancel 未执行）")
+        if not any(e.get("type") == "sub_agent/end" and e.get("status") == "cancelled" for e in events):
+            failures.append("未观测到 sub_agent/end(status=cancelled)（取消终态未落账）")
+        if not any(
+            e.get("type") == "subagent/completed" and e.get("status") == "cancelled"
+            for e in events
+        ):
+            failures.append("未观测到 subagent/completed(state=cancelled) 取消通知")
     return failures
 
 

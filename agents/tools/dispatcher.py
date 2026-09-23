@@ -176,6 +176,9 @@ class ToolDispatcher:
         if name == "agent":
             from agents.core.subagent_runner import execute_agent_tool
             return await execute_agent_tool(self.agent, inp, timeout_s=self.get_tool_timeout("agent"))
+        if name == "subagent_cancel":
+            from agents.core.subagent_runner import execute_subagent_cancel_tool
+            return await execute_subagent_cancel_tool(self.agent, inp)
         if name == "ask_user":
             from agents.tools.question_tools import handle_ask_user
             return await handle_ask_user(self.agent.session, inp, abort_fn=lambda: self.agent.abort_requested())

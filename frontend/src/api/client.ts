@@ -517,6 +517,15 @@ export async function backgroundSubagent(sessionId: string, subSessionId: string
   return res.json();
 }
 
+/** U4：硬中止后台子代理（软 abort + 硬 cancel 双通道，子会话仍可续跑） */
+export async function cancelSubagent(sessionId: string, subSessionId: string): Promise<SteerResult> {
+  const res = await fetch(`${API_BASE}/sessions/${sessionId}/subagents/${subSessionId}/cancel`, {
+    method: 'POST',
+  });
+  if (!res.ok) throw new Error(`Failed to cancel subagent: ${res.status}`);
+  return res.json();
+}
+
 export async function forkSession(
   sessionId: string, 
   options?: { at_seq?: number; keep_user_messages?: number }

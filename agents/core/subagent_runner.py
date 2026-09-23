@@ -134,6 +134,10 @@ async def _launch_job(agent: "Agent", sub_agent: "Agent", sub_session: Session, 
         timeout_s=timeout_s, max_tool_calls=max_tool_calls, resume=resume,
     ))
     register_job(job)
+    # 让出一拍确保 job task 已进入运行体（到达首个 await 挂起点）：否则
+    # "发起后立刻取消"会命中未启动 task 的 cancel——协程整体跳过，
+    # try/finally 收尾（sub_agent/end + 通知 + done.set）全部丢失
+    await asyncio.sleep(0)
 
     if background:
         job.mark_background()
@@ -226,7 +230,7 @@ async def _run_sub_agent_job(agent: "Agent", job: SubAgentJob, sub_agent: "Agent
             run_task = asyncio.create_task(sub_agent.run_once(prompt))
             try:
                 job.result = await _await_sub_agent_run(
-                    agent, sub_agent, sub_session, run_task, state,
+                    agent, job, sub_agent, sub_session, run_task, state,
                     timeout_s=timeout_s, max_tool_calls=max_tool_calls,
                 )
             finally:
@@ -247,8 +251,9 @@ def _fire_completion_notification(agent: "Agent", job: SubAgentJob) -> None:
     走统一数据流（v2 subagent-completion.ts:20-45）：一次 append 同时完成
     持久化 + 投影（derive 为 user 消息，下一轮模型自动可见）+ WS 广播（前端完成卡片）。
     notification_id 预分配幂等——done 与 cancel 竞态可能双触发（v2 job.ts:38,199-209,366）。
+    U4：硬中止（cancel_requested）无论是否后台化都通知——取消必须可靠送达父会话。
     """
-    if not job.backgrounded.is_set():
+    if not job.backgrounded.is_set() and not job.cancel_requested:
         return
     parent = agent.session
     if any(
@@ -279,13 +284,17 @@ def _fire_completion_notification(agent: "Agent", job: SubAgentJob) -> None:
     })
 
 
-async def _resume_agent_tool(agent: "Agent", inp: dict, resume_id: str, *, timeout_s: int) -> str | ToolExecutionResult:
-    """U2 续跑子会话：归属校验 → 运行中 steer+join / 空闲则从事件流恢复起新 turn。"""
-    owned = any(
-        ev.get("type") == "sub_agent/start" and ev.get("sub_session_id") == resume_id
+def _owns_sub_session(agent: "Agent", sub_id: str) -> bool:
+    """归属校验：sub_id 必须是本会话直接派生的子代理（防跨会话接管/取消）。"""
+    return any(
+        ev.get("type") == "sub_agent/start" and ev.get("sub_session_id") == sub_id
         for ev in agent.session.events
     )
-    if not owned:
+
+
+async def _resume_agent_tool(agent: "Agent", inp: dict, resume_id: str, *, timeout_s: int) -> str | ToolExecutionResult:
+    """U2 续跑子会话：归属校验 → 运行中 steer+join / 空闲则从事件流恢复起新 turn。"""
+    if not _owns_sub_session(agent, resume_id):
         return ToolExecutionResult(
             text=(
                 f"Error: session_id '{resume_id}' is not a sub-agent of this session. "
@@ -402,8 +411,69 @@ async def _resume_idle_sub_agent(agent: "Agent", inp: dict, resume_id: str, *, t
     )
 
 
-async def _await_sub_agent_run(agent: "Agent", sub_agent: "Agent", sub_session: Session,
-                               run_task: "asyncio.Task[dict]", state: dict[str, Any], *,
+async def execute_subagent_cancel_tool(agent: "Agent", inp: dict) -> ToolExecutionResult:
+    """U4 硬中止工具：归属校验 → job.request_cancel（软 abort + 硬 task.cancel）→
+    等收尾（sub_agent/end + 幂等取消通知落父会话）→ 返回带标签结果。
+
+    与优雅收尾的分工：本工具立即硬停；想引导运行中子代理换方向/收尾，
+    用 agent 工具带 session_id 续跑（prompt 经 steer 队列注入，U1 通道）。
+    被取消的子会话已落盘，之后仍可 agent(session_id=...) 续跑。
+    """
+    target_id = str(inp.get("session_id") or "").strip()
+    if not target_id:
+        return ToolExecutionResult(
+            text="Error: session_id is required (the sub-agent's id from its <subagent session_id=...> tag).",
+            status="error", outcome="error", metadata={"reason": "missing_session_id"},
+        )
+    if not _owns_sub_session(agent, target_id):
+        return ToolExecutionResult(
+            text=(
+                f"Error: session_id '{target_id}' is not a sub-agent of this session. "
+                "Only sub-agents you spawned can be cancelled."
+            ),
+            status="error", outcome="error",
+            metadata={"reason": "cancel_not_owned", "sub_session_id": target_id},
+        )
+    job = get_job(target_id)
+    if job is None or job.done.is_set():
+        return ToolExecutionResult(
+            text=f"Sub-agent '{target_id}' is not running (already finished or never spawned in this process).",
+            status="error", outcome="error",
+            metadata={"reason": "cancel_not_running", "sub_session_id": target_id},
+        )
+
+    job.request_cancel()
+    agent.session.append("sub_agent/cancel", {
+        "sub_session_id": target_id,
+        "agent_type": job.agent_type,
+        "description": job.description,
+    })
+    try:
+        await asyncio.wait_for(job.done.wait(), timeout=5)
+    except asyncio.TimeoutError:
+        return ToolExecutionResult(
+            text=_tag_subagent(
+                "Cancel requested but the sub-agent has not finished shutting down within 5s. "
+                "It will be stopped and a completion notification will arrive.",
+                target_id, "cancelled",
+            ),
+            status="ok", outcome="cancelled",
+            metadata={"reason": "cancel_slow_shutdown", "sub_session_id": target_id},
+        )
+    status = job.state.get("status") or "cancelled"
+    return ToolExecutionResult(
+        text=_tag_subagent(
+            job.state.get("output_text") or "Sub-agent cancelled.",
+            target_id, _state_label(status),
+        ),
+        status="ok", outcome="cancelled",
+        metadata={"reason": "subagent_cancel", "sub_session_id": target_id, "final_status": status},
+    )
+
+
+async def _await_sub_agent_run(agent: "Agent", job: SubAgentJob, sub_agent: "Agent",
+                               sub_session: Session, run_task: "asyncio.Task[dict]",
+                               state: dict[str, Any], *,
                                timeout_s: int, max_tool_calls: int | None) -> ToolExecutionResult:
     """等待子代理 run 并封装结果（spawn/resume 共用）。
 
@@ -428,7 +498,13 @@ async def _await_sub_agent_run(agent: "Agent", sub_agent: "Agent", sub_session: 
     except asyncio.CancelledError:
         if not run_task.done():
             run_task.cancel()
-        if agent.abort_requested():
+        # U4：job 级硬中止（subagent_cancel）与父级 abort 同样映射为 cancelled，
+        # 不再误报 timeout（旧行为：非父 abort 的取消一律按外层超时兜底解释）
+        if job.cancel_requested:
+            state["status"] = "cancelled"
+            state["outcome"] = "cancelled"
+            state["summary"] = "Sub-agent cancelled via subagent_cancel (hard stop)"
+        elif agent.abort_requested():
             state["status"] = "cancelled"
             state["outcome"] = "cancelled"
             state["summary"] = "Sub-agent cancelled by parent abort"

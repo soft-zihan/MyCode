@@ -38,9 +38,22 @@ class SubAgentJob:
     state: dict[str, Any] = field(default_factory=dict)
     result: Any = None
     notification_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    cancel_requested: bool = False
 
     def mark_background(self) -> None:
         self.backgrounded.set()
+
+    def request_cancel(self) -> None:
+        """U4 硬中止：软 abort（子 Agent 置位标志+取消其当前 task，run_once 在
+        step 边界优雅收尾并补 turn/end{reason:"aborted"}）+ 硬 cancel 生命周期
+        task 兜底（模型流等待中的 CancelledError 经 _await_sub_agent_run 级联杀
+        run_task）。v2 只有软中止（job.ts:413-441 fiber interrupt），我们双通道。
+        """
+        self.cancel_requested = True
+        if self.sub_agent is not None:
+            self.sub_agent.abort()
+        if self.task is not None and not self.task.done():
+            self.task.cancel()
 
 
 _jobs: dict[str, SubAgentJob] = {}

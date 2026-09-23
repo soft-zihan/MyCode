@@ -424,6 +424,17 @@ tool_definitions: list[ToolDef] = [
         },
     },
     {
+        "name": "subagent_cancel",
+        "description": "Hard-cancel a running sub-agent you spawned (typically a background one). Stops it immediately (within ~1s) — use this when the work is no longer needed or is stuck. To gracefully redirect a running sub-agent instead, resume it via the agent tool with its session_id (your prompt is steered in). The cancelled sub-agent's session stays persisted and can still be resumed later with the agent tool.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "description": "The sub-agent's session_id (from its <subagent session_id=...> result tag)"},
+            },
+            "required": ["session_id"],
+        },
+    },
+    {
         "name": "remember",
         "description": "Save a persistent memory to the wiki. Use IMMEDIATELY in the current turn when the user says 'remember X', 'always/never do X', 'from now on X', or corrects your behavior — such user-taught rules MUST use wiki_type=feedback even when they look like project conventions (litmus test: does it constrain how the agent should act? then feedback, not knowledge). Feedback content must include the Rule, Why, and How to apply. Deduplication is automatic: similar existing entries are merged, and the result tells you which entry was updated. Types: feedback (rules/corrections/confirmations the user teaches the agent), user (personal preferences), knowledge (objective project facts/architecture decisions/technical details), reference (external links/docs), workflow_pattern (troubleshooting pattern; requires symptom/root_cause/workaround instead of content).",
         "input_schema": {

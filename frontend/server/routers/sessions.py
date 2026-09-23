@@ -841,6 +841,24 @@ async def api_background_subagent(session_id: str, sub_session_id: str) -> dict[
     return {"success": True, "message": "Sub-agent moved to background"}
 
 
+@router.post("/api/sessions/{session_id}/subagents/{sub_session_id}/cancel")
+async def api_cancel_subagent(session_id: str, sub_session_id: str) -> dict[str, Any]:
+    """U4：硬中止后台子代理（软 abort + 硬 task.cancel 双通道）。
+
+    子会话已落盘，取消后仍可通过 agent 工具 session_id 续跑；
+    取消通知经 subagent/completed（state="cancelled"）幂等注入父会话。
+    """
+    from agents.core.job_registry import get_job
+
+    job = get_job(sub_session_id)
+    if job is None or job.done.is_set():
+        return {"success": False, "message": "Sub-agent is not running"}
+    if job.parent_session_id != session_id:
+        raise HTTPException(status_code=404, detail="Not a sub-agent of this session")
+    job.request_cancel()
+    return {"success": True, "message": "Sub-agent cancel requested"}
+
+
 @router.post("/api/sessions/{session_id}/fork")
 async def api_fork_session(session_id: str, data: Optional[ForkRequest] = None) -> dict[str, Any]:
     """原子 Fork：从指定位置切割，创建新 session

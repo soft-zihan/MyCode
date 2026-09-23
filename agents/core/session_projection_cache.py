@@ -273,7 +273,9 @@ def _apply_running(state: bool, event: dict[str, Any]) -> bool:
     t = event.get("type")
     if t == "turn/start":
         return True
-    if t == "turn/end":
+    # D4 修复：abort 路径写 turn/cancel（sessions.py abort 端点），不认它则
+    # 被中止会话在投影/前端永久"运行中"
+    if t in ("turn/end", "turn/cancel"):
         return False
     return state
 

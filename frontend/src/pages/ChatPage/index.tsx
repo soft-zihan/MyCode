@@ -336,7 +336,7 @@ export default function ChatPage() {
           )}
 
           {/* U3a: Background Tasks Panel */}
-          <BackgroundTasksPanel tasks={backgroundTasks} />
+          <BackgroundTasksPanel tasks={backgroundTasks} sessionId={currentSessionId ?? undefined} />
 
           {/* Goal Mode UI */}
           {goalState && (
