@@ -96,3 +96,19 @@ def test_system_prompt_renders_tool_guidance():
     assert "# 使用工具" in prompt
     restricted = build_system_prompt(active_tools={"read_file"})
     assert "mcp__code-review-graph__" not in restricted
+
+
+def test_tool_guidance_empty_and_interaction_rules():
+    """U5b-#5：无工具时空段；工具交互通则从内核下沉且随工具存在注入。"""
+    from agents.core.prompt import build_tool_guidance, _load_system_prompt_template
+
+    assert build_tool_guidance(set()) == ""
+    full = build_tool_guidance(None)
+    for marker in ("<tool_result>", "system-reminder", "hooks", "compact_context", "冒号"):
+        assert marker in full
+    # compact_context 指引以该工具存在为前提
+    assert "compact_context" not in build_tool_guidance({"read_file"})
+    # 内核不再包含工具交互细节与 CLI REPL 帮助
+    tpl = _load_system_prompt_template()
+    for removed in ("<tool_result>", "system-reminder", "REPL 命令"):
+        assert removed not in tpl
