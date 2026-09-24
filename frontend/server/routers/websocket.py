@@ -42,6 +42,16 @@ async def websocket_events(websocket: WebSocket) -> None:
     
     Server broadcasts all events to subscribers.
     """
+    # U13：token 鉴权启用时，WS 握手校验 query token（浏览器 WS 无法带 header，
+    # v2 用一次性 ticket；4401 = 应用层未授权关闭码）。
+    # 注意：ASGI 规定 accept 前 close 会被 uvicorn 转为 HTTP 403（关闭码丢失），
+    # 必须先 accept 再 close(4401)，前端才能据关闭码弹 token 输入而非盲目重连。
+    from frontend.server import auth
+    if auth.auth_enabled() and not auth.verify_ws_token(websocket.query_params.get("token")):
+        await websocket.accept()
+        await websocket.close(code=4401)
+        return
+
     await websocket.accept()
     subscriber = Subscriber(websocket)
     _subscribers.append(subscriber)

@@ -27,12 +27,25 @@ from routers import (
     bad_cases_router,
     hello_router,
     version_router,
+    auth_router,
 )
 
 # Import global MCP manager from dedicated module
 from frontend.server.mcp_manager import global_mcp_manager
+from frontend.server import auth
 
 app = FastAPI(title="MyCode API", version="1.0.0")
+
+
+@app.middleware("http")
+async def token_auth_middleware(request, call_next):
+    """U13：MYCODE_AUTH_TOKEN 设置后，/api（豁免面除外）必须带 Bearer token。"""
+    if auth.auth_enabled() and not auth.is_exempt_path(request.url.path):
+        if not auth.verify_bearer(request.headers.get("authorization")):
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return await call_next(request)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -56,6 +69,7 @@ app.include_router(eval_router)
 app.include_router(bad_cases_router)
 app.include_router(hello_router)
 app.include_router(version_router)
+app.include_router(auth_router)
 
 
 @app.on_event("startup")
@@ -142,4 +156,10 @@ def api_health() -> dict[str, str]:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=5555, ws_max_size=10*1024*1024)  # 10MB
+    host = auth.get_bind_host()
+    if auth.auth_enabled():
+        print(f"[auth] token 鉴权已启用（MYCODE_AUTH_TOKEN），绑定 {host}:5555")
+    elif host != "127.0.0.1":
+        print(f"[auth] 警告：绑定 {host}:5555 且未设 MYCODE_AUTH_TOKEN——网络可达者即可驱动 agent，"
+              f"仅限受信网络；远程访问首选 SSH 隧道（ssh -L 5555:localhost:5555）")
+    uvicorn.run(app, host=host, port=5555, ws_max_size=10*1024*1024)  # 10MB

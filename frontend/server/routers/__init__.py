@@ -12,6 +12,7 @@ from .eval import router as eval_router
 from .bad_cases import router as bad_cases_router
 from .hello import router as hello_router
 from .version import router as version_router
+from .auth import router as auth_router
 
 __all__ = [
     "sessions_router",
@@ -28,4 +29,5 @@ __all__ = [
     "bad_cases_router",
     "hello_router",
     "version_router",
+    "auth_router",
 ]

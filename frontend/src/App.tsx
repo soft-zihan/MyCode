@@ -5,10 +5,12 @@ import ToolsPage from './pages/ToolsPage';
 import AgentsPage from './pages/AgentsPage';
 import EvalPage from './pages/EvalPage';
 import BadCasesPage from './pages/BadCasesPage';
+import AuthGate from './components/auth/AuthGate';
 
 function App() {
   return (
     <BrowserRouter>
+      <AuthGate />
       <div className="flex h-screen bg-gray-100 overflow-hidden">
         <Routes>
           <Route path="/" element={<ChatPage />} />

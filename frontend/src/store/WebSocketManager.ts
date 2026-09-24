@@ -7,6 +7,7 @@
  */
 
 import { logger } from '../utils/logger';
+import { getToken, notifyAuthRequired } from '../api/auth';
 
 type EventListener = (event: any) => void;
 
@@ -18,26 +19,25 @@ class WebSocketManager {
   private listeners = new Set<EventListener>();
   private messageQueue: any[] = [];
   private shouldReconnect = true;
-  private started = false; // 一旦启动就永不重连（除非显式 stop）
   
   /**
    * Connect to WebSocket server.
    * Idempotent: calling multiple times has no effect.
    */
   connect(): void {
-    // 一旦启动，不再重复连接
-    if (this.started) {
-      return;
-    }
-    
+    // U13 修复：原 `if (this.started) return` 使 onclose→scheduleReconnect→connect
+    // 永远空转（started 已置 true），断线重连机制实际失效。幂等性由 readyState
+    // 检查保证即可；stop() 通过 shouldReconnect=false 阻断自动重连。
     if (this.ws?.readyState === WebSocket.OPEN || this.ws?.readyState === WebSocket.CONNECTING) {
-      this.started = true;
       return;
     }
     
-    this.started = true;
     this.shouldReconnect = true;
-    const wsUrl = `ws://${window.location.hostname}:5555/ws/events`;
+    // U13：token 鉴权启用时 WS 握手带 query token（浏览器 WS 无法设 header）
+    const token = getToken();
+    const wsUrl = `ws://${window.location.hostname}:5555/ws/events${
+      token ? `?token=${encodeURIComponent(token)}` : ''
+    }`;
     logger.info('[WS] connecting to', wsUrl);
     
     this.ws = new WebSocket(wsUrl);
@@ -70,9 +70,14 @@ class WebSocketManager {
       }
     };
     
-    this.ws.onclose = () => {
-      logger.warn('[WS] disconnected');
+    this.ws.onclose = (ev) => {
+      logger.warn('[WS] disconnected', ev.code);
       this.ws = null;
+      // U13：4401 = token 鉴权拒绝——重连无意义，弹 AuthGate 让用户输入 token
+      if (ev.code === 4401) {
+        notifyAuthRequired();
+        return;
+      }
       // 只有在显式 stop 后才不重连
       if (this.shouldReconnect) {
         this.scheduleReconnect();
@@ -149,7 +154,6 @@ class WebSocketManager {
    */
   disconnect(): void {
     this.shouldReconnect = false;
-    this.started = false;
     
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
