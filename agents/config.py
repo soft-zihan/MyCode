@@ -49,6 +49,32 @@ class ModelEndpointConfig:
 
 
 @dataclass
+class EmbeddingConfig:
+    """Embedding 模型配置（wiki 语义召回/编译去重专用）。
+
+    BC-30：本机 ollama 单槽串行 + 冷加载不可靠，召回曾 94s 超时（预算 20s）。
+    切换为云端 OpenAI 兼容 /embeddings（默认 SiliconFlow BAAI/bge-large-zh-v1.5（免费），
+    实测 ~0.2s/次、1024 维）。backend: openai=OpenAI 兼容 API；ollama=本地。
+    """
+    backend: str = "openai"
+    base_url: str = "https://api.siliconflow.cn/v1"
+    api_key: str = ""
+    model: str = "BAAI/bge-large-zh-v1.5"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "EmbeddingConfig":
+        return cls(
+            backend=data.get("backend", "openai"),
+            base_url=data.get("base_url", "https://api.siliconflow.cn/v1"),
+            api_key=data.get("api_key", ""),
+            model=data.get("model", "BAAI/bge-large-zh-v1.5"),
+        )
+
+
+@dataclass
 class PlanStrategyConfig:
     """Plan 策略配置"""
     grill_spec: str = "simple"
@@ -87,12 +113,14 @@ class AppConfig:
     endpoints: dict[str, ModelEndpointConfig]
     routing: dict[str, str]
     plan_strategies: PlanStrategyConfig = field(default_factory=PlanStrategyConfig)
+    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "endpoints": {k: v.to_dict() for k, v in self.endpoints.items()},
             "routing": self.routing,
             "plan_strategies": self.plan_strategies.to_dict(),
+            "embedding": self.embedding.to_dict(),
         }
 
     @classmethod
@@ -110,6 +138,7 @@ class AppConfig:
             endpoints=endpoints,
             routing=routing_data,
             plan_strategies=PlanStrategyConfig.from_dict(strategies_data),
+            embedding=EmbeddingConfig.from_dict(data.get("embedding", {})),
         )
 
 
@@ -141,6 +170,23 @@ def save_config(config: AppConfig) -> None:
         json.dumps(config.to_dict(), indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+
+
+def get_embedding_config() -> EmbeddingConfig:
+    return load_config().embedding
+
+
+def update_embedding_config(backend: str, base_url: str, model: str, api_key: str | None = None) -> EmbeddingConfig:
+    """更新 embedding 配置；api_key=None 表示保留现值（前端不回显密钥）。"""
+    config = load_config()
+    cfg = config.embedding
+    cfg.backend = backend
+    cfg.base_url = base_url
+    cfg.model = model
+    if api_key is not None:
+        cfg.api_key = api_key
+    save_config(config)
+    return cfg
 
 
 def get_agent_model_ref(agent_type: str) -> str:

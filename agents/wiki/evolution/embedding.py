@@ -13,12 +13,12 @@ import re
 from pathlib import Path
 from typing import Any
 
-from agents.wiki.wiki_manager import get_wiki_dir, WikiEntry
+from agents.wiki.wiki_manager import WikiEntry
 
 
-DEFAULT_EMBEDDING_MODEL = "qwen3-embedding"
+# 兜底零向量/缓存元信息用默认维度；真实维度以 API 返回向量为准
+# （cosine_similarity 对维度不一致返回 0.0，天然防跨模型混算）
 EMBEDDING_DIM = 1024
-CACHE_DIR_NAME = ".embed-cache"
 
 
 def content_hash(text: str) -> str:
@@ -27,9 +27,9 @@ def content_hash(text: str) -> str:
 
 
 def get_embedding_model() -> str:
-    """embedding 模型名（settings embed.model，默认 qwen3-embedding）。"""
-    from agents.wiki.evolution.settings import get_setting
-    return str(get_setting("embed.model", DEFAULT_EMBEDDING_MODEL))
+    """embedding 模型名（全局配置 ~/.my-code/config.json embedding.model，BC-30）。"""
+    from agents.config import get_embedding_config
+    return get_embedding_config().model
 
 
 def _resolve_model(model: str | None) -> str:
@@ -37,15 +37,21 @@ def _resolve_model(model: str | None) -> str:
 
 
 def get_cache_dir() -> Path:
-    """获取 embedding 缓存目录。"""
-    d = get_wiki_dir() / CACHE_DIR_NAME
+    """embedding 缓存目录（全局，BC-30）。
+
+    缓存键是内容 sha256、文件按模型分名，天然跨工作区安全共享；
+    放全局（~/.mycode/embed-cache）使评测 wipe / 工作区清理不再导致
+    全量冷启动——冷 embed 串行 + ollama 重试曾把召回推到 94s（预算 20s）。
+    """
+    d = Path.home() / ".mycode" / "embed-cache"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def get_cache_path(model: str | None = None) -> Path:
-    """获取缓存文件路径。"""
-    return get_cache_dir() / f"{_resolve_model(model)}.json"
+    """缓存文件路径（模型名消毒为合法文件名，如 BAAI/bge-... → BAAI_bge-...）。"""
+    safe = re.sub(r"[^\w.\-]", "_", _resolve_model(model))
+    return get_cache_dir() / f"{safe}.json"
 
 
 class EmbeddingCache:
@@ -100,7 +106,9 @@ class EmbeddingCache:
         if not self._dirty:
             return
         path = get_cache_path(self._model)
-        path.write_text(json.dumps(self._cache, ensure_ascii=False))
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(self._cache, ensure_ascii=False))
+        tmp.replace(path)
         self._dirty = False
     
     @property
@@ -121,47 +129,97 @@ def set_cached_embedding(text: str, embedding: list[float], model: str | None = 
 
 
 async def embed_text(text: str, model: str | None = None) -> list[float]:
-    """生成文本的 embedding。
-
-    模型/后端由 settings embed.model / embed.backend 配置，失败时重试。
-    """
-    from agents.wiki.evolution.settings import get_setting
+    """生成文本的 embedding（后端/模型/密钥来自全局配置，失败时重试）。"""
+    from agents.config import get_embedding_config
 
     model = _resolve_model(model)
     cached = get_cached_embedding(text, model)
     if cached is not None:
         return cached
 
-    backend = str(get_setting("embed.backend", "ollama"))
-    if backend != "ollama":
-        raise RuntimeError(f"unsupported embed.backend: {backend!r} (only 'ollama' is implemented)")
-
-    embedding = await _call_ollama_embedding(text, model)
+    cfg = get_embedding_config()
+    if cfg.backend == "openai":
+        embedding = await _call_openai_embedding(text, model)
+    elif cfg.backend == "ollama":
+        embedding = await _call_ollama_embedding(text, model)
+    else:
+        raise RuntimeError(f"unsupported embedding backend: {cfg.backend!r} (openai | ollama)")
     set_cached_embedding(text, embedding, model)
     return embedding
 
 
-async def _call_ollama_embedding(text: str, model: str) -> list[float]:
-    """调用 ollama embedding API。"""
-    import aiohttp
+async def _call_openai_embedding(text: str, model: str) -> list[float]:
+    """调用 OpenAI 兼容 /embeddings API（SiliconFlow 等，BC-30）。"""
+    from agents.config import get_embedding_config
 
+    cfg = get_embedding_config()
+    url = f"{cfg.base_url.rstrip('/')}/embeddings"
+    headers = {"Content-Type": "application/json"}
+    if cfg.api_key:
+        headers["Authorization"] = f"Bearer {cfg.api_key}"
+    payload = {"model": model, "input": text}
+
+    max_retries = 3
+    async with _get_semaphore():
+        for attempt in range(max_retries):
+            try:
+                session = _get_http_session()
+                async with session.post(url, json=payload, headers=headers, timeout=30) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data["data"][0]["embedding"]
+                    body = (await resp.text())[:200]
+                    raise RuntimeError(f"embeddings API returned {resp.status}: {body}")
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise RuntimeError(f"embedding failed after {max_retries} attempts: {e}")
+                await asyncio.sleep(1)
+
+    raise RuntimeError("embedding failed")
+
+
+# (loop, session, semaphore) 三元组：session/semaphore 均绑定事件循环，
+# 换 loop（如线程内 asyncio.run）时自动重建，防 "attached to a different loop"
+_http_state: tuple[Any, Any, Any] | None = None
+# 限并发：compile/consolidate 批量 embed 不得挤占前台召回队列（BC-30）
+_EMBED_CONCURRENCY = 4
+
+
+def _get_http_session():
+    global _http_state
+    loop = asyncio.get_running_loop()
+    if _http_state is None or _http_state[0] is not loop or _http_state[1].closed:
+        import aiohttp
+        _http_state = (loop, aiohttp.ClientSession(), asyncio.Semaphore(_EMBED_CONCURRENCY))
+    return _http_state[1]
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    _get_http_session()
+    assert _http_state is not None
+    return _http_state[2]
+
+
+async def _call_ollama_embedding(text: str, model: str) -> list[float]:
+    """调用 ollama embedding API（共享 session + 全局限并发）。"""
     url = "http://localhost:11434/api/embeddings"
     payload = {"model": model, "prompt": text}
 
     max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            async with aiohttp.ClientSession() as session:
+    async with _get_semaphore():
+        for attempt in range(max_retries):
+            try:
+                session = _get_http_session()
                 async with session.post(url, json=payload, timeout=30) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         return data["embedding"]
                     else:
                         raise RuntimeError(f"ollama returned {resp.status}")
-        except Exception as e:
-            if attempt == max_retries - 1:
-                raise RuntimeError(f"ollama embedding failed after {max_retries} attempts: {e}")
-            await asyncio.sleep(1)
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise RuntimeError(f"ollama embedding failed after {max_retries} attempts: {e}")
+                await asyncio.sleep(1)
 
     raise RuntimeError("ollama embedding failed")
 

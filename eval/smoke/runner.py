@@ -155,15 +155,14 @@ def setup_workspace(task: dict) -> Path:
     """评测 workspace 准备：全量清空隔离（BC-5：残留 1.3G 曾导致 grep 超时与跨用例污染）。
 
     保留项（BC-6）：
-    - .embed-cache：内容寻址，跨用例无害，省时；
     - .extract_state.json：提取水位线。清掉会让全局 session 存储里所有旧会话
       （同 cwd 的历史评测会话）重新变成"待补编译"，backfill 把它们编译进新
       用例的 wiki 造成跨用例污染并拖慢当前用例的折叠编译。
+    （embedding 缓存已全局化 ~/.mycode/embed-cache（BC-30），不在 workspace 内。）
     """
     if task.get("use_real_workspace"):
         ws = SMOKE_CHAIN_WORKSPACE
         keep = {
-            ws / ".mycode" / "wiki" / ".embed-cache",
             ws / ".mycode" / "wiki" / ".extract_state.json",
         }
         if ws.exists():
@@ -186,6 +185,15 @@ def setup_workspace(task: dict) -> Path:
 def check_backend_health(base_url: str) -> None:
     response = requests.get(f"{base_url}/api/health", timeout=5)
     response.raise_for_status()
+
+
+def fetch_audit_events(base_url: str, session_id: str) -> list[dict]:
+    """BC-29：审计类断言（memory_injection、sub_agent/resume 等 INTERNAL 事件）
+    不走 WS 公开通道（U8 白名单），改为 HTTP 拉持久化全量事件日志。
+    WS=流式/存活通道，HTTP=审计通道，与 U8 事件治理设计一致。"""
+    resp = requests.get(f"{base_url}/api/sessions/{session_id}", timeout=15)
+    resp.raise_for_status()
+    return resp.json().get("events") or []
 
 
 def send_chat(base_url: str, message: str, session_id: str | None, cwd: str, thinking: bool | None = None) -> dict:
@@ -238,7 +246,7 @@ def _check_subagent_background(expect: dict, events: list[dict]) -> list[str]:
     return failures
 
 
-def check_assertions_for_phase(phase: dict, workspace: Path, events: list[dict], turn_events: list[dict], window_events: list[dict]) -> list[str]:
+def check_assertions_for_phase(phase: dict, workspace: Path, events: list[dict], turn_events: list[dict], window_events: list[dict], audit_events: list[dict]) -> list[str]:
     """为多阶段测试检查断言。"""
     expect = phase.get("expect", {})
     failures = []
@@ -272,8 +280,8 @@ def check_assertions_for_phase(phase: dict, workspace: Path, events: list[dict],
             failures.append("未观测到子智能体事件（sub_agent_id）")
 
     if expect.get("sub_agent_resumed"):
-        # U2 续跑断言：必须观测到 sub_agent/resume 事件（agent 工具带 session_id 续聊）
-        if not any(e.get("type") == "sub_agent/resume" for e in window_events):
+        # U2 续跑断言：sub_agent/resume 为 INTERNAL（BC-29），从持久化审计日志取证
+        if not any(e.get("type") == "sub_agent/resume" for e in audit_events):
             failures.append("未观测到 sub_agent/resume 事件（第二次调用未带 session_id 续跑）")
 
     failures.extend(_check_subagent_background(expect, events))
@@ -317,8 +325,8 @@ def check_assertions_for_phase(phase: dict, workspace: Path, events: list[dict],
     if reasons and reasons[-1] != "completed":
         failures.append(f"turn/end reason={reasons[-1]}（期望 completed）")
 
-    # wiki 断言
-    wiki_injections = [e for e in events if e.get("type") == "memory_injection"]
+    # wiki 断言（memory_injection 为 INTERNAL：BC-29，从持久化审计日志取证）
+    wiki_injections = [e for e in audit_events if e.get("type") == "memory_injection"]
     wiki_text = " ".join(str(e.get("content", "")) for e in wiki_injections)
     
     wiki_recalled_expect = expect.get("wiki_recalled")
@@ -343,7 +351,7 @@ def check_assertions_for_phase(phase: dict, workspace: Path, events: list[dict],
     return failures
 
 
-def check_assertions(task: dict, workspace: Path, events: list[dict], turn_events: list[dict], window_events: list[dict]) -> list[str]:
+def check_assertions(task: dict, workspace: Path, events: list[dict], turn_events: list[dict], window_events: list[dict], audit_events: list[dict]) -> list[str]:
     """返回失败原因列表（空 = 通过）。
 
     events=本 session 全部事件，turn_events=最后一轮，
@@ -406,8 +414,8 @@ def check_assertions(task: dict, workspace: Path, events: list[dict], turn_event
             failures.append("未观测到子智能体事件（sub_agent_id）")
 
     if expect.get("sub_agent_resumed"):
-        # U2 续跑断言：必须观测到 sub_agent/resume 事件（agent 工具带 session_id 续聊）
-        if not any(e.get("type") == "sub_agent/resume" for e in window_events):
+        # U2 续跑断言：sub_agent/resume 为 INTERNAL（BC-29），从持久化审计日志取证
+        if not any(e.get("type") == "sub_agent/resume" for e in audit_events):
             failures.append("未观测到 sub_agent/resume 事件（第二次调用未带 session_id 续跑）")
 
     failures.extend(_check_subagent_background(expect, events))
@@ -451,8 +459,8 @@ def check_assertions(task: dict, workspace: Path, events: list[dict], turn_event
     if reasons and reasons[-1] != "completed":
         failures.append(f"turn/end reason={reasons[-1]}（期望 completed）")
 
-    # wiki 断言：验证 memory_injection 事件
-    wiki_injections = [e for e in events if e.get("type") == "memory_injection"]
+    # wiki 断言：验证 memory_injection 事件（INTERNAL：BC-29，持久化审计日志取证）
+    wiki_injections = [e for e in audit_events if e.get("type") == "memory_injection"]
     wiki_text = " ".join(str(e.get("content", "")) for e in wiki_injections)
     
     # wiki_recalled: 验证指定路径被召回
@@ -707,7 +715,7 @@ async def run_task(
                     if not arrived:
                         record["failures"].append(f"wait_for_events 超时: {spec}")
 
-                # 提取回答内容（取最后一个 assistant_message）
+                # 提取回答内容（公开 text 流事件重建，BC-25）
                 events = listener.session_events(session_id)
                 ended_turns = {e.get("turn") for e in events if e.get("type") == "turn/end"}
                 last_turn_start = max(
@@ -741,9 +749,10 @@ async def run_task(
                     "wiki_recalled": phase_expect.get("wiki_recalled", False),
                 })
                 
-                # 阶段断言
+                # 阶段断言（审计事件走 HTTP 持久化日志，BC-29）
                 if not record["failures"]:
-                    failures = check_assertions_for_phase(phase, workspace, events, turn_events, listener.events[window_start:])
+                    audit_events = await asyncio.to_thread(fetch_audit_events, base_url, session_id)
+                    failures = check_assertions_for_phase(phase, workspace, events, turn_events, listener.events[window_start:], audit_events)
                     record["failures"].extend(failures)
         else:
             # 单阶段测试（原有逻辑）
@@ -771,7 +780,8 @@ async def run_task(
                          if e.get("type") == "turn/start" and e.get("turn") in ended_turns),
                         default=0,
                     )
-                    failures = check_assertions(task, workspace, events, events[last_turn_start:], window_events)
+                    audit_events = await asyncio.to_thread(fetch_audit_events, base_url, session_id)
+                    failures = check_assertions(task, workspace, events, events[last_turn_start:], window_events, audit_events)
                     record["failures"].extend(failures)
     except Exception as e:
         record["failures"].append(f"runner 异常: {type(e).__name__}: {e}")

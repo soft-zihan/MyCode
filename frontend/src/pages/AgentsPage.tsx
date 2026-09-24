@@ -6,6 +6,7 @@ import {
 } from '../api/client';
 import { Bot, Server, RefreshCw, Save, Plus, Trash2, ChevronDown, ChevronRight, Globe, Cpu, CheckCircle, XCircle, Loader, Edit2, X, RotateCcw, Sparkles } from 'lucide-react';
 import { PageLayout } from '../components/PageLayout';
+import { EmbeddingConfigSection } from './agents/EmbeddingConfigSection';
 
 interface ApiProvider {
   id: string;
@@ -36,7 +37,7 @@ export default function AgentsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [activeSection, setActiveSection] = useState<'models' | 'agents'>('agents');
+  const [activeSection, setActiveSection] = useState<'models' | 'agents' | 'embedding'>('agents');
   const [providers, setProviders] = useState<ApiProvider[]>([]);
   const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
   const [verifyingModel, setVerifyingModel] = useState<string | null>(null);
@@ -573,6 +574,17 @@ export default function AgentsPage() {
             ))}
           </div>
         )}
+
+        {/* Embedding 配置入口（BC-30：wiki 语义召回后端） */}
+        <div
+          className={`px-3 py-2 cursor-pointer hover:bg-indigo-100/50 border-t border-gray-200 mt-auto flex items-center gap-1.5 ${
+            activeSection === 'embedding' ? 'bg-indigo-100 border-l-2 border-indigo-500' : ''
+          }`}
+          onClick={() => setActiveSection('embedding')}
+        >
+          <Cpu className="w-3.5 h-3.5 text-indigo-500" />
+          <span className="text-xs font-semibold text-gray-700">Embedding 模型</span>
+        </div>
       </div>
     </div>
   );
@@ -580,7 +592,9 @@ export default function AgentsPage() {
   return (
     <PageLayout sidebarContent={sidebarContent}>
       <div className="h-full flex flex-col bg-white">
-        {activeSection === 'models' ? (
+        {activeSection === 'embedding' ? (
+          <EmbeddingConfigSection />
+        ) : activeSection === 'models' ? (
           <>
             <div className="p-6 border-b border-gray-200">
               <div className="flex items-center justify-between">

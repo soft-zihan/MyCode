@@ -1041,3 +1041,51 @@ export function langfuseDatasetUrl(info: LangfuseInfo | null, datasetName: strin
 export function langfuseSessionUrl(info: LangfuseInfo | null, sessionId: string): string | null {
   return langfuseProjectUrl(info, `/sessions/${encodeURIComponent(sessionId)}`);
 }
+
+// ── Embedding 模型配置（wiki 语义召回/编译去重后端，BC-30） ──
+
+export interface EmbeddingConfig {
+  backend: string;      // openai=OpenAI 兼容 API；ollama=本地
+  base_url: string;
+  model: string;
+  api_key_set: boolean; // 密钥不回显，仅报是否已配置
+}
+
+export interface EmbeddingConfigInput {
+  backend: string;
+  base_url: string;
+  model: string;
+  api_key?: string | null; // null/缺省=保留已存密钥
+}
+
+export interface EmbeddingVerifyResult {
+  status: 'success' | 'error';
+  message: string;
+  dim?: number;
+  latency_ms?: number;
+}
+
+export async function fetchEmbeddingConfig(): Promise<EmbeddingConfig> {
+  const res = await fetch(`${API_BASE}/embedding-config`);
+  if (!res.ok) throw new Error('Failed to fetch embedding config');
+  return res.json();
+}
+
+export async function saveEmbeddingConfig(cfg: EmbeddingConfigInput): Promise<void> {
+  const res = await fetch(`${API_BASE}/embedding-config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(cfg),
+  });
+  if (!res.ok) throw new Error('Failed to save embedding config');
+}
+
+export async function verifyEmbeddingConfig(cfg: EmbeddingConfigInput): Promise<EmbeddingVerifyResult> {
+  const res = await fetch(`${API_BASE}/embedding-config/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(cfg),
+  });
+  if (!res.ok) throw new Error('Failed to verify embedding config');
+  return res.json();
+}

@@ -70,7 +70,7 @@ def test_mark_session_compiled_missing_file_no_raise(ws, tmp_path):
 
 
 def test_wipe_except_keeps_whitelist(tmp_path):
-    """BC-5/6：评测 workspace 清空须保留 .embed-cache 与 .extract_state.json。"""
+    """BC-5/6：评测 workspace 清空须保留 .extract_state.json（embed 缓存已全局化，BC-30）。"""
     from eval.smoke.runner import _wipe_except
 
     ws = tmp_path / "ws"
@@ -84,10 +84,10 @@ def test_wipe_except_keeps_whitelist(tmp_path):
     (ws / "stale-dir" / "nested").mkdir(parents=True)
     (ws / "stale-dir" / "nested" / "f.txt").write_text("f")
 
-    keep = {wiki / ".embed-cache", wiki / ".extract_state.json"}
+    keep = {wiki / ".extract_state.json"}
     _wipe_except(ws, keep)
 
-    assert (wiki / ".embed-cache" / "vec.bin").exists()
+    assert not (wiki / ".embed-cache").exists()  # 旧 workspace 内缓存不再保留（BC-30 全局化）
     assert (wiki / ".extract_state.json").exists()
     assert not (wiki / "knowledge").exists()
     assert not (ws / "utils.py").exists()

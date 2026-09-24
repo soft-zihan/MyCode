@@ -608,7 +608,7 @@ async def select_relevant_wiki_entries(
         if not entries:
             if span:
                 span.add_metadata(recalled_count=0, reason="no_entries")
-            print(f"[wiki_select] no entries, took {time.time()-t0:.2f}s")
+            print(f"[wiki_select] no entries (wiki_dir={get_wiki_dir()}), took {time.time()-t0:.2f}s")
             return []
 
         candidates = [e for e in entries if e.rel_path not in already_surfaced]

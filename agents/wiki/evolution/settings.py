@@ -50,17 +50,6 @@ def get_default_settings() -> dict[str, Any]:
             "scoreThreshold": 0.12,
             "priorityBand": 0.05,
         },
-        "embed": {
-            "model": "qwen3-embedding",
-            "backend": "ollama",
-            "chunk": {
-                "enabled": True,
-                "maxChunks": 10,
-                "penalty": 0.1,
-                "fullMaxChunks": 20,
-                "fullPenalty": 0.0,
-            },
-        },
         "consolidate": {
             "staleAfterMonths": 3,
             "maxRefreshPerRun": 25,

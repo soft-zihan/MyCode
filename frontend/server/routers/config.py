@@ -158,3 +158,89 @@ def api_update_plan_strategies(data: dict[str, str]) -> dict[str, Any]:
     )
     save_config(config)
     return {"status": "ok", "message": "Plan strategies saved successfully"}
+
+
+# ── Embedding 模型配置（BC-30：wiki 语义召回/编译去重的 embedding 后端） ──
+
+
+class EmbeddingConfigUpdate(BaseModel):
+    backend: str = "openai"          # openai=OpenAI 兼容 API；ollama=本地
+    base_url: str = "https://api.siliconflow.cn/v1"
+    model: str = "BAAI/bge-large-zh-v1.5"
+    api_key: str | None = None       # None=保留现值（GET 不回显密钥）
+
+
+class EmbeddingVerifyRequest(BaseModel):
+    backend: str = "openai"
+    base_url: str = ""
+    model: str = ""
+    api_key: str | None = None       # None=用已保存的密钥验证
+
+
+@router.get("/api/embedding-config")
+def api_get_embedding_config() -> dict[str, Any]:
+    from agents.config import get_embedding_config
+    cfg = get_embedding_config()
+    # 密钥不回显，只报是否已配置
+    return {
+        "backend": cfg.backend,
+        "base_url": cfg.base_url,
+        "model": cfg.model,
+        "api_key_set": bool(cfg.api_key),
+    }
+
+
+@router.post("/api/embedding-config")
+def api_update_embedding_config(data: EmbeddingConfigUpdate) -> dict[str, Any]:
+    from agents.config import update_embedding_config
+    update_embedding_config(data.backend, data.base_url, data.model, data.api_key)
+    return {"status": "ok", "message": "Embedding config saved successfully"}
+
+
+@router.post("/api/embedding-config/verify")
+async def api_verify_embedding_config(data: EmbeddingVerifyRequest) -> dict[str, Any]:
+    """真实调用一次 embeddings API 验证连通性，返回维度与延迟。"""
+    import time
+
+    import httpx
+
+    from agents.config import get_embedding_config
+
+    cfg = get_embedding_config()
+    backend = data.backend or cfg.backend
+    base_url = (data.base_url or cfg.base_url).rstrip("/")
+    model = data.model or cfg.model
+    api_key = data.api_key if data.api_key is not None else cfg.api_key
+
+    if backend == "ollama":
+        url = "http://localhost:11434/api/embeddings"
+        headers: dict[str, str] = {}
+        payload = {"model": model, "prompt": "verify"}
+        extract = lambda d: d["embedding"]  # noqa: E731
+    else:
+        url = f"{base_url}/embeddings"
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        payload = {"model": model, "input": "verify"}
+        extract = lambda d: d["data"][0]["embedding"]  # noqa: E731
+
+    t0 = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+    except httpx.HTTPError as exc:
+        return {"status": "error", "message": f"请求失败: {type(exc).__name__}: {exc}"}
+
+    latency_ms = round((time.time() - t0) * 1000)
+    if resp.status_code == 200:
+        try:
+            dim = len(extract(resp.json()))
+        except (KeyError, IndexError, TypeError):
+            return {"status": "error", "message": f"响应格式异常: {resp.text[:200]}"}
+        return {"status": "success", "message": f"连接成功（{latency_ms}ms）", "dim": dim, "latency_ms": latency_ms}
+    if resp.status_code == 401:
+        return {"status": "error", "message": "鉴权失败——API key 无效"}
+    try:
+        msg = resp.json().get("error", {}).get("message") or resp.text[:200]
+    except Exception:
+        msg = resp.text[:200]
+    return {"status": "error", "message": f"HTTP {resp.status_code}: {msg}"}
