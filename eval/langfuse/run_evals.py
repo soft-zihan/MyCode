@@ -20,6 +20,36 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# BC-24：评审对象=评审标准对齐——默认只评主任务 trace，排除派生 trace。
+# session-title（标题 side query）与子代理 turn（tag=sub-agent）不是被评任务
+# 的执行主体，按父任务标准评审会产出系统性假 0 分（详见 21-bad-case 台账 BC-24）。
+DERIVED_TRACE_NAMES = frozenset({"session-title"})
+DERIVED_TRACE_TAGS = ("sub-agent", "side-query")
+
+
+def select_main_traces(traces: list[dict]) -> tuple[list[str], dict[str, int]]:
+    """筛出主任务 trace id，并返回排除计数（可观测，不静默）。
+
+    排除依据（真实 Langfuse 数据核验）：派生 trace 的 name 可能仍是
+    agent-turn（side query 在子代理/标题上下文内自开 trace 时继承外层 tags），
+    因此 name 与 tags 双通道过滤：session-title 按 name，sub-agent/side-query 按 tag。
+    """
+    ids: list[str] = []
+    excluded = {name: 0 for name in DERIVED_TRACE_NAMES}
+    excluded.update({tag: 0 for tag in DERIVED_TRACE_TAGS})
+    for t in traces:
+        name = t.get("name") or ""
+        tags = t.get("tags") or []
+        if name in DERIVED_TRACE_NAMES:
+            excluded[name] += 1
+            continue
+        if derived_tag := next((tag for tag in DERIVED_TRACE_TAGS if tag in tags), None):
+            excluded[derived_tag] += 1
+            continue
+        if tid := t.get("id"):
+            ids.append(tid)
+    return ids, {k: v for k, v in excluded.items() if v}
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="MyCode Langfuse 评估管道")
@@ -29,6 +59,8 @@ def main() -> None:
     parser.add_argument("--judge", action="store_true", help="运行 LLM-as-Judge（task_completion/trajectory）")
     parser.add_argument("--sync-failures", action="store_true", help="失败案例回流 regression dataset")
     parser.add_argument("--name", type=str, default=None, help="按 trace name 过滤（如 agent-turn）")
+    parser.add_argument("--include-derived", action="store_true",
+                        help="评审含派生 trace（session-title/子代理）；默认排除（BC-24）")
     parser.add_argument("--diagnose", action="store_true", help="轨迹诊断（Failure Onset 定位 + 失败分类）")
     parser.add_argument("--export-training", type=str, default=None, help="导出高质量轨迹到文件（JSONL 格式）")
     args = parser.parse_args()
@@ -45,7 +77,12 @@ def main() -> None:
         trace_ids = [args.trace_id]
     else:
         traces = client.fetch_traces(limit=args.limit, from_timestamp=from_ts, name=args.name)
-        trace_ids = [t["id"] for t in traces if t.get("id")]
+        if args.include_derived:
+            trace_ids = [t["id"] for t in traces if t.get("id")]
+        else:
+            trace_ids, excluded = select_main_traces(traces)
+            if excluded:
+                print(f"[eval] BC-24 筛选：排除派生 trace {excluded}（--include-derived 可关闭）")
     print(f"[eval] 待评估 traces: {len(trace_ids)}")
 
     def progress(payload: dict) -> None:

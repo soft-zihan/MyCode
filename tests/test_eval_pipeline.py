@@ -245,3 +245,38 @@ class TestDatasetSync:
         assert classify_failure(bundle, [{"name": "tool_success", "value": 0.5}]) == ["tool_success=0.5"]
         assert classify_failure(bundle, [{"name": "repeated_tool_calls", "value": True}]) == ["repeated_tool_calls"]
         assert classify_failure(bundle, [{"name": "tool_success", "value": 1.0}]) == []
+
+
+class TestSelectMainTraces:
+    """BC-24：评审对象筛选——派生 trace 不按父任务标准评审。"""
+
+    def test_excludes_session_title_and_sub_agent(self):
+        from eval.langfuse.run_evals import select_main_traces
+
+        traces = [
+            {"id": "t1", "name": "agent-turn", "tags": ["main-agent"]},
+            {"id": "t2", "name": "session-title", "tags": []},
+            {"id": "t3", "name": "agent-turn", "tags": ["sub-agent"]},
+            {"id": "t4", "name": "smoke-eval", "tags": ["eval", "smoke"]},
+            {"id": "t5", "name": "agent-turn", "tags": ["main-agent", "plan-mode"]},
+            # 真实数据形态：side query 在子代理上下文自开 trace，name 仍是 agent-turn
+            {"id": "t6", "name": "agent-turn", "tags": ["session-title", "side-query", "sub-agent"]},
+            {"id": "t7", "name": "agent-turn", "tags": ["main-agent", "side-query"]},
+        ]
+        ids, excluded = select_main_traces(traces)
+        assert ids == ["t1", "t4", "t5"]
+        assert excluded == {"session-title": 1, "sub-agent": 2, "side-query": 1}
+
+    def test_no_exclusions_returns_all_and_empty_counts(self):
+        from eval.langfuse.run_evals import select_main_traces
+
+        traces = [{"id": "t1", "name": "agent-turn", "tags": ["main-agent"]}]
+        ids, excluded = select_main_traces(traces)
+        assert ids == ["t1"]
+        assert excluded == {}
+
+    def test_missing_id_skipped(self):
+        from eval.langfuse.run_evals import select_main_traces
+
+        ids, _ = select_main_traces([{"name": "agent-turn", "tags": []}])
+        assert ids == []
