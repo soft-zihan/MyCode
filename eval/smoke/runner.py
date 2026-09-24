@@ -661,7 +661,11 @@ async def run_task(
                     while pending and time.time() < wait_deadline:
                         still = []
                         for spec in pending:
-                            matches = [m for m in workspace.glob(spec["path"]) if m.is_file()]
+                            # BC-31：path 支持 str 或 list[str]（多 glob OR）——提取类型
+                            # 分类（knowledge/feedback/...）是 LLM 非确定性实现细节，
+                            # 断言契约只到"内容进入 wiki 任一类型目录"
+                            paths = spec["path"] if isinstance(spec["path"], list) else [spec["path"]]
+                            matches = [m for p in paths for m in workspace.glob(p) if m.is_file()]
                             needle = spec.get("contains")
                             needles = [needle] if isinstance(needle, str) else list(needle or [])
                             ok = bool(matches) and (
