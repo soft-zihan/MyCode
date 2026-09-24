@@ -28,6 +28,7 @@ from routers import (
     hello_router,
     version_router,
     auth_router,
+    artifacts_router,
 )
 
 # Import global MCP manager from dedicated module
@@ -42,8 +43,13 @@ async def token_auth_middleware(request, call_next):
     """U13：MYCODE_AUTH_TOKEN 设置后，/api（豁免面除外）必须带 Bearer token。"""
     if auth.auth_enabled() and not auth.is_exempt_path(request.url.path):
         if not auth.verify_bearer(request.headers.get("authorization")):
-            from fastapi.responses import JSONResponse
-            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+            # U9：<img> 标签无法携带 Authorization header——artifacts 只读通道
+            # 允许 query token（与 WS 握手同一信任模型：静态 token 走 query，
+            # 直接暴露仅限受信内网/配合 TLS 反代）。
+            if not (request.url.path.startswith("/api/artifacts/")
+                    and auth.verify_query_token(request.query_params.get("token"))):
+                from fastapi.responses import JSONResponse
+                return JSONResponse({"detail": "unauthorized"}, status_code=401)
     return await call_next(request)
 
 
@@ -70,6 +76,7 @@ app.include_router(bad_cases_router)
 app.include_router(hello_router)
 app.include_router(version_router)
 app.include_router(auth_router)
+app.include_router(artifacts_router)
 
 
 @app.on_event("startup")

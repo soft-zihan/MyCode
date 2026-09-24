@@ -13,6 +13,7 @@ from .bad_cases import router as bad_cases_router
 from .hello import router as hello_router
 from .version import router as version_router
 from .auth import router as auth_router
+from .artifacts import router as artifacts_router
 
 __all__ = [
     "sessions_router",
@@ -30,4 +31,5 @@ __all__ = [
     "hello_router",
     "version_router",
     "auth_router",
+    "artifacts_router",
 ]

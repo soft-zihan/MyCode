@@ -48,8 +48,9 @@ class SkillDefinition:
 _skills_cache: dict[Path, list[SkillDefinition]] = {}
 
 
-def execute_skill(skill_name:str, args:object)-> dict | None:
+def execute_skill(skill_name: str, args: object, substitutions: dict[str, str] | None = None) -> dict | None:
     # skill 工具的执行入口：按名字找到 skill，并返回解析后的 prompt 和执行配置。
+    # substitutions：调用方运行时变量（U9：${SESSION_ID}/${ARTIFACTS_DIR}）。
     skill = get_skill_by_name(skill_name)
     if not skill:
         return None
@@ -62,7 +63,7 @@ def execute_skill(skill_name:str, args:object)-> dict | None:
     )
 
     return {
-        "prompt": resolve_skill_prompt(skill, args),
+        "prompt": resolve_skill_prompt(skill, args, substitutions),
         "allowed_tools": skill.allowed_tools,
         "context": skill.context,
         "source": skill.source,
@@ -72,13 +73,16 @@ def execute_skill(skill_name:str, args:object)-> dict | None:
 
 
 
-def resolve_skill_prompt(skill: SkillDefinition, args: object) -> str:
+def resolve_skill_prompt(skill: SkillDefinition, args: object, substitutions: dict[str, str] | None = None) -> str:
     import re
     prompt = skill.prompt_template
     # 支持在 SKILL.md 正文中使用 $ARGUMENTS 或 ${ARGUMENTS} 引用用户参数。
     prompt = re.sub(r"\$ARGUMENTS|\$\{ARGUMENTS\}", str(args or ""), prompt)
     # 支持 skill 引用自己的目录，例如读取同目录下的 references/scripts。
     prompt = prompt.replace("${CLAUDE_SKILL_DIR}", skill.skill_dir)
+    # U9：调用方注入的运行时变量（如 ${SESSION_ID}/${ARTIFACTS_DIR}）
+    for key, value in (substitutions or {}).items():
+        prompt = prompt.replace(key, value)
     return prompt
 
 def get_skill_by_name(skill_name:str)->SkillDefinition | None:
@@ -108,6 +112,9 @@ def discover_skills() -> list[SkillDefinition]:
     # 用户级/项目级同名 skill 可覆盖。
     builtin_dir = Path(__file__).resolve().parent.parent / "prompts" / "commands"
     _load_skills_from_dir(builtin_dir, "builtin", skills, overwrite=False)
+    # 内置功能 skill（U9：visualization 图表生成），同为最低优先级可覆盖。
+    builtin_skills_dir = Path(__file__).resolve().parent.parent / "prompts" / "skills"
+    _load_skills_from_dir(builtin_skills_dir, "builtin", skills, overwrite=False)
 
     result = list(skills.values())
 

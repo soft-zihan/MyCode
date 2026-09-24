@@ -296,6 +296,18 @@ tool_definitions: list[ToolDef] = [
         },
     },
     {
+        "name": "skill",
+        "description": "Invoke a registered skill by name and get its resolved instructions to follow. Available skills and their trigger conditions are listed in the 'Available Skills' section of the system prompt. Use this when the user's request matches a skill's When to use, or when the user types /<skill-name>.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "skill_name": {"type": "string", "description": "The name of the skill to invoke (exactly as listed in Available Skills)"},
+                "args": {"type": "string", "description": "Optional arguments passed to the skill (substituted for $ARGUMENTS in its template)"},
+            },
+            "required": ["skill_name"],
+        },
+    },
+    {
         "name": "skill_create",
         "description": "Create a new reusable skill from explicit durable workflow guidance when no suitable existing skill exists.",
         "input_schema": {

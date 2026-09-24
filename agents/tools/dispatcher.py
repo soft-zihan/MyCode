@@ -189,6 +189,8 @@ class ToolDispatcher:
             result = handle_todolist(self.agent.session.id, inp)
             self.agent.session.append("todo/updated", {"session_id": self.agent.session.id})
             return result
+        if name == "skill":
+            return await self._execute_skill_tool(inp)
         if self.agent._mcp_manager.is_mcp_tool(name):
             return await self.agent._mcp_manager.call_tool(name, inp)
 
@@ -233,6 +235,48 @@ class ToolDispatcher:
             except Exception:
                 pass
         return result
+
+    async def _execute_skill_tool(self, inp: dict) -> str | ToolExecutionResult:
+        """skill 工具：解析注册 skill 并返回其指令（inline），fork 上下文转子代理执行。
+
+        历史（BC-28）：该工具曾在早期重构中被误删，但 system prompt 的
+        Available Skills 段一直广告"call the `skill` tool"——模型调用只会得到
+        Unknown tool。U9（模型主动调 skill 生成图表）依赖此通路，按原契约恢复。
+        """
+        from agents.skills.skills import discover_skills, execute_skill
+
+        skill_name = str(inp.get("skill_name") or "").strip()
+        if not skill_name:
+            return "Error: skill_name is required."
+        result = execute_skill(skill_name, inp.get("args") or "", self._skill_substitutions())
+        if result is None:
+            available = ", ".join(sorted(s.name for s in discover_skills()))
+            return f"Error: unknown skill '{skill_name}'. Available skills: {available}"
+        if result.get("context") == "fork":
+            # fork：独立子代理执行 skill 指令，保护主上下文窗口
+            from agents.core.subagent_runner import execute_agent_tool
+            return await execute_agent_tool(
+                self.agent,
+                {"type": "general", "prompt": result["prompt"], "description": f"skill:{skill_name}"},
+                timeout_s=self.get_tool_timeout("agent"),
+            )
+        return result["prompt"]
+
+    def _skill_substitutions(self) -> dict[str, str]:
+        """U9：skill 模板运行时变量——会话 ID 与 artifacts 图片输出目录。
+
+        SKILL.md 正文可用 ${SESSION_ID} / ${ARTIFACTS_DIR}；artifacts 目录
+        约定 <workspace>/.mycode/artifacts/<session_id>/，由 GET
+        /api/artifacts/{session_id}/{filename} 只读伺服（前端内联 <img>）。
+        """
+        from pathlib import Path
+
+        session_id = self.agent.session_id
+        artifacts_dir = ""
+        cwd = self.agent.session.projections.get("cwd")
+        if cwd:
+            artifacts_dir = str(Path(cwd) / ".mycode" / "artifacts" / session_id)
+        return {"${SESSION_ID}": session_id, "${ARTIFACTS_DIR}": artifacts_dir}
 
     async def _execute_compact_context_tool(self, inp: dict) -> str:
         """执行 compact_context 工具。"""

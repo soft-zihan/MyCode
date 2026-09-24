@@ -3,6 +3,15 @@ import ReactMarkdown, { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { CodeBlock } from './CodeBlock';
 import { linkifyFilePaths, isFileHref, normalizeFileHref } from './linkify';
+import { getToken } from '../../../api/auth';
+
+/** U9：artifacts 图片经 <img> 加载无法带 Authorization header → query token 回退 */
+function resolveImageSrc(src: string | undefined): string | undefined {
+  if (!src || !src.startsWith('/api/artifacts/')) return src;
+  const token = getToken();
+  if (!token) return src;
+  return `${src}${src.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`;
+}
 
 export interface MarkdownProps {
   content: string;
@@ -90,6 +99,19 @@ export function Markdown({
         >
           {children}
         </a>
+      );
+    },
+    img({ src, alt, ...props }) {
+      const resolved = resolveImageSrc(typeof src === 'string' ? src : undefined);
+      return (
+        <img
+          src={resolved}
+          alt={alt ?? ''}
+          className="max-w-full max-h-96 my-3 rounded-lg border border-gray-200 cursor-zoom-in"
+          onClick={() => resolved && window.open(resolved, '_blank', 'noopener,noreferrer')}
+          loading="lazy"
+          {...props}
+        />
       );
     },
     p({ children }) {

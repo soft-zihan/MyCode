@@ -52,8 +52,8 @@ def verify_bearer(authorization_header: str | None) -> bool:
     return hmac.compare_digest(value, token)
 
 
-def verify_ws_token(query_token: str | None) -> bool:
-    """校验 WS 握手 query token。未启用鉴权时恒放行。"""
+def verify_query_token(query_token: str | None) -> bool:
+    """校验 query token（WS 握手 / artifacts <img> 等无法带 header 的通道）。未启用鉴权时恒放行。"""
     token = get_auth_token()
     if token is None:
         return True

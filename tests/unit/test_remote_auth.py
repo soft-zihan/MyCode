@@ -37,7 +37,7 @@ class TestAuthToggle:
         assert auth.get_auth_token() is None
         # 未启用时恒放行
         assert auth.verify_bearer(None)
-        assert auth.verify_ws_token(None)
+        assert auth.verify_query_token(None)
 
     def test_enabled_with_token(self, with_token):
         assert auth.auth_enabled()
@@ -63,11 +63,11 @@ class TestBearerVerify:
 
 class TestWsToken:
     def test_valid(self, with_token):
-        assert auth.verify_ws_token("s3cret")
+        assert auth.verify_query_token("s3cret")
 
     def test_missing_or_wrong(self, with_token):
-        assert not auth.verify_ws_token(None)
-        assert not auth.verify_ws_token("nope")
+        assert not auth.verify_query_token(None)
+        assert not auth.verify_query_token("nope")
 
 
 class TestExemptPaths:
