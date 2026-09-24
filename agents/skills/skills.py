@@ -104,6 +104,10 @@ def discover_skills() -> list[SkillDefinition]:
     # 项目级 skills 优先级较低：<workspace>/.mycode/skills/<name>/SKILL.md
     project_dir = workspace / ".mycode" / "skills"
     _load_skills_from_dir(project_dir, "project", skills, overwrite=False)
+    # 内置命令资产优先级最低（v2 plugin/command/*.txt 对齐：/initialize、/review），
+    # 用户级/项目级同名 skill 可覆盖。
+    builtin_dir = Path(__file__).resolve().parent.parent / "prompts" / "commands"
+    _load_skills_from_dir(builtin_dir, "builtin", skills, overwrite=False)
 
     result = list(skills.values())
 
