@@ -108,7 +108,6 @@ export default function ChatPage() {
     chatSnapshot,
     pendingSteerMessages,
     setPendingSteerMessages,
-    goalState,
     planSlug,
     handleAddToChat,
     handleRemoveContext,
@@ -130,8 +129,6 @@ export default function ChatPage() {
     handleAcceptFile,
     handleRejectFile,
     handleAcceptAll,
-    handleConfirmGoal,
-    handleCancelGoal,
   } = useChat();
 
   // U3a：后台任务列表纯从事件流派生（sub-agent 节点 backgrounded && running），零专用 API
@@ -337,83 +334,6 @@ export default function ChatPage() {
 
           {/* U3a: Background Tasks Panel */}
           <BackgroundTasksPanel tasks={backgroundTasks} sessionId={currentSessionId ?? undefined} />
-
-          {/* Goal Mode UI */}
-          {goalState && (
-            <div className={`border-t px-4 py-3 ${
-              goalState.status === 'achieved' ? 'border-green-300 bg-green-50' :
-              goalState.status === 'aborted' ? 'border-red-300 bg-red-50' :
-              goalState.status === 'budget_exhausted' ? 'border-orange-300 bg-orange-50' :
-              'border-purple-300 bg-purple-50'
-            }`}>
-              <div className="flex items-start gap-3">
-                <div className="flex-1">
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="text-sm font-medium text-purple-800">
-                      {goalState.active ? 'Goal Mode' : 'Confirm Goal'}
-                    </span>
-                    {goalState.active && (
-                      <span className="text-xs px-1.5 py-0.5 bg-purple-200 text-purple-800 rounded">
-                        Iteration {goalState.iteration}/{goalState.maxIterations}
-                      </span>
-                    )}
-                    {goalState.status === 'achieved' && (
-                      <span className="text-xs px-1.5 py-0.5 bg-green-200 text-green-800 rounded">✓ Achieved</span>
-                    )}
-                    {goalState.status === 'aborted' && (
-                      <span className="text-xs px-1.5 py-0.5 bg-red-200 text-red-800 rounded">✗ Aborted</span>
-                    )}
-                    {goalState.status === 'budget_exhausted' && (
-                      <span className="text-xs px-1.5 py-0.5 bg-orange-200 text-orange-800 rounded">Budget Exhausted</span>
-                    )}
-                  </div>
-                  <div className="text-sm text-gray-700 mb-2">
-                    <strong>Goal:</strong> {goalState.goal}
-                  </div>
-                  <div className="text-xs text-gray-600">
-                    <strong>Success Criteria:</strong>
-                    <ol className="list-decimal list-inside mt-1 space-y-0.5">
-                      {goalState.criteria.map((c, i) => (
-                        <li key={i}>{c}</li>
-                      ))}
-                    </ol>
-                  </div>
-                </div>
-                <div className="flex gap-2 flex-shrink-0">
-                  {!goalState.active ? (
-                    <>
-                      <button
-                        onClick={handleCancelGoal}
-                        className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded hover:bg-gray-50 transition-colors"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        onClick={handleConfirmGoal}
-                        className="px-3 py-1.5 text-sm font-medium text-white bg-purple-600 border border-purple-700 rounded hover:bg-purple-700 transition-colors"
-                      >
-                        Start Goal
-                      </button>
-                    </>
-                  ) : goalState.status === 'running' ? (
-                    <button
-                      onClick={handleStopStreaming}
-                      className="px-3 py-1.5 text-sm font-medium text-red-700 bg-white border border-red-300 rounded hover:bg-red-50 transition-colors"
-                    >
-                      Stop
-                    </button>
-                  ) : (
-                    <button
-                      onClick={handleCancelGoal}
-                      className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded hover:bg-gray-50 transition-colors"
-                    >
-                      Dismiss
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
 
           {/* Input Area */}
           <div className="border-t border-gray-200 bg-white px-4 py-3">

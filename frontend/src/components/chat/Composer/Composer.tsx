@@ -125,7 +125,6 @@ const SLASH_COMMANDS: SuggestionItem[] = [
   { id: 'yolo', label: 'yolo', type: 'command', description: 'Toggle bypass permissions' },
   { id: 'palette', label: 'palette', type: 'command', description: 'Open command palette' },
   // Agent commands
-  { id: 'goal', label: 'goal', type: 'command', description: 'Autonomous goal mode' },
 ];
 
 interface ComposerProps {

@@ -5,7 +5,7 @@ import { backgroundSubagent } from '../../../api/client';
 import { ToolRow } from '../ToolRow';
 import { Markdown } from '../markdown';
 import type { SubAgentNode, ToolCallNode, SubAgentEventItem } from './types';
-import type { ToolCallEvent } from '../../../hooks';
+import type { ToolCallEvent } from './types';
 
 interface SubAgentNodeViewProps {
   node: SubAgentNode;

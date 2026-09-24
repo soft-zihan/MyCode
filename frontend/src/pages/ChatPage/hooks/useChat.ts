@@ -122,7 +122,6 @@ export function useChat() {
   const pendingPermission = useSessionStore(() => sessionId ? sessionStore.getPendingPermission(sessionId) : undefined);
   const pendingQuestion = useSessionStore(() => sessionId ? sessionStore.getPendingQuestion(sessionId) : undefined);
   const todos = useSessionStore(() => sessionId ? sessionStore.getTodos(sessionId) : EMPTY_TODOS);
-  const goalState = useSessionStore(() => sessionId ? sessionStore.getGoalState(sessionId) : undefined);
   const planSlug = useSessionStore(() => sessionId ? sessionStore.getPlanSlug(sessionId) : undefined);
   const fileSnapshots = useSessionStore(() => sessionId ? sessionStore.getFileSnapshots(sessionId) : EMPTY_FILE_SNAPSHOTS);
   const contextUsed = useSessionStore(() => sessionId ? sessionStore.getContextUsed(sessionId) : 0);
@@ -300,49 +299,6 @@ export function useChat() {
           if (eventSessionId === currentSessionIdRef.current) {
             setPermissionMode(mode);
           }
-        }
-      }
-      
-      if (eventType === 'goal/criteria') {
-        sessionStore.setGoalState(eventSessionId, {
-          active: false,
-          goal: event.goal as string,
-          criteria: event.criteria as string[],
-          iteration: 0,
-          maxIterations: 10,
-          status: 'idle',
-        });
-      }
-      
-      if (eventType === 'goal/start') {
-        sessionStore.setGoalState(eventSessionId, {
-          active: true,
-          goal: event.goal as string,
-          criteria: event.criteria as string[],
-          iteration: 0,
-          maxIterations: 10,
-          status: 'running',
-        });
-      }
-      
-      if (eventType === 'goal/progress') {
-        const current = sessionStore.getGoalState(eventSessionId);
-        if (current) {
-          sessionStore.setGoalState(eventSessionId, {
-            ...current,
-            iteration: event.iteration,
-            status: event.status || 'running',
-          });
-        }
-      }
-      
-      if (eventType === 'goal/complete') {
-        const current = sessionStore.getGoalState(eventSessionId);
-        if (current) {
-          sessionStore.setGoalState(eventSessionId, {
-            ...current,
-            status: event.status,
-          });
         }
       }
       
@@ -988,21 +944,6 @@ export function useChat() {
     sessionStore.setFileSnapshots(currentSessionId, []);
   }, [currentSessionId]);
 
-  const handleConfirmGoal = useCallback(async () => {
-    if (!currentSessionId) return;
-    // Send /goal confirm to start the goal loop
-    setInputValue('/goal confirm');
-    // Trigger send after state update
-    setTimeout(() => {
-      handleSendMessage();
-    }, 0);
-  }, [currentSessionId]);
-
-  const handleCancelGoal = useCallback(() => {
-    if (!currentSessionId) return;
-    sessionStore.setGoalState(currentSessionId, undefined);
-  }, [currentSessionId]);
-
   return {
     // State
     inputValue,
@@ -1031,7 +972,6 @@ export function useChat() {
     chatSnapshot,
     pendingSteerMessages,
     setPendingSteerMessages,
-    goalState,
     planSlug,
     
     // Handlers
@@ -1058,8 +998,6 @@ export function useChat() {
     handleRejectFile,
     handleAcceptAll,
     handleNodeEvent,
-    handleConfirmGoal,
-    handleCancelGoal,
     handleLoadMoreEvents,
   };
 }

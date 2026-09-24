@@ -1,98 +1,15 @@
-"""SSE events router.
+"""权限/提问响应 router。
 
-提供 SSE 事件流和权限响应 API。
+SSE 事件流端点已删除（零消费者——前端实时流走 WebSocket，且旧实现对流式事件
+缺 seq 字段存在 KeyError）；此处仅保留权限与提问的响应 API。
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
-from typing import Optional
-
-from fastapi import APIRouter, Request
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter
 from pydantic import BaseModel
 
 router = APIRouter(tags=["events"])
-
-
-# SSE 只推送这些类型
-_STREAM_TYPES = frozenset({
-    "turn/start", "turn/end", "step/start", "step/end",
-    "thinking", "text", "tool_call", "tool_result",
-    "sub_agent/start", "sub_agent/end",
-    "permission/request", "permission/resolved",
-    "question/request", "question/resolved",
-    "todo/updated",
-    "stats", "info", "error",
-})
-
-
-@router.get("/api/events")
-async def api_events(
-    request: Request,
-    session_id: Optional[str] = None,
-    since: int = 0,
-):
-    """SSE 事件流。"""
-    from agents.session_manager import get_session_manager
-    
-    sm = get_session_manager()
-    
-    async def stream():
-        unsubscribes = []
-        merge_queue: asyncio.Queue = asyncio.Queue(maxsize=5000)
-        tasks = []
-        
-        try:
-            for session in sm.active_sessions():
-                if session_id and session.id != session_id:
-                    continue
-                
-                queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
-                
-                def on_event(event, q=queue):
-                    if event["type"] in _STREAM_TYPES:
-                        if event["seq"] >= since:
-                            try:
-                                q.put_nowait(event)
-                            except asyncio.QueueFull:
-                                pass
-                
-                unsubscribes.append(session.subscribe(on_event))
-                
-                async def forward(q):
-                    try:
-                        while True:
-                            event = await q.get()
-                            if event is None:
-                                break
-                            await merge_queue.put(event)
-                    except asyncio.CancelledError:
-                        pass
-                
-                tasks.append(asyncio.create_task(forward(queue)))
-            
-            while True:
-                if await request.is_disconnected():
-                    break
-                try:
-                    event = await asyncio.wait_for(merge_queue.get(), timeout=30.0)
-                except asyncio.TimeoutError:
-                    yield ": heartbeat\n\n"
-                    continue
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-        finally:
-            for u in unsubscribes:
-                u()
-            for t in tasks:
-                t.cancel()
-    
-    return StreamingResponse(
-        stream(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
 
 
 class PermissionResponseData(BaseModel):

@@ -99,3 +99,14 @@ export interface ChatSnapshot {
   order: string[];
   nodes: Map<string, ChatNode>;
 }
+
+export interface ToolCallEvent {
+  call_id: string;
+  name: string;
+  input: Record<string, unknown>;
+  status: 'pending' | 'success' | 'error' | 'denied';
+  result?: string;
+  duration_ms?: number;
+  snapshot?: { file_path: string; old_content: string; new_content: string };
+  sub_agent_id?: string;
+}

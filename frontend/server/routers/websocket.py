@@ -12,6 +12,8 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from agents.core.event_types import is_public_event
+
 
 router = APIRouter()
 
@@ -92,7 +94,12 @@ def broadcast_event(event: dict[str, Any], target_session_id: str | None = None)
     """
     event_type = event.get("type", "unknown")
     session_id = event.get("session_id", "unknown")
-    
+
+    # U8 公开面白名单：清单外事件不上 WS（新事件默认不公开，
+    # 显式加入 agents/core/event_types.py——防内部事件泄漏成前端隐性依赖）
+    if not is_public_event(event_type):
+        return
+
     if not _subscribers:
         print(f"[WS] broadcast: no subscribers for {event_type} session={session_id[:8] if session_id else 'N/A'}")
         return

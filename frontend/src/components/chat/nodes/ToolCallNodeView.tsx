@@ -1,7 +1,7 @@
 import { memo } from 'react';
 import { ToolRow } from '../ToolRow';
 import type { ToolCallNode } from './types';
-import type { ToolCallEvent } from '../../../hooks';
+import type { ToolCallEvent } from './types';
 
 interface ToolCallNodeViewProps {
   node: ToolCallNode;

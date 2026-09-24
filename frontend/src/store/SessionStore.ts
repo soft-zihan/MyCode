@@ -27,15 +27,6 @@ export interface TodoItem {
   updated_at: string;
 }
 
-export interface GoalState {
-  active: boolean;
-  goal: string;
-  criteria: string[];
-  iteration: number;
-  maxIterations: number;
-  status: string;
-}
-
 export interface FileSnapshot {
   file_path: string;
   is_new: boolean;
@@ -65,7 +56,6 @@ export interface SessionState {
   pendingPermission?: PermissionRequest;
   pendingQuestion?: QuestionRequest;
   todos?: TodoItem[];
-  goalState?: GoalState;
   fileSnapshots: FileSnapshot[];
   contextUsed: number;
   contextTotal: number;
@@ -303,16 +293,6 @@ class SessionStore {
   setTodos(sessionId: string, todos: TodoItem[]): void {
     const state = this.getOrCreate(sessionId);
     state.todos = todos;
-    this.notify();
-  }
-
-  getGoalState(sessionId: string): GoalState | undefined {
-    return this.sessions.get(sessionId)?.goalState;
-  }
-
-  setGoalState(sessionId: string, state: GoalState | undefined): void {
-    const sessionState = this.getOrCreate(sessionId);
-    sessionState.goalState = state;
     this.notify();
   }
 

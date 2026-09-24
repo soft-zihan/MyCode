@@ -12,7 +12,7 @@ import {
   XCircle,
   Loader2
 } from 'lucide-react';
-import type { ToolCallEvent } from '../../hooks';
+import type { ToolCallEvent } from './nodes/types';
 
 interface ToolRowProps {
   call: ToolCallEvent;

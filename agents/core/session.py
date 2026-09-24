@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import logging
 import uuid
 from pathlib import Path
 
@@ -11,6 +12,8 @@ import time
 
 from .session_backend import SessionBackend
 from .session_backend_jsonl import JsonlSessionBackend
+
+logger = logging.getLogger(__name__)
 
 
 # 只推不持久化的事件类型（流式事件）
@@ -365,6 +368,18 @@ class Session:
                 except Exception as e:
                     print(f"[session] crash-recovery closer 落盘失败 {session_id}: {e!r}")
         events = repaired
+
+        # U8 前向兼容：重放遇清单外未知类型记 warning 后跳过（不投影不进 LLM 消息，
+        # v2 bus.ts:787-805 语义）——未来版本写的事件不阻塞旧代码加载
+        from .event_types import ALL_KNOWN_EVENT_TYPES
+        unknown_types = sorted({
+            str(e.get("type", "")) for e in events
+        } - ALL_KNOWN_EVENT_TYPES)
+        if unknown_types:
+            logger.warning(
+                "[session %s] 重放遇到未知事件类型（跳过，前向兼容）: %s",
+                session_id, unknown_types,
+            )
 
         events_by_seq: dict[int, dict] = {}
         for event in events:

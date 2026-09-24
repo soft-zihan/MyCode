@@ -111,7 +111,6 @@ class EventRouter {
       sessionStore.updateProjections(sessionId, {
         running: false,
         updatedAt: Date.now(),
-        title: event.name,
       });
     } else if (eventType === 'user_message') {
       sessionStore.updateProjections(sessionId, {
