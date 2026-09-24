@@ -119,6 +119,7 @@ export function useChat() {
   
   const sessionId = currentSessionId ?? sessionStore.getCurrentId();
   const isStreaming = useSessionStore(() => sessionStore.get(sessionId ?? '')?.projections?.running ?? false);
+  const hasMoreHistory = useSessionStore(() => sessionId ? sessionStore.get(sessionId)?.hasMore ?? false : false);
   const pendingPermission = useSessionStore(() => sessionId ? sessionStore.getPendingPermission(sessionId) : undefined);
   const pendingQuestion = useSessionStore(() => sessionId ? sessionStore.getPendingQuestion(sessionId) : undefined);
   const todos = useSessionStore(() => sessionId ? sessionStore.getTodos(sessionId) : EMPTY_TODOS);
@@ -999,5 +1000,6 @@ export function useChat() {
     handleAcceptAll,
     handleNodeEvent,
     handleLoadMoreEvents,
+    hasMoreHistory,
   };
 }

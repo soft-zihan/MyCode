@@ -93,6 +93,8 @@ export default function ChatPage() {
     currentCwd,
     isStreaming,
     isLoadingSession,
+    hasMoreHistory,
+    handleLoadMoreEvents,
     isWaitingResponse,
     isCompacting,
     fileSnapshots,
@@ -279,6 +281,8 @@ export default function ChatPage() {
             isStreaming={isStreaming}
             isLoadingSession={isLoadingSession}
             isWaitingResponse={isWaitingResponse}
+            hasMoreHistory={hasMoreHistory}
+            onLoadMoreHistory={handleLoadMoreEvents}
             onEditMessage={handleEditMessage}
             onRewind={handleRewindRequest}
             onFileClick={(path: string) => {

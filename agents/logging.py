@@ -1,6 +1,9 @@
 """Simple logging wrapper for MyCode.
 
 替代 TUI 的 print_* 函数，使用标准 logging。
+
+⚠️ 冻结（2026-09-23 用户裁定）：随 CLI REPL（agents/main.py）冻结，
+TUI 落地后一并删除；Web/API 路径不使用本模块新增能力。
 """
 
 from __future__ import annotations

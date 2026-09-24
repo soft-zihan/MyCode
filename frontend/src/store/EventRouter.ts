@@ -160,49 +160,6 @@ class EventRouter {
   }
   
   /**
-   * Load more historical events for a session (lazy loading).
-   */
-  async loadMoreEvents(sessionId: string, limit: number = 50): Promise<boolean> {
-    const state = sessionStore.get(sessionId);
-    if (!state || !state.hasMore) {
-      return false;
-    }
-    
-    try {
-      const response = await fetch(`/api/sessions/${sessionId}/events?before=${state.baseSeq}&limit=${limit}`);
-      
-      if (!response.ok) {
-        console.error(`[EventRouter] loadMore failed: ${response.status}`);
-        return false;
-      }
-      
-      const { events, has_more, base_seq } = await response.json();
-      
-      if (events && events.length > 0) {
-        // Notify listeners to prepend events
-        for (const event of events) {
-          for (const listener of this.listeners) {
-            try {
-              listener({ ...event, _prepend: true });
-            } catch (err) {
-              console.error('[EventRouter] listener error during loadMore:', err);
-            }
-          }
-        }
-        
-        // Update pagination state
-        sessionStore.setPagination(sessionId, has_more, base_seq, state.lastSeq);
-        return true;
-      }
-      
-      return false;
-    } catch (err) {
-      console.error('[EventRouter] loadMore error:', err);
-      return false;
-    }
-  }
-  
-  /**
    * Subscribe to all events.
    * Returns unsubscribe function.
    */

@@ -9,18 +9,24 @@ interface ChatViewProps {
   isStreaming: boolean;
   isLoadingSession?: boolean;
   isWaitingResponse?: boolean;
+  hasMoreHistory?: boolean;
+  onLoadMoreHistory?: () => Promise<boolean>;
   onEditMessage?: (node: UserNode) => void;
   onRewind?: (userMessageIndex: number) => void;
   onFileClick?: (path: string) => void;
   onFork?: (beforeIndex: number) => void;
 }
 
-export const ChatView = memo(function ChatView({ snapshot, sessionId, isStreaming, isLoadingSession, isWaitingResponse, onEditMessage, onRewind, onFileClick, onFork }: ChatViewProps) {
+export const ChatView = memo(function ChatView({ snapshot, sessionId, isStreaming, isLoadingSession, isWaitingResponse, hasMoreHistory, onLoadMoreHistory, onEditMessage, onRewind, onFileClick, onFork }: ChatViewProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
+  // BC-19：滚动顶懒加载更早历史（prepend 后恢复阅读位置）
+  const [loadingMore, setLoadingMore] = useState(false);
+  const loadingMoreRef = useRef(false);
+  const anchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
 
   const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
     messagesEndRef.current?.scrollIntoView({ behavior });
@@ -47,7 +53,27 @@ export const ChatView = memo(function ChatView({ snapshot, sessionId, isStreamin
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
     isNearBottomRef.current = atBottom;
     setShowScrollBtn(!atBottom);
+
+    // BC-19：滚到顶部触发懒加载更早事件
+    if (el.scrollTop < 80 && hasMoreHistory && onLoadMoreHistory && !loadingMoreRef.current) {
+      loadingMoreRef.current = true;
+      setLoadingMore(true);
+      anchorRef.current = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop };
+      onLoadMoreHistory().finally(() => {
+        loadingMoreRef.current = false;
+        setLoadingMore(false);
+      });
+    }
   };
+
+  // prepend 落地后恢复阅读位置（新增高度补偿到 scrollTop）
+  useEffect(() => {
+    const el = scrollContainerRef.current;
+    const anchor = anchorRef.current;
+    if (!el || !anchor) return;
+    el.scrollTop = anchor.scrollTop + (el.scrollHeight - anchor.scrollHeight);
+    anchorRef.current = null;
+  }, [snapshot]);
 
   useEffect(() => {
     if (isNearBottomRef.current) {
@@ -100,6 +126,12 @@ export const ChatView = memo(function ChatView({ snapshot, sessionId, isStreamin
     <div className="flex-1 flex min-h-0 relative">
     <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-4 py-4 min-w-0">
       <div ref={contentRef} className="space-y-4">
+        {loadingMore && (
+          <div className="flex items-center justify-center gap-2 py-2 text-gray-400">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            <span className="text-xs">加载更早历史…</span>
+          </div>
+        )}
         {order.map((key, idx) => {
           const node = nodes.get(key);
           if (!node) return null;

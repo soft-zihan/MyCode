@@ -1,4 +1,8 @@
-"""CLI entry point and interactive REPL."""
+"""CLI entry point and interactive REPL.
+
+⚠️ 冻结（2026-09-23 用户裁定）：CLI REPL 不再新增功能、不修非阻塞缺陷。
+TUI（TUI评估.md §5，TS ink）落地后整体删除本文件与 agents/logging.py print 体系。
+"""
 
 from __future__ import annotations
 

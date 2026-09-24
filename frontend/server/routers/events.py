@@ -62,20 +62,3 @@ async def api_get_todos(session_id: str):
     
     items = list_todos(session_id)
     return {"todos": [item.to_dict() for item in items]}
-
-
-@router.get("/api/sessions/{session_id}/messages")
-async def api_session_messages(session_id: str):
-    """获取 session 的消息历史（从事件日志派生）。"""
-    from agents.session_manager import get_session_manager
-    from agents.core.session import Session
-    
-    sm = get_session_manager()
-    session = sm.get(session_id)
-    if not session:
-        session = Session.load_from_events(session_id)
-    if not session:
-        from fastapi import HTTPException
-        raise HTTPException(404, "Session not found")
-    
-    return session.derive_messages()
