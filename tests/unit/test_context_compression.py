@@ -454,3 +454,53 @@ async def test_notes_side_query_exception_falls_back(monkeypatch):
     assert fold["session_notes"] == ""
     assert fold["notes_validated"] is False
     assert fold["summary"]  # 确定性 fallback 摘要非空
+
+
+class TestCheckpointTail:
+    """U5b-#3 v2 conversation-checkpoint 双层结构：摘要 + 近期无损尾部按 token 预算扩展。"""
+
+    @staticmethod
+    def _dialog_groups(pairs: int, chars: int):
+        from agents.core.context_events import EventGroup
+
+        groups = []
+        seq = 0
+        for i in range(pairs):
+            groups.append(EventGroup("user", [{
+                "type": "user_message", "seq": seq, "content": f"u{i} " + "x" * chars,
+            }]))
+            seq += 1
+            groups.append(EventGroup("assistant_text", [{
+                "type": "assistant_message", "seq": seq, "content": f"a{i} " + "y" * chars,
+            }]))
+            seq += 1
+        return groups
+
+    def test_budget_zero_keeps_round_based_cut(self):
+        from agents.core.context_events import find_session_fold_cut
+
+        groups = self._dialog_groups(8, 12_000)  # 每组 ~3000 tokens
+        assert find_session_fold_cut(groups, 2, 5) == 12
+
+    def test_tail_extends_to_token_budget(self):
+        from agents.core.context_events import find_session_fold_cut
+
+        groups = self._dialog_groups(8, 12_000)
+        # rounds cut=12 → 尾部 4 组=12k tokens < 15k 预算 → 前扩 1 组到 15k
+        assert find_session_fold_cut(groups, 2, 5, tail_token_budget=15_000) == 11
+
+    def test_small_content_not_extended(self):
+        from agents.core.context_events import find_session_fold_cut
+
+        groups = self._dialog_groups(8, 40)  # 总量 ~160 tokens，可折叠部分 < min_fold 2000
+        assert find_session_fold_cut(groups, 2, 5, tail_token_budget=15_000) == 12
+
+    def test_all_user_degenerate_guarded(self):
+        from agents.core.context_events import EventGroup, find_session_fold_cut
+
+        groups = [
+            EventGroup("user", [{"type": "user_message", "seq": i, "content": "x" * 12_000}])
+            for i in range(6)
+        ]
+        # 扩展把 cut 压到 1，groups[:1] 全 user → 拒绝折叠
+        assert find_session_fold_cut(groups, 2, 5, tail_token_budget=15_000) == -1

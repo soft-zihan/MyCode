@@ -26,6 +26,7 @@ from .context_events import (
     collect_hidden_seqs,
     estimate_event_tokens,
     estimate_visible_message_tokens,
+    estimate_group_tokens,
     find_session_fold_cut,
     find_tool_fold_indices,
     latest_session_notes,
@@ -47,6 +48,11 @@ COMPRESSION_ARMS = {"full", "truncate", "tool_only", "session_only"}
 KEEP_RECENT_TOOL_ROUNDS = 3
 KEEP_RECENT_DIALOG_ROUNDS = 2
 KEEP_RECENT_TRAJECTORY_TOOL_ROUNDS = 5
+# v2 conversation-checkpoint 双层结构：折叠摘要 + 最近 ~15k tokens 无损尾部
+# （compaction.ts:41）。小窗口（测试/消融臂）按 35% 窗口比例退化，防预算吞没
+# 全部内容；轮次下限（KEEP_RECENT_*）语义保持不变。
+CHECKPOINT_TAIL_TOKEN_BUDGET = 15_000
+CHECKPOINT_TAIL_WINDOW_RATIO = 0.35
 IDLE_TIMEOUT_S = 5 * 60
 TOOL_ABSTRACT_CHAR_LIMIT = 1200
 TOOL_ABSTRACT_INPUT_CHAR_LIMIT = 8000
@@ -538,10 +544,15 @@ class ContextCompressor:
         trigger: str = "auto",
     ) -> bool:
         groups = build_message_groups(session)
+        tail_token_budget = min(
+            CHECKPOINT_TAIL_TOKEN_BUDGET,
+            int(self.effective_window * CHECKPOINT_TAIL_WINDOW_RATIO),
+        )
         cut_index = find_session_fold_cut(
             groups,
             self.keep_recent_dialog_rounds,
             self.keep_recent_trajectory_tool_rounds,
+            tail_token_budget=tail_token_budget,
         )
         if cut_index <= 0:
             return False
@@ -593,6 +604,9 @@ class ContextCompressor:
             "notes_validated": notes_validated,
             "previous_notes_chars": len(previous_notes),
             "transcript_chars": len(transcript),
+            "checkpoint_tail_tokens": sum(
+                estimate_group_tokens(group) for group in groups[cut_index:]
+            ),
             "fold_mode": fold_mode,
             "trigger": trigger,
         })

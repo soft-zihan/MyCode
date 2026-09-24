@@ -132,14 +132,57 @@ def find_tool_fold_indices(groups: list[EventGroup], keep_recent_tool_rounds: in
     return tool_indices[:-keep_recent_tool_rounds]
 
 
+# v2 conversation-checkpoint 双层结构（compaction.ts:41,279-320）：折叠摘要 +
+# 最近 ~15k tokens 无损原文尾部。尾部以 keep_recent 轮次为下限，按 token 预算
+# 向前扩展 cut；扩展后剩余可折叠量不足 min_fold_tokens 则停止——折叠过小内容
+# 不值得 side query 成本，也保证小窗口（测试/消融臂）行为不被预算吞没。
+DEFAULT_CHECKPOINT_TAIL_TOKEN_BUDGET = 15_000
+DEFAULT_MIN_FOLD_TOKENS = 2_000
+
+
+def estimate_group_tokens(group: EventGroup) -> int:
+    return sum(estimate_event_tokens(event) for event in group.events)
+
+
+def _extend_cut_for_checkpoint_tail(
+    groups: list[EventGroup],
+    cut: int,
+    tail_token_budget: int,
+    min_fold_tokens: int,
+) -> int:
+    """把 cut 向前扩展，使尾部（groups[cut:]）无损保留量逼近 token 预算。"""
+    if tail_token_budget <= 0 or cut <= 1:
+        return cut
+    sizes = [estimate_group_tokens(group) for group in groups]
+    prefix = [0] * (len(sizes) + 1)
+    for i, size in enumerate(sizes):
+        prefix[i + 1] = prefix[i] + size
+    tail = prefix[len(sizes)] - prefix[cut]
+    while cut > 1 and tail < tail_token_budget:
+        if prefix[cut - 1] < min_fold_tokens:
+            break
+        cut -= 1
+        tail += sizes[cut]
+    return cut
+
+
 def find_session_fold_cut(
     groups: list[EventGroup],
     keep_recent_dialog_rounds: int,
     keep_recent_trajectory_tool_rounds: int,
+    tail_token_budget: int = 0,
+    min_fold_tokens: int = DEFAULT_MIN_FOLD_TOKENS,
 ) -> int:
     user_indices = [index for index, group in enumerate(groups) if group.is_user]
     if len(user_indices) > keep_recent_dialog_rounds:
-        return user_indices[-keep_recent_dialog_rounds]
+        cut = user_indices[-keep_recent_dialog_rounds]
+        if tail_token_budget > 0:
+            extended = _extend_cut_for_checkpoint_tail(groups, cut, tail_token_budget, min_fold_tokens)
+            if extended != cut:
+                cut = extended
+                if cut <= 0 or all(group.is_user for group in groups[:cut]):
+                    return -1
+        return cut
 
     tool_indices = [index for index, group in enumerate(groups) if group.is_tool]
     if len(tool_indices) <= keep_recent_trajectory_tool_rounds:
@@ -153,6 +196,7 @@ def find_session_fold_cut(
         cut = min(cut, assistant_text_indices[-1])
     if user_indices:
         cut = max(cut, user_indices[-1] + 1)
+    cut = _extend_cut_for_checkpoint_tail(groups, cut, tail_token_budget, min_fold_tokens)
     if cut <= 0 or cut >= len(groups):
         return -1
     if all(group.is_user for group in groups[:cut]):
