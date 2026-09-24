@@ -36,7 +36,6 @@ function computeBreakdownFromStats(event: Record<string, any>): Record<string, a
   const systemClaudeMdChars = event.system_claude_md_chars || 0;
   const systemSkillsChars = event.system_skills_chars || 0;
   const systemWikiChars = event.system_wiki_chars || 0;
-  const systemAgentsChars = event.system_agents_chars || 0;
   const systemWorkspaceChars = event.system_workspace_chars || 0;
   const planModeChars = event.plan_mode_chars || 0;
   
@@ -44,7 +43,7 @@ function computeBreakdownFromStats(event: Record<string, any>): Record<string, a
   
   let userTokens: number, assistantTokens: number, toolTokens: number;
   let basePromptTokens: number, claudeMdTokens: number, skillsTokens: number;
-  let wikiTokens: number, agentsTokens: number, planModeTokens: number;
+  let wikiTokens: number, planModeTokens: number;
   
   if (actualInputTokens > 0 && totalChars > 0) {
     const scale = actualInputTokens / (totalChars / CHARS_PER_TOKEN);
@@ -55,7 +54,6 @@ function computeBreakdownFromStats(event: Record<string, any>): Record<string, a
     claudeMdTokens = Math.round((systemClaudeMdChars / CHARS_PER_TOKEN) * scale);
     skillsTokens = Math.round((systemSkillsChars / CHARS_PER_TOKEN) * scale);
     wikiTokens = Math.round((systemWikiChars / CHARS_PER_TOKEN) * scale);
-    agentsTokens = Math.round((systemAgentsChars / CHARS_PER_TOKEN) * scale);
     planModeTokens = Math.round((planModeChars / CHARS_PER_TOKEN) * scale);
   } else {
     userTokens = Math.round(userChars / CHARS_PER_TOKEN);
@@ -65,7 +63,6 @@ function computeBreakdownFromStats(event: Record<string, any>): Record<string, a
     claudeMdTokens = Math.round(systemClaudeMdChars / CHARS_PER_TOKEN);
     skillsTokens = Math.round(systemSkillsChars / CHARS_PER_TOKEN);
     wikiTokens = Math.round(systemWikiChars / CHARS_PER_TOKEN);
-    agentsTokens = Math.round(systemAgentsChars / CHARS_PER_TOKEN);
     planModeTokens = Math.round(planModeChars / CHARS_PER_TOKEN);
   }
   
@@ -87,7 +84,6 @@ function computeBreakdownFromStats(event: Record<string, any>): Record<string, a
     claude_md_tokens: claudeMdTokens,
     skills_tokens: skillsTokens,
     wiki_tokens: wikiTokens,
-    agents_tokens: agentsTokens,
     tools_tokens: toolTokens,
     messages_tokens: messagesTokens,
     user_tokens: userTokens,

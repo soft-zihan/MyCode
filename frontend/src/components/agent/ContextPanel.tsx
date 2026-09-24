@@ -62,7 +62,7 @@ export function ContextPanel({ sessionId, onFileSelect }: ContextPanelProps) {
 
   const systemTotal = breakdown ? (
     breakdown.base_prompt_tokens + breakdown.claude_md_tokens + breakdown.skills_tokens +
-    breakdown.wiki_tokens + breakdown.agents_tokens
+    breakdown.wiki_tokens
   ) : 0;
 
   const toolResultByName: Record<string, number> = breakdown?.tool_result_by_name || {};
@@ -173,7 +173,6 @@ export function ContextPanel({ sessionId, onFileSelect }: ContextPanelProps) {
             <BreakdownItem label="CLAUDE.md" tokens={breakdown.claude_md_tokens} totalTokens={totalTokens} color="#c084fc" indent={1} detail="项目规则" />
             <BreakdownItem label="Skills" tokens={breakdown.skills_tokens} totalTokens={totalTokens} color="#d8b4fe" indent={1} />
             <BreakdownItem label="Wiki" tokens={breakdown.wiki_tokens} totalTokens={totalTokens} color="#f3e8ff" indent={1} />
-            <BreakdownItem label="Agents" tokens={breakdown.agents_tokens} totalTokens={totalTokens} color="#faf5ff" indent={1} detail="子代理" />
 
             {/* Layer 2: Tool Results */}
             <div className="flex items-center gap-2 py-0.5 font-medium mt-2">

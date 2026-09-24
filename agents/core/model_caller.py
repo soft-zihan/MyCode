@@ -35,24 +35,48 @@ def _to_openai_tools(tools: list[dict]) -> list[dict]:
 
     D7：agent 工具的 type enum 每次请求现场重解析（含自定义代理），
     与 get_sub_agent_config 的可用类型始终一致，不做静态快照。
+    U5a：description 即动态 prompt（v2 subagent.ts/shell.ts 模式）——
+    子代理清单注入 agent 工具描述、实际 shell/OS 注入 run_shell 描述，
+    不再占用冻结的 system prompt。
     """
     dynamic_agent_types: list[str] | None = None
+    dynamic_agent_list = ""
     out = []
     for t in tools:
         schema = t["input_schema"]
+        description = t["description"]
         if t["name"] == "agent":
             if dynamic_agent_types is None:
                 from agents.core.subagent import get_available_agent_types
-                dynamic_agent_types = [n["name"] for n in get_available_agent_types() if n.get("name")]
+                _types = [n for n in get_available_agent_types() if n.get("name")]
+                dynamic_agent_types = [n["name"] for n in _types]
+                dynamic_agent_list = "; ".join(
+                    f"'{n['name']}' — {n.get('description', '')}" for n in _types
+                )
             if dynamic_agent_types and "type" in schema.get("properties", {}):
                 import copy
                 schema = copy.deepcopy(schema)
                 schema["properties"]["type"]["enum"] = dynamic_agent_types
+            if dynamic_agent_list:
+                description = f"{description} Available agent types: {dynamic_agent_list}."
+        elif t["name"] == "run_shell":
+            import os as _os
+            import platform as _platform
+            import sys as _sys
+            _shell = (
+                (_os.environ.get("ComSpec") or "cmd.exe")
+                if _sys.platform == "win32"
+                else _os.environ.get("SHELL", "/bin/sh")
+            )
+            description = (
+                f"{description} Environment: {_platform.system()} {_platform.machine()}, "
+                f"commands run via {_shell}."
+            )
         out.append({
             "type": "function",
             "function": {
                 "name": t["name"],
-                "description": t["description"],
+                "description": description,
                 "parameters": schema,
             },
         })
@@ -148,8 +172,12 @@ class ModelCaller:
     def __init__(self, agent: "Agent"):
         self._agent = agent
 
-    async def call(self, *, tools_enabled: bool = True) -> dict:
-        """流式模型调用（trace 外壳 + 超时 + 重试）。"""
+    async def call(self, *, tools_enabled: bool = True, tool_choice: str | None = None) -> dict:
+        """流式模型调用（trace 外壳 + 超时 + 重试）。
+
+        tool_choice="none"：保留工具定义但禁止调用（v2 llm.ts 收敛模式——
+        工具数组参与 prefix cache，摘掉 tools 会使缓存整体失效）。
+        """
         from agents.observability.trace import trace_span
         from agents.agent import _with_retry
 
@@ -169,7 +197,7 @@ class ModelCaller:
 
             async def _attempt():
                 await a.check_and_compact()
-                create_params, raw_messages, metrics = self._assemble_request(span, tools_enabled)
+                create_params, raw_messages, metrics = self._assemble_request(span, tools_enabled, tool_choice)
                 metrics.update(self._compute_token_breakdown(raw_messages))
                 stream = await a.openai_client.chat.completions.create(**create_params)
                 consumed = await self._consume_stream(stream)
@@ -213,7 +241,7 @@ class ModelCaller:
                 span.record_error(e)
                 raise
 
-    def _assemble_request(self, span, tools_enabled: bool) -> tuple[dict, list[dict], dict]:
+    def _assemble_request(self, span, tools_enabled: bool, tool_choice: str | None = None) -> tuple[dict, list[dict], dict]:
         """组装 create 参数 + 上报 trace input，返回 (params, raw_messages, 组装指标)。"""
         a = self._agent
         _asm_t0 = time.perf_counter()
@@ -230,11 +258,11 @@ class ModelCaller:
         sanitized_messages = sanitize_for_utf8(raw_messages)
         _sanitize_msgs_ms = (time.perf_counter() - _t3) * 1000
 
-        # 运行时易变状态尾部注入（prefix cache 保护：主 system prompt 会话内不变，
-        # 尾部消息每步变化不影响其前全部历史的缓存命中）
-        _guidance = a.build_runtime_guidance()
-        if _guidance:
-            sanitized_messages = [*sanitized_messages, {"role": "system", "content": _guidance}]
+        # 尾部 ephemeral system messages 注入（U5a：plan 提示词 + 运行时易变状态；
+        # prefix cache 保护——主 system prompt 会话内真冻结，尾部消息每步变化
+        # 不影响其前全部历史的缓存命中）
+        for _tail in a.build_tail_system_messages():
+            sanitized_messages.append({"role": "system", "content": _tail})
 
         create_params = {
             "model": a.model,
@@ -252,6 +280,8 @@ class ModelCaller:
             _t5 = time.perf_counter()
             create_params["tools"] = sanitize_for_utf8(openai_tools)
             _sanitize_tools_ms = (time.perf_counter() - _t5) * 1000
+            if tool_choice:
+                create_params["tool_choice"] = tool_choice
         else:
             _convert_tools_ms = 0
             _sanitize_tools_ms = 0
@@ -316,21 +346,18 @@ class ModelCaller:
         _system_agents_md_chars = 0
         _system_skills_chars = 0
         _system_wiki_chars = 0
-        _system_agents_chars = 0
         _system_workspace_chars = 0
         try:
             from agents.core.prompt import (
                 load_claude_md, load_agents_md, build_skill_descriptions,
-                build_wiki_prompt_section,
-                build_agent_descriptions, build_workspace_structure
+                build_wiki_prompt_section, build_workspace_structure
             )
             _system_claude_md_chars = len(load_claude_md())
             _system_agents_md_chars = len(load_agents_md())
             _system_skills_chars = len(build_skill_descriptions())
             _system_wiki_chars = len(build_wiki_prompt_section())
-            _system_agents_chars = len(build_agent_descriptions())
             _system_workspace_chars = len(build_workspace_structure())
-            _system_base_chars = _system_chars - _system_claude_md_chars - _system_agents_md_chars - _system_skills_chars - _system_wiki_chars - _system_agents_chars - _system_workspace_chars
+            _system_base_chars = _system_chars - _system_claude_md_chars - _system_agents_md_chars - _system_skills_chars - _system_wiki_chars - _system_workspace_chars
         except Exception:
             _system_base_chars = _system_chars
 
@@ -356,7 +383,6 @@ class ModelCaller:
             "system_agents_md_chars": _system_agents_md_chars,
             "system_skills_chars": _system_skills_chars,
             "system_wiki_chars": _system_wiki_chars,
-            "system_agents_chars": _system_agents_chars,
             "system_workspace_chars": _system_workspace_chars,
             # Plan mode
             "is_plan_mode": _is_plan_mode,

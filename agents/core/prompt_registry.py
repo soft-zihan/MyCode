@@ -98,6 +98,7 @@ def list_all_prompts() -> list[PromptInfo]:
     
     # 定义 hidden agent 到提示词文件的映射
     hidden_agent_prompt_files = {
+        "side_query_title": "generate_title.txt",
         "side_query_wiki": "select_wiki.txt",
         "side_query_compile": "compile_session.txt",
         "side_query_skill": "generate_skill.txt",

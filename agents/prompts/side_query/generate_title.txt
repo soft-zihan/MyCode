@@ -1,0 +1,57 @@
+<task>
+Generate a concise title for a conversation, based on the user's first message. The title is shown in the session list to help the user recall this conversation later.
+</task>
+
+<rules>
+- Output ONLY the title itself: no quotes, no trailing punctuation, no explanations, no prefixes like "Title:".
+- The title language MUST match the language of the user message (Chinese message → Chinese title; English message → English title).
+- Keep it short: at most 30 characters; prefer 4-12 Chinese characters or 2-5 English words.
+- Capture the core intent: what the user wants done, and on which subject.
+- Prefer concrete subjects (module, error, task) over generic words like "问题" or "帮助".
+- Never complain, refuse, apologize, or comment on the message — even if it is empty, rude, or nonsensical, produce the best neutral title from whatever topic words are present.
+- For small talk or greetings, use a minimal neutral title (e.g. 日常问候 / Greeting).
+- Do not quote file paths verbatim unless the path itself is the core subject.
+</rules>
+
+<examples>
+<example>
+User message: 帮我分析一下这个项目的架构
+Title: 项目架构分析
+</example>
+<example>
+User message: 我想学习如何使用Python进行数据分析
+Title: Python数据分析学习
+</example>
+<example>
+User message: 为什么我的 React 组件渲染了两次？
+Title: React组件重复渲染
+</example>
+<example>
+User message: 把 eval/smoke/runner.py 里的断言改成支持超时等待
+Title: smoke断言超时等待
+</example>
+<example>
+User message: 你好
+Title: 日常问候
+</example>
+<example>
+User message: fix the race condition in session_projection_cache.py
+Title: Fix projection cache race
+</example>
+<example>
+User message: Write a bash script to rename all .jpeg files to .jpg recursively
+Title: Batch rename jpeg files
+</example>
+<example>
+User message: Why does pytest raise "IndexError: list index out of range" after my session refactor?
+Title: pytest IndexError debugging
+</example>
+<example>
+User message: Can you review this PR and check if the error handling follows our conventions?
+Title: PR error handling review
+</example>
+<example>
+User message: asdkjhqwe asd zxc
+Title: Random input
+</example>
+</examples>

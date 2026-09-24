@@ -12,7 +12,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any
+
+_SIDE_QUERY_PROMPTS_DIR = Path(__file__).parent.parent / "prompts" / "side_query"
+
+
+def _load_side_query_prompt(filename: str) -> str:
+    """从 prompts/side_query/ 加载提示词（单一来源，供 registry/override 复用）。"""
+    return (_SIDE_QUERY_PROMPTS_DIR / filename).read_text(encoding="utf-8")
 
 
 class AgentMode(str, Enum):
@@ -51,25 +59,13 @@ class AgentConfig:
 
 
 BUILTIN_HIDDEN_AGENTS: dict[str, AgentConfig] = {
-    # 会话标题生成
+    # 会话标题生成（U5a：v2 plugin/agent.ts 模式——task/rules/examples + few-shot + 防抱怨 + 语言跟随）
     "side_query_title": AgentConfig(
         name="side_query_title",
         mode=AgentMode.PRIMARY,
         hidden=True,
         description="生成会话标题",
-        system_prompt="""你是一个标题生成器。根据用户的消息，生成一个简洁的标题（5-10个中文字符）。
-
-要求：
-- 只输出标题，不要有任何其他内容
-- 标题要能概括用户消息的核心主题
-- 不要使用引号或其他符号包裹
-
-示例：
-用户消息："帮我分析一下这个项目的架构"
-输出：项目架构分析
-
-用户消息："我想学习如何使用Python进行数据分析"
-输出：Python数据分析学习""",
+        system_prompt=_load_side_query_prompt("generate_title.txt"),
     ),
     # Side Query: Wiki 选择
     "side_query_wiki": AgentConfig(

@@ -19,7 +19,6 @@ from agents.tools.executor import persist_large_result, detect_failure
 from agents.observability.tool_tracker import RepeatGuard
 from agents.wiki.wiki_manager import start_wiki_prefetch as run_wiki_prefetch
 from agents.core.model_registry import ModelEndpoint, resolve_agent_endpoint
-from agents.core.prompt import build_system_prompt
 from agents.core import prompt_runtime
 from agents.core.side_query import SideQueryFactory
 from agents.core import session_lifecycle
@@ -268,12 +267,14 @@ class Agent:
         self._failed_tool_call_count: int = 0
 
     def _init_prompt(self, opts: "AgentOptions") -> None:
-        """段5：system prompt（含 plan 模式）+ OpenAI client（workspace 上下文内构建）。"""
+        """段5：system prompt（含 plan 模式）+ OpenAI client（workspace 上下文内构建）。
+
+        U5a：渲染统一走 _refresh_runtime_system_prompt（旧实现在此处直接
+        build_system_prompt 后 refresh 再渲染一次——初始化双重渲染）。
+        """
         from .core.workspace import set_workspace, reset_workspace
         _ws_token = set_workspace(self.workspace)
         try:
-            self._base_system_prompt = opts.custom_system_prompt or build_system_prompt()
-
             self._plan_mode_manager = PlanModeManager(
                 workspace=self.workspace,
                 session_id=self.session_id,
@@ -282,10 +283,6 @@ class Agent:
 
             if self.permission_mode == "plan":
                 self._plan_mode_manager.plan_dir = self._plan_mode_manager.generate_plan_dir()
-                self._system_prompt = self._base_system_prompt + self._plan_mode_manager.build_plan_mode_prompt()
-                print(f"[DEBUG] Agent.__init__: Entered plan mode. Plan dir: {self._plan_mode_manager.plan_dir}")
-            else:
-                self._system_prompt = self._base_system_prompt
 
             self._openai_client = openai.AsyncOpenAI(base_url=opts.api_base, api_key=opts.api_key)
 
@@ -379,8 +376,6 @@ class Agent:
         self._plan_mode_manager.pre_plan_mode = self.permission_mode
         self.permission_mode = "plan"
         self._plan_mode_manager.plan_dir = self._plan_mode_manager.generate_plan_dir()
-        self._system_prompt = self._base_system_prompt + self._plan_mode_manager.build_plan_mode_prompt()
-        self.session.system_prompt = self._system_prompt
         print_info("Entered plan mode (read-only). Plan dir: " + str(self._plan_mode_manager.plan_dir))
 
         trace_event(
@@ -399,8 +394,6 @@ class Agent:
         self.permission_mode = self._plan_mode_manager.pre_plan_mode or "default"
         self._plan_mode_manager.pre_plan_mode = None
         self._plan_mode_manager.plan_dir = None
-        self._system_prompt = self._base_system_prompt
-        self.session.system_prompt = self._system_prompt
         print_info(f"Exited plan mode -> {self.permission_mode} mode")
         if emit:
             self._emit_permission_mode_event()
@@ -472,8 +465,8 @@ class Agent:
             event_data["sub_agent_id"] = self._current_sub_agent_id
         self.session.append("text", event_data)
 
-    def build_runtime_guidance(self) -> str | None:
-        return prompt_runtime.build_runtime_guidance(self)
+    def build_tail_system_messages(self) -> list[str]:
+        return prompt_runtime.build_tail_system_messages(self)
 
     def _refresh_runtime_system_prompt(self, force: bool = False) -> None:
         prompt_runtime.refresh_runtime_system_prompt(self, force=force)

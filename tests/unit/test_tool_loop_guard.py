@@ -447,22 +447,23 @@ async def test_agent_loop_finalizes_tool_budget():
         handled.append(tool_calls)
         return False
 
-    async def fake_finalize_tool_budget():
-        finalized.append(True)
+    async def fake_finalize_budget(stop_reason, reason_text, step_reason):
+        finalized.append((stop_reason, step_reason))
 
     loop.call_model_stream = fake_call_model_stream
     loop._handle_tool_calls = fake_handle_tool_calls
-    loop._finalize_tool_budget = fake_finalize_tool_budget
+    loop._finalize_budget = fake_finalize_budget
 
     await loop.run("test")
 
     assert model_calls == 1
     assert len(handled) == 1
-    assert finalized == [True]
+    assert finalized == [("tool_budget_exceeded", "tool_budget_exceeded")]
 
 
 @pytest.mark.asyncio
-async def test_finalize_tool_budget_requests_summary_without_tools():
+async def test_finalize_budget_converges_with_tool_choice_none():
+    """U5a：收敛调用保留工具定义 + tool_choice="none"（v2 max-steps 模式，保 prefix cache）。"""
     agent = _make_loop_stub_agent()
     agent._tool_call_count = 5
     agent.max_tool_calls = 5
@@ -483,13 +484,46 @@ async def test_finalize_tool_budget_requests_summary_without_tools():
         }
 
     loop.call_model_stream = fake_call_model_stream
-    await loop._finalize_tool_budget()
+    await loop._finalize_budget(
+        "tool_budget_exceeded", "Tool call budget exceeded: 5/5", "tool_budget_exceeded"
+    )
 
-    assert kwargs_seen == [{"tools_enabled": False}]
+    assert kwargs_seen == [{"tools_enabled": True, "tool_choice": "none"}]
     assert agent._tool_budget_stop_reason == "tool_budget_exceeded"
     event_types = [event["type"] for event in agent.session.events]
     assert "user_message" in event_types
     assert "assistant_message" in event_types
+    # v2 措辞要素：CRITICAL + overrides + 四要素
+    instruction = next(e for e in agent.session.events if e["type"] == "user_message")
+    assert "CRITICAL" in instruction["content"]
+    assert "OVERRIDES ALL OTHER" in instruction["content"]
+    for part in ("Conclusion", "Evidence", "Unfinished", "Suggestion"):
+        assert part in instruction["content"]
+
+
+@pytest.mark.asyncio
+async def test_finalize_budget_turn_budget_sets_stop_reason():
+    """turn/cost 预算收敛：stop_reason 透传（turn/end reason=budget_exceeded 依据）。"""
+    agent = _make_loop_stub_agent()
+    agent._tool_budget_stop_reason = None
+    loop = AgentLoop(agent)
+    await _stub_loop_prereqs(loop)
+
+    async def fake_call_model_stream(*args, **kwargs):
+        return {
+            "choices": [{
+                "message": {"content": "final", "thinking": None, "tool_calls": None},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+        }
+
+    loop.call_model_stream = fake_call_model_stream
+    await loop._finalize_budget("turn_budget_exceeded", "Turn limit reached (3 >= 3)", "budget_exceeded")
+
+    assert agent._tool_budget_stop_reason == "turn_budget_exceeded"
+    step_events = [e for e in agent.session.events if e["type"] in ("step/start", "step/end")]
+    assert step_events and all(e.get("reason") == "budget_exceeded" for e in step_events)
 
 
 class BudgetFakeSubAgent(FakeSubAgent):

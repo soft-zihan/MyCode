@@ -70,6 +70,22 @@ Rules:
 _PROMPTS_DIR = Path(__file__).parent.parent / "prompts" / "side_query"
 COMPILE_SESSION_NOTES_AND_KNOWLEDGE_SYSTEM = (_PROMPTS_DIR / "compile_session.txt").read_text(encoding="utf-8")
 
+# U5a：session_notes 结构校验（对齐 v2 compaction.ts 的模板命中检查 + 纠正重试）
+REQUIRED_NOTES_SECTIONS = (
+    "## Objective",
+    "## Requirements",
+    "## Decisions",
+    "## Work State",
+    "## Next Move",
+    "## Relevant Files",
+    "## Important Context",
+)
+
+
+def validate_session_notes(notes: str) -> list[str]:
+    """返回缺失的必需小节标题列表（空列表 = 结构合格）。"""
+    return [s for s in REQUIRED_NOTES_SECTIONS if s not in notes]
+
 
 def _count_hidden_seqs(session: Any) -> int:
     return len(collect_hidden_seqs(session.events))
@@ -549,30 +565,14 @@ class ContextCompressor:
 
         session_notes = ""
         project_knowledge = ""
-        summary = ""
+        notes_validated = False
 
         if side_query:
-            try:
-                raw = await side_query(
-                    COMPILE_SESSION_NOTES_AND_KNOWLEDGE_SYSTEM,
-                    self._build_compile_prompt(transcript, previous_notes),
+            summary, session_notes, project_knowledge, notes_validated = (
+                await self._compile_session_notes(
+                    side_query, transcript, previous_notes, fallback_transcript
                 )
-                print(f"[side_query] raw response length={len(raw) if raw else 0}")
-                compiled = self._parse_compiled_result(raw)
-                session_notes = compiled.get("session_notes", "")
-                project_knowledge = compiled.get("project_knowledge", "")
-                print(
-                    f"[side_query] parsed: session_notes={len(session_notes)}chars, "
-                    f"project_knowledge={len(project_knowledge)}chars"
-                )
-
-                if session_notes:
-                    summary = self._format_session_notes_as_summary(session_notes)
-                else:
-                    summary = format_folded_memory(fallback_folded_memory(fallback_transcript))
-            except Exception as e:
-                logger.error("[side_query] failed: %s: %s", type(e).__name__, e)
-                summary = format_folded_memory(fallback_folded_memory(fallback_transcript))
+            )
         else:
             summary = format_folded_memory(fallback_folded_memory(fallback_transcript))
 
@@ -590,6 +590,7 @@ class ContextCompressor:
             "summary": summary,
             "session_notes": session_notes,
             "project_knowledge": project_knowledge,
+            "notes_validated": notes_validated,
             "previous_notes_chars": len(previous_notes),
             "transcript_chars": len(transcript),
             "fold_mode": fold_mode,
@@ -615,6 +616,74 @@ class ContextCompressor:
         self._session_fold_count += 1
         self._record_fold_event()
         return True
+
+    async def _compile_session_notes(
+        self,
+        side_query: SideQueryFn,
+        transcript: str,
+        previous_notes: str,
+        fallback_transcript: str,
+    ) -> tuple[str, str, str, bool]:
+        """会话笔记编译：结构校验 + 纠正重试一次 + 显式失败审计。
+
+        返回 (summary, session_notes, project_knowledge, notes_validated)。
+        对齐 v2 compaction.ts：模板命中检查失败 → 追加纠正提示重试一次 →
+        仍失败显式报错（logger.error + session_folded.notes_validated=False），
+        不静默吞异常。notes 非空但结构不合格时仍保留内容（内容优先于格式），
+        只有彻底失败（异常/空输出）才退回确定性 fallback 摘要。
+        """
+        compile_prompt = self._build_compile_prompt(transcript, previous_notes)
+        notes = ""
+        knowledge = ""
+        validated = False
+        try:
+            raw = await side_query(COMPILE_SESSION_NOTES_AND_KNOWLEDGE_SYSTEM, compile_prompt)
+            print(f"[side_query] raw response length={len(raw) if raw else 0}")
+            compiled = self._parse_compiled_result(raw)
+            notes = compiled.get("session_notes", "")
+            knowledge = compiled.get("project_knowledge", "")
+            print(
+                f"[side_query] parsed: session_notes={len(notes)}chars, "
+                f"project_knowledge={len(knowledge)}chars"
+            )
+
+            missing = validate_session_notes(notes) if notes else list(REQUIRED_NOTES_SECTIONS)
+            if missing:
+                logger.warning(
+                    "[side_query] session_notes missing sections %s, retrying once", missing
+                )
+                retry_prompt = (
+                    compile_prompt
+                    + "\n\nYour previous output was missing required sections: "
+                    + ", ".join(missing)
+                    + "\nRegenerate session_notes containing ALL required ## section headings verbatim, in order."
+                    + "\n\nPrevious output:\n"
+                    + clip_text(notes or str(raw or ""), 8000)
+                )
+                raw2 = await side_query(COMPILE_SESSION_NOTES_AND_KNOWLEDGE_SYSTEM, retry_prompt)
+                compiled2 = self._parse_compiled_result(raw2)
+                notes2 = compiled2.get("session_notes", "")
+                if notes2 and len(validate_session_notes(notes2)) < len(missing):
+                    notes = notes2
+                    knowledge = compiled2.get("project_knowledge", "") or knowledge
+                    missing = validate_session_notes(notes)
+            validated = bool(notes) and not missing
+            if not validated:
+                logger.error(
+                    "[side_query] session_notes structure validation failed after retry "
+                    "(missing=%s, notes_chars=%d)",
+                    missing,
+                    len(notes),
+                )
+        except Exception as e:
+            logger.error("[side_query] failed: %s: %s", type(e).__name__, e)
+            notes = ""
+
+        if notes:
+            summary = self._format_session_notes_as_summary(notes)
+        else:
+            summary = format_folded_memory(fallback_folded_memory(fallback_transcript))
+        return summary, notes, knowledge, validated
 
     def _build_compile_prompt(self, transcript: str, previous_notes: str = "") -> str:
         sections: list[str] = []

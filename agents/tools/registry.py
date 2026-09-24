@@ -21,8 +21,6 @@ CONCURRENCY_SAFE_TOOLS = {"read_file", "outline_file", "list_files", "grep_searc
 
 MAX_RESULT_CHARS = 50000
 
-_activated_tools: set[str] = set()
-
 
 def _truncate_result(result: str) -> str:
     if len(result) <= MAX_RESULT_CHARS:
@@ -35,26 +33,8 @@ def _truncate_result(result: str) -> str:
     )
 
 
-def reset_activated_tools() -> None:
-    _activated_tools.clear()
-
-
 def get_active_tool_definitions(all_tools: list[ToolDef] | None = None) -> list[ToolDef]:
-    tools = all_tools if all_tools is not None else tool_definitions
-    return [
-        {k: v for k, v in t.items() if k != "deferred"}
-        for t in tools
-        if not t.get("deferred") or t["name"] in _activated_tools
-    ]
-
-
-def get_deferred_tool_names(all_tools: list[ToolDef] | None = None) -> list[str]:
-    tools = all_tools if all_tools is not None else tool_definitions
-    return [t["name"] for t in tools if t.get("deferred") and t["name"] not in _activated_tools]
-
-
-def activate_tool(name: str) -> None:
-    _activated_tools.add(name)
+    return all_tools if all_tools is not None else tool_definitions
 
 
 @dataclass
@@ -410,13 +390,13 @@ tool_definitions: list[ToolDef] = [
     },
     {
         "name": "agent",
-        "description": "Launch a sub-agent to handle a task autonomously. Sub-agents have isolated context and return their result wrapped in a <subagent session_id=... state=...> tag. RESUME: pass session_id (from that tag) to continue the same sub-agent — it keeps full memory of its earlier work, so the prompt only needs the new instruction. Omit session_id to spawn a fresh sub-agent — then the prompt must contain ALL needed context. Built-in types: 'explore' (read-only search), 'reviewer' (code review + verification commands), 'general' (full tools); custom agent types are listed in the system prompt.",
+        "description": "Launch a sub-agent to handle a task autonomously. Sub-agents have isolated context and return their result wrapped in a <subagent session_id=... state=...> tag. RESUME: pass session_id (from that tag) to continue the same sub-agent — it keeps full memory of its earlier work, so the prompt only needs the new instruction. Omit session_id to spawn a fresh sub-agent — then the prompt must contain ALL needed context.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "description": {"type": "string", "description": "Short (3-5 word) description of the sub-agent's task"},
                 "prompt": {"type": "string", "description": "Detailed task instructions. For a fresh sub-agent include full context; when resuming via session_id only the new instruction is needed"},
-                "type": {"type": "string", "enum": ["explore", "reviewer", "general"], "description": "Agent type. Default: general. Custom agent names (see system prompt) are also accepted; the enum is refreshed per request to include them"},
+                "type": {"type": "string", "enum": ["explore", "reviewer", "general"], "description": "Agent type. Default: general. The enum and the available-types list in this tool's description are refreshed per request (including custom agents)"},
                 "session_id": {"type": "string", "description": "Optional. The session_id of a sub-agent you previously spawned (from its <subagent session_id=...> result tag). Pass it to continue that sub-agent with its memory retained; omit to spawn a new one"},
                 "background": {"type": "boolean", "description": "If true, launch in background and return immediately with the sub-agent's session_id (state=\"running\"). When it finishes, its result is automatically injected into this session and you will see it at the start of your next turn — do NOT sleep/poll or spawn a duplicate; if nothing else to do, end your reply"},
             },

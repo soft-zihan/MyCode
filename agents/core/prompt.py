@@ -11,7 +11,6 @@ from pathlib import Path
 from agents.core.workspace import get_workspace
 from agents.wiki.wiki_manager import build_wiki_prompt_section, init_wiki_git
 from agents.skills.skills import build_skill_descriptions
-from .subagent import build_agent_descriptions
 
 # ─── System prompt template (from file) ──────────────────────
 
@@ -174,8 +173,52 @@ def build_workspace_structure() -> str:
         return ""
 
 
-def build_system_prompt() -> str:
-    """Build the full system prompt from template file + dynamic context."""
+# U5a：工具指引按工具存在性条件生成（v2 system-prompt.ts OPENCODE_TOOL_GUIDANCE
+# 模式——"有 shell 才注入 shell 纪律"）。active_tools=None 时全量注入。
+_DEDICATED_TOOL_LINES = [
+    ("read_file", "   - 读取文件使用 read_file 而不是 cat、head、tail 或 sed"),
+    ("outline_file", "   - 对于大型代码/markdown 文件（>300 行），先调用 outline_file 获取结构大纲（类/函数/标题及行号范围），然后通过 offset/limit 只读取你需要的部分"),
+    ("edit_file", "   - 编辑文件使用 edit_file 而不是 sed 或 awk"),
+    ("write_file", "   - 创建文件使用 write_file 而不是 cat 与 heredoc 或 echo 重定向"),
+    ("list_files", "   - 搜索文件使用 list_files 而不是 find 或 ls"),
+    ("grep_search", "    - 搜索文件内容使用 grep_search 而不是 grep 或 rg"),
+    ("web_search", "    - 搜索公网事实、文档、URL、日期或最新信息使用 web_search，而不是 curl、wget 或手写搜索脚本"),
+]
+
+_CODE_GRAPH_PREFIX = "mcp__code-review-graph__"
+
+
+def build_tool_guidance(active_tools: set[str] | None = None) -> str:
+    """生成"# 使用工具"段：每条指引以其对应工具存在为前提。"""
+    def has(name: str) -> bool:
+        return active_tools is None or name in active_tools
+
+    lines = ["# 使用工具"]
+    if has("run_shell"):
+        dedicated = [text for name, text in _DEDICATED_TOOL_LINES if has(name)]
+        if dedicated:
+            lines.append(" - 当有相关的专用工具时，不要使用 run_shell 运行命令。使用专用工具让用户更好地理解和审查你的工作。这对于帮助你至关重要：")
+            lines.extend(dedicated)
+        lines.append("    - 仅在需要 shell 执行的系统命令和终端操作上专门使用 run_shell。如果你不确定并且有相关的专用工具，默认使用专用工具，只有在绝对必要时才使用 run_shell 工具。")
+    lines.append(" - 你可以在一次响应中调用多个工具。如果你打算调用多个工具且它们之间没有依赖关系，并行执行所有独立的工具调用。尽可能最大化使用并行工具调用以提高效率。但是，如果某些工具调用依赖于之前的调用来确定依赖值，不要并行调用这些工具，而是按顺序调用它们。例如，如果一个操作必须在另一个操作开始之前完成，按顺序运行这些操作而不是并行。")
+    if has("agent"):
+        lines.append(" - 当任务与 agent 的描述匹配时，使用 `agent` 工具调用专门的 agent。子 agent 对于并行化独立查询或保护主上下文窗口免受过多结果影响很有价值，但不应该在不需要时过度使用。重要的是，避免重复子 agent 已经在做的工作——如果你将研究委托给子 agent，不要自己也执行相同的搜索。子 agent 默认不注入 wiki 记忆——派发任务时，把任务所需的相关记忆/约定/教训显式写进任务描述（prompt）里。")
+    if active_tools is None or any(n.startswith(_CODE_GRAPH_PREFIX) for n in active_tools):
+        lines.extend([
+            " - 代码图（如果已连接）：当名为 `mcp__code-review-graph__*` 的 MCP 工具可用时，存在代码库的结构知识图（由用户通过 /graph build 构建）。用它来回答多跳结构问题，而不是广泛的 grep：",
+            "   - \"谁调用 X / X 调用什么 / 谁导入模块 Y\" → `mcp__code-review-graph__query_graph_tool`（模式：callers_of、callees_of、importers_of、imports_of、tests_for、inheritors_of）",
+            "   - \"更改文件 X 会影响什么\" → `mcp__code-review-graph__get_impact_radius_tool` 或 `mcp__code-review-graph__detect_changes_tool`",
+            "   - 按名称查找符号 → `mcp__code-review-graph__semantic_search_nodes_tool`",
+            "   对于一跳查找（精确字符串、文件通配符），继续使用 grep_search/list_files。如果图查询报告图缺失或过时，告诉用户运行 /graph build 或 /graph update——不要自己构建它。",
+        ])
+    return "\n".join(lines)
+
+
+def build_system_prompt(active_tools: set[str] | None = None) -> str:
+    """Build the full system prompt from template file + dynamic context.
+
+    active_tools：当前工具名快照，用于条件化工具指引（None = 全量注入）。
+    """
     import time
     from datetime import date
     _t0 = time.perf_counter()
@@ -199,10 +242,6 @@ def build_system_prompt() -> str:
     skills_section = build_skill_descriptions()
     _skills_ms = (time.perf_counter() - _t5) * 1000
 
-    _t6 = time.perf_counter()
-    agent_section = build_agent_descriptions()
-    _agents_ms = (time.perf_counter() - _t6) * 1000
-
     workspace_structure = build_workspace_structure()
 
     init_wiki_git()
@@ -212,13 +251,12 @@ def build_system_prompt() -> str:
         "{{date}}": today,
         "{{platform}}": plat,
         "{{shell}}": shell,
+        "{{tool_guidance}}": build_tool_guidance(active_tools),
         "{{workspace_structure}}": workspace_structure,
         "{{claude_md}}": claude_md,
         "{{agents_md}}": agents_md,
         "{{wiki}}": wiki_section,
         "{{skills}}": skills_section,
-        "{{agents}}": agent_section,
-        "{{deferred_tools}}": "",
     }
     result = _load_system_prompt_template()
     for key, value in replacements.items():
@@ -230,7 +268,7 @@ def build_system_prompt() -> str:
             f"[perf] build_system_prompt: {_total_ms:.1f}ms "
             f"(claude_md={_claude_md_ms:.1f} agents_md={_agents_md_ms:.1f} "
             f"wiki={_wiki_ms:.1f} "
-            f"skills={_skills_ms:.1f} agents={_agents_ms:.1f})",
+            f"skills={_skills_ms:.1f})",
             file=sys.stderr,
         )
 

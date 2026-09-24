@@ -199,7 +199,11 @@ def get_sub_agent_config(agent_type: str) -> dict:
 
 
 def get_available_agent_types() -> list[dict[str, str]]:
-    """返回系统提示词中可展示的全部代理类型说明，包括内置代理和自定义代理。"""
+    """返回全部代理类型说明（内置 + 自定义）。
+
+    U5a：消费方为 agent 工具的动态 description/enum（每请求重解析，
+    v2 subagent.ts "description 即动态 prompt" 模式），不再进 system prompt。
+    """
     types = [
         {"name": "explore", "description": "Fast, read-only codebase search and exploration"},
         {"name": "reviewer", "description": "Code review with verification commands"},
@@ -208,19 +212,6 @@ def get_available_agent_types() -> list[dict[str, str]]:
     for name, defn in _discover_custom_agents().items():
         types.append({"name": name, "description": defn["description"]})
     return types
-
-
-def build_agent_descriptions() -> str:
-    """把自定义代理类型格式化成 Markdown，供主 Agent 注入到系统提示词中。"""
-    types = get_available_agent_types()
-    if len(types) <= 3:
-        return ""  # Only built-in types, already in system prompt
-
-    custom = types[3:]
-    lines = ["\n# Custom Agent Types", ""]
-    for t in custom:
-        lines.append(f"- **{t['name']}**: {t['description']}")
-    return "\n".join(lines)
 
 
 def reset_agent_cache() -> None:

@@ -699,7 +699,6 @@ export interface TokenBreakdown {
   claude_md_tokens: number;
   skills_tokens: number;
   wiki_tokens: number;
-  agents_tokens: number;
   // Tools
   tools_tokens: number;
   builtin_tool_count: number;

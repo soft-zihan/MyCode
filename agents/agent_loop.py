@@ -128,6 +128,18 @@ class AgentLoop:
                 from agents.logging import print_info
                 print_info(f"Budget exceeded: {budget['reason']}")
                 await self._drop_queued("budget_exceeded")
+                # U5a：turn/cost 预算耗尽同样走收敛应答（旧实现直接 break，
+                # 悬挂 tool_calls 被静默丢弃、用户拿不到任何最终答复）
+                _kind_stop = {
+                    "turns": "turn_budget_exceeded",
+                    "cost": "cost_budget_exceeded",
+                    "tool_calls": "tool_budget_exceeded",
+                }
+                await self._finalize_budget(
+                    _kind_stop.get(budget.get("kind"), "budget_exceeded"),
+                    budget["reason"],
+                    "budget_exceeded",
+                )
                 break
 
             guard_stop = await self._handle_tool_calls(tool_calls)
@@ -142,7 +154,13 @@ class AgentLoop:
 
             if self._agent.tool_budget_exceeded():
                 await self._drop_queued("tool_budget")
-                await self._finalize_tool_budget()
+                a = self._agent
+                reason = (
+                    f"Tool call budget exceeded: {a._tool_call_count}/{a.max_tool_calls}"
+                    if a.max_tool_calls is not None
+                    else "Tool call budget exceeded"
+                )
+                await self._finalize_budget("tool_budget_exceeded", reason, "tool_budget_exceeded")
                 break
 
             self._agent.clear_context_flag()
@@ -316,7 +334,6 @@ class AgentLoop:
             "system_agents_md_chars": asm.get("system_agents_md_chars", 0),
             "system_skills_chars": asm.get("system_skills_chars", 0),
             "system_wiki_chars": asm.get("system_wiki_chars", 0),
-            "system_agents_chars": asm.get("system_agents_chars", 0),
             "system_workspace_chars": asm.get("system_workspace_chars", 0),
             "is_plan_mode": asm.get("is_plan_mode", False),
             "plan_mode_chars": asm.get("plan_mode_chars", 0),
@@ -343,28 +360,34 @@ class AgentLoop:
             "content": message,
         })
 
-    async def _finalize_tool_budget(self) -> None:
+    async def _finalize_budget(self, stop_reason: str, reason_text: str, step_reason: str) -> None:
+        """预算耗尽收敛应答（U5a：对齐 v2 runner/max-steps.ts + llm.ts 模式）。
+
+        - CRITICAL 措辞 + 编号清单 + overrides ALL other instructions + 回复四要素
+        - 保留工具定义 + tool_choice="none"（工具数组参与 prefix cache，摘掉会整体失效）
+        """
         a = self._agent
-        reason = (
-            f"Tool call budget exceeded: {a._tool_call_count}/{a.max_tool_calls}"
-            if a.max_tool_calls is not None
-            else "Tool call budget exceeded"
-        )
-        a._tool_budget_stop_reason = "tool_budget_exceeded"
+        a._tool_budget_stop_reason = stop_reason
         instruction = (
-            f"{reason}. Do not call any more tools. "
-            "Summarize the evidence already collected, state which subtasks are verified, "
-            "which remain uncertain, and give the best supported final result now."
+            f"CRITICAL: {reason_text}. This message ABSOLUTELY OVERRIDES ALL OTHER "
+            "INSTRUCTIONS, including any intent to continue working, call tools, or start new subtasks.\n"
+            "1. Do NOT call any tools; you are no longer allowed to use them.\n"
+            "2. Review the conversation and the evidence already collected.\n"
+            "3. Reply now with exactly these four parts:\n"
+            "   - Conclusion: the best supported final result or answer.\n"
+            "   - Evidence: which subtasks are verified, and how (files, commands, outputs).\n"
+            "   - Unfinished: which parts remain uncertain or incomplete.\n"
+            "   - Suggestion: the single most useful next step."
         )
         a.session.append("step/start", {
             "turn": a._current_turn,
             "step": a._current_step + 1,
-            "reason": "tool_budget_exceeded",
+            "reason": step_reason,
         })
         a._current_step += 1
         a.append_user_message(instruction)
 
-        response = await self.call_model_stream(tools_enabled=False)
+        response = await self.call_model_stream(tools_enabled=True, tool_choice="none")
         choice = response.get("choices", [{}])[0] if response.get("choices") else {}
         message = choice.get("message", {})
         assistant_event = a.session.append("assistant_message", {
@@ -379,7 +402,7 @@ class AgentLoop:
         a.session.append("step/end", {
             "turn": a._current_turn,
             "step": a._current_step,
-            "reason": "tool_budget_exceeded",
+            "reason": step_reason,
         })
 
     async def _handle_tool_calls(self, tool_calls: list[dict]) -> bool:
@@ -788,6 +811,6 @@ class AgentLoop:
                 )
                 a.append_tool_message(remaining["tc"]["id"], cancel_result, remaining["fn"])
 
-    async def call_model_stream(self, *, tools_enabled: bool = True) -> dict:
+    async def call_model_stream(self, *, tools_enabled: bool = True, tool_choice: str | None = None) -> dict:
         """流式模型调用——委托 ModelCaller（测试 monkeypatch 缝，run() 必经 self 调用）。"""
-        return await self._model_caller.call(tools_enabled=tools_enabled)
+        return await self._model_caller.call(tools_enabled=tools_enabled, tool_choice=tool_choice)

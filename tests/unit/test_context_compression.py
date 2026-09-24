@@ -4,8 +4,18 @@ import json
 import pytest
 
 from agents.agent import Agent
-from agents.core.context_compressor import ContextCompressor
+from agents.core.context_compressor import (
+    REQUIRED_NOTES_SECTIONS,
+    ContextCompressor,
+    validate_session_notes,
+)
 from agents.core.session import Session
+
+
+def _valid_notes(marker: str = "") -> str:
+    """结构合格的 session_notes（含全部必需 ## 小节）。"""
+    body = "\n\n".join(f"{s}\n- item{marker}" for s in REQUIRED_NOTES_SECTIONS)
+    return body
 
 
 def _make_agent(tmp_path, monkeypatch, **kwargs):
@@ -217,7 +227,7 @@ async def test_session_fold_merges_previous_notes_and_replaces_old_summary(monke
     async def side_query(system: str, user: str) -> str:
         prompts.append((system, user))
         return json.dumps({
-            "session_notes": "merged notes",
+            "session_notes": _valid_notes(" merged"),
             "project_knowledge": "merged knowledge",
         })
 
@@ -239,7 +249,8 @@ async def test_session_fold_merges_previous_notes_and_replaces_old_summary(monke
 
     visible_folds = [event for event in session.visible_events if event.get("type") == "session_folded"]
     assert len(visible_folds) == 1
-    assert visible_folds[0]["session_notes"] == "merged notes"
+    assert visible_folds[0]["session_notes"] == _valid_notes(" merged")
+    assert visible_folds[0]["notes_validated"] is True
     assert old_fold["seq"] not in session.visible_seqs
 
     assert len(prompts) == 1
@@ -250,12 +261,12 @@ async def test_session_fold_merges_previous_notes_and_replaces_old_summary(monke
 
     assert len(wiki_calls) == 1
     assert wiki_calls[0]["session_id"] == "sess"
-    assert wiki_calls[0]["session_notes"] == "merged notes"
+    assert wiki_calls[0]["session_notes"] == _valid_notes(" merged")
 
     messages = session.get_messages_for_llm()
     contents = [str(message.get("content") or "") for message in messages]
     assert not any("old summary" in content for content in contents)
-    assert any("merged notes" in content for content in contents)
+    assert any("item merged" in content for content in contents)
 
 
 def test_agent_uses_default_auto_compact_threshold(tmp_path, monkeypatch):
@@ -351,3 +362,95 @@ def test_session_notes_wiki_entry_is_updated_in_place(tmp_path):
         assert "note v2" in updated.read_text()
     finally:
         reset_workspace(token)
+
+
+# ── U5a：session_notes 结构校验 + 纠正重试 ──────────────────────
+
+
+def test_validate_session_notes_detects_missing_sections():
+    assert validate_session_notes(_valid_notes()) == []
+    missing = validate_session_notes("## Objective\n- x\n## Next Move\n1. y")
+    assert "## Requirements" in missing
+    assert "## Objective" not in missing
+
+
+def _foldable_session() -> Session:
+    session = Session("notes-validation", origin="sub_agent")
+    for index in range(4):
+        session.append("user_message", {"content": f"user {index}"})
+        session.append("assistant_message", {"content": f"assistant {index}"})
+    return session
+
+
+def _make_fold_compressor() -> ContextCompressor:
+    return ContextCompressor(
+        effective_window=1000,
+        tool_fold_threshold=0.7,
+        keep_recent_dialog_rounds=2,
+    )
+
+
+async def test_notes_invalid_then_retry_valid(monkeypatch):
+    session = _foldable_session()
+    prompts: list[str] = []
+    calls = {"n": 0}
+
+    async def side_query(system: str, user: str) -> str:
+        prompts.append(user)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return json.dumps({"session_notes": "## Objective\n- broken", "project_knowledge": ""})
+        return json.dumps({"session_notes": _valid_notes(" retry"), "project_knowledge": "k"})
+
+    import agents.wiki.pipeline as wiki_pipeline
+    async def _noop(**kwargs):
+        return None
+    monkeypatch.setattr(wiki_pipeline, "on_session_folded", _noop)
+
+    compressor = _make_fold_compressor()
+    assert await compressor._fold_session(session, side_query, "sess")
+    await asyncio.sleep(0)
+
+    assert calls["n"] == 2
+    assert "missing required sections" in prompts[1]
+    fold = [e for e in session.visible_events if e.get("type") == "session_folded"][0]
+    assert fold["notes_validated"] is True
+    assert fold["session_notes"] == _valid_notes(" retry")
+
+
+async def test_notes_invalid_twice_keeps_content_and_audits(monkeypatch):
+    session = _foldable_session()
+
+    async def side_query(system: str, user: str) -> str:
+        return json.dumps({"session_notes": "## Objective\n- still broken", "project_knowledge": ""})
+
+    import agents.wiki.pipeline as wiki_pipeline
+    async def _noop(**kwargs):
+        return None
+    monkeypatch.setattr(wiki_pipeline, "on_session_folded", _noop)
+
+    compressor = _make_fold_compressor()
+    assert await compressor._fold_session(session, side_query, "sess")
+    await asyncio.sleep(0)
+
+    fold = [e for e in session.visible_events if e.get("type") == "session_folded"][0]
+    # 内容优先于格式：结构不合格仍保留 notes，但审计字段显式标记失败
+    assert fold["notes_validated"] is False
+    assert "still broken" in fold["session_notes"]
+    assert "still broken" in fold["summary"]
+
+
+async def test_notes_side_query_exception_falls_back(monkeypatch):
+    session = _foldable_session()
+
+    async def side_query(system: str, user: str) -> str:
+        raise RuntimeError("gateway down")
+
+    compressor = _make_fold_compressor()
+    assert await compressor._fold_session(session, side_query, "sess")
+    await asyncio.sleep(0)
+
+    fold = [e for e in session.visible_events if e.get("type") == "session_folded"][0]
+    assert fold["session_notes"] == ""
+    assert fold["notes_validated"] is False
+    assert fold["summary"]  # 确定性 fallback 摘要非空

@@ -158,6 +158,10 @@ class TurnRunner:
                             server_name = parts[1]
                             global_registry.register_mcp(mcp_def, server=server_name)
                     a.tools = a.tools + mcp_defs
+                    # U5a：工具指引按工具快照条件生成——MCP 接入是结构性变化，
+                    # force 重建一次（字节相同时 setter 不 bump，缓存无损；
+                    # 代码图等 MCP 专属指引自此可见）
+                    a._refresh_runtime_system_prompt(force=True)
                 span.add_metadata(success=True, tool_count=len(mcp_defs) if mcp_defs else 0)
             except asyncio.TimeoutError:
                 error = TimeoutError("MCP init timeout (30s)")
