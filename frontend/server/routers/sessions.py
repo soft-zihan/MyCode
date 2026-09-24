@@ -107,8 +107,8 @@ def api_list_sessions() -> list[dict[str, Any]]:
 @router.get("/api/sessions/{session_id}")
 def api_get_session(session_id: str) -> dict[str, Any]:
     print(f"[GET] session_id={session_id}")
-    from agents.core.session import Session
-    session = Session.load_from_events(session_id)
+    from agents.session_manager import get_session_manager
+    session = get_session_manager().get_or_load(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -134,11 +134,8 @@ def api_update_session(session_id: str, request: dict[str, Any]) -> dict[str, An
         raise HTTPException(status_code=400, detail="Only 'name' updates are supported")
     
     from agents.session_manager import get_session_manager
-    from agents.core.session import Session
     
-    session = get_session_manager().get(session_id)
-    if session is None:
-        session = Session.load_from_events(session_id)
+    session = get_session_manager().get_or_load(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
     
@@ -150,15 +147,11 @@ def api_update_session(session_id: str, request: dict[str, Any]) -> dict[str, An
 @router.get("/api/sessions/{session_id}/projections")
 def api_get_session_projections(session_id: str) -> dict[str, Any]:
     """快速获取 session 投影值（title, updatedAt, cwd, running）。"""
-    try:
-        from agents.core.session import Session
-        session = Session.load_from_events(session_id)
-        if session:
-            return session.projections
-    except Exception:
-        pass
-    
-    raise HTTPException(status_code=404, detail="Session not found")
+    from agents.session_manager import get_session_manager
+    session = get_session_manager().get_or_load(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session.projections
 
 
 @router.get("/api/sessions/{session_id}/summary")
@@ -170,8 +163,8 @@ def api_session_summary(session_id: str) -> dict[str, Any]:
     if not backend.session_exists(session_id):
         raise HTTPException(status_code=404, detail="Session not found")
 
-    from agents.core.session import Session
-    session = Session.load_from_events(session_id)
+    from agents.session_manager import get_session_manager
+    session = get_session_manager().get_or_load(session_id)
     if session:
         result["metadata"] = {
             "id": session_id,
@@ -874,7 +867,8 @@ async def api_fork_session(session_id: str, data: Optional[ForkRequest] = None) 
     loaded = None
     if session is not None:
         original_title = session.projections.get("title")
-    if not original_title:
+    if not original_title and session is None:
+        # BC-26：仅非活会话允许磁盘加载（load_from_events 带修复写副作用）
         loaded = Session.load_from_events(session_id)
         if loaded is not None:
             original_title = loaded.projections.get("title")
@@ -1398,9 +1392,11 @@ def api_get_session_events(
             "total_count": int,
         }
     """
-    from agents.core.session import Session
+    from agents.session_manager import get_session_manager
     
-    session = Session.load_from_events(session_id)
+    # BC-26：前端 gap repair 会高频轮询本端点——活会话必须走内存实例，
+    # 否则每次 load_from_events 都对存活 turn 触发 crash-repair 写
+    session = get_session_manager().get_or_load(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
     

@@ -33,6 +33,26 @@ class TurnRunner:
 
     async def chat(self, user_message: str) -> None:
         """单轮对话入口：workspace 上下文 + trace 上下文 + run_turn。"""
+        await self._enter_turn(user_message)
+
+    async def wake_turn(self, trigger_reason: str = "subagent_completed") -> None:
+        """U3b 自动唤醒轮：不写 user_message 事件（synthetic 通知已在事件流中、
+        derive 投影为 user 消息），turn/start 携带 trigger=auto_wake。忙则跳过。"""
+        await self._enter_turn(
+            None,
+            trigger="auto_wake",
+            extra_tags=("auto-wake",),
+            trace_input=f"[auto-wake] {trigger_reason}",
+        )
+
+    async def _enter_turn(
+        self,
+        user_message: str | None,
+        *,
+        trigger: str = "user",
+        extra_tags: tuple[str, ...] = (),
+        trace_input: str | None = None,
+    ) -> None:
         from agents.core.workspace import set_workspace, reset_workspace
         from agents.observability.trace import trace_context
 
@@ -40,6 +60,7 @@ class TurnRunner:
         trace_tags = ["sub-agent"] if a.is_sub_agent else ["main-agent"]
         if a.permission_mode == "plan":
             trace_tags.append("plan-mode")
+        trace_tags.extend(extra_tags)
 
         _ws_token = set_workspace(a.workspace)
         try:
@@ -48,11 +69,34 @@ class TurnRunner:
                 trace_name="agent-turn",
                 tags=trace_tags,
             ):
-                await self.run_turn(user_message)
+                await self.run_turn(user_message, trigger=trigger, trace_input=trace_input)
         finally:
             reset_workspace(_ws_token)
 
-    async def run_turn(self, user_message: str) -> None:
+    async def run_turn(
+        self,
+        user_message: str | None,
+        trigger: str = "user",
+        trace_input: str | None = None,
+    ) -> None:
+        """turn 生命周期入口：_turn_lock 互斥（用户轮/唤醒轮单一写者）。
+
+        U3b：auto_wake 轮忙时直接跳过——运行中的轮次经消息增量派生在下一
+        step 自动看到 synthetic 通知，无需排队唤醒。user_message=None 表示
+        唤醒轮：不写 user_message 事件。
+        """
+        a = self._agent
+        if trigger == "auto_wake" and a._turn_lock.locked():
+            return
+        async with a._turn_lock:
+            await self._run_turn_inner(user_message, trigger, trace_input)
+
+    async def _run_turn_inner(
+        self,
+        user_message: str | None,
+        trigger: str,
+        trace_input: str | None,
+    ) -> None:
         """原 _chat_inner：turn 生命周期六段编排。"""
         a = self._agent
         print(f"[DEBUG] agent.chat: STARTED - self.session_id = {a.session_id}, is_sub_agent = {a.is_sub_agent}")
@@ -67,7 +111,7 @@ class TurnRunner:
         # （schema 漂移致恒 0 分死通道，事件流已是唯一数据源）。
         a._pending_system_injections = self._collect_pending_injections()
 
-        original_user_message = safe_utf8_text(user_message)
+        original_user_message = safe_utf8_text(user_message) if user_message is not None else ""
         ready_skill_extraction_window = self._pop_skill_extraction_window(original_user_message)
         self._reset_turn_state()
 
@@ -79,7 +123,7 @@ class TurnRunner:
         _turn_start_output_tokens = a.total_output_tokens
         with trace_span(
             "turn",
-            input=user_message[:4000],
+            input=trace_input if trace_input is not None else (user_message or "")[:4000],
             metadata={
                 "session_id": a.session_id,
                 "model": a.model,
@@ -87,6 +131,7 @@ class TurnRunner:
                 "permission_mode": a.permission_mode,
                 "turn_id": f"{a.session_id}:{a._current_turn}",
                 "turn_number": a._current_turn,
+                "turn_trigger": trigger,
                 "event_range_start_seq": _turn_event_start_seq,
                 "is_sub_agent": a.is_sub_agent,
             },
@@ -94,6 +139,7 @@ class TurnRunner:
             a._current_trace_id = turn_span.get_trace_id()
             a.session.append("turn/start", {
                 "turn": a._current_turn,
+                "trigger": trigger,
                 "trace_id": a._current_trace_id,
             })
             assistant_text = await self._run_turn_task(user_message, original_user_message, turn_span)
@@ -214,7 +260,7 @@ class TurnRunner:
         a._user_message_written_this_turn = False
         a._current_turn += 1
 
-    async def _run_turn_task(self, user_message: str, original_user_message: str, turn_span) -> str | None:
+    async def _run_turn_task(self, user_message: str | None, original_user_message: str, turn_span) -> str | None:
         """段4：任务启动 + 取消/异常处理。返回 assistant_text；异常路径返回 None（turn/end 已落盘）。"""
         a = self._agent
         coro = a._chat_openai(user_message)
@@ -223,7 +269,8 @@ class TurnRunner:
             await a._current_task
         except asyncio.CancelledError:
             a._aborted = True
-            if not a._user_message_written_this_turn:
+            # U3b：唤醒轮无用户消息可补写（synthetic 通知已在事件流中）
+            if user_message is not None and not a._user_message_written_this_turn:
                 a.session.append("user_message", {"content": original_user_message})
                 a._user_message_written_this_turn = True
             turn_span.add_metadata(aborted=True, event_range_end_seq=a.session.seq)

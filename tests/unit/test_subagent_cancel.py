@@ -80,6 +80,11 @@ class CancelFakeAgent:
         self.permission_mode = "bypassPermissions"
         self.spawned: list[CancelFakeSubAgent] = []
         self._sub_delay = sub_delay
+        self.auto_wake_requests: list[str] = []
+
+    def request_auto_wake(self, reason: str = "subagent_completed") -> bool:
+        self.auto_wake_requests.append(reason)
+        return True
 
     def abort_requested(self) -> bool:
         return False

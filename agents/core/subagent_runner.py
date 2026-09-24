@@ -61,12 +61,13 @@ def spawn_sub_agent(
 # <subagent session_id state> 标签的 timeout 结果（外层只作兜底，文本无标签）
 _INNER_TIMEOUT_MARGIN_S = 5
 
-# U3a 反轮询文案（诚实版，参数描述+工具结果双处——v2 shell.ts:25-26 模式）：
-# U3a 无自动唤醒，不抄 v2 "you will be resumed automatically" 承诺（见方案 U3 路线复审）。
+# U3b 反轮询文案（v2 完整版——自动唤醒已落地，可诚实承诺 idle 唤醒；
+# 参数描述+工具结果双处注入，v2 shell.ts:25-26 模式）。
 _BACKGROUND_GUIDANCE = (
     "When it finishes, its result is automatically injected into this session "
-    "(as a <subagent ...> message) and rendered in the frontend; you will see it "
-    "at the start of your next turn. Do NOT sleep, poll, or spawn a duplicate "
+    "(as a <subagent ...> message). If you are still working, you will see it "
+    "at your next step; if the session is idle, you will be woken automatically "
+    "to report the outcome to the user. Do NOT sleep, poll, or spawn a duplicate "
     "sub-agent for the same work. If you have nothing to do that does not depend "
     "on it, end your reply."
 )
@@ -282,6 +283,9 @@ def _fire_completion_notification(agent: "Agent", job: SubAgentJob) -> None:
         "input_tokens": state.get("input_tokens", 0),
         "output_tokens": state.get("output_tokens", 0),
     })
+    # U3b：父会话 idle → 自动唤醒轮主动汇报；忙则跳过（运行中轮次经消息
+    # 增量派生在下一 step 看到通知）。预算/守卫在 request_auto_wake 内。
+    agent.request_auto_wake(reason="subagent_completed")
 
 
 def _owns_sub_session(agent: "Agent", sub_id: str) -> bool:

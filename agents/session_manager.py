@@ -144,6 +144,16 @@ class SessionManager:
     
     def get(self, session_id: str) -> Session | None:
         return self._sessions.get(session_id)
+
+    def get_or_load(self, session_id: str) -> Session | None:
+        """BC-26 单写者纪律：活会话（内存中）实例即唯一真源，直接返回；
+        仅不在内存的会话（本进程无写者）允许 load_from_events——后者带
+        crash-repair 写副作用（合成 turn/end closer），对存活 turn 执行会
+        产生假中断事件与重复 seq 双写。"""
+        session = self._sessions.get(session_id)
+        if session is not None:
+            return session
+        return Session.load_from_events(session_id)
     
     def get_agent(self, session_id: str) -> Any | None:
         return self._agents.get(session_id)

@@ -219,6 +219,9 @@ class Agent:
         self._abort_event = asyncio.Event()
         self._parent_abort_event = opts.parent_abort_event
         self._current_task: asyncio.Task | None = None
+        # U3b：turn 级互斥（用户轮/自动唤醒轮单一写者）+ 唤醒任务句柄
+        self._turn_lock = asyncio.Lock()
+        self._auto_wake_task: asyncio.Task | None = None
         self._current_trace_id: str | None = None
         self._confirmed_paths: set[str] = set()
 
@@ -317,6 +320,8 @@ class Agent:
     def abort(self) -> None:
         self._aborted = True
         self._abort_event.set()
+        if self._auto_wake_task and not self._auto_wake_task.done():
+            self._auto_wake_task.cancel()
         if self._current_task and not self._current_task.done():
             self._current_task.cancel()
 
@@ -439,6 +444,34 @@ class Agent:
 
     async def chat(self, user_message: str) -> None:
         await self._turn_runner.chat(user_message)
+
+    # ── U3b 自动唤醒 ──
+
+    def request_auto_wake(self, reason: str = "subagent_completed") -> bool:
+        """synthetic 到达且本会话 idle → 调度自动唤醒轮（模型无人触发主动汇报）。
+
+        跳过条件（返回 False）：子代理 / 已中止 / turn 运行中（消息列表按可见
+        事件增量派生，运行中的轮次下一 step 自动看到通知，无需唤醒）/ 上一次
+        唤醒尚未结束 / 预算耗尽（连续 auto_wake 轮无真实 user_message ≥3，
+        v2 restart.ts:26-33 per-turn 预算思想）。
+        """
+        from agents.core.auto_wake import auto_wake_budget_exhausted
+
+        if self.is_sub_agent:
+            return False
+        if self._aborted or self._abort_event.is_set():
+            return False
+        if self._turn_lock.locked():
+            return False
+        if self._auto_wake_task is not None and not self._auto_wake_task.done():
+            return False
+        if auto_wake_budget_exhausted(self.session.events):
+            return False
+        self._auto_wake_task = asyncio.create_task(self._run_auto_wake(reason))
+        return True
+
+    async def _run_auto_wake(self, reason: str) -> None:
+        await self._turn_runner.wake_turn(reason)
 
     async def run_once(self, prompt: str) -> dict:
         return await self._turn_runner.run_once(prompt)

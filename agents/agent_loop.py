@@ -72,8 +72,8 @@ class AgentLoop:
         except Exception as exc:
             print_error(f"[bad_case] auto mark failed: {type(exc).__name__}: {exc}")
 
-    async def run(self, user_message: str) -> None:
-        """主推理循环入口。"""
+    async def run(self, user_message: str | None) -> None:
+        """主推理循环入口。user_message=None 为 U3b 自动唤醒轮（不写用户消息事件）。"""
         await self._prepare_turn(user_message)
         
         while True:
@@ -211,15 +211,13 @@ class AgentLoop:
             })
         await q.clear()
 
-    async def _prepare_turn(self, user_message: str) -> None:
-        """准备轮次：清理消息、重置状态、创建快照。"""
+    async def _prepare_turn(self, user_message: str | None) -> None:
+        """准备轮次：清理消息、重置状态、创建快照。None=自动唤醒轮（U3b）。"""
         from agents.core.snapshot_service import SnapshotService
         from pathlib import Path
         
         a = self._agent
-        user_message = safe_utf8_text(user_message)
-        # U0 清理：<retrieved_skills> 只有 strip 无 producer（死防御代码），删除
-        clean_message = user_message.strip()
+        clean_message = safe_utf8_text(user_message).strip() if user_message is not None else ""
         
         # 重置工具调用跟踪器
         self._tool_tracker.reset()
@@ -233,7 +231,7 @@ class AgentLoop:
                     svc = SnapshotService(cwd, snapshot_dir)
                     snapshot = await svc.capture(
                         session_id=a.session.id,
-                        label=f"Before: {clean_message[:50]}",
+                        label=f"Before: {clean_message[:50]}" if user_message is not None else "Before: [auto-wake]",
                     )
                     snapshot_id = snapshot.id
                     print(f"[DEBUG] snapshot created: {snapshot_id}")
@@ -242,7 +240,8 @@ class AgentLoop:
                     import traceback
                     traceback.print_exc()
         
-        a.append_user_message(clean_message, snapshot_id=snapshot_id)
+        if user_message is not None:
+            a.append_user_message(clean_message, snapshot_id=snapshot_id)
         # D3 hotfix：chat() 暂存的记忆/提醒注入落盘为 memory_injection 事件
         # （user_message 之后、渲染为 user 消息；不动 system[0]，prefix cache 无损）
         if a._pending_system_injections:
@@ -251,7 +250,7 @@ class AgentLoop:
             a._pending_system_injections = []
         a._repeat_guard.reset()
 
-        if not a.is_sub_agent:
+        if not a.is_sub_agent and user_message is not None:
             sq = a.build_side_query()
             if sq:
                 a.start_wiki_prefetch(user_message, sq)

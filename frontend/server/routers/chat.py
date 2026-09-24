@@ -230,15 +230,20 @@ class RevertRequest(BaseModel):
 
 
 def _resolve_session_workspace(session_id: str) -> Path | None:
-    """解析会话工作区：活会话投影优先，否则从事件日志重建。"""
+    """解析会话工作区：活会话投影优先，否则从事件日志重建。
+
+    BC-26：活会话（内存中）不再回退磁盘加载——load_from_events 带
+    crash-repair 写副作用，对存活 turn 执行会产生假中断事件。
+    """
     from agents.session_manager import get_session_manager
-    session = get_session_manager().get(session_id)
-    cwd = session.projections.get("cwd") if session is not None else None
-    if not cwd:
-        from agents.core.session import Session
-        loaded = Session.load_from_events(session_id)
-        if loaded is not None:
-            cwd = loaded.projections.get("cwd")
+    sm = get_session_manager()
+    session = sm.get(session_id)
+    if session is not None:
+        cwd = session.projections.get("cwd")
+        return Path(cwd).resolve() if cwd else None
+    from agents.core.session import Session
+    loaded = Session.load_from_events(session_id)
+    cwd = loaded.projections.get("cwd") if loaded is not None else None
     return Path(cwd).resolve() if cwd else None
 
 

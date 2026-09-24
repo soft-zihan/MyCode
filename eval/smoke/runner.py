@@ -51,6 +51,17 @@ SMOKE_CHAIN_WORKSPACE = Path.home() / ".mycode" / "eval_workspaces" / "smoke-cha
 DEFAULT_WS_URL = "ws://localhost:5555/ws/events"
 
 
+def _assistant_text_from_public(turn_events: list[dict]) -> str:
+    """BC-25：U8 起 assistant_message 为 INTERNAL 事件（落盘不广播），WS 客户端
+    收不到。从公开的流式 text 事件重建助手文本（前端渲染同源），过滤带
+    sub_agent_id 的子代理文本。"""
+    return "".join(
+        str(e.get("content", ""))
+        for e in turn_events
+        if e.get("type") == "text" and not e.get("sub_agent_id")
+    ).strip()
+
+
 def load_tasks(only: list[str] | None = None, suite: str = "smoke") -> list[dict]:
     """加载评测任务。
     
@@ -100,8 +111,20 @@ class EventListener:
     def session_events(self, session_id: str) -> list[dict]:
         return [e for e in self.events if e.get("session_id") == session_id]
 
+    def auto_wake_turn_numbers(self, session_id: str) -> set:
+        """U3b：trigger=auto_wake 的轮号集合（唤醒轮非用户触发，不参与轮次记账）。"""
+        return {
+            e.get("turn")
+            for e in self.session_events(session_id)
+            if e.get("type") == "turn/start" and e.get("trigger") == "auto_wake"
+        }
+
     def turn_end_count(self, session_id: str) -> int:
-        return sum(1 for e in self.session_events(session_id) if e.get("type") == "turn/end")
+        wake_turns = self.auto_wake_turn_numbers(session_id)
+        return sum(
+            1 for e in self.session_events(session_id)
+            if e.get("type") == "turn/end" and e.get("turn") not in wake_turns
+        )
 
     async def wait_turn_end(self, session_id: str, expected_count: int, timeout_s: float) -> bool:
         deadline = time.time() + timeout_s
@@ -199,8 +222,12 @@ def _check_subagent_background(expect: dict, events: list[dict]) -> list[str]:
             failures.append("subagent/completed 缺少 notification_id（幂等键未落盘）")
     if expect.get("subagent_cancelled"):
         # U4 硬中止：审计事件 + cancelled 终态 + 幂等取消通知三件套
-        if not any(e.get("type") == "sub_agent/cancel" for e in events):
-            failures.append("未观测到 sub_agent/cancel 审计事件（subagent_cancel 未执行）")
+        # U8 后 sub_agent/cancel 为 INTERNAL（落盘不广播）；WS 侧以公开的
+        # tool_call(name=subagent_cancel) 作为"工具确实执行"的证据
+        if not any(
+            e.get("type") == "tool_call" and e.get("name") == "subagent_cancel" for e in events
+        ):
+            failures.append("未观测到 subagent_cancel 工具调用（tool_call 公开事件缺失）")
         if not any(e.get("type") == "sub_agent/end" and e.get("status") == "cancelled" for e in events):
             failures.append("未观测到 sub_agent/end(status=cancelled)（取消终态未落账）")
         if not any(
@@ -216,9 +243,7 @@ def check_assertions_for_phase(phase: dict, workspace: Path, events: list[dict],
     expect = phase.get("expect", {})
     failures = []
 
-    assistant_text = " ".join(
-        str(e.get("content", "")) for e in turn_events if e.get("type") == "assistant_message"
-    )
+    assistant_text = _assistant_text_from_public(turn_events)
     
     for needle in expect.get("response_contains", []):
         if isinstance(needle, list):
@@ -335,9 +360,7 @@ def check_assertions(task: dict, workspace: Path, events: list[dict], turn_event
     expect = task.get("expect", {})
     failures = []
 
-    assistant_text = " ".join(
-        str(e.get("content", "")) for e in turn_events if e.get("type") == "assistant_message"
-    )
+    assistant_text = _assistant_text_from_public(turn_events)
     
     # response_contains: 支持 str（必须包含）或 list[str]（任一包含）
     for needle in expect.get("response_contains", []):
@@ -653,33 +676,47 @@ async def run_task(
                         )
 
                 # U3a：wait_for_events——后台异步事件（如 subagent/completed）轮询等待，
-                # 确保 synthetic 通知已落盘注入，下一阶段模型上下文才确定性可见
-                for etype in phase_expect.get("wait_for_events", []):
+                # 确保 synthetic 通知已落盘注入，下一阶段模型上下文才确定性可见。
+                # U3b：条目支持 str（按 type 匹配）或 dict（字段子集匹配，
+                # 如 {"type": "turn/start", "trigger": "auto_wake"}）；按声明顺序
+                # 匹配（后一条在前一条命中位置之后查找），可表达"通知→唤醒轮
+                # 开始→唤醒轮结束"的因果链。
+                search_from = 0
+                for spec in phase_expect.get("wait_for_events", []):
                     if budget_blown:
                         break
+
+                    def _event_matches(e: dict, spec=spec) -> bool:
+                        if isinstance(spec, str):
+                            return e.get("type") == spec
+                        return all(e.get(k) == v for k, v in spec.items())
+
                     ev_deadline = time.time() + phase_expect.get("wait_timeout_s", 240)
                     arrived = False
                     while time.time() < ev_deadline:
-                        if any(e.get("type") == etype for e in listener.session_events(session_id)):
+                        events_now = listener.session_events(session_id)
+                        idx = next(
+                            (i for i, e in enumerate(events_now) if i >= search_from and _event_matches(e)),
+                            None,
+                        )
+                        if idx is not None:
+                            search_from = idx + 1
                             arrived = True
                             break
                         await asyncio.sleep(1)
                     if not arrived:
-                        record["failures"].append(f"wait_for_events 超时: {etype}")
+                        record["failures"].append(f"wait_for_events 超时: {spec}")
 
                 # 提取回答内容（取最后一个 assistant_message）
                 events = listener.session_events(session_id)
+                ended_turns = {e.get("turn") for e in events if e.get("type") == "turn/end"}
                 last_turn_start = max(
-                    (idx for idx, e in enumerate(events) if e.get("type") == "turn/start"),
+                    (idx for idx, e in enumerate(events)
+                     if e.get("type") == "turn/start" and e.get("turn") in ended_turns),
                     default=0,
                 )
                 turn_events = events[last_turn_start:]
-                answer = ""
-                for e in reversed(turn_events):
-                    if e.get("type") == "assistant_message":
-                        answer = e.get("content", "")
-                        if answer:
-                            break
+                answer = _assistant_text_from_public(turn_events)
                 
                 if "responses" not in record:
                     record["responses"] = []
@@ -728,8 +765,10 @@ async def run_task(
                 if i == len(messages):
                     events = listener.session_events(session_id)
                     window_events = listener.events[window_start:]
+                    ended_turns = {e.get("turn") for e in events if e.get("type") == "turn/end"}
                     last_turn_start = max(
-                        (idx for idx, e in enumerate(events) if e.get("type") == "turn/start"),
+                        (idx for idx, e in enumerate(events)
+                         if e.get("type") == "turn/start" and e.get("turn") in ended_turns),
                         default=0,
                     )
                     failures = check_assertions(task, workspace, events, events[last_turn_start:], window_events)
@@ -740,12 +779,13 @@ async def run_task(
 
     if session_id and "responses" not in record:
         events = listener.session_events(session_id)
-        answer = ""
-        for e in reversed(events):
-            if e.get("type") == "assistant_message":
-                answer = e.get("content", "")
-                if answer:
-                    break
+        ended_turns = {e.get("turn") for e in events if e.get("type") == "turn/end"}
+        last_turn_start = max(
+            (idx for idx, e in enumerate(events)
+             if e.get("type") == "turn/start" and e.get("turn") in ended_turns),
+            default=0,
+        )
+        answer = _assistant_text_from_public(events[last_turn_start:])
         expect = task.get("expect", {})
         expected_keywords: list[Any] = []
         for group in expect.get("response_contains", []):
