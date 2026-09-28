@@ -274,3 +274,16 @@ projects/
 .mycode/
 mindmap/
 .gitignore
+# 本地文档与代理工作文件（公开仓库只提交 README.md）
+Agents.md
+AGENTS.md
+SUMMARY.md
+DEPLOYMENT.md
+PROJECT_INTRO.md
+RESUME_PACKAGING.md
+trace.md
+docs/
+.opencode/
+openspec/
+eval/EVALUATION_PLAN.md
+tests/PLAN_SYSTEM_TEST_PLAN.md
