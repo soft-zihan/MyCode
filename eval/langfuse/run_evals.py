@@ -54,7 +54,7 @@ def select_main_traces(traces: list[dict]) -> tuple[list[str], dict[str, int]]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="MyCode Langfuse 评估管道")
     parser.add_argument("--limit", type=int, default=20, help="扫描 trace 数（默认 20）")
-    parser.add_argument("--from-hours", type=int, default=24, help="只看最近 N 小时（默认 24）")
+    parser.add_argument("--from-hours", type=float, default=24, help="只看最近 N 小时（默认 24，支持小数如 0.5）")
     parser.add_argument("--trace-id", type=str, default=None, help="只评估指定 trace")
     parser.add_argument("--judge", action="store_true", help="运行 LLM-as-Judge（task_completion/trajectory）")
     parser.add_argument("--sync-failures", action="store_true", help="失败案例回流 regression dataset")

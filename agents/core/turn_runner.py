@@ -100,7 +100,6 @@ class TurnRunner:
         """原 _chat_inner：turn 生命周期六段编排。"""
         a = self._agent
         print(f"[DEBUG] agent.chat: STARTED - self.session_id = {a.session_id}, is_sub_agent = {a.is_sub_agent}")
-        await self._init_mcp_once()
 
         # D3 hotfix：记忆/wiki 提醒不再拼接 system prompt——改 system[0] 会破坏
         # prefix cache 且在长会话中无限累积（每轮 += 永不还原）。改走既有
@@ -136,6 +135,10 @@ class TurnRunner:
                 "is_sub_agent": a.is_sub_agent,
             },
         ) as turn_span:
+            # BC-34：MCP 懒初始化必须在 turn span 上下文内——此前段1跑在 turn span
+            # 开启之前，mcp.init span 无父成孤儿 trace（还带 main-agent tag + sessionId，
+            # 混进评审集产噪）。初始化仍只发生一次（_mcp_initialized 幂等）
+            await self._init_mcp_once()
             a._current_trace_id = turn_span.get_trace_id()
             a.session.append("turn/start", {
                 "turn": a._current_turn,
@@ -182,7 +185,7 @@ class TurnRunner:
     # ── 六段拆分 ──
 
     async def _init_mcp_once(self) -> None:
-        """段1：MCP 懒初始化（仅主代理、仅一次；失败降级继续）。"""
+        """段1：MCP 懒初始化（仅主代理、仅一次；失败降级继续；在 turn span 内执行，BC-34）。"""
         a = self._agent
         if a._mcp_initialized or a.is_sub_agent:
             return

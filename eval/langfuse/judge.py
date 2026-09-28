@@ -115,8 +115,10 @@ def _tool_sequence_text(
 
     长轨迹不只看前 30 个工具，而是保留 head、tail、失败/超时/blocked 样本和工具计数。
     """
+    # BC-34：子代理派发（agent 工具）落盘为 AGENT observation（agent.general），
+    # 只筛 TOOL 会系统性漏掉派发调用 → judge 误判"未派发子代理"给假 0 分
     tools = sorted(
-        (o for o in bundle.get("observations", []) if o.get("type") == "TOOL"),
+        (o for o in bundle.get("observations", []) if o.get("type") in ("TOOL", "AGENT")),
         key=lambda o: o.get("startTime") or "",
     )
     if not tools:
@@ -186,7 +188,7 @@ def judge_trajectory(bundle: dict[str, Any]) -> dict[str, Any] | None:
     user_input = bundle.get("input")
     if not user_input:
         return None
-    if not any(o.get("type") == "TOOL" for o in bundle.get("observations", [])):
+    if not any(o.get("type") in ("TOOL", "AGENT") for o in bundle.get("observations", [])):
         return None
     prompt = TRAJECTORY_PROMPT.format(
         user_input=_truncate_middle(user_input, head_chars=1500, tail_chars=500),
