@@ -609,6 +609,9 @@ async def run_task(
 
     t0 = time.time()
     session_id = None
+    # BC-33：按会话累计已发送轮数——new_session 任务横跨多个会话，
+    # langfuse 校验必须逐会话进行（expected_turns 语义是"该会话的轮数"）
+    session_turns: dict[str, int] = {}
     window_start = len(listener.events)
 
     def observe_session(sid: str | None) -> None:
@@ -646,6 +649,7 @@ async def run_task(
                         record["failures"].append(f"阶段{phase_idx} API error: {resp['error'][:150]}")
                         break
                     observe_session(resp["session_id"])
+                    session_turns[resp["session_id"]] = session_turns.get(resp["session_id"], 0) + 1
                     ok = await listener.wait_turn_end(session_id, baseline + 1, timeout_s)
                     if not ok:
                         record["failures"].append(f"阶段{phase_idx} 第 {i} 轮等待 turn/end 超时（{timeout_s}s）")
@@ -770,6 +774,7 @@ async def run_task(
                     record["failures"].append(f"API error: {resp['error'][:150]}")
                     break
                 observe_session(resp["session_id"])
+                session_turns[resp["session_id"]] = session_turns.get(resp["session_id"], 0) + 1
                 ok = await listener.wait_turn_end(session_id, baseline + 1, timeout_s)
                 if not ok:
                     record["failures"].append(f"第 {i} 轮等待 turn/end 超时（{timeout_s}s）")
@@ -815,17 +820,25 @@ async def run_task(
             "wiki_recalled": expect.get("wiki_recalled", False),
         }]
 
-    if session_id and not skip_langfuse:
-        try:
-            # BC-32：expected_turns 用 record["turns"]（全 phases 消息数）——多阶段任务
-            # 的局部变量 messages 恒为空列表，传 len(messages) 会让 trace 数校验失效，
-            # 且 0 trace 时误报成结构失败（真实语义是"trace 未到达云端"）
-            record["langfuse"] = await asyncio.to_thread(verify_langfuse, session_id, record["turns"])
-            if not record["langfuse"]["ok"]:
-                record["failures"].extend(f"langfuse: {c}" for c in record["langfuse"]["checks"])
-        except Exception as e:
-            record["langfuse"] = {"ok": False, "checks": [f"查询异常: {e}"]}
-            record["failures"].append(f"langfuse 查询异常: {e}")
+    if session_turns and not skip_langfuse:
+        # BC-32：expected_turns 必须真实生效（曾恒为 0 使校验失效）；
+        # BC-33：new_session 任务横跨多会话，逐会话校验后合并——
+        # 按任务总轮数校验会把新会话误判为 trace 缺失
+        merged: dict[str, Any] = {"ok": True, "traces": 0, "checks": [], "scores": {}, "trace_ids": []}
+        for sid, n_turns in session_turns.items():
+            try:
+                res = await asyncio.to_thread(verify_langfuse, sid, n_turns)
+            except Exception as e:
+                res = {"ok": False, "traces": 0, "checks": [f"查询异常: {e}"], "scores": {}, "trace_ids": []}
+            merged["ok"] = merged["ok"] and bool(res.get("ok"))
+            merged["traces"] += res.get("traces", 0)
+            merged["trace_ids"].extend(res.get("trace_ids", []))
+            merged["checks"].extend(f"[{sid[:8]}] {c}" for c in res.get("checks", []))
+            for k, v in (res.get("scores") or {}).items():
+                merged["scores"][k if k not in merged["scores"] else f"{sid[:8]}:{k}"] = v
+        record["langfuse"] = merged
+        if not merged["ok"]:
+            record["failures"].extend(f"langfuse: {c}" for c in merged["checks"])
         
         # 评测结果上报 Langfuse（多阶段任务且有 responses 时）
         if phases and len(phases) >= 2 and "responses" in record:
