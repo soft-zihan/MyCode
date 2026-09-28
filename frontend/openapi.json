@@ -1217,6 +1217,140 @@
         "title": "ValidationError",
         "type": "object"
       },
+      "WorktreeCreateRequest": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ref"
+          }
+        },
+        "title": "WorktreeCreateRequest",
+        "type": "object"
+      },
+      "WorktreeEntry": {
+        "properties": {
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "directory": {
+            "title": "Directory",
+            "type": "string"
+          },
+          "head": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "managed": {
+            "title": "Managed",
+            "type": "boolean"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "project": {
+            "title": "Project",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project",
+          "directory",
+          "kind",
+          "managed"
+        ],
+        "title": "WorktreeEntry",
+        "type": "object"
+      },
+      "WorktreeListResponse": {
+        "properties": {
+          "git": {
+            "title": "Git",
+            "type": "boolean"
+          },
+          "worktrees": {
+            "items": {
+              "$ref": "#/components/schemas/WorktreeEntry"
+            },
+            "title": "Worktrees",
+            "type": "array"
+          }
+        },
+        "required": [
+          "worktrees",
+          "git"
+        ],
+        "title": "WorktreeListResponse",
+        "type": "object"
+      },
+      "WorktreeRemoveResponse": {
+        "properties": {
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success"
+        ],
+        "title": "WorktreeRemoveResponse",
+        "type": "object"
+      },
       "WriteFileRequest": {
         "properties": {
           "content": {
@@ -3485,6 +3619,98 @@
         "summary": "Api Update Project",
         "tags": [
           "projects"
+        ]
+      }
+    },
+    "/api/projects/{cwd}/worktrees": {
+      "get": {
+        "operationId": "api_list_worktrees_api_projects__cwd__worktrees_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cwd",
+            "required": true,
+            "schema": {
+              "title": "Cwd",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorktreeListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api List Worktrees",
+        "tags": [
+          "worktrees"
+        ]
+      },
+      "post": {
+        "operationId": "api_create_worktree_api_projects__cwd__worktrees_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cwd",
+            "required": true,
+            "schema": {
+              "title": "Cwd",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorktreeCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorktreeEntry"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Create Worktree",
+        "tags": [
+          "worktrees"
         ]
       }
     },
@@ -6298,6 +6524,58 @@
         "summary": "Api Workspace Tree",
         "tags": [
           "workspace"
+        ]
+      }
+    },
+    "/api/worktrees/{directory}": {
+      "delete": {
+        "operationId": "api_remove_worktree_api_worktrees__directory__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "directory",
+            "required": true,
+            "schema": {
+              "title": "Directory",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Force",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorktreeRemoveResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Remove Worktree",
+        "tags": [
+          "worktrees"
         ]
       }
     }

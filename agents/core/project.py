@@ -13,6 +13,8 @@ from typing import Any
 from dataclasses import dataclass, field
 import time
 
+from .worktree import prune_project_worktrees
+
 
 @dataclass
 class Project:
@@ -127,11 +129,19 @@ def update_project(cwd: str, name: str | None = None) -> Project | None:
 
 
 def delete_project(cwd: str) -> bool:
-    """删除 project。"""
+    """删除 project。
+
+    U11：级联清理该项目的受管 worktree（v2 WorktreeTable onDelete=cascade 语义）——
+    清单条目总是清除；git 目录删除尽力而为，脏目录遗留并如实打印（不静默吞）。
+    """
     projects = _load_projects()
     if cwd not in projects:
         return False
-    
+
+    leftover = prune_project_worktrees(cwd)
+    if leftover:
+        print(f"[project] worktree 级联：脏目录遗留（需手动清理或 force）: {leftover}")
+
     del projects[cwd]
     _save_projects(projects)
     return True

@@ -1,4 +1,5 @@
 // API client for MyCode backend
+import type { components } from './schema';
 
 const API_BASE = '/api';
 
@@ -120,6 +121,56 @@ export async function registerProject(cwd: string, name?: string): Promise<Proje
 export async function deleteProject(cwd: string): Promise<void> {
   const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(cwd)}`, { method: 'DELETE' });
   if (!res.ok) throw new Error('Failed to delete project');
+}
+
+// U11 worktree（契约单源：类型来自 openapi 生成的 schema.d.ts——U12 首个消费点）
+export type WorktreeEntry = components['schemas']['WorktreeEntry'];
+
+export interface WorktreeListResult {
+  worktrees: WorktreeEntry[];
+  git: boolean;   // false = 非 git 项目（无 worktree 能力，UI 隐藏入口）
+}
+
+export class WorktreeRemoveError extends Error {
+  forceRequired: boolean;
+  constructor(message: string, forceRequired: boolean) {
+    super(message);
+    this.forceRequired = forceRequired;
+  }
+}
+
+export async function fetchWorktrees(cwd: string): Promise<WorktreeListResult> {
+  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(cwd)}/worktrees`);
+  if (!res.ok) throw new Error('Failed to fetch worktrees');
+  return res.json();
+}
+
+export async function createWorktree(cwd: string, name?: string): Promise<WorktreeEntry> {
+  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(cwd)}/worktrees`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name ?? null })
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.detail || 'Failed to create worktree');
+  }
+  return res.json();
+}
+
+export async function removeWorktree(directory: string, force = false): Promise<void> {
+  const res = await fetch(
+    `${API_BASE}/worktrees/${encodeURIComponent(directory)}${force ? '?force=true' : ''}`,
+    { method: 'DELETE' }
+  );
+  if (res.status === 409) {
+    const data = await res.json().catch(() => ({}));
+    throw new WorktreeRemoveError(data?.detail?.message || 'Worktree has uncommitted changes', true);
+  }
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.detail || 'Failed to remove worktree');
+  }
 }
 
 export async function updateSessionName(id: string, name: string): Promise<void> {

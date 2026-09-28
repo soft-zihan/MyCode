@@ -833,6 +833,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/projects/{cwd}/worktrees": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Api List Worktrees */
+        get: operations["api_list_worktrees_api_projects__cwd__worktrees_get"];
+        put?: never;
+        /** Api Create Worktree */
+        post: operations["api_create_worktree_api_projects__cwd__worktrees_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/prompts": {
         parameters: {
             query?: never;
@@ -1858,6 +1876,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/worktrees/{directory}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Api Remove Worktree */
+        delete: operations["api_remove_worktree_api_worktrees__directory__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2322,6 +2357,44 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
+        };
+        /** WorktreeCreateRequest */
+        WorktreeCreateRequest: {
+            /** Name */
+            name?: string | null;
+            /** Ref */
+            ref?: string | null;
+        };
+        /** WorktreeEntry */
+        WorktreeEntry: {
+            /** Branch */
+            branch?: string | null;
+            /** Created At */
+            created_at?: string | null;
+            /** Directory */
+            directory: string;
+            /** Head */
+            head?: string | null;
+            /** Kind */
+            kind: string;
+            /** Managed */
+            managed: boolean;
+            /** Name */
+            name?: string | null;
+            /** Project */
+            project: string;
+        };
+        /** WorktreeListResponse */
+        WorktreeListResponse: {
+            /** Git */
+            git: boolean;
+            /** Worktrees */
+            worktrees: components["schemas"]["WorktreeEntry"][];
+        };
+        /** WorktreeRemoveResponse */
+        WorktreeRemoveResponse: {
+            /** Success */
+            success: boolean;
         };
         /** WriteFileRequest */
         WriteFileRequest: {
@@ -4028,6 +4101,72 @@ export interface operations {
                     "application/json": {
                         [key: string]: boolean;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    api_list_worktrees_api_projects__cwd__worktrees_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                cwd: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorktreeListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    api_create_worktree_api_projects__cwd__worktrees_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                cwd: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WorktreeCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorktreeEntry"];
                 };
             };
             /** @description Validation Error */
@@ -6001,6 +6140,39 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    api_remove_worktree_api_worktrees__directory__delete: {
+        parameters: {
+            query?: {
+                force?: boolean;
+            };
+            header?: never;
+            path: {
+                directory: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorktreeRemoveResponse"];
                 };
             };
             /** @description Validation Error */

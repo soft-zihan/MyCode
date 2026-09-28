@@ -7,6 +7,7 @@ from .workspace import router as workspace_router
 from .mcp import router as mcp_router
 from .events import router as events_router
 from .projects import router as projects_router
+from .worktrees import router as worktrees_router
 from .websocket import router as websocket_router
 from .eval import router as eval_router
 from .bad_cases import router as bad_cases_router
@@ -25,6 +26,7 @@ __all__ = [
     "mcp_router",
     "events_router",
     "projects_router",
+    "worktrees_router",
     "websocket_router",
     "eval_router",
     "bad_cases_router",

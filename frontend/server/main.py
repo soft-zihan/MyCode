@@ -22,6 +22,7 @@ from routers import (
     mcp_router,
     events_router,
     projects_router,
+    worktrees_router,
     websocket_router,
     eval_router,
     bad_cases_router,
@@ -69,6 +70,9 @@ app.include_router(config_router)
 app.include_router(workspace_router)
 app.include_router(mcp_router)
 app.include_router(events_router)
+# worktrees 必须先于 projects 注册：/api/projects/{cwd:path} 是贪婪路由，
+# 会吞掉 /api/projects/<cwd>/worktrees（FastAPI 按注册顺序匹配）
+app.include_router(worktrees_router)
 app.include_router(projects_router)
 app.include_router(websocket_router)
 app.include_router(eval_router)

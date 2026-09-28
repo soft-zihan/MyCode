@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
-import { ChevronRight, Folder, Clock, Plus, Pencil, Trash2, X, ChevronDown } from 'lucide-react';
+import { ChevronRight, Folder, Clock, Plus, Pencil, Trash2, X, ChevronDown, GitBranch } from 'lucide-react';
 import {
   fetchSessions, deleteSession, Session,
   fetchDirectories, DirectoryList,
   updateSessionName,
   fetchProjects, deleteProject, registerProject, Project,
+  fetchWorktrees, createWorktree, removeWorktree, WorktreeRemoveError, WorktreeEntry,
 } from '../../../api/client';
 import { sessionStore, useSessionStore } from '../../../store';
 
@@ -142,6 +143,9 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState<string>('');
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set());
+  // U11 worktree：undefined = 非 git 项目（不显示 worktree 入口）
+  const [worktreesByProject, setWorktreesByProject] = useState<Record<string, WorktreeEntry[] | undefined>>({});
+  const [expandedWorktrees, setExpandedWorktrees] = useState<Set<string>>(new Set());
 
   const allProjections = useSessionStore(() => sessionStore.getAllProjections());
 
@@ -167,11 +171,74 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
     });
   };
 
+  const refreshWorktrees = async (cwd: string) => {
+    try {
+      const { worktrees, git } = await fetchWorktrees(cwd);
+      setWorktreesByProject(prev => ({ ...prev, [cwd]: git ? worktrees : undefined }));
+    } catch {
+      setWorktreesByProject(prev => ({ ...prev, [cwd]: undefined }));
+    }
+  };
+
+  const loadWorktrees = async (projectsData: Project[]) => {
+    const results = await Promise.all(
+      projectsData.map(async p => {
+        try {
+          const { worktrees, git } = await fetchWorktrees(p.cwd);
+          return [p.cwd, git ? worktrees : undefined] as const;
+        } catch {
+          return [p.cwd, undefined] as const;
+        }
+      })
+    );
+    setWorktreesByProject(Object.fromEntries(results));
+  };
+
+  const handleCreateWorktree = async (projectCwd: string) => {
+    try {
+      await createWorktree(projectCwd);
+      await refreshWorktrees(projectCwd);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to create worktree');
+    }
+  };
+
+  const handleRemoveWorktree = async (entry: WorktreeEntry, projectCwd: string) => {
+    const label = entry.name || entry.directory.split('/').pop() || entry.directory;
+    try {
+      await removeWorktree(entry.directory);
+    } catch (err) {
+      if (err instanceof WorktreeRemoveError && err.forceRequired) {
+        if (!confirm(`${label} has uncommitted changes. Force delete?`)) return;
+        try {
+          await removeWorktree(entry.directory, true);
+        } catch (err2) {
+          alert(err2 instanceof Error ? err2.message : 'Failed to remove worktree');
+          return;
+        }
+      } else {
+        alert(err instanceof Error ? err.message : 'Failed to remove worktree');
+        return;
+      }
+    }
+    await refreshWorktrees(projectCwd);
+  };
+
+  const toggleWorktreePanel = (cwd: string) => {
+    setExpandedWorktrees(prev => {
+      const next = new Set(prev);
+      if (next.has(cwd)) next.delete(cwd);
+      else next.add(cwd);
+      return next;
+    });
+  };
+
   const loadData = async (forceRefresh = false) => {
     if (!forceRefresh && sessionsCache && projectsCache) {
       setSessions(sessionsCache);
       setProjects(projectsCache);
       setLoading(false);
+      loadWorktrees(projectsCache);
       return;
     }
 
@@ -184,6 +251,7 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
       setProjects(projectsData);
       sessionsCache = sessionsData;
       projectsCache = projectsData;
+      loadWorktrees(projectsData);
     } catch (err) {
       console.error('Failed to load data:', err);
     } finally {
@@ -255,12 +323,24 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
     loadData(true);
   };
 
+  // U11：worktree 目录 → 父项目映射（worktree 会话归入父项目组，不另立项目——v2 UI 教训）
+  const worktreeDirToProject: Record<string, { project: string; name: string | null }> = {};
+  for (const [cwd, entries] of Object.entries(worktreesByProject)) {
+    for (const e of entries || []) {
+      if (e.kind === 'linked') {
+        worktreeDirToProject[e.directory] = { project: cwd, name: e.name ?? null };
+      }
+    }
+  }
+
   const grouped: Record<string, Session[]> = {};
   for (const project of projects) {
     grouped[project.cwd] = [];
   }
   for (const session of displaySessions) {
-    const cwd = session.cwd || 'Unknown';
+    const rawCwd = session.cwd || 'Unknown';
+    const wtParent = worktreeDirToProject[rawCwd];
+    const cwd = wtParent ? wtParent.project : rawCwd;
     if (!grouped[cwd]) grouped[cwd] = [];
     grouped[cwd].push(session);
   }
@@ -323,6 +403,24 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
                   >
                     <Plus className="w-3 h-3" />
                   </button>
+                  {worktreesByProject[cwd] && (
+                    <button
+                      onClick={() => toggleWorktreePanel(cwd)}
+                      className={`p-0.5 rounded transition-colors ${
+                        expandedWorktrees.has(cwd)
+                          ? 'bg-slate-200 text-slate-700'
+                          : 'hover:bg-gray-200 text-gray-500'
+                      }`}
+                      title="Worktrees"
+                    >
+                      <GitBranch className="w-3 h-3" />
+                      {worktreesByProject[cwd]!.filter(e => e.kind === 'linked').length > 0 && (
+                        <span className="ml-0.5 text-[9px] text-slate-500">
+                          {worktreesByProject[cwd]!.filter(e => e.kind === 'linked').length}
+                        </span>
+                      )}
+                    </button>
+                  )}
                   <button
                     onClick={async (e) => {
                       e.stopPropagation();
@@ -348,6 +446,48 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
                   </button>
                 </div>
               </div>
+              {!isCollapsed && expandedWorktrees.has(cwd) && (
+                <div className="px-2 py-1 bg-slate-50 border-y border-slate-100">
+                  {(worktreesByProject[cwd] || []).filter(e => e.kind === 'linked').length === 0 && (
+                    <div className="text-[10px] text-gray-400 py-0.5">No worktrees</div>
+                  )}
+                  {(worktreesByProject[cwd] || []).filter(e => e.kind === 'linked').map(wt => (
+                    <div key={wt.directory} className="flex items-center justify-between py-0.5 group/wt">
+                      <div className="flex items-center min-w-0 text-[11px] text-gray-600">
+                        <GitBranch className="w-3 h-3 mr-1 text-slate-400 flex-shrink-0" />
+                        <span className="truncate" title={wt.directory}>
+                          {wt.name || wt.directory.split('/').pop()}
+                        </span>
+                        {!wt.managed && (
+                          <span className="ml-1 px-0.5 rounded bg-gray-200 text-gray-500 text-[9px] flex-shrink-0">ext</span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-0.5 opacity-0 group-hover/wt:opacity-100 transition-opacity">
+                        <button
+                          onClick={() => onNewSession?.(wt.directory)}
+                          className="p-0.5 hover:bg-gray-200 rounded text-gray-500"
+                          title="New session in worktree"
+                        >
+                          <Plus className="w-3 h-3" />
+                        </button>
+                        <button
+                          onClick={() => handleRemoveWorktree(wt, cwd)}
+                          className="p-0.5 hover:bg-red-100 rounded text-red-400"
+                          title="Remove worktree"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  <button
+                    onClick={() => handleCreateWorktree(cwd)}
+                    className="mt-0.5 flex items-center text-[11px] text-slate-500 hover:text-slate-700"
+                  >
+                    <Plus className="w-3 h-3 mr-0.5" /> New worktree
+                  </button>
+                </div>
+              )}
               {!isCollapsed && projectSessions.map(session => (
                 <div
                   key={session.id}
@@ -380,6 +520,14 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
                         title={session.name || formatRelativeTime(session.startTime)}
                       >
                         {session.name || formatRelativeTime(session.startTime)}
+                      </span>
+                    )}
+                    {session.cwd && worktreeDirToProject[session.cwd] && (
+                      <span
+                        className="ml-1 px-1 rounded bg-slate-100 text-slate-500 text-[9px] flex-shrink-0"
+                        title={`worktree: ${worktreeDirToProject[session.cwd].name || session.cwd}`}
+                      >
+                        wt
                       </span>
                     )}
                   </div>

@@ -51,14 +51,28 @@ class GitRepositoryManager:
         user_git_dir = self.project_root / ".git"
         if not user_git_dir.exists():
             return
+        # U11：worktree 下 .git 是文件（gitdir: 指针）→ 用 git 解析真实路径；
+        # 主仓库下结果与原 .git 目录等价。common-dir 供 objects alternates，
+        # git-dir 供 index 复制（worktree 的 index 是 per-worktree 的）。
+        common = (await self._run_git(
+            ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=self.project_root, check=False,
+        )).strip()
+        git_dir = (await self._run_git(
+            ["rev-parse", "--path-format=absolute", "--git-dir"],
+            cwd=self.project_root, check=False,
+        )).strip()
+        objects_source = Path(common) / "objects" if common else user_git_dir / "objects"
+        index_source = Path(git_dir) / "index" if git_dir else user_git_dir / "index"
+        if not objects_source.exists():
+            return
         objects_info = self.repo_path / ".git" / "objects" / "info"
         objects_info.mkdir(parents=True, exist_ok=True)
         alternates_file = objects_info / "alternates"
-        alternates_file.write_text(str(user_git_dir / "objects") + "\n")
-        user_index = user_git_dir / "index"
-        if user_index.exists():
+        alternates_file.write_text(str(objects_source) + "\n")
+        if index_source.exists():
             our_index = self.repo_path / ".git" / "index"
-            shutil.copy2(user_index, our_index)
+            shutil.copy2(index_source, our_index)
 
     async def _run_git(
         self,
