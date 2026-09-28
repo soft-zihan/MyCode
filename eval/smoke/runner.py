@@ -817,7 +817,10 @@ async def run_task(
 
     if session_id and not skip_langfuse:
         try:
-            record["langfuse"] = await asyncio.to_thread(verify_langfuse, session_id, len(messages))
+            # BC-32：expected_turns 用 record["turns"]（全 phases 消息数）——多阶段任务
+            # 的局部变量 messages 恒为空列表，传 len(messages) 会让 trace 数校验失效，
+            # 且 0 trace 时误报成结构失败（真实语义是"trace 未到达云端"）
+            record["langfuse"] = await asyncio.to_thread(verify_langfuse, session_id, record["turns"])
             if not record["langfuse"]["ok"]:
                 record["failures"].extend(f"langfuse: {c}" for c in record["langfuse"]["checks"])
         except Exception as e:
