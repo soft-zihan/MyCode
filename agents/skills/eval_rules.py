@@ -42,6 +42,43 @@ def _parse_json_object(text: str) -> dict[str, Any]:
     return {}
 
 
+def _make_rule(
+    rule_id: str,
+    label: str,
+    kind: str,
+    hard: bool,
+    params: dict[str, Any],
+    source: str = "skill_text",
+) -> dict[str, Any]:
+    return {
+        "rule_id": rule_id,
+        "label": label,
+        "kind": kind,
+        "hard": hard,
+        "params": params,
+        "provenance": {"source": source},
+    }
+
+
+# 各规则的 skill 文本触发词（中英双语）
+_CITE_SOURCE_KEYS = (
+    "引用来源", "标注来源", "注明来源",
+    "cite sources", "with sources", "provide sources", "source-backed",
+)
+_CONCLUSION_FIRST_KEYS = (
+    "先给结论", "结论在前", "先说结论",
+    "answer first", "lead with the conclusion", "bottom line first",
+)
+_NO_HALLUCINATION_KEYS_LLM = (
+    "不要幻觉", "不要编造", "不确定就说",
+    "don't hallucinate", "do not hallucinate", "avoid hallucination", "if unsure",
+)
+_NO_HALLUCINATION_KEYS_PROGRAMMATIC = (
+    "不要幻觉", "不要编造", "不确定就说",
+    "do not hallucinate", "avoid hallucination", "if unsure",
+)
+
+
 def _compile_eval_rules(skill: dict[str, Any], *, include_llm_rules: bool = False) -> list[dict[str, Any]]:
     corpus = "\n".join(
         [
@@ -54,129 +91,61 @@ def _compile_eval_rules(skill: dict[str, Any], *, include_llm_rules: bool = Fals
     )
     low = _normalize_text(corpus)
     rules: list[dict[str, Any]] = [
-        {
-            "rule_id": "response_nonempty",
-            "label": "Non-empty response",
-            "kind": "programmatic",
-            "hard": True,
-            "params": {"mode": "nonempty"},
-            "provenance": {"source": "baseline"},
-        }
+        _make_rule("response_nonempty", "Non-empty response", "programmatic", True,
+                   {"mode": "nonempty"}, source="baseline")
     ]
 
     skill_requirement = _skill_alignment_requirement(skill)
     if include_llm_rules and skill_requirement:
-        rules.append(
-            {
-                "rule_id": "skill_instruction_alignment",
-                "label": "Follows skill instructions",
-                "kind": "llm_binary",
-                "hard": False,
-                "params": {
-                    "mode": "requirement",
-                    "requirement_text": skill_requirement,
-                },
-                "provenance": {"source": "skill_text"},
-            }
-        )
+        rules.append(_make_rule(
+            "skill_instruction_alignment", "Follows skill instructions", "llm_binary", False,
+            {"mode": "requirement", "requirement_text": skill_requirement},
+        ))
 
-    if any(key in low for key in ("引用来源", "标注来源", "注明来源", "cite sources", "with sources", "provide sources", "source-backed")):
-        rules.append(
-            {
-                "rule_id": "must_cite_sources",
-                "label": "Cite sources",
-                "kind": "programmatic",
-                "hard": True,
-                "params": {"mode": "mentions_sources"},
-                "provenance": {"source": "skill_text"},
-            }
-        )
+    if any(key in low for key in _CITE_SOURCE_KEYS):
+        rules.append(_make_rule(
+            "must_cite_sources", "Cite sources", "programmatic", True,
+            {"mode": "mentions_sources"},
+        ))
 
     para_limit = _paragraph_limit(corpus)
     if para_limit:
-        rules.append(
-            {
-                "rule_id": "paragraph_limit",
-                "label": f"At most {para_limit} paragraphs",
-                "kind": "programmatic",
-                "hard": True,
-                "params": {"mode": "max_paragraphs", "max_paragraphs": para_limit},
-                "provenance": {"source": "skill_text"},
-            }
-        )
+        rules.append(_make_rule(
+            "paragraph_limit", f"At most {para_limit} paragraphs", "programmatic", True,
+            {"mode": "max_paragraphs", "max_paragraphs": para_limit},
+        ))
 
-    if any(key in low for key in ("先给结论", "结论在前", "先说结论", "answer first", "lead with the conclusion", "bottom line first")):
-        rules.append(
-            {
-                "rule_id": "lead_with_conclusion",
-                "label": "Lead with conclusion",
-                "kind": "programmatic",
-                "hard": False,
-                "params": {"mode": "lead_with_conclusion"},
-                "provenance": {"source": "skill_text"},
-            }
-        )
+    if any(key in low for key in _CONCLUSION_FIRST_KEYS):
+        rules.append(_make_rule(
+            "lead_with_conclusion", "Lead with conclusion", "programmatic", False,
+            {"mode": "lead_with_conclusion"},
+        ))
 
     if "json" in low or "结构化输出" in low:
-        rules.append(
-            {
-                "rule_id": "json_parseable",
-                "label": "Valid JSON output",
-                "kind": "programmatic",
-                "hard": True,
-                "params": {"mode": "json_parseable"},
-                "provenance": {"source": "skill_text"},
-            }
-        )
+        rules.append(_make_rule(
+            "json_parseable", "Valid JSON output", "programmatic", True,
+            {"mode": "json_parseable"},
+        ))
 
     if "markdown table" in low or "表格" in low:
-        rules.append(
-            {
-                "rule_id": "markdown_table",
-                "label": "Markdown table present",
-                "kind": "programmatic",
-                "hard": False,
-                "params": {"mode": "markdown_table"},
-                "provenance": {"source": "skill_text"},
-            }
-        )
+        rules.append(_make_rule(
+            "markdown_table", "Markdown table present", "programmatic", False,
+            {"mode": "markdown_table"},
+        ))
 
-    if include_llm_rules and any(
-        key in low
-        for key in (
-            "不要幻觉",
-            "不要编造",
-            "不确定就说",
-            "don't hallucinate",
-            "do not hallucinate",
-            "avoid hallucination",
-            "if unsure",
-        )
-    ):
-        rules.append(
+    if include_llm_rules and any(key in low for key in _NO_HALLUCINATION_KEYS_LLM):
+        rules.append(_make_rule(
+            "no_unfounded_claims", "Avoid unfounded claims", "llm_binary", True,
             {
-                "rule_id": "no_unfounded_claims",
-                "label": "Avoid unfounded claims",
-                "kind": "llm_binary",
-                "hard": True,
-                "params": {
-                    "mode": "requirement",
-                    "requirement_text": "Avoid unfounded claims and state uncertainty when needed.",
-                },
-                "provenance": {"source": "skill_text"},
-            }
-        )
-    elif any(key in low for key in ("不要幻觉", "不要编造", "不确定就说", "do not hallucinate", "avoid hallucination", "if unsure")):
-        rules.append(
-            {
-                "rule_id": "uncertainty_marked",
-                "label": "Mark uncertainty",
-                "kind": "programmatic",
-                "hard": False,
-                "params": {"mode": "uncertainty_marked"},
-                "provenance": {"source": "skill_text"},
-            }
-        )
+                "mode": "requirement",
+                "requirement_text": "Avoid unfounded claims and state uncertainty when needed.",
+            },
+        ))
+    elif any(key in low for key in _NO_HALLUCINATION_KEYS_PROGRAMMATIC):
+        rules.append(_make_rule(
+            "uncertainty_marked", "Mark uncertainty", "programmatic", False,
+            {"mode": "uncertainty_marked"},
+        ))
 
     return rules[:8]
 

@@ -48,23 +48,8 @@ def _action_bucket(action: str) -> str:
     return "other"
 
 
-async def _evaluate_online_skill_evolution_core(
-    *,
-    min_replay_samples: int = DEFAULT_MIN_REPLAY_SAMPLES,
-    min_promotion_tests: int = DEFAULT_MIN_PROMOTION_TESTS,
-    min_rule_pass_rate: float = DEFAULT_MIN_RULE_PASS_RATE,
-    write_report: bool = True,
-    write_artifacts: bool = True,
-    side_query: SideQuery | None = None,
-    include_llm_rules: bool = False,
-) -> dict[str, Any]:
-    root = get_evolution_dir()
-    provenance_rows = _read_jsonl(root / ONLINE_PROVENANCE_LOG)
-    provenance_index = _read_json(root / ONLINE_PROVENANCE_INDEX, {})
-    lifecycle_stats = load_skill_stats()
-    active_skills = _active_skill_snapshots()
-    grouped_rows = _rows_by_skill(provenance_rows)
-
+def _summarize_provenance_rows(provenance_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """在线 provenance 行的动作分桶/成功数/候选事件数/近期失败统计。"""
     action_counts = {"none": 0, "add": 0, "merge": 0, "discard": 0, "failed": 0, "denied": 0, "other": 0}
     ok_count = 0
     candidate_events = 0
@@ -89,105 +74,193 @@ async def _evaluate_online_skill_evolution_core(
                     "error": row.get("error", ""),
                 }
             )
+    return {
+        "action_counts": action_counts,
+        "ok": ok_count,
+        "candidate_events": candidate_events,
+        "accepted_events": accepted_events,
+        "recent_failures": recent_failures,
+    }
 
+
+def _collect_all_skill_names(
+    active_skills: dict[str, Any],
+    provenance_index: Any,
+    lifecycle_stats: Any,
+) -> set[str]:
+    """评测覆盖的 skill 名集合：活跃 + provenance 索引 + 生命周期统计三方并集。"""
     all_names = set(active_skills)
     if isinstance(provenance_index, dict):
         all_names.update(str(name) for name in provenance_index if str(name).strip())
     all_names.update(str(name) for name in lifecycle_stats if str(name).strip())
+    return all_names
 
-    skills: list[dict[str, Any]] = []
-    for name in sorted(all_names):
-        lineage_raw = provenance_index.get(name, {}) if isinstance(provenance_index, dict) else {}
-        lifecycle_raw = lifecycle_stats.get(name, {}) if isinstance(lifecycle_stats, dict) else {}
-        lineage = lineage_raw if isinstance(lineage_raw, dict) else {}
-        lifecycle = lifecycle_raw if isinstance(lifecycle_raw, dict) else {}
-        snapshot = active_skills.get(name, {})
-        if not snapshot:
-            snapshot = {
-                "name": name,
-                "description": str(lineage.get("description") or lifecycle.get("description") or ""),
-                "when_to_use": str(lineage.get("when_to_use") or ""),
-                "instructions": "",
-            }
 
-        replay_pool = _build_replay_pool(name, grouped_rows.get(name, []), lineage, freeze=write_artifacts)
-        rules = _compile_eval_rules(snapshot, include_llm_rules=include_llm_rules)
-        rule_summary = await _summarize_rule_outcomes_async(
-            rules,
-            replay_pool,
+class _EvalContext:
+    """单次评测运行的共享上下文（避免在 helper 间传递 10+ 个散装参数）。"""
+
+    def __init__(
+        self,
+        *,
+        provenance_index: Any,
+        lifecycle_stats: Any,
+        active_skills: dict[str, Any],
+        grouped_rows: dict[str, list[dict[str, Any]]],
+        min_replay_samples: int,
+        min_promotion_tests: int,
+        min_rule_pass_rate: float,
+        write_artifacts: bool,
+        side_query: SideQuery | None,
+        include_llm_rules: bool,
+    ) -> None:
+        self.provenance_index = provenance_index
+        self.lifecycle_stats = lifecycle_stats
+        self.active_skills = active_skills
+        self.grouped_rows = grouped_rows
+        self.min_replay_samples = min_replay_samples
+        self.min_promotion_tests = min_promotion_tests
+        self.min_rule_pass_rate = min_rule_pass_rate
+        self.write_artifacts = write_artifacts
+        self.side_query = side_query
+        self.include_llm_rules = include_llm_rules
+
+
+def _resolve_skill_snapshot(name: str, ctx: _EvalContext) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """合并 lineage/lifecycle/活跃快照三方数据；无活跃文件时用 lineage 元数据兜底。返回 (snapshot, lineage, lifecycle)。"""
+    lineage_raw = ctx.provenance_index.get(name, {}) if isinstance(ctx.provenance_index, dict) else {}
+    lifecycle_raw = ctx.lifecycle_stats.get(name, {}) if isinstance(ctx.lifecycle_stats, dict) else {}
+    lineage = lineage_raw if isinstance(lineage_raw, dict) else {}
+    lifecycle = lifecycle_raw if isinstance(lifecycle_raw, dict) else {}
+    snapshot = ctx.active_skills.get(name, {})
+    if not snapshot:
+        snapshot = {
+            "name": name,
+            "description": str(lineage.get("description") or lifecycle.get("description") or ""),
+            "when_to_use": str(lineage.get("when_to_use") or ""),
+            "instructions": "",
+        }
+    return snapshot, lineage, lifecycle
+
+
+def _build_skill_report_entry(
+    *,
+    name: str,
+    snapshot: dict[str, Any],
+    lineage: dict[str, Any],
+    lifecycle: dict[str, Any],
+    replay_pool: list[dict[str, Any]],
+    promotion_test_count: int,
+    public_rule_summary: dict[str, Any],
+    status: str,
+    reasons: list[str],
+    current_version: Any,
+    candidate_bundle: Any,
+    artifacts: dict[str, Any],
+) -> dict[str, Any]:
+    """单个 skill 的评测报告条目。"""
+    return {
+        "skill": name,
+        "lineage_id": _lineage_id_for_skill(name),
+        "status": status,
+        "reasons": reasons,
+        "source_count": int(lineage.get("source_count", 0) or 0) if isinstance(lineage, dict) else 0,
+        "history_count": int(lineage.get("history_count", 0) or 0) if isinstance(lineage, dict) else 0,
+        "last_action": lineage.get("last_action", "") if isinstance(lineage, dict) else "",
+        "last_time": lineage.get("last_time", "") if isinstance(lineage, dict) else "",
+        "current_version": current_version,
+        "created": int(lifecycle.get("created", 0) or 0),
+        "evolutions": int(lifecycle.get("evolutions", 0) or 0),
+        "invocations": int(lifecycle.get("invocations", 0) or 0),
+        "feedback": int(lifecycle.get("feedback", 0) or 0),
+        "replay": {
+            "count": len(replay_pool),
+            "mutate_dev": sum(1 for item in replay_pool if item.get("split") == "mutate_dev"),
+            "promotion_test": promotion_test_count,
+            "sources": sorted({str(item.get("source_type") or "") for item in replay_pool if item.get("source_type")}),
+        },
+        "eval": public_rule_summary,
+        "candidate_eval": {
+            "candidate_count": len(list(candidate_bundle.get("candidate_variants") or [])) if isinstance(candidate_bundle, dict) else 0,
+            "best_candidate": dict(candidate_bundle.get("best_dev_summary") or {}) if isinstance(candidate_bundle, dict) else {},
+            "has_promotion_test_eval": bool((candidate_bundle or {}).get("best_test_summary")) if isinstance(candidate_bundle, dict) else False,
+        },
+        "artifacts": artifacts,
+        "file": lifecycle.get("file", ""),
+        "skill_dir": snapshot.get("skill_dir", ""),
+    }
+
+
+async def _evaluate_single_skill(name: str, ctx: _EvalContext) -> dict[str, Any]:
+    """评测单个 skill：回放池 → 规则汇总 → 状态门 → 候选 bundle → 落盘工件。"""
+    snapshot, lineage, lifecycle = _resolve_skill_snapshot(name, ctx)
+
+    replay_pool = _build_replay_pool(name, ctx.grouped_rows.get(name, []), lineage, freeze=ctx.write_artifacts)
+    rules = _compile_eval_rules(snapshot, include_llm_rules=ctx.include_llm_rules)
+    rule_summary = await _summarize_rule_outcomes_async(
+        rules,
+        replay_pool,
+        skill_name=name,
+        side_query=ctx.side_query,
+    )
+    public_rule_summary = dict(rule_summary)
+    public_rule_summary.pop("outcomes", None)
+    promotion_test_count = sum(1 for item in replay_pool if item.get("split") == "promotion_test")
+    status, reasons = _skill_status(
+        replay_count=len(replay_pool),
+        promotion_test_count=promotion_test_count,
+        rule_summary=rule_summary,
+        min_replay_samples=ctx.min_replay_samples,
+        min_promotion_tests=ctx.min_promotion_tests,
+        min_rule_pass_rate=ctx.min_rule_pass_rate,
+    )
+    current_version = (
+        lineage.get("current_version", lifecycle.get("version", ""))
+    )
+    snapshot["version"] = str(current_version or "")
+    candidate_bundle = await _build_candidate_eval_bundle_async(
+        lineage_id=_lineage_id_for_skill(name),
+        snapshot=snapshot,
+        replay_pool=replay_pool,
+        rules=rules,
+        rule_summary=rule_summary,
+        side_query=ctx.side_query,
+    )
+    artifacts = (
+        _persist_eval_artifacts(
             skill_name=name,
-            side_query=side_query,
-        )
-        public_rule_summary = dict(rule_summary)
-        public_rule_summary.pop("outcomes", None)
-        promotion_test_count = sum(1 for item in replay_pool if item.get("split") == "promotion_test")
-        status, reasons = _skill_status(
-            replay_count=len(replay_pool),
-            promotion_test_count=promotion_test_count,
-            rule_summary=rule_summary,
-            min_replay_samples=min_replay_samples,
-            min_promotion_tests=min_promotion_tests,
-            min_rule_pass_rate=min_rule_pass_rate,
-        )
-        current_version = (
-            lineage.get("current_version", lifecycle.get("version", ""))
-        )
-        snapshot["version"] = str(current_version or "")
-        candidate_bundle = await _build_candidate_eval_bundle_async(
-            lineage_id=_lineage_id_for_skill(name),
             snapshot=snapshot,
             replay_pool=replay_pool,
             rules=rules,
             rule_summary=rule_summary,
-            side_query=side_query,
+            status=status,
+            reasons=reasons,
+            candidate_bundle=candidate_bundle,
         )
-        artifacts = (
-            _persist_eval_artifacts(
-                skill_name=name,
-                snapshot=snapshot,
-                replay_pool=replay_pool,
-                rules=rules,
-                rule_summary=rule_summary,
-                status=status,
-                reasons=reasons,
-                candidate_bundle=candidate_bundle,
-            )
-            if write_artifacts
-            else {}
-        )
-        skills.append(
-            {
-                "skill": name,
-                "lineage_id": _lineage_id_for_skill(name),
-                "status": status,
-                "reasons": reasons,
-                "source_count": int(lineage.get("source_count", 0) or 0) if isinstance(lineage, dict) else 0,
-                "history_count": int(lineage.get("history_count", 0) or 0) if isinstance(lineage, dict) else 0,
-                "last_action": lineage.get("last_action", "") if isinstance(lineage, dict) else "",
-                "last_time": lineage.get("last_time", "") if isinstance(lineage, dict) else "",
-                "current_version": current_version,
-                "created": int(lifecycle.get("created", 0) or 0),
-                "evolutions": int(lifecycle.get("evolutions", 0) or 0),
-                "invocations": int(lifecycle.get("invocations", 0) or 0),
-                "feedback": int(lifecycle.get("feedback", 0) or 0),
-                "replay": {
-                    "count": len(replay_pool),
-                    "mutate_dev": sum(1 for item in replay_pool if item.get("split") == "mutate_dev"),
-                    "promotion_test": promotion_test_count,
-                    "sources": sorted({str(item.get("source_type") or "") for item in replay_pool if item.get("source_type")}),
-                },
-                "eval": public_rule_summary,
-                "candidate_eval": {
-                    "candidate_count": len(list(candidate_bundle.get("candidate_variants") or [])) if isinstance(candidate_bundle, dict) else 0,
-                    "best_candidate": dict(candidate_bundle.get("best_dev_summary") or {}) if isinstance(candidate_bundle, dict) else {},
-                    "has_promotion_test_eval": bool((candidate_bundle or {}).get("best_test_summary")) if isinstance(candidate_bundle, dict) else False,
-                },
-                "artifacts": artifacts,
-                "file": lifecycle.get("file", ""),
-                "skill_dir": snapshot.get("skill_dir", ""),
-            }
-        )
+        if ctx.write_artifacts
+        else {}
+    )
+    return _build_skill_report_entry(
+        name=name,
+        snapshot=snapshot,
+        lineage=lineage,
+        lifecycle=lifecycle,
+        replay_pool=replay_pool,
+        promotion_test_count=promotion_test_count,
+        public_rule_summary=public_rule_summary,
+        status=status,
+        reasons=reasons,
+        current_version=current_version,
+        candidate_bundle=candidate_bundle,
+        artifacts=artifacts,
+    )
 
+
+def _build_skill_aggregate(
+    skills: list[dict[str, Any]],
+    row_summary: dict[str, Any],
+    ingest_count: int,
+) -> dict[str, Any]:
+    """跨 skill 汇总：状态分布/回放样本/规则通过率/LLM 评审/候选变体。"""
     status_counts: dict[str, int] = {}
     champion_status_counts: dict[str, int] = {}
     total_replay = 0
@@ -216,6 +289,74 @@ async def _evaluate_online_skill_evolution_core(
         candidate_eval = item.get("candidate_eval") if isinstance(item.get("candidate_eval"), dict) else {}
         total_candidate_variants += int(candidate_eval.get("candidate_count", 0) or 0)
 
+    ok_count = int(row_summary.get("ok", 0))
+    candidate_events = int(row_summary.get("candidate_events", 0))
+    accepted_events = int(row_summary.get("accepted_events", 0))
+    return {
+        "online_ingests": ingest_count,
+        "ok": ok_count,
+        "ok_rate": _ratio(ok_count, ingest_count),
+        "candidate_events": candidate_events,
+        "accepted_events": accepted_events,
+        "acceptance_rate": _ratio(accepted_events, candidate_events),
+        "actions": row_summary.get("action_counts", {}),
+        "skills": len(skills),
+        "statuses": status_counts,
+        "champion_statuses": champion_status_counts,
+        "replay_samples": total_replay,
+        "rule_outcomes": total_rule_outcomes,
+        "rule_pass_rate": _ratio(total_rule_passed, total_rule_outcomes),
+        "llm_rules": total_llm_rules,
+        "llm_rule_outcomes": total_llm_rule_outcomes,
+        "llm_rule_pass_rate": _ratio(total_llm_rule_passed, total_llm_rule_outcomes),
+        "candidate_variants": total_candidate_variants,
+    }
+
+
+def _write_eval_report(root: Any, report: dict[str, Any]) -> None:
+    report_path = root / "online_eval_report.json"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    report["report_file"] = str(report_path)
+
+
+async def _evaluate_online_skill_evolution_core(
+    *,
+    min_replay_samples: int = DEFAULT_MIN_REPLAY_SAMPLES,
+    min_promotion_tests: int = DEFAULT_MIN_PROMOTION_TESTS,
+    min_rule_pass_rate: float = DEFAULT_MIN_RULE_PASS_RATE,
+    write_report: bool = True,
+    write_artifacts: bool = True,
+    side_query: SideQuery | None = None,
+    include_llm_rules: bool = False,
+) -> dict[str, Any]:
+    root = get_evolution_dir()
+    provenance_rows = _read_jsonl(root / ONLINE_PROVENANCE_LOG)
+    provenance_index = _read_json(root / ONLINE_PROVENANCE_INDEX, {})
+    lifecycle_stats = load_skill_stats()
+    active_skills = _active_skill_snapshots()
+    grouped_rows = _rows_by_skill(provenance_rows)
+
+    row_summary = _summarize_provenance_rows(provenance_rows)
+    all_names = _collect_all_skill_names(active_skills, provenance_index, lifecycle_stats)
+
+    ctx = _EvalContext(
+        provenance_index=provenance_index,
+        lifecycle_stats=lifecycle_stats,
+        active_skills=active_skills,
+        grouped_rows=grouped_rows,
+        min_replay_samples=min_replay_samples,
+        min_promotion_tests=min_promotion_tests,
+        min_rule_pass_rate=min_rule_pass_rate,
+        write_artifacts=write_artifacts,
+        side_query=side_query,
+        include_llm_rules=include_llm_rules,
+    )
+
+    skills: list[dict[str, Any]] = []
+    for name in sorted(all_names):
+        skills.append(await _evaluate_single_skill(name, ctx))
+
     report = {
         "generated_at": _utc_now(),
         "mode": "online_skill_lineage_eval",
@@ -237,33 +378,12 @@ async def _evaluate_online_skill_evolution_core(
             "min_promotion_tests": min_promotion_tests,
             "min_rule_pass_rate": min_rule_pass_rate,
         },
-        "aggregate": {
-            "online_ingests": len(provenance_rows),
-            "ok": ok_count,
-            "ok_rate": _ratio(ok_count, len(provenance_rows)),
-            "candidate_events": candidate_events,
-            "accepted_events": accepted_events,
-            "acceptance_rate": _ratio(accepted_events, candidate_events),
-            "actions": action_counts,
-            "skills": len(skills),
-            "statuses": status_counts,
-            "champion_statuses": champion_status_counts,
-            "replay_samples": total_replay,
-            "rule_outcomes": total_rule_outcomes,
-            "rule_pass_rate": _ratio(total_rule_passed, total_rule_outcomes),
-            "llm_rules": total_llm_rules,
-            "llm_rule_outcomes": total_llm_rule_outcomes,
-            "llm_rule_pass_rate": _ratio(total_llm_rule_passed, total_llm_rule_outcomes),
-            "candidate_variants": total_candidate_variants,
-        },
+        "aggregate": _build_skill_aggregate(skills, row_summary, len(provenance_rows)),
         "skills": skills,
-        "recent_failures": recent_failures[-10:],
+        "recent_failures": row_summary["recent_failures"][-10:],
     }
     if write_report:
-        report_path = root / "online_eval_report.json"
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        report["report_file"] = str(report_path)
+        _write_eval_report(root, report)
     return report
 
 
@@ -332,8 +452,8 @@ def _format_eval_failure_summary(eval_data: dict[str, Any], *, limit: int = 2) -
     return "; ".join(parts)
 
 
-def format_online_skill_eval(report: dict[str, Any] | None = None) -> str:
-    report = report or evaluate_online_skill_evolution()
+def _format_eval_header(report: dict[str, Any]) -> list[str]:
+    """aggregate/actions/statuses/champion_statuses 概览行。"""
     aggregate = report.get("aggregate") if isinstance(report.get("aggregate"), dict) else {}
     actions = aggregate.get("actions") if isinstance(aggregate.get("actions"), dict) else {}
     statuses = aggregate.get("statuses") if isinstance(aggregate.get("statuses"), dict) else {}
@@ -369,62 +489,85 @@ def format_online_skill_eval(report: dict[str, Any] | None = None) -> str:
         lines.append("  statuses: " + ", ".join(f"{key}={statuses[key]}" for key in sorted(statuses)))
     if champion_statuses:
         lines.append("  champion_statuses: " + ", ".join(f"{key}={champion_statuses[key]}" for key in sorted(champion_statuses)))
+    return lines
+
+
+def _format_eval_skill_line(item: dict[str, Any]) -> str:
+    """单个 skill 的明细行（状态/回放/规则/候选/冠军 + 失败摘要后缀）。"""
+    replay = item.get("replay") if isinstance(item.get("replay"), dict) else {}
+    eval_data = item.get("eval") if isinstance(item.get("eval"), dict) else {}
+    candidate_eval = item.get("candidate_eval") if isinstance(item.get("candidate_eval"), dict) else {}
+    best_candidate = candidate_eval.get("best_candidate") if isinstance(candidate_eval.get("best_candidate"), dict) else {}
+    artifacts = item.get("artifacts") if isinstance(item.get("artifacts"), dict) else {}
+    promotion = artifacts.get("promotion") if isinstance(artifacts.get("promotion"), dict) else {}
+    reasons = "; ".join(str(reason) for reason in item.get("reasons", []) if str(reason).strip())
+    failure_summary = _format_eval_failure_summary(eval_data)
+    suffix_parts = []
+    if reasons:
+        suffix_parts.append(reasons)
+    if failure_summary:
+        suffix_parts.append(f"failures: {failure_summary}")
+    suffix = f" - {'; '.join(suffix_parts)}" if suffix_parts else ""
+    return (
+        "    "
+        f"{item.get('skill')}: status={item.get('status')}, "
+        f"replay={replay.get('count', 0)} "
+        f"(test={replay.get('promotion_test', 0)}), "
+        f"rules={eval_data.get('rule_count', 0)}, "
+        f"llm_rules={eval_data.get('llm_rule_count', 0)}, "
+        f"llm_judgments={eval_data.get('llm_outcome_count', 0)}, "
+        f"candidates={candidate_eval.get('candidate_count', 0)}, "
+        f"best_candidate_score={float(best_candidate.get('average_score', 0.0) or 0.0):.2f}, "
+        f"rule_pass={_pct(float(eval_data.get('pass_rate', 0) or 0))}, "
+        f"hard_failures={eval_data.get('hard_failures', 0)}, "
+        f"champion={promotion.get('status', 'n/a')}"
+        f"{suffix}"
+    )
+
+
+def _format_eval_skills(skills: list[Any]) -> list[str]:
+    """skills 明细段：按状态严重度排序，最多展示 20 条。"""
+    if not skills:
+        return ["  no online skill lineage or usage records found yet"]
+    lines = ["  skills:"]
+    ranked = sorted(
+        skills,
+        key=lambda item: (
+            _status_rank(str(item.get("status") or "")),
+            -int((item.get("replay") or {}).get("count", 0) if isinstance(item.get("replay"), dict) else 0),
+            str(item.get("skill") or ""),
+        ),
+    )
+    for item in ranked[:20]:
+        lines.append(_format_eval_skill_line(item))
+    if len(skills) > 20:
+        lines.append(f"    ... {len(skills) - 20} more skill(s) omitted")
+    return lines
+
+
+def _format_eval_recent_failures(failures: list[Any]) -> list[str]:
+    """recent failures 段（最多 5 条）。"""
+    if not failures:
+        return []
+    lines = ["  recent failures:"]
+    for failure in failures[-5:]:
+        lines.append(
+            "    "
+            f"{failure.get('time', '')} {failure.get('action', '')} "
+            f"{failure.get('skill', '')}: {failure.get('error', '')}"
+        )
+    return lines
+
+
+def format_online_skill_eval(report: dict[str, Any] | None = None) -> str:
+    report = report or evaluate_online_skill_evolution()
+    lines = _format_eval_header(report)
 
     skills = report.get("skills") if isinstance(report.get("skills"), list) else []
-    if not skills:
-        lines.append("  no online skill lineage or usage records found yet")
-    else:
-        lines.append("  skills:")
-        ranked = sorted(
-            skills,
-            key=lambda item: (
-                _status_rank(str(item.get("status") or "")),
-                -int((item.get("replay") or {}).get("count", 0) if isinstance(item.get("replay"), dict) else 0),
-                str(item.get("skill") or ""),
-            ),
-        )
-        for item in ranked[:20]:
-            replay = item.get("replay") if isinstance(item.get("replay"), dict) else {}
-            eval_data = item.get("eval") if isinstance(item.get("eval"), dict) else {}
-            candidate_eval = item.get("candidate_eval") if isinstance(item.get("candidate_eval"), dict) else {}
-            best_candidate = candidate_eval.get("best_candidate") if isinstance(candidate_eval.get("best_candidate"), dict) else {}
-            artifacts = item.get("artifacts") if isinstance(item.get("artifacts"), dict) else {}
-            promotion = artifacts.get("promotion") if isinstance(artifacts.get("promotion"), dict) else {}
-            reasons = "; ".join(str(reason) for reason in item.get("reasons", []) if str(reason).strip())
-            failure_summary = _format_eval_failure_summary(eval_data)
-            suffix_parts = []
-            if reasons:
-                suffix_parts.append(reasons)
-            if failure_summary:
-                suffix_parts.append(f"failures: {failure_summary}")
-            suffix = f" - {'; '.join(suffix_parts)}" if suffix_parts else ""
-            lines.append(
-                "    "
-                f"{item.get('skill')}: status={item.get('status')}, "
-                f"replay={replay.get('count', 0)} "
-                f"(test={replay.get('promotion_test', 0)}), "
-                f"rules={eval_data.get('rule_count', 0)}, "
-                f"llm_rules={eval_data.get('llm_rule_count', 0)}, "
-                f"llm_judgments={eval_data.get('llm_outcome_count', 0)}, "
-                f"candidates={candidate_eval.get('candidate_count', 0)}, "
-                f"best_candidate_score={float(best_candidate.get('average_score', 0.0) or 0.0):.2f}, "
-                f"rule_pass={_pct(float(eval_data.get('pass_rate', 0) or 0))}, "
-                f"hard_failures={eval_data.get('hard_failures', 0)}, "
-                f"champion={promotion.get('status', 'n/a')}"
-                f"{suffix}"
-            )
-        if len(skills) > 20:
-            lines.append(f"    ... {len(skills) - 20} more skill(s) omitted")
+    lines.extend(_format_eval_skills(skills))
 
     failures = report.get("recent_failures") if isinstance(report.get("recent_failures"), list) else []
-    if failures:
-        lines.append("  recent failures:")
-        for failure in failures[-5:]:
-            lines.append(
-                "    "
-                f"{failure.get('time', '')} {failure.get('action', '')} "
-                f"{failure.get('skill', '')}: {failure.get('error', '')}"
-            )
+    lines.extend(_format_eval_recent_failures(failures))
 
     if report.get("report_file"):
         lines.append(f"  report_file={report['report_file']}")

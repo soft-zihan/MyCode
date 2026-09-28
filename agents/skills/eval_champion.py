@@ -216,6 +216,31 @@ def _check_historical_retention(
     }
 
 
+def _promotion_result(
+    *,
+    promoted: bool,
+    status: str,
+    reason: str,
+    candidate: dict[str, Any],
+    champion: dict[str, Any],
+    min_score_delta: float,
+    auto_activate: bool,
+    retention_check: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "promoted": promoted,
+        "status": status,
+        "reason": reason,
+        "champion_before": champion,
+        "candidate": candidate,
+        "min_score_delta": min_score_delta,
+        "auto_activate": auto_activate,
+    }
+    if retention_check is not None:
+        result["retention_check"] = retention_check
+    return result
+
+
 def _promotion_decision(
     *,
     status: str,
@@ -224,39 +249,32 @@ def _promotion_decision(
     min_score_delta: float = DEFAULT_MIN_SCORE_DELTA,
     auto_activate: bool = False,
 ) -> dict[str, Any]:
+    common = {
+        "candidate": candidate,
+        "min_score_delta": min_score_delta,
+        "auto_activate": auto_activate,
+    }
     if status in {"unobserved", "incubating"}:
-        return {
-            "promoted": False,
-            "status": status,
-            "reason": "not enough usable replay signal for champion promotion",
-            "champion_before": champion,
-            "candidate": candidate,
-            "min_score_delta": min_score_delta,
-            "auto_activate": auto_activate,
-        }
+        return _promotion_result(
+            promoted=False, status=status, champion=champion,
+            reason="not enough usable replay signal for champion promotion",
+            **common,
+        )
     if status == "watch":
-        return {
-            "promoted": False,
-            "status": "rejected",
-            "reason": "candidate is under watch",
-            "champion_before": champion,
-            "candidate": candidate,
-            "min_score_delta": min_score_delta,
-            "auto_activate": auto_activate,
-        }
+        return _promotion_result(
+            promoted=False, status="rejected", champion=champion,
+            reason="candidate is under watch",
+            **common,
+        )
 
     previous_summary = champion.get("summary") if isinstance(champion.get("summary"), dict) else {}
     if not previous_summary:
-        return {
-            "promoted": True,
-            "status": "active_champion",
-            "reason": "first healthy candidate for this lineage",
-            "champion_before": {},
-            "candidate": candidate,
-            "min_score_delta": min_score_delta,
-            "auto_activate": auto_activate,
-            "retention_check": {"passed": True, "reason": "no previous champion to regress against"},
-        }
+        return _promotion_result(
+            promoted=True, status="active_champion", champion={},
+            reason="first healthy candidate for this lineage",
+            retention_check={"passed": True, "reason": "no previous champion to regress against"},
+            **common,
+        )
 
     candidate_score = float(candidate.get("average_score", 0.0) or 0.0)
     champion_score = float(previous_summary.get("average_score", 0.0) or 0.0)
@@ -271,34 +289,188 @@ def _promotion_decision(
     )
 
     if not retention["passed"]:
-        return {
-            "promoted": False,
-            "status": "rejected",
-            "reason": f"failed retention check: {retention['reason']}",
-            "champion_before": champion,
-            "candidate": candidate,
-            "min_score_delta": min_score_delta,
-            "auto_activate": auto_activate,
-            "retention_check": retention,
-        }
+        return _promotion_result(
+            promoted=False, status="rejected", champion=champion,
+            reason=f"failed retention check: {retention['reason']}",
+            retention_check=retention,
+            **common,
+        )
 
     promoted = bool(
         candidate_score >= champion_score + float(min_score_delta)
         and candidate_hard <= champion_hard
     )
-    return {
-        "promoted": promoted,
-        "status": "active_champion" if promoted else "rejected",
-        "reason": (
+    return _promotion_result(
+        promoted=promoted,
+        status="active_champion" if promoted else "rejected",
+        reason=(
             "candidate beats current champion on average score without more hard failures"
             if promoted
             else "candidate does not beat current champion promotion gate"
         ),
-        "champion_before": champion,
-        "candidate": candidate,
-        "min_score_delta": min_score_delta,
-        "auto_activate": auto_activate,
-        "retention_check": retention,
+        champion=champion,
+        retention_check=retention,
+        **common,
+    )
+
+
+def _judgment_row(outcome: dict[str, Any], variant_id: str = "current_active") -> dict[str, Any]:
+    return {
+        "sample_id": outcome.get("sample_id", ""),
+        "variant_id": variant_id,
+        "split": outcome.get("split", ""),
+        "rule_id": outcome.get("rule_id", ""),
+        "label": outcome.get("label", ""),
+        "kind": outcome.get("kind", "programmatic"),
+        "hard": bool(outcome.get("hard")),
+        "passed": bool(outcome.get("passed")),
+        "score": float(outcome.get("score", 0.0) or 0.0),
+        "details": outcome.get("details", {}),
+    }
+
+
+def _build_run_outputs(
+    replay_pool: list[dict[str, Any]], bundle: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """当前活跃版本的回放输出 + 候选变体输出。"""
+    outputs = [
+        {
+            "sample_id": sample.get("sample_id", ""),
+            "variant_id": "current_active",
+            "split": sample.get("split", ""),
+            "source_type": sample.get("source_type", ""),
+            "latest_user": sample.get("latest_user", ""),
+            "response_source": "history_latest_assistant",
+            "response_text": sample.get("latest_assistant", ""),
+        }
+        for sample in replay_pool
+    ]
+    outputs.extend(list(bundle.get("outputs") or []))
+    return outputs
+
+
+def _build_run_judgments(
+    rule_summary: dict[str, Any], bundle: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """当前活跃版本的规则判定 + 候选变体判定。"""
+    judgments = [
+        _judgment_row(outcome)
+        for outcome in list(rule_summary.get("outcomes") or [])
+        if isinstance(outcome, dict)
+    ]
+    for outcome in list(bundle.get("judgments") or []):
+        if not isinstance(outcome, dict):
+            continue
+        judgments.append(_judgment_row(outcome, variant_id=outcome.get("variant_id", "")))
+    return judgments
+
+
+def _select_promotion_candidate(
+    *,
+    skill_name: str,
+    snapshot: dict[str, Any],
+    rule_summary: dict[str, Any],
+    replay_pool: list[dict[str, Any]],
+    bundle: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """dev 集最优变体显著优于当前版本且过 test 集时，以它作为晋升候选。
+
+    返回 (promotion_candidate, promotion_snapshot, candidate_summary)。
+    """
+    candidate_summary = _variant_summary(
+        skill_name=skill_name,
+        snapshot=snapshot,
+        rule_summary=rule_summary,
+        replay_pool=replay_pool,
+    )
+    promotion_candidate = candidate_summary
+    promotion_snapshot = snapshot
+    best_variant = bundle.get("best_variant") if isinstance(bundle.get("best_variant"), dict) else {}
+    best_dev_summary = bundle.get("best_dev_summary") if isinstance(bundle.get("best_dev_summary"), dict) else {}
+    best_test_summary = bundle.get("best_test_summary") if isinstance(bundle.get("best_test_summary"), dict) else {}
+    candidate_beats_current = bool(
+        best_dev_summary
+        and float(best_dev_summary.get("average_score", 0.0) or 0.0)
+        >= float(candidate_summary.get("average_score", 0.0) or 0.0) + DEFAULT_MIN_SCORE_DELTA
+        and int(best_dev_summary.get("hard_failures", 0) or 0) <= int(candidate_summary.get("hard_failures", 0) or 0)
+    )
+    if best_variant and best_test_summary and candidate_beats_current:
+        promotion_candidate = dict(best_test_summary)
+        promotion_snapshot = best_variant.get("snapshot") if isinstance(best_variant.get("snapshot"), dict) else snapshot
+    return promotion_candidate, promotion_snapshot, candidate_summary
+
+
+def _run_promotion(
+    *,
+    lineage_id: str,
+    skill_name: str,
+    status: str,
+    promotion_candidate: dict[str, Any],
+    promotion_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    """加载旧冠军 → 裁决 → 晋升时写入新冠军并按需激活。"""
+    champion_before = _load_champion(lineage_id)
+    promotion = _promotion_decision(
+        status=status,
+        candidate=promotion_candidate,
+        champion=champion_before,
+        auto_activate=_auto_activate_enabled(),
+    )
+    if promotion.get("promoted"):
+        _set_champion(
+            lineage_id,
+            {
+                "lineage_id": lineage_id,
+                "skill": skill_name,
+                "snapshot": promotion_snapshot,
+                "summary": promotion_candidate,
+                "promotion": promotion,
+                "updated_at": _utc_now(),
+            },
+        )
+        if promotion.get("auto_activate"):
+            _activate_champion(skill_name, promotion_snapshot, lineage_id)
+    return promotion
+
+
+def _build_run_summary(
+    *,
+    run_id: str,
+    lineage_id: str,
+    skill_name: str,
+    status: str,
+    reasons: list[str],
+    candidate_summary: dict[str, Any],
+    bundle: dict[str, Any],
+    promotion: dict[str, Any],
+    replay_pool: list[dict[str, Any]],
+    artifacts: dict[str, str],
+) -> dict[str, Any]:
+    return {
+        "run_id": run_id,
+        "lineage_id": lineage_id,
+        "skill": skill_name,
+        "status": status,
+        "reasons": reasons,
+        "candidate": candidate_summary,
+        "candidate_variants": [
+            {
+                key: value
+                for key, value in dict(variant).items()
+                if key != "snapshot"
+            }
+            for variant in list(bundle.get("candidate_variants") or [])
+            if isinstance(variant, dict)
+        ],
+        "variant_summaries": list(bundle.get("variant_summaries") or []),
+        "best_candidate": dict(bundle.get("best_dev_summary") or {}),
+        "promotion": promotion,
+        "replay_counts": {
+            "total": len(replay_pool),
+            "mutate_dev": sum(1 for item in replay_pool if item.get("split") == "mutate_dev"),
+            "promotion_test": sum(1 for item in replay_pool if item.get("split") == "promotion_test"),
+        },
+        "artifacts": artifacts,
     }
 
 
@@ -327,135 +499,49 @@ def _persist_eval_artifacts(
 
     run_id = _run_id(lineage_id)
     run_dir = _lineage_run_dir(lineage_id, run_id)
-    outputs = [
-        {
-            "sample_id": sample.get("sample_id", ""),
-            "variant_id": "current_active",
-            "split": sample.get("split", ""),
-            "source_type": sample.get("source_type", ""),
-            "latest_user": sample.get("latest_user", ""),
-            "response_source": "history_latest_assistant",
-            "response_text": sample.get("latest_assistant", ""),
-        }
-        for sample in replay_pool
-    ]
     bundle = candidate_bundle if isinstance(candidate_bundle, dict) else {}
-    outputs.extend(list(bundle.get("outputs") or []))
-    judgments = [
-        {
-            "sample_id": outcome.get("sample_id", ""),
-            "variant_id": "current_active",
-            "split": outcome.get("split", ""),
-            "rule_id": outcome.get("rule_id", ""),
-            "label": outcome.get("label", ""),
-            "kind": outcome.get("kind", "programmatic"),
-            "hard": bool(outcome.get("hard")),
-            "passed": bool(outcome.get("passed")),
-            "score": float(outcome.get("score", 0.0) or 0.0),
-            "details": outcome.get("details", {}),
-        }
-        for outcome in list(rule_summary.get("outcomes") or [])
-        if isinstance(outcome, dict)
-    ]
-    for outcome in list(bundle.get("judgments") or []):
-        if not isinstance(outcome, dict):
-            continue
-        judgments.append(
-            {
-                "sample_id": outcome.get("sample_id", ""),
-                "variant_id": outcome.get("variant_id", ""),
-                "split": outcome.get("split", ""),
-                "rule_id": outcome.get("rule_id", ""),
-                "label": outcome.get("label", ""),
-                "kind": outcome.get("kind", "programmatic"),
-                "hard": bool(outcome.get("hard")),
-                "passed": bool(outcome.get("passed")),
-                "score": float(outcome.get("score", 0.0) or 0.0),
-                "details": outcome.get("details", {}),
-            }
-        )
-    _write_jsonl(run_dir / "outputs.jsonl", outputs)
-    _write_jsonl(run_dir / "judgments.jsonl", judgments)
+    _write_jsonl(run_dir / "outputs.jsonl", _build_run_outputs(replay_pool, bundle))
+    _write_jsonl(run_dir / "judgments.jsonl", _build_run_judgments(rule_summary, bundle))
 
-    candidate_summary = _variant_summary(
+    promotion_candidate, promotion_snapshot, candidate_summary = _select_promotion_candidate(
         skill_name=skill_name,
         snapshot=snapshot,
         rule_summary=rule_summary,
         replay_pool=replay_pool,
+        bundle=bundle,
     )
-    promotion_candidate = candidate_summary
-    promotion_snapshot = snapshot
-    best_variant = bundle.get("best_variant") if isinstance(bundle.get("best_variant"), dict) else {}
-    best_dev_summary = bundle.get("best_dev_summary") if isinstance(bundle.get("best_dev_summary"), dict) else {}
-    best_test_summary = bundle.get("best_test_summary") if isinstance(bundle.get("best_test_summary"), dict) else {}
-    candidate_beats_current = bool(
-        best_dev_summary
-        and float(best_dev_summary.get("average_score", 0.0) or 0.0)
-        >= float(candidate_summary.get("average_score", 0.0) or 0.0) + DEFAULT_MIN_SCORE_DELTA
-        and int(best_dev_summary.get("hard_failures", 0) or 0) <= int(candidate_summary.get("hard_failures", 0) or 0)
-    )
-    if best_variant and best_test_summary and candidate_beats_current:
-        promotion_candidate = dict(best_test_summary)
-        promotion_snapshot = best_variant.get("snapshot") if isinstance(best_variant.get("snapshot"), dict) else snapshot
-    champion_before = _load_champion(lineage_id)
-    promotion = _promotion_decision(
+    promotion = _run_promotion(
+        lineage_id=lineage_id,
+        skill_name=skill_name,
         status=status,
-        candidate=promotion_candidate,
-        champion=champion_before,
-        auto_activate=_auto_activate_enabled(),
+        promotion_candidate=promotion_candidate,
+        promotion_snapshot=promotion_snapshot,
     )
-    if promotion.get("promoted"):
-        _set_champion(
-            lineage_id,
-            {
-                "lineage_id": lineage_id,
-                "skill": skill_name,
-                "snapshot": promotion_snapshot,
-                "summary": promotion_candidate,
-                "promotion": promotion,
-                "updated_at": _utc_now(),
-            },
-        )
-        if promotion.get("auto_activate"):
-            _activate_champion(skill_name, promotion_snapshot, lineage_id)
 
-    summary = {
-        "run_id": run_id,
-        "lineage_id": lineage_id,
-        "skill": skill_name,
-        "status": status,
-        "reasons": reasons,
-        "candidate": candidate_summary,
-        "candidate_variants": [
-            {
-                key: value
-                for key, value in dict(variant).items()
-                if key != "snapshot"
-            }
-            for variant in list(bundle.get("candidate_variants") or [])
-            if isinstance(variant, dict)
-        ],
-        "variant_summaries": list(bundle.get("variant_summaries") or []),
-        "best_candidate": dict(bundle.get("best_dev_summary") or {}),
-        "promotion": promotion,
-        "replay_counts": {
-            "total": len(replay_pool),
-            "mutate_dev": sum(1 for item in replay_pool if item.get("split") == "mutate_dev"),
-            "promotion_test": sum(1 for item in replay_pool if item.get("split") == "promotion_test"),
-        },
-        "artifacts": {
-            "dataset": str(_lineage_dataset_dir(lineage_id) / "replay_pool.jsonl"),
-            "eval_spec": str(eval_dir / "eval_spec.json"),
-            "outputs": str(run_dir / "outputs.jsonl"),
-            "judgments": str(run_dir / "judgments.jsonl"),
-        },
+    artifacts = {
+        "dataset": str(_lineage_dataset_dir(lineage_id) / "replay_pool.jsonl"),
+        "eval_spec": str(eval_dir / "eval_spec.json"),
+        "outputs": str(run_dir / "outputs.jsonl"),
+        "judgments": str(run_dir / "judgments.jsonl"),
     }
+    summary = _build_run_summary(
+        run_id=run_id,
+        lineage_id=lineage_id,
+        skill_name=skill_name,
+        status=status,
+        reasons=reasons,
+        candidate_summary=candidate_summary,
+        bundle=bundle,
+        promotion=promotion,
+        replay_pool=replay_pool,
+        artifacts=artifacts,
+    )
     _write_json(run_dir / "summary.json", summary)
     return {
         "run_id": run_id,
         "run_dir": str(run_dir),
-        "dataset_file": str(_lineage_dataset_dir(lineage_id) / "replay_pool.jsonl"),
-        "eval_spec_file": str(eval_dir / "eval_spec.json"),
+        "dataset_file": artifacts["dataset"],
+        "eval_spec_file": artifacts["eval_spec"],
         "champion_file": str(_lineage_champion_dir(lineage_id) / "champion.json"),
         "promotion": promotion,
     }

@@ -165,36 +165,31 @@ def _exact_identity_match(candidate: OnlineSkillCandidate, skills: list[Any]) ->
     return ""
 
 
-async def maintain_online_skill_candidate(
-    *,
-    candidate: OnlineSkillCandidate,
-    side_query: SideQuery,
-    retrieved_reference: dict[str, Any] | None = None,
-    confirm_write: ConfirmWrite | None = None,
-    target: str = "project",
+_ONLINE_MANAGER_SYSTEM_PROMPT = (
+    "You are MyCode's online Skill Set Manager.\n"
+    "Decide whether a candidate should add a new skill, merge into an existing skill, or be discarded.\n"
+    "Output ONLY strict JSON.\n\n"
+    "Schema:\n"
+    "{\"action\":\"add|merge|discard\",\"target_skill\":\"existing name for merge\","
+    "\"reason\":\"short reason\",\"merged_description\":\"optional\","
+    "\"merged_when_to_use\":\"optional\",\"merged_instructions\":\"optional full merged SKILL.md body\"}\n\n"
+    "Rules:\n"
+    "- Prefer merge over add when the same capability already exists.\n"
+    "- Discard if the candidate duplicates an existing shared/project skill and adds no user-specific durable improvement.\n"
+    "- If merging, synthesize a complete merged instruction body, preserving useful existing guidance and adding only durable new guidance.\n"
+    "- Do not preserve one-off payload, secrets, transient project facts, URLs, exact dates, or assistant-only claims.\n"
+)
+
+
+def _build_manager_payload(
+    candidate: "OnlineSkillCandidate",
+    exact_target: str,
+    retrieved_reference: dict[str, Any] | None,
+    similar_hits: list[Any],
+    skills: list[Any],
 ) -> dict[str, Any]:
-    from .skills import create_skill, discover_skills, evolve_skill, retrieve_relevant_skills
-
-    skills = discover_skills()
-    exact_target = _exact_identity_match(candidate, skills)
-    similar_hits = retrieve_relevant_skills(_candidate_search_text(candidate), limit=8, min_score=0.03)
-    top_reference_name = str((retrieved_reference or {}).get("name") or "").strip()
-
-    system = (
-        "You are MyCode's online Skill Set Manager.\n"
-        "Decide whether a candidate should add a new skill, merge into an existing skill, or be discarded.\n"
-        "Output ONLY strict JSON.\n\n"
-        "Schema:\n"
-        "{\"action\":\"add|merge|discard\",\"target_skill\":\"existing name for merge\","
-        "\"reason\":\"short reason\",\"merged_description\":\"optional\","
-        "\"merged_when_to_use\":\"optional\",\"merged_instructions\":\"optional full merged SKILL.md body\"}\n\n"
-        "Rules:\n"
-        "- Prefer merge over add when the same capability already exists.\n"
-        "- Discard if the candidate duplicates an existing shared/project skill and adds no user-specific durable improvement.\n"
-        "- If merging, synthesize a complete merged instruction body, preserving useful existing guidance and adding only durable new guidance.\n"
-        "- Do not preserve one-off payload, secrets, transient project facts, URLs, exact dates, or assistant-only claims.\n"
-    )
-    payload = {
+    """在线维护决策的 side_query 载荷（候选 + 精确匹配 + 相似检索 + 现存 skills）。"""
+    return {
         "candidate": asdict(candidate),
         "exact_identity_target": exact_target,
         "retrieved_reference": retrieved_reference or None,
@@ -212,7 +207,14 @@ async def maintain_online_skill_candidate(
         ],
     }
 
-    decision = _parse_json_object(await side_query(system, json.dumps(payload, ensure_ascii=False)))
+
+def _resolve_manager_action(
+    decision: dict[str, Any],
+    exact_target: str,
+    similar_hits: list[Any],
+    top_reference_name: str,
+) -> tuple[str, str]:
+    """归一化 LLM 决策：精确身份匹配强制 merge；高分相似候选改 merge；非法动作归 discard。"""
     action = str(decision.get("action") or "").strip().lower()
     target_skill = str(decision.get("target_skill") or "").strip()
 
@@ -229,6 +231,73 @@ async def maintain_online_skill_candidate(
 
     if action not in {"add", "merge", "discard"}:
         action = "discard"
+    return action, target_skill
+
+
+def _execute_candidate_merge(
+    candidate: "OnlineSkillCandidate",
+    target_skill: str,
+    top_reference_name: str,
+    decision: dict[str, Any],
+) -> dict[str, Any]:
+    from .skills import evolve_skill
+
+    target_skill = target_skill or top_reference_name
+    if not target_skill:
+        return {"ok": False, "action": "merge", "error": "missing target_skill", "decision": decision}
+    result = evolve_skill(
+        skill_name=target_skill,
+        lesson=candidate.evidence or candidate.description,
+        rationale=str(decision.get("reason") or "Online maintainer merge"),
+        target="active",
+        instructions=str(decision.get("merged_instructions") or candidate.instructions),
+        description=str(decision.get("merged_description") or ""),
+        when_to_use=str(decision.get("merged_when_to_use") or candidate.when_to_use),
+        tags=candidate.tags,
+    )
+    return {"action": "merge", "candidate": asdict(candidate), "decision": decision, **result}
+
+
+def _execute_candidate_add(
+    candidate: "OnlineSkillCandidate",
+    target: str,
+    decision: dict[str, Any],
+) -> dict[str, Any]:
+    from .skills import create_skill
+
+    result = create_skill(
+        name=candidate.name,
+        description=candidate.description,
+        instructions=candidate.instructions,
+        when_to_use=candidate.when_to_use,
+        target=target,
+        context="inline",
+        user_invocable=False,
+        evidence=candidate.evidence,
+        actor="online",
+        tags=candidate.tags,
+    )
+    return {"action": "add", "candidate": asdict(candidate), "decision": decision, **result}
+
+
+async def maintain_online_skill_candidate(
+    *,
+    candidate: OnlineSkillCandidate,
+    side_query: SideQuery,
+    retrieved_reference: dict[str, Any] | None = None,
+    confirm_write: ConfirmWrite | None = None,
+    target: str = "project",
+) -> dict[str, Any]:
+    from .skills import discover_skills, retrieve_relevant_skills
+
+    skills = discover_skills()
+    exact_target = _exact_identity_match(candidate, skills)
+    similar_hits = retrieve_relevant_skills(_candidate_search_text(candidate), limit=8, min_score=0.03)
+    top_reference_name = str((retrieved_reference or {}).get("name") or "").strip()
+
+    payload = _build_manager_payload(candidate, exact_target, retrieved_reference, similar_hits, skills)
+    decision = _parse_json_object(await side_query(_ONLINE_MANAGER_SYSTEM_PROMPT, json.dumps(payload, ensure_ascii=False)))
+    action, target_skill = _resolve_manager_action(decision, exact_target, similar_hits, top_reference_name)
 
     if action == "discard":
         return {"ok": True, "action": "discard", "skill": "", "decision": decision}
@@ -244,34 +313,50 @@ async def maintain_online_skill_candidate(
         }
 
     if action == "merge":
-        target_skill = target_skill or top_reference_name
-        if not target_skill:
-            return {"ok": False, "action": "merge", "error": "missing target_skill", "decision": decision}
-        result = evolve_skill(
-            skill_name=target_skill,
-            lesson=candidate.evidence or candidate.description,
-            rationale=str(decision.get("reason") or "Online maintainer merge"),
-            target="active",
-            instructions=str(decision.get("merged_instructions") or candidate.instructions),
-            description=str(decision.get("merged_description") or ""),
-            when_to_use=str(decision.get("merged_when_to_use") or candidate.when_to_use),
-            tags=candidate.tags,
-        )
-        return {"action": "merge", "candidate": asdict(candidate), "decision": decision, **result}
+        return _execute_candidate_merge(candidate, target_skill, top_reference_name, decision)
+    return _execute_candidate_add(candidate, target, decision)
 
-    result = create_skill(
-        name=candidate.name,
-        description=candidate.description,
-        instructions=candidate.instructions,
-        when_to_use=candidate.when_to_use,
-        target=target,
-        context="inline",
-        user_invocable=False,
-        evidence=candidate.evidence,
-        actor="online",
-        tags=candidate.tags,
-    )
-    return {"action": "add", "candidate": asdict(candidate), "decision": decision, **result}
+
+async def _dispatch_candidate(
+    *,
+    candidate: OnlineSkillCandidate,
+    side_query: SideQuery,
+    retrieved_reference: dict[str, Any] | None,
+    confirm_write: ConfirmWrite | None,
+    target: str,
+    span: Any,
+) -> dict[str, Any]:
+    """rule 候选走规则维护，skill 候选走在线 Skill 维护；异常统一收敛为 failed 结果。"""
+    try:
+        if candidate.kind == "rule":
+            return await _maintain_rule_candidate(
+                candidate=candidate,
+                confirm_write=confirm_write,
+            )
+        return await maintain_online_skill_candidate(
+            candidate=candidate,
+            side_query=side_query,
+            retrieved_reference=retrieved_reference,
+            confirm_write=confirm_write,
+            target=target,
+        )
+    except Exception as exc:
+        span.record_error(exc)
+        return {"ok": False, "action": "failed", "skill": candidate.name, "error": str(exc)}
+
+
+def _build_ingest_metadata(result: dict[str, Any], candidate: OnlineSkillCandidate) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "action": str(result.get("action") or "none"),
+        "skill_name": str(result.get("skill") or candidate.name),
+        "success": bool(result.get("ok")),
+    }
+    decision = result.get("decision")
+    if isinstance(decision, dict) and decision.get("action"):
+        metadata["decision_action"] = str(decision["action"])
+    if not result.get("ok") and result.get("error"):
+        metadata["error"] = str(result["error"])
+    return metadata
 
 
 async def online_ingest(
@@ -319,39 +404,17 @@ async def online_ingest(
 
         span.add_metadata(candidate_kind=candidate.kind, candidate_name=candidate.name)
 
-        if candidate.kind == "rule":
-            try:
-                result = await _maintain_rule_candidate(
-                    candidate=candidate,
-                    confirm_write=confirm_write,
-                )
-            except Exception as exc:
-                result = {"ok": False, "action": "failed", "skill": candidate.name, "error": str(exc)}
-                span.record_error(exc)
-        else:
-            try:
-                result = await maintain_online_skill_candidate(
-                    candidate=candidate,
-                    side_query=side_query,
-                    retrieved_reference=retrieved_reference,
-                    confirm_write=confirm_write,
-                    target=target,
-                )
-            except Exception as exc:
-                result = {"ok": False, "action": "failed", "skill": candidate.name, "error": str(exc)}
-                span.record_error(exc)
+        result = await _dispatch_candidate(
+            candidate=candidate,
+            side_query=side_query,
+            retrieved_reference=retrieved_reference,
+            confirm_write=confirm_write,
+            target=target,
+            span=span,
+        )
 
         decision = result.get("decision")
-        metadata: dict[str, Any] = {
-            "action": str(result.get("action") or "none"),
-            "skill_name": str(result.get("skill") or candidate.name),
-            "success": bool(result.get("ok")),
-        }
-        if isinstance(decision, dict) and decision.get("action"):
-            metadata["decision_action"] = str(decision["action"])
-        if not result.get("ok") and result.get("error"):
-            metadata["error"] = str(result["error"])
-        span.add_metadata(**metadata)
+        span.add_metadata(**_build_ingest_metadata(result, candidate))
 
         record_online_provenance(
             action=str(result.get("action") or "none"),

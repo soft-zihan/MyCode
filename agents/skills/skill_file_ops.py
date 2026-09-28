@@ -346,6 +346,109 @@ def _append_evolution_note(body: str, lesson: str, rationale: str = "") -> str:
     return body + "\n\n" + marker + "\n\n" + bullet + "\n"
 
 
+def _record_evolution_snapshot(
+    *,
+    skill_file: Path,
+    resolved_name: str,
+    meta: dict[str, Any],
+    raw: str,
+    lesson: str,
+    rationale: str,
+    actor: str,
+) -> Path:
+    """进化前原文快照写入 lineage 历史（回滚/审查依赖），返回历史文件路径。"""
+    snapshot = {
+        "time": _utc_now(),
+        "event": "snapshot",
+        "actor": actor,
+        "skill": resolved_name,
+        "file": str(skill_file),
+        "version": meta.get("version", "0.1.0"),
+        "lesson": _preview(lesson, 1200),
+        "rationale": _preview(rationale, 1200),
+        "content": raw,
+    }
+    history_path = get_evolution_dir() / HISTORY_DIR / f"{_safe_skill_slug(resolved_name)}.jsonl"
+    _append_jsonl(history_path, snapshot)
+    return history_path
+
+
+def _apply_evolution_meta(
+    meta: dict[str, Any],
+    resolved_name: str,
+    description: str,
+    when_to_use: str,
+    tags: list[str] | None,
+) -> None:
+    """原地更新 frontmatter：name/version/last-evolved/evolution-count 与可选覆盖字段。"""
+    meta["name"] = resolved_name
+    meta["version"] = _bump_patch(meta.get("version"))
+    meta["last-evolved"] = _utc_now()
+    meta["evolution-count"] = str(_parse_int(meta.get("evolution-count"), 0) + 1)
+    if description.strip():
+        meta["description"] = re.sub(r"\s+", " ", description.strip())
+    if when_to_use.strip():
+        meta["when-to-use"] = re.sub(r"\s+", " ", when_to_use.strip())
+    if tags:
+        existing_tags = [part.strip() for part in str(meta.get("tags") or "").split(",") if part.strip()]
+        merged_tags = existing_tags[:]
+        for tag in tags:
+            normalized = re.sub(r"\s+", "-", str(tag).strip())
+            if normalized and normalized not in merged_tags:
+                merged_tags.append(normalized)
+        if merged_tags:
+            meta["tags"] = ",".join(merged_tags[:12])
+
+
+def _build_evolved_body(parsed_body: str, instructions: str, lesson: str, rationale: str) -> str:
+    """显式 instructions 时用新 body + 进化注记；否则在原 body 追加进化注记。"""
+    if instructions.strip():
+        new_body = _skill_body(instructions.strip())
+        note = _append_evolution_note("", lesson, rationale).strip()
+        if note:
+            new_body = new_body.rstrip() + "\n\n" + note + "\n"
+        return new_body
+    return _append_evolution_note(parsed_body, lesson, rationale)
+
+
+def _record_evolution_event(
+    *,
+    skill_file: Path,
+    resolved_name: str,
+    version: str,
+    target: str,
+    lesson: str,
+    rationale: str,
+    history_path: Path,
+    actor: str,
+) -> dict[str, Any]:
+    """evolve 事件写 usage log + trace，返回事件本体。"""
+    event = {
+        "event": "evolve",
+        "time": _utc_now(),
+        "actor": actor,
+        "skill": resolved_name,
+        "file": str(skill_file),
+        "version": version,
+        "target": target,
+        "lesson": _preview(lesson, 1200),
+        "rationale": _preview(rationale, 1200),
+        "history": str(history_path),
+    }
+    _append_jsonl(get_evolution_dir() / USAGE_LOG, event)
+    trace_event(
+        "skill.write",
+        metadata={
+            "action": "evolve",
+            "skill_name": resolved_name,
+            "file": str(skill_file),
+            "version": version,
+            "success": True,
+        },
+    )
+    return event
+
+
 def evolve_skill_file(
     *,
     skill_name: str,
@@ -368,69 +471,30 @@ def evolve_skill_file(
     meta = dict(parsed.meta)
     resolved_name = meta.get("name") or skill_file.parent.name
 
-    snapshot = {
-        "time": _utc_now(),
-        "event": "snapshot",
-        "actor": actor,
-        "skill": resolved_name,
-        "file": str(skill_file),
-        "version": meta.get("version", "0.1.0"),
-        "lesson": _preview(lesson, 1200),
-        "rationale": _preview(rationale, 1200),
-        "content": raw,
-    }
-    history_path = get_evolution_dir() / HISTORY_DIR / f"{_safe_skill_slug(resolved_name)}.jsonl"
-    _append_jsonl(history_path, snapshot)
+    history_path = _record_evolution_snapshot(
+        skill_file=skill_file,
+        resolved_name=resolved_name,
+        meta=meta,
+        raw=raw,
+        lesson=lesson,
+        rationale=rationale,
+        actor=actor,
+    )
 
-    meta["name"] = resolved_name
-    meta["version"] = _bump_patch(meta.get("version"))
-    meta["last-evolved"] = _utc_now()
-    meta["evolution-count"] = str(_parse_int(meta.get("evolution-count"), 0) + 1)
-    if description.strip():
-        meta["description"] = re.sub(r"\s+", " ", description.strip())
-    if when_to_use.strip():
-        meta["when-to-use"] = re.sub(r"\s+", " ", when_to_use.strip())
-    if tags:
-        existing_tags = [part.strip() for part in str(meta.get("tags") or "").split(",") if part.strip()]
-        merged_tags = existing_tags[:]
-        for tag in tags:
-            normalized = re.sub(r"\s+", "-", str(tag).strip())
-            if normalized and normalized not in merged_tags:
-                merged_tags.append(normalized)
-        if merged_tags:
-            meta["tags"] = ",".join(merged_tags[:12])
+    _apply_evolution_meta(meta, resolved_name, description, when_to_use, tags)
 
-    if instructions.strip():
-        new_body = _skill_body(instructions.strip())
-        note = _append_evolution_note("", lesson, rationale).strip()
-        if note:
-            new_body = new_body.rstrip() + "\n\n" + note + "\n"
-    else:
-        new_body = _append_evolution_note(parsed.body, lesson, rationale)
+    new_body = _build_evolved_body(parsed.body, instructions, lesson, rationale)
     skill_file.write_text(format_frontmatter(meta, new_body), encoding="utf-8")
 
-    event = {
-        "event": "evolve",
-        "time": _utc_now(),
-        "actor": actor,
-        "skill": resolved_name,
-        "file": str(skill_file),
-        "version": meta["version"],
-        "target": target,
-        "lesson": _preview(lesson, 1200),
-        "rationale": _preview(rationale, 1200),
-        "history": str(history_path),
-    }
-    _append_jsonl(get_evolution_dir() / USAGE_LOG, event)
-    trace_event(
-        "skill.write",
-        metadata={
-            "action": "evolve",
-            "skill_name": resolved_name,
-            "file": str(skill_file),
-            "version": meta["version"],
-            "success": True,
-        },
+    event = _record_evolution_event(
+        skill_file=skill_file,
+        resolved_name=resolved_name,
+        version=meta["version"],
+        target=target,
+        lesson=lesson,
+        rationale=rationale,
+        history_path=history_path,
+        actor=actor,
     )
     return {"ok": True, **event}
 
