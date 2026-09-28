@@ -28,49 +28,10 @@ from agents.core.text_sanitization import safe_utf8_text
 from agents.core.turn_runner import TurnRunner
 from agents.core.session import Session
 from agents.tools import ToolDef, tool_definitions
-from agents.logging import print_info, print_assistant_text, print_error, print_retry
+from agents.logging import print_info, print_assistant_text, print_error
 from agents.plan.plan_mode import PlanModeManager
 from agents.tools.dispatcher import ToolDispatcher
 from agents.core.context import ContextManager
-
-
-class ContentLevelError(Exception):
-    """模型返回内容级错误（空响应、截断、畸形 tool_call 等）。"""
-    pass
-
-
-def _is_retryable(error: Exception) -> bool:
-    status = getattr(error, "status_code", None) or getattr(error, "status", None)
-    if status in (429, 503, 529):
-        return True
-    msg = str(error)
-    if "overloaded" in msg or "ECONNRESET" in msg or "ETIMEDOUT" in msg:
-        return True
-    if isinstance(error, ContentLevelError):
-        return True
-    return False
-
-
-async def _with_retry(fn, max_retries: int = 3):
-    from agents.core.circuit_breaker import llm_circuit_breaker
-
-    if not llm_circuit_breaker.can_execute():
-        raise RuntimeError("LLM API circuit breaker is open, retry later")
-
-    for attempt in range(max_retries + 1):
-        try:
-            result = await fn()
-            llm_circuit_breaker.record_success()
-            return result
-        except Exception as error:
-            llm_circuit_breaker.record_failure()
-            if attempt >= max_retries or not _is_retryable(error):
-                raise
-            delay = min(1000 * (2 ** attempt), 30000) / 1000 + (hash(str(time.time())) % 1000) / 1000
-            status = getattr(error, "status_code", None) or getattr(error, "status", None)
-            reason = f"HTTP {status}" if status else (getattr(error, "code", None) or "network error")
-            print_retry(attempt + 1, max_retries, reason)
-            await asyncio.sleep(delay)
 
 
 def _get_max_output_tokens(model: str) -> int:
@@ -357,6 +318,7 @@ class Agent:
             model_ref=model_ref,
             label=label,
             max_tool_calls=max_tool_calls,
+            agent_cls=type(self),
         )
 
     def set_confirm_fn(self, fn:Callable[[str], Awaitable[bool]]) -> None:

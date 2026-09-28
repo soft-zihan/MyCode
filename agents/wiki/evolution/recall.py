@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agents.observability.trace import trace_span
-from agents.wiki.wiki_manager import list_wiki_entries, WikiEntry
+from agents.wiki.store import list_wiki_entries, WikiEntry
 
 
 LESSON_ATOM_TYPE = "self_improvement"

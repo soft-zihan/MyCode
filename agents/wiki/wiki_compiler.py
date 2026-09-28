@@ -14,12 +14,17 @@ from pathlib import Path
 from typing import Any
 
 from agents.core.workspace import get_workspace
-from agents.wiki.wiki_manager import (
+from agents.wiki.store import (
     get_wiki_dir,
     write_wiki_entry,
     write_workflow_pattern,
     _git_commit,
     update_wiki_index,
+    list_wiki_entries,
+    read_wiki_entry,
+    mark_pattern_compiled,
+    pattern_content_hash,
+    is_skill_stale,
 )
 from agents.wiki.wiki_capture import (
     mark_session_compiled,
@@ -63,7 +68,6 @@ def _release_compile_lock() -> None:
 
 def _dedup_check(wiki_type: str, name: str) -> bool:
     """检查是否已存在相同条目。"""
-    from agents.wiki.wiki_manager import list_wiki_entries
     entries = list_wiki_entries(wiki_type)
     for entry in entries:
         if entry.name == name:
@@ -325,13 +329,6 @@ async def _extract_from_session(content: str, side_query: Any) -> list[dict]:
 
 
 async def compile_to_skill(pattern_rel_path: str, side_query: Any) -> str | None:
-    from agents.wiki.wiki_manager import (
-        read_wiki_entry,
-        mark_pattern_compiled,
-        pattern_content_hash,
-        is_skill_stale,
-    )
-
     entry = read_wiki_entry(pattern_rel_path)
     if not entry:
         return None
@@ -463,8 +460,6 @@ async def check_and_compile_pending_sessions(side_query: Any, threshold: int = 2
             if not events:
                 continue
 
-            from agents.wiki.wiki_manager import get_wiki_dir
-            from datetime import datetime, timezone
             now = datetime.now(timezone.utc)
             session_dir = get_wiki_dir() / "session" / now.strftime("%Y/%m/%d")
             slug = session_id.replace("/", "_").replace("\\", "_")[:40]

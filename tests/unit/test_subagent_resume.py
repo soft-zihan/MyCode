@@ -199,7 +199,8 @@ def test_spawn_passes_compression_arm_and_window(tmp_path, monkeypatch):
         model="unknown-model", api_base="https://example.com/v1", api_key="sk-test",
         compression_arm="truncate", context_window=123456,
     )
-    child = spawn_sub_agent(parent, system_prompt="sp", tools=[], model_ref="", label="general")
+    child = spawn_sub_agent(parent, system_prompt="sp", tools=[], model_ref="", label="general",
+                            agent_cls=Agent)
     assert child.compression_arm == "truncate"
     assert child.context_window == 123456
     assert child.is_sub_agent

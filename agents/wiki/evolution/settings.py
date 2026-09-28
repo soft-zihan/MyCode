@@ -9,7 +9,7 @@ import yaml
 from pathlib import Path
 from typing import Any
 
-from agents.wiki.wiki_manager import get_wiki_dir
+from agents.wiki.store import get_wiki_dir
 
 
 _SETTINGS_CACHE: dict[str, Any] | None = None

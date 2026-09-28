@@ -26,7 +26,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from agents.wiki.wiki_manager import (
+from agents.wiki.store import (
+    CONSOLIDATE_STATE_FILE,
     get_wiki_dir,
     list_wiki_entries,
     read_wiki_entry,
@@ -35,10 +36,10 @@ from agents.wiki.wiki_manager import (
     update_wiki_index,
     WikiEntry,
 )
+from agents.wiki.wiki_manager import preflight_wiki_search
 
 logger = logging.getLogger(__name__)
 
-CONSOLIDATE_STATE_FILE = ".consolidate_state.json"
 CONSOLIDATE_COOLDOWN_HOURS = 24
 MIN_CHANGED_ENTRIES = 5
 SELECTION_BUDGET = 100
@@ -231,7 +232,6 @@ async def _select_material(
 
     # 关联条目：与 A/M 条目语义相近的现有条目
     try:
-        from agents.wiki.wiki_manager import preflight_wiki_search
         for entry in changed_entries[:RELATED_LOOKUPS]:
             if len(material) >= SELECTION_BUDGET:
                 break

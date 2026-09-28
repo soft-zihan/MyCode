@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agents.wiki.wiki_manager import get_wiki_dir, WikiEntry
+from agents.wiki.store import get_wiki_dir, WikiEntry
 from agents.core.frontmatter import parse_frontmatter, format_frontmatter
 
 

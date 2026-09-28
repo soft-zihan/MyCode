@@ -9,6 +9,16 @@ from __future__ import annotations
 import asyncio
 import json
 
+from agents.wiki.redact import redact_secrets
+from agents.wiki.store import (
+    get_wiki_dir,
+    merge_wiki_entry,
+    write_wiki_entry,
+    write_workflow_pattern,
+)
+from agents.wiki.wiki_consolidator import maybe_schedule_consolidate
+from agents.wiki.wiki_manager import preflight_wiki_search
+
 REMEMBER_TYPES = {"feedback", "user", "knowledge", "reference", "workflow_pattern"}
 
 MERGE_REPLACE_THRESHOLD = 0.85
@@ -28,14 +38,6 @@ async def remember(inp: dict, side_query=None) -> str:
     Returns:
         JSON 字符串 {action: created|merged|appended, path, message}
     """
-    from agents.wiki.redact import redact_secrets
-    from agents.wiki.wiki_manager import (
-        merge_wiki_entry,
-        preflight_wiki_search,
-        write_wiki_entry,
-        write_workflow_pattern,
-    )
-
     wiki_type = str(inp.get("wiki_type", "")).strip()
     name = str(inp.get("name", "")).strip()
     description = str(inp.get("description", "")).strip()
@@ -107,7 +109,6 @@ async def remember(inp: dict, side_query=None) -> str:
                 extra_meta={"source": "agent"},
             )
         _maybe_consolidate(side_query)
-        from agents.wiki.wiki_manager import get_wiki_dir
         rel = str(path.relative_to(get_wiki_dir()))
         return json.dumps(
             {"action": "created", "path": rel, "message": f"Created new {wiki_type} entry: {rel}"},
@@ -122,7 +123,6 @@ def _maybe_consolidate(side_query) -> None:
     if side_query is None:
         return
     try:
-        from agents.wiki.wiki_consolidator import maybe_schedule_consolidate
         if maybe_schedule_consolidate(side_query):
             print("[wiki_consolidate] scheduled after remember (threshold met)")
     except RuntimeError:
@@ -131,7 +131,6 @@ def _maybe_consolidate(side_query) -> None:
 
 
 def _result(action: str, path, top_entry, top_score: float) -> str:
-    from agents.wiki.wiki_manager import get_wiki_dir
     rel = str(path.relative_to(get_wiki_dir()))
     return json.dumps(
         {

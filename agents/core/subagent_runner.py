@@ -16,6 +16,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from agents.core.job_registry import SubAgentJob, get_job, pop_job, register_job
+from agents.core.model_registry import resolve_agent_endpoint
 from agents.core.session import Session
 from agents.tools.result import ToolExecutionResult
 
@@ -31,17 +32,18 @@ def spawn_sub_agent(
     model_ref: str,
     label: str,
     max_tool_calls: int | None = None,
+    agent_cls: type["Agent"],
 ) -> "Agent":
     """按父代理上下文派生子代理（endpoint 路由 / plan 模式继承 / abort 联动）。
 
     BC-20 修复：compression_arm/context_window 随 spawn 透传——子代理与父走同一
     压缩实验臂与窗口，LOCA 类消融实验不再被子代理逃逸。
-    """
-    from agents.agent import Agent
-    from agents.core.model_registry import resolve_agent_endpoint
 
+    M4 解环：agent_cls 由调用方注入（Agent._spawn_sub_agent 传 type(self)），
+    本模块不再运行时 import agents.agent——runner↔agent 环消除。
+    """
     endpoint = resolve_agent_endpoint(label, model_ref=model_ref, primary=parent._primary_endpoint())
-    return Agent(
+    return agent_cls(
         model=endpoint.model,
         api_base=endpoint.base_url,
         api_key=endpoint.api_key,

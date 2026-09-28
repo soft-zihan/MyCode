@@ -71,7 +71,7 @@ def test_strip_citations_oneshot():
 
 
 def test_increment_usage_no_commit(ws):
-    from agents.wiki.wiki_manager import (
+    from agents.wiki.store import (
         get_wiki_dir, increment_usage, write_wiki_entry, _git_commit, init_wiki_git,
     )
 
@@ -99,12 +99,13 @@ def test_increment_usage_no_commit(ws):
 
 
 def test_increment_usage_missing_file_noop(ws):
-    from agents.wiki.wiki_manager import increment_usage
+    from agents.wiki.store import increment_usage
     increment_usage("knowledge/不存在.md")  # 不抛异常
 
 
 def test_injection_format_contains_citation_instruction(ws):
-    from agents.wiki.wiki_manager import format_wiki_for_injection, WikiEntry
+    from agents.wiki.store import WikiEntry
+    from agents.wiki.wiki_manager import format_wiki_for_injection
 
     entry = WikiEntry(
         name="t", type="knowledge", filename="t.md",

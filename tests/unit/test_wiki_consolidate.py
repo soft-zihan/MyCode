@@ -20,7 +20,7 @@ def ws(tmp_path, monkeypatch):
 
 
 def _write_entry(rel: str, name: str, content: str, wiki_type: str = "knowledge", **meta):
-    from agents.wiki.wiki_manager import get_wiki_dir
+    from agents.wiki.store import get_wiki_dir
     path = get_wiki_dir() / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     front = {"name": name, "type": wiki_type, "description": name, "applied_count": "0", **meta}
@@ -30,7 +30,7 @@ def _write_entry(rel: str, name: str, content: str, wiki_type: str = "knowledge"
 
 async def test_supersede_contradictory_pair(ws, monkeypatch):
     """矛盾条目对：consolidate 后旧条目 superseded_by + archived，状态推进。"""
-    from agents.wiki.wiki_manager import init_wiki_git, get_wiki_dir, update_wiki_index
+    from agents.wiki.store import init_wiki_git, get_wiki_dir, update_wiki_index
     import agents.wiki.wiki_manager as wm
     from agents.wiki import wiki_consolidator as wc
 
@@ -44,7 +44,7 @@ async def test_supersede_contradictory_pair(ws, monkeypatch):
     _write_entry("knowledge/pool-new.md", "连接池调整", "config/database.py 连接池因高并发从 10 调至 50（2026-09-20）")
     for i in range(4):
         _write_entry(f"knowledge/filler-{i}.md", f"filler{i}", f"内容 {i}")
-    from agents.wiki.wiki_manager import _git_commit
+    from agents.wiki.store import _git_commit
     update_wiki_index()
     _git_commit("test: seed entries")
 
@@ -78,7 +78,7 @@ async def test_supersede_contradictory_pair(ws, monkeypatch):
 
 
 async def test_consolidate_defers_below_threshold(ws):
-    from agents.wiki.wiki_manager import init_wiki_git, _git_commit
+    from agents.wiki.store import init_wiki_git, _git_commit
     from agents.wiki import wiki_consolidator as wc
 
     init_wiki_git()
@@ -98,7 +98,7 @@ async def test_consolidate_defers_below_threshold(ws):
 
 
 async def test_consolidate_noop_advances_state(ws):
-    from agents.wiki.wiki_manager import init_wiki_git, _git_commit
+    from agents.wiki.store import init_wiki_git, _git_commit
     from agents.wiki import wiki_consolidator as wc
 
     init_wiki_git()
@@ -118,7 +118,7 @@ async def test_consolidate_noop_advances_state(ws):
 
 def test_index_pruning_and_reheat(ws):
     """250 条超预算 → 剪到 ≤200 行、最冷被剪、回热自动回归。"""
-    from agents.wiki.wiki_manager import (
+    from agents.wiki.store import (
         update_wiki_index, get_wiki_dir, increment_applied_count, MAX_INDEX_LINES,
     )
 

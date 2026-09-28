@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from agents.wiki.wiki_manager import WikiEntry
+from agents.wiki.store import WikiEntry
 
 
 PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}

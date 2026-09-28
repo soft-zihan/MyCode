@@ -9,7 +9,8 @@ import sys
 from pathlib import Path
 
 from agents.core.workspace import get_workspace
-from agents.wiki.wiki_manager import build_wiki_prompt_section, init_wiki_git
+from agents.wiki.store import init_wiki_git
+from agents.wiki.wiki_manager import build_wiki_prompt_section
 from agents.skills.skills import build_skill_descriptions
 
 # ─── System prompt template (from file) ──────────────────────

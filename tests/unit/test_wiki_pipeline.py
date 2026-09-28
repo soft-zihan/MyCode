@@ -50,7 +50,7 @@ def ws(tmp_path):
 async def test_fold_writes_notes_captures_compiles_and_advances_watermark(ws):
     from agents.wiki.pipeline import on_session_folded
     from agents.wiki.wiki_capture import get_last_extract_pos
-    from agents.wiki.wiki_manager import get_wiki_dir
+    from agents.wiki.store import get_wiki_dir
 
     async def side_query(system: str, user: str) -> str:
         return json.dumps([{
@@ -98,7 +98,7 @@ async def test_fold_writes_notes_captures_compiles_and_advances_watermark(ws):
 async def test_compile_failure_keeps_watermark_and_segment_uncompiled(ws):
     from agents.wiki.pipeline import on_session_folded
     from agents.wiki.wiki_capture import get_last_extract_pos
-    from agents.wiki.wiki_manager import get_wiki_dir
+    from agents.wiki.store import get_wiki_dir
 
     async def broken_side_query(system: str, user: str) -> str:
         raise RuntimeError("llm down")
@@ -120,7 +120,7 @@ async def test_compile_failure_keeps_watermark_and_segment_uncompiled(ws):
 
 async def test_watermark_prevents_recapture(ws):
     from agents.wiki.pipeline import on_session_folded
-    from agents.wiki.wiki_manager import get_wiki_dir
+    from agents.wiki.store import get_wiki_dir
 
     async def side_query(system: str, user: str) -> str:
         return "[]"

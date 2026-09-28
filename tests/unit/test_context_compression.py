@@ -327,7 +327,7 @@ async def test_session_fold_single_turn_trajectory_keeps_turn_running():
 
 def test_session_notes_wiki_entry_is_updated_in_place(tmp_path):
     from agents.core.workspace import reset_workspace, set_workspace
-    from agents.wiki.wiki_manager import get_wiki_dir, write_wiki_entry
+    from agents.wiki.store import get_wiki_dir, write_wiki_entry
 
     token = set_workspace(tmp_path)
     try:

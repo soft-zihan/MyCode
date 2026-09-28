@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from agents.wiki.wiki_manager import get_wiki_dir, _git_commit
+from agents.wiki.store import get_wiki_dir, _git_commit
 
 
 def _get_extract_state_path() -> Path:

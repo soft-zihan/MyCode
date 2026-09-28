@@ -16,6 +16,7 @@ from agents.core.text_sanitization import safe_utf8_text
 from agents.tools.file_snapshot import capture_file_snapshot
 from agents.tools.registry import CONCURRENCY_SAFE_TOOLS
 from agents.observability.tool_tracker import ToolCallTracker, check_tool_warnings
+from agents.wiki.wiki_manager import format_wiki_for_injection
 
 if TYPE_CHECKING:
     from agents.agent import Agent
@@ -272,7 +273,6 @@ class AgentLoop:
         try:
             entries = a._wiki_prefetch.result()
             if entries:
-                from agents.wiki.wiki_manager import format_wiki_for_injection
                 injection_text = format_wiki_for_injection(entries)
                 injection_text = safe_utf8_text(injection_text)
                 a.append_memory_injection(injection_text)

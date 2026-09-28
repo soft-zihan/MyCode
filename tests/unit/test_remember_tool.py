@@ -99,13 +99,13 @@ async def test_remember_merges_similar(ws, monkeypatch):
     assert first["action"] == "created"
 
     # stub preflight 返回高分命中（不依赖 ollama embedding）
-    from agents.wiki.wiki_manager import read_wiki_entry
+    from agents.wiki.store import read_wiki_entry
 
     async def fake_preflight(content, wiki_type, top_k=5):
         entry = read_wiki_entry(first["path"])
         return [(entry, 0.9)]
 
-    monkeypatch.setattr("agents.wiki.wiki_manager.preflight_wiki_search", fake_preflight)
+    monkeypatch.setattr("agents.tools.wiki_tools.preflight_wiki_search", fake_preflight)
     second = json.loads(await remember({
         "wiki_type": "knowledge", "name": "python 版本 2",
         "content": "本项目使用 python 3.12，虚拟环境在 .venv，测试用 pytest",
@@ -120,12 +120,12 @@ async def test_remember_appends_mid_similarity(ws, monkeypatch):
     first = json.loads(await remember({
         "wiki_type": "user", "name": "语言偏好", "content": "用户偏好中文回复",
     }))
-    from agents.wiki.wiki_manager import read_wiki_entry
+    from agents.wiki.store import read_wiki_entry
 
     async def fake_preflight(content, wiki_type, top_k=5):
         return [(read_wiki_entry(first["path"]), 0.75)]
 
-    monkeypatch.setattr("agents.wiki.wiki_manager.preflight_wiki_search", fake_preflight)
+    monkeypatch.setattr("agents.tools.wiki_tools.preflight_wiki_search", fake_preflight)
     second = json.loads(await remember({
         "wiki_type": "user", "name": "回复风格", "content": "用户偏好简洁回复，不要客套话",
     }))

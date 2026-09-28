@@ -503,6 +503,17 @@ def is_derived_session_meta(meta: dict[str, Any]) -> bool:
     return (meta.get("origin") or "") in DERIVED_SESSION_ORIGINS
 
 
+# M4 解环：活跃会话来源用 provider 倒置——session_manager 导入时注册，
+# 依赖方向保持单向 session_manager→core.session。provider 未注册 =
+# SessionManager 从未加载 = 进程内不可能有活跃会话，语义完备。
+_active_sessions_provider: Callable[[], list["Session"]] | None = None
+
+
+def set_active_sessions_provider(fn: Callable[[], list["Session"]] | None) -> None:
+    global _active_sessions_provider
+    _active_sessions_provider = fn
+
+
 def list_sessions() -> list[dict[str, Any]]:
     """列出所有 session，包括磁盘上的和内存中的。直接从 projcache 读取投影数据。"""
     import time as _time
@@ -510,12 +521,10 @@ def list_sessions() -> list[dict[str, Any]]:
     _ensure_dir()
     results = []
     seen_ids = set()
-    
-    # 1. 先从内存中获取活跃的 session
-    try:
-        from agents.session_manager import get_session_manager
-        manager = get_session_manager()
-        for session in manager.active_sessions():
+
+    # 1. 先从内存中获取活跃的 session（provider 由 session_manager 注册）
+    if _active_sessions_provider is not None:
+        for session in _active_sessions_provider():
             metadata = {
                 "id": session.id,
                 "name": session.title or session.id,
@@ -529,8 +538,6 @@ def list_sessions() -> list[dict[str, Any]]:
             }
             results.append(metadata)
             seen_ids.add(session.id)
-    except Exception as e:
-        print(f"[session] session 元数据读取失败: {e!r}")
     
     # 2. 直接从 projcache 文件读取投影数据（不需要读 session 文件）
     import concurrent.futures

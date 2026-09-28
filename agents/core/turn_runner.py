@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 from agents.core.text_sanitization import safe_utf8_text
 from agents.logging import print_divider, print_error
-from agents.wiki.wiki_manager import list_pending_confirm_entries
+from agents.wiki.store import list_pending_confirm_entries
 
 if TYPE_CHECKING:
     from agents.agent import Agent

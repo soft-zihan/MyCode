@@ -19,6 +19,17 @@ import logging
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from agents.core.frontmatter import parse_frontmatter
+from agents.wiki.store import get_wiki_dir, write_wiki_entry
+from agents.wiki.wiki_capture import (
+    capture_session_to_session,
+    get_last_extract_pos,
+    register_compile_failure,
+    set_last_extract_pos,
+)
+from agents.wiki.wiki_compiler import check_and_compile_pending_sessions, compile_single_session
+from agents.wiki.wiki_consolidator import maybe_schedule_consolidate
+
 logger = logging.getLogger(__name__)
 
 SideQueryFn = Callable[[str, str], Awaitable[str]]
@@ -65,8 +76,6 @@ async def _run(
 async def _write_session_notes(session_id: str, session_notes: str) -> None:
     """session_notes 合并写入（压缩摘要产物，原地更新）。"""
     try:
-        from agents.wiki.wiki_manager import write_wiki_entry
-
         await asyncio.to_thread(
             write_wiki_entry,
             wiki_type="session_notes",
@@ -83,12 +92,6 @@ async def _write_session_notes(session_id: str, session_notes: str) -> None:
 
 async def _capture_and_compile(session_id: str, session: Any, side_query: SideQueryFn) -> None:
     """捕获水位线之后的新事件为 segment，并立即编译。"""
-    from agents.wiki.wiki_capture import (
-        capture_session_to_session,
-        get_last_extract_pos,
-    )
-    from agents.wiki.wiki_manager import get_wiki_dir
-
     try:
         last_pos = get_last_extract_pos(session_id)
         new_events = [e for e in session.events if e.get("seq", 0) > last_pos]
@@ -111,8 +114,6 @@ async def _capture_and_compile(session_id: str, session: Any, side_query: SideQu
 
 async def _compile_segment(session_path: Path, side_query: SideQueryFn) -> None:
     """编译单个 segment。成功后推进水位线并触发补编译。"""
-    from agents.wiki.wiki_compiler import compile_single_session, check_and_compile_pending_sessions
-
     try:
         # BC-6：折叠触发的编译对延迟敏感（评测 wait_for_files / 用户召回），
         # 锁忙时有限重试而非直接丢给空闲补编译（后者可能被 backfill 队列拖到几分钟后）
@@ -141,22 +142,17 @@ async def _compile_segment(session_path: Path, side_query: SideQueryFn) -> None:
             print(f"[wiki_backfill] extracted {backfill_total} entries from pending sessions")
 
         # Phase 3 触发点：编译成功后检查整理门槛（24h + ≥5 条目变更）
-        from agents.wiki.wiki_consolidator import maybe_schedule_consolidate
         if maybe_schedule_consolidate(side_query):
             print("[wiki_consolidate] scheduled (threshold met)")
     except Exception as e:
         # 编译失败：水位线不推进，segment 保持 compiled=false，下次补编译自动重试；
         # 达到毒丸上限（3 次）由 register_compile_failure 终态化并推进水位线（BC-3）
         print(f"[wiki_compile_single] compile failed for {session_path.name}: {type(e).__name__}: {e}")
-        from agents.wiki.wiki_capture import register_compile_failure
         register_compile_failure(session_path)
 
 
 def _advance_watermark(session_path: Path) -> None:
     """编译成功后从 frontmatter 读取 max_seq，推进提取水位线。"""
-    from agents.core.frontmatter import parse_frontmatter
-    from agents.wiki.wiki_capture import get_last_extract_pos, set_last_extract_pos
-
     try:
         meta = parse_frontmatter(session_path.read_text()).meta
         session_id = meta.get("session_id", "")

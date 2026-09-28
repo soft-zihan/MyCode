@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from agents.wiki.wiki_manager import WikiEntry
+from agents.wiki.store import WikiEntry
 
 
 # 兜底零向量/缓存元信息用默认维度；真实维度以 API 返回向量为准

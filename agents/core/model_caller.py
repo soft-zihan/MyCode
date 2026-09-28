@@ -18,8 +18,11 @@ import os
 import time
 from typing import TYPE_CHECKING, Any
 
+from agents.core.retry import ContentLevelError, with_retry
 from agents.core.text_sanitization import safe_utf8_text, sanitize_for_utf8
 from agents.tools.registry import get_active_tool_definitions
+from agents.wiki.citation import CitationStripper, strip_citations
+from agents.wiki.store import increment_usage
 
 if TYPE_CHECKING:
     from agents.agent import Agent
@@ -179,7 +182,6 @@ class ModelCaller:
         工具数组参与 prefix cache，摘掉 tools 会使缓存整体失效）。
         """
         from agents.observability.trace import trace_span
-        from agents.agent import _with_retry
 
         a = self._agent
         _model_t0 = time.time()
@@ -205,7 +207,7 @@ class ModelCaller:
 
             try:
                 model_timeout = int(os.environ.get("MYCODE_MODEL_TIMEOUT", "120"))
-                result = await asyncio.wait_for(_with_retry(_attempt), timeout=model_timeout)
+                result = await asyncio.wait_for(with_retry(_attempt), timeout=model_timeout)
                 usage = result.get("usage", {}) if isinstance(result, dict) else {}
                 input_tokens = int(usage.get("prompt_tokens", 0) or 0)
                 output_tokens = int(usage.get("completion_tokens", 0) or 0)
@@ -380,9 +382,6 @@ class ModelCaller:
 
     async def _consume_stream(self, stream) -> dict:
         """消费 SSE 流：thinking/text/tool_calls 增量、usage、abort、空闲超时。"""
-        from agents.agent import ContentLevelError
-        from agents.wiki.citation import CitationStripper
-
         a = self._agent
         _citation_stripper = CitationStripper()
         acc: dict = {"content": "", "tool_calls": {}, "finish_reason": "", "usage": None}
@@ -475,9 +474,6 @@ class ModelCaller:
 
     def _build_result(self, consumed: dict, metrics: dict) -> dict:
         """组装 OpenAI 兼容 result：空响应检查 + citation 剥离 + usage 计数。"""
-        from agents.agent import ContentLevelError
-        from agents.wiki.citation import strip_citations
-
         a = self._agent
         content = consumed["content"]
         assembled = consumed["tool_calls"]
@@ -494,7 +490,6 @@ class ModelCaller:
         content, _cited_paths = strip_citations(content)
         for _p in _cited_paths:
             try:
-                from agents.wiki.wiki_manager import increment_usage
                 increment_usage(_p)
             except Exception as _e:
                 print(f"[wiki_citation] usage update failed for {_p}: {type(_e).__name__}: {_e}")

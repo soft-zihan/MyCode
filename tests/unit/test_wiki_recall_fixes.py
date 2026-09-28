@@ -10,7 +10,8 @@ import pytest
 
 from agents.core.workspace import workspace_scope
 from agents.wiki.evolution.embedding import EmbeddingCache, content_hash
-from agents.wiki.wiki_manager import WikiEntry, _keyword_fallback_select
+from agents.wiki.store import WikiEntry
+from agents.wiki.wiki_manager import _keyword_fallback_select
 
 
 @pytest.fixture

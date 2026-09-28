@@ -195,3 +195,10 @@ def get_session_manager() -> SessionManager:
     if _session_manager is None:
         _session_manager = SessionManager()
     return _session_manager
+
+
+# M4 解环：导入时注册活跃会话 provider——core.session.list_sessions 不再
+# 运行时反向 import 本模块（依赖单向化）
+from agents.core.session import set_active_sessions_provider  # noqa: E402
+
+set_active_sessions_provider(lambda: get_session_manager().active_sessions())
