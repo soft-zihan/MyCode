@@ -69,6 +69,65 @@ class AgentLoop:
         except Exception as exc:
             print_error(f"[bad_case] auto mark failed: {type(exc).__name__}: {exc}")
 
+    async def _run_step(self) -> Any:
+        """单个模型调用步：step/start → 流式调用 → assistant_message 落盘 → step/end。
+
+        返回本步的 tool_calls（None 表示纯文本回复）。
+        """
+        self._agent.session.append("step/start", {
+            "turn": self._agent._current_turn,
+            "step": self._agent._current_step + 1,
+        })
+        self._agent._current_step += 1
+
+        response = await self.call_model_stream()
+
+        choice = response.get("choices", [{}])[0] if response.get("choices") else {}
+        message = choice.get("message", {})
+
+        assistant_event = self._agent.session.append("assistant_message", {
+            "turn": self._agent._current_turn,
+            "step": self._agent._current_step,
+            "thinking": message.get("thinking"),
+            "content": message.get("content") or "",
+            "tool_calls": message.get("tool_calls"),
+        })
+        self._agent.mark_last_usage_position(int(assistant_event.get("seq", -1)))
+        self._update_token_stats(response)
+
+        self._agent.session.append("step/end", {
+            "turn": self._agent._current_turn,
+            "step": self._agent._current_step,
+        })
+        return message.get("tool_calls")
+
+    async def _finalize_turn_budget(self, budget: dict) -> None:
+        """U5a：turn/cost 预算耗尽同样走收敛应答（旧实现直接 break，
+        悬挂 tool_calls 被静默丢弃、用户拿不到任何最终答复）。"""
+        print_info(f"Budget exceeded: {budget['reason']}")
+        await self._drop_queued("budget_exceeded")
+        _kind_stop = {
+            "turns": "turn_budget_exceeded",
+            "cost": "cost_budget_exceeded",
+            "tool_calls": "tool_budget_exceeded",
+        }
+        await self._finalize_budget(
+            _kind_stop.get(budget.get("kind"), "budget_exceeded"),
+            budget["reason"],
+            "budget_exceeded",
+        )
+
+    async def _finalize_tool_budget(self) -> None:
+        """工具调用预算耗尽：丢弃排队消息并走收敛应答。"""
+        await self._drop_queued("tool_budget")
+        a = self._agent
+        reason = (
+            f"Tool call budget exceeded: {a._tool_call_count}/{a.max_tool_calls}"
+            if a.max_tool_calls is not None
+            else "Tool call budget exceeded"
+        )
+        await self._finalize_budget("tool_budget_exceeded", reason, "tool_budget_exceeded")
+
     async def run(self, user_message: str | None) -> None:
         """主推理循环入口。user_message=None 为 U3b 自动唤醒轮（不写用户消息事件）。"""
         await self._prepare_turn(user_message)
@@ -81,35 +140,7 @@ class AgentLoop:
 
             await self._consume_wiki_prefetch()
 
-            self._agent.session.append("step/start", {
-                "turn": self._agent._current_turn,
-                "step": self._agent._current_step + 1,
-            })
-            self._agent._current_step += 1
-
-            response = await self.call_model_stream()
-
-            choice = response.get("choices", [{}])[0] if response.get("choices") else {}
-            message = choice.get("message", {})
-            
-            thinking_content = message.get("thinking")
-            content = message.get("content") or ""
-            tool_calls = message.get("tool_calls")
-            
-            assistant_event = self._agent.session.append("assistant_message", {
-                "turn": self._agent._current_turn,
-                "step": self._agent._current_step,
-                "thinking": thinking_content,
-                "content": content,
-                "tool_calls": tool_calls,
-            })
-            self._agent.mark_last_usage_position(int(assistant_event.get("seq", -1)))
-            self._update_token_stats(response)
-
-            self._agent.session.append("step/end", {
-                "turn": self._agent._current_turn,
-                "step": self._agent._current_step,
-            })
+            tool_calls = await self._run_step()
 
             if not tool_calls:
                 # U1：turn 收尾前 drain 双队列——steering/follow_up 尾到则同 run 内 continue
@@ -122,20 +153,7 @@ class AgentLoop:
             self._agent.increment_turns()
             budget = self._agent.check_budget()
             if budget["exceeded"]:
-                print_info(f"Budget exceeded: {budget['reason']}")
-                await self._drop_queued("budget_exceeded")
-                # U5a：turn/cost 预算耗尽同样走收敛应答（旧实现直接 break，
-                # 悬挂 tool_calls 被静默丢弃、用户拿不到任何最终答复）
-                _kind_stop = {
-                    "turns": "turn_budget_exceeded",
-                    "cost": "cost_budget_exceeded",
-                    "tool_calls": "tool_budget_exceeded",
-                }
-                await self._finalize_budget(
-                    _kind_stop.get(budget.get("kind"), "budget_exceeded"),
-                    budget["reason"],
-                    "budget_exceeded",
-                )
+                await self._finalize_turn_budget(budget)
                 break
 
             guard_stop = await self._handle_tool_calls(tool_calls)
@@ -149,14 +167,7 @@ class AgentLoop:
             await self._drain_steering()
 
             if self._agent.tool_budget_exceeded():
-                await self._drop_queued("tool_budget")
-                a = self._agent
-                reason = (
-                    f"Tool call budget exceeded: {a._tool_call_count}/{a.max_tool_calls}"
-                    if a.max_tool_calls is not None
-                    else "Tool call budget exceeded"
-                )
-                await self._finalize_budget("tool_budget_exceeded", reason, "tool_budget_exceeded")
+                await self._finalize_tool_budget()
                 break
 
             self._agent.clear_context_flag()

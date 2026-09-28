@@ -52,6 +52,113 @@ def set_session_backend(backend: SessionBackend) -> None:
     _backend = backend
 
 
+def _read_projcache_metadata(session_id: str) -> dict[str, Any]:
+    """从 projcache 读取 cwd/plan_slug 元数据（缺失/损坏不致命）。"""
+    projcache_path = session_dir() / f"{session_id}.projcache.json"
+    metadata: dict[str, Any] = {}
+    if projcache_path.exists():
+        try:
+            projcache = json.loads(projcache_path.read_text())
+            rows = projcache.get("rows", {})
+            if rows.get("cwd") and rows["cwd"].get("val"):
+                metadata["cwd"] = rows["cwd"]["val"]
+            if rows.get("plan_slug") and rows["plan_slug"].get("val"):
+                metadata["plan_slug"] = rows["plan_slug"]["val"]
+        except Exception as e:
+            print(f"[session] projcache 读取失败 {projcache_path}: {e!r}")
+    return metadata
+
+
+def _apply_crash_recovery(
+    backend: SessionBackend, events: list[dict], session_id: str
+) -> list[dict]:
+    """U6：校验并修复事件流（"恢复是数据库的属性而非加载器的属性"，v2 execution.ts 哲学）。
+
+    合成 closer 回写后端，保证磁盘流 seq 连续、turn 配对；否则内存修复占用的
+    seq 会在后续 append 时留下永久空洞，且每次加载重复修复。
+    """
+    from .session_crash_recovery import validate_and_repair_events
+    repaired = validate_and_repair_events(events, session_id)
+    if len(repaired) > len(events):
+        for ev in repaired[len(events):]:
+            try:
+                backend.append(session_id, ev)
+            except Exception as e:
+                print(f"[session] crash-recovery closer 落盘失败 {session_id}: {e!r}")
+    return repaired
+
+
+def _warn_unknown_event_types(events: list[dict], session_id: str) -> None:
+    """U8 前向兼容：重放遇清单外未知类型记 warning 后跳过（不投影不进 LLM 消息，
+    v2 bus.ts:787-805 语义）——未来版本写的事件不阻塞旧代码加载。"""
+    from .event_types import ALL_KNOWN_EVENT_TYPES
+    unknown_types = sorted({
+        str(e.get("type", "")) for e in events
+    } - ALL_KNOWN_EVENT_TYPES)
+    if unknown_types:
+        logger.warning(
+            "[session %s] 重放遇到未知事件类型（跳过，前向兼容）: %s",
+            session_id, unknown_types,
+        )
+
+
+def _fill_session_log(session: "Session", events: list[dict], session_id: str) -> None:
+    """按 seq 建 _log 并用占位事件填平空洞，维持 "_log 以 seq 为下标" 的全局不变量。
+
+    get_event/get_messages_for_llm 直接按 seq 索引，空洞（历史 crash 残留）会
+    错位甚至 IndexError。占位仅内存不落盘，derive_messages 对未知类型返回 []。
+    """
+    events_by_seq: dict[int, dict] = {}
+    for event in events:
+        seq = event.get("seq")
+        if seq is not None and seq not in events_by_seq:
+            events_by_seq[seq] = event
+
+    max_seq = max(events_by_seq.keys())
+    for seq in range(max_seq + 1):
+        event = events_by_seq.get(seq)
+        if event is None:
+            event = {"type": "seq_gap", "seq": seq, "time": 0, "session_id": session_id}
+        session._log.append(event)
+
+    session._next_seq = max_seq + 1
+
+
+def _compute_visibility(session: "Session") -> None:
+    """按 events_hidden 标记派生可见 seq 索引，并 bump surface generation。"""
+    hidden_seqs = set()
+    for event in session._log:
+        if event.get("type") == "events_hidden":
+            hidden_seqs.update(event.get("hidden_seqs", []))
+
+    session._visible_seqs = [
+        e["seq"] for e in session._log
+        if e.get("seq") not in hidden_seqs and e.get("type") != "events_hidden"
+    ]
+    session._surface_generation = len(session._log)
+
+
+def _restore_projections_and_ownership(session: "Session", session_id: str) -> None:
+    """重放投影，并恢复会话归属属性（U2：子会话续跑依赖 origin/parent/agent_type）。"""
+    from .session_projection_cache import restore_projections, SessionHeader
+    header = SessionHeader(
+        id=session.id,
+        version=1,
+        created_at=session.created_at,
+        cwd=session.cwd,
+        is_seeded=session.is_seeded,
+        inherited_event_count=session.inherited_event_count,
+    )
+    session._projections = restore_projections(session_id, session._log, header)
+
+    if session._projections.get("origin"):
+        session.origin = session._projections["origin"]
+    if session._projections.get("parent_session"):
+        session.parent_session = session._projections["parent_session"]
+    if session._projections.get("agent_type"):
+        session.agent_type = session._projections["agent_type"]
+
+
 class Session:
     """Event-sourced Session 存储。
 
@@ -142,6 +249,60 @@ class Session:
         """Session 标题（单一数据源：事件流投影，由 session/title 事件驱动）。"""
         return self._projections.get("title")
     
+    def _emit_to_subscribers(self, event: dict[str, Any]) -> None:
+        """进程内订阅者推送（SSE 等），单个订阅者异常不阻断其余。"""
+        for sub in list(self._subscribers):
+            try:
+                sub(event)
+            except Exception as e:
+                print(f"[session] 事件订阅者异常: type={event.get('type')} err={e!r}")
+
+    def _persist_event(self, event: dict[str, Any]) -> None:
+        """Persist to backend（U2：子会话事件同样落盘——可观测/可恢复/可续跑；
+        用户会话列表由 list 层按 origin 过滤，不靠"不落盘"实现隔离）"""
+        try:
+            backend = get_session_backend()
+            backend.append(self.id, event)
+        except Exception as e:
+            print(f"[session] backend.append 失败（事件仅在内存，存在丢失风险）: type={event.get('type')} seq={event.get('seq')} err={e!r}")
+
+    def _update_projections(self, event: dict[str, Any]) -> None:
+        """投影增量派生 + projcache 写入调度。
+
+        普通 append 走增量派生，不 bump generation（否则每步全量重烘焙 system，
+        prefix cache 全失效）。
+        """
+        try:
+            from .session_projection_cache import get_projection_registry, get_projection_cache, ProjectionCheckpoint
+            registry = get_projection_registry()
+            self._projections = registry.apply_event(self._projections, event)
+            
+            cache = get_projection_cache()
+            cache.record_event(self.id)
+            
+            if event["type"] in ("turn/end", "session/title", "session/meta"):
+                cache.force_write(self.id)
+            
+            if cache.should_write(self.id):
+                rows = registry.checkpoint(self._projections, event["seq"])
+                checkpoint = ProjectionCheckpoint.from_session(self, rows)
+                cache.save_checkpoint(checkpoint)
+        except Exception as e:
+            print(f"[session] 投影缓存更新失败: type={event.get('type')} err={e!r}")
+
+    def _broadcast_ws(self, event: dict[str, Any]) -> None:
+        """广播到 WebSocket 订阅者；子智能体事件同时透传给父 session。"""
+        try:
+            # 使用与 main.py 相同的导入路径
+            from routers.websocket import broadcast_event
+            broadcast_event(event, target_session_id=self.id)
+            
+            # 如果是子智能体，也广播给父 session 的订阅者
+            if self.origin == "sub_agent" and self.parent_session:
+                broadcast_event(event, target_session_id=self.parent_session)
+        except (ImportError, TypeError):
+            pass  # WebSocket module not available or type evaluation error
+
     def append(self, type: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
         """唯一写入入口。自动区分持久化和只推送。
         
@@ -163,11 +324,7 @@ class Session:
         
         if type in SSE_ONLY_TYPES:
             # 流式事件：只推送，不持久化
-            for sub in list(self._subscribers):
-                try:
-                    sub(event)
-                except Exception as e:
-                    print(f"[session] 事件订阅者异常: type={type} err={e!r}")
+            self._emit_to_subscribers(event)
         else:
             # 聚合事件：持久化 + 推送
             event["seq"] = self._next_seq
@@ -175,57 +332,17 @@ class Session:
             self._log.append(event)
             
             # 新事件默认可见（events_hidden 本身不加入索引）
-            # 普通 append 走增量派生，不 bump generation（否则每步全量重烘焙 system，prefix cache 全失效）
             if type != "events_hidden":
                 self._visible_seqs.append(event["seq"])
             else:
                 # 隐藏事件 = surface 结构变化 → 全量重烘焙
                 self._surface_generation += 1
             
-            # Persist to backend（U2：子会话事件同样落盘——可观测/可恢复/可续跑；
-            # 用户会话列表由 list 层按 origin 过滤，不靠"不落盘"实现隔离）
-            try:
-                backend = get_session_backend()
-                backend.append(self.id, event)
-            except Exception as e:
-                print(f"[session] backend.append 失败（事件仅在内存，存在丢失风险）: type={type} seq={event.get('seq')} err={e!r}")
-            
-            # Update projections
-            try:
-                from .session_projection_cache import get_projection_registry, get_projection_cache, ProjectionCheckpoint, CheckpointRow
-                registry = get_projection_registry()
-                self._projections = registry.apply_event(self._projections, event)
-                
-                cache = get_projection_cache()
-                cache.record_event(self.id)
-                
-                if type in ("turn/end", "session/title", "session/meta"):
-                    cache.force_write(self.id)
-                
-                if cache.should_write(self.id):
-                    rows = registry.checkpoint(self._projections, event["seq"])
-                    checkpoint = ProjectionCheckpoint.from_session(self, rows)
-                    cache.save_checkpoint(checkpoint)
-            except Exception as e:
-                print(f"[session] 投影缓存更新失败: type={type} err={e!r}")
-            
-            for sub in list(self._subscribers):
-                try:
-                    sub(event)
-                except Exception as e:
-                    print(f"[session] 事件订阅者异常: type={type} err={e!r}")
+            self._persist_event(event)
+            self._update_projections(event)
+            self._emit_to_subscribers(event)
         
-        # Broadcast to WebSocket subscribers
-        try:
-            # 使用与 main.py 相同的导入路径
-            from routers.websocket import broadcast_event
-            broadcast_event(event, target_session_id=self.id)
-            
-            # 如果是子智能体，也广播给父 session 的订阅者
-            if self.origin == "sub_agent" and self.parent_session:
-                broadcast_event(event, target_session_id=self.parent_session)
-        except (ImportError, TypeError):
-            pass  # WebSocket module not available or type evaluation error
+        self._broadcast_ws(event)
         
         return event
     
@@ -333,101 +450,22 @@ class Session:
         支持 JSONL 和 SQLite 两种后端，通过 MYCODE_SESSION_BACKEND 环境变量切换。
         """
         # 从 projcache 读取元数据
-        projcache_path = session_dir() / f"{session_id}.projcache.json"
-        metadata = {}
-        if projcache_path.exists():
-            try:
-                projcache = json.loads(projcache_path.read_text())
-                rows = projcache.get("rows", {})
-                if rows.get("cwd") and rows["cwd"].get("val"):
-                    metadata["cwd"] = rows["cwd"]["val"]
-                if rows.get("plan_slug") and rows["plan_slug"].get("val"):
-                    metadata["plan_slug"] = rows["plan_slug"]["val"]
-            except Exception as e:
-                print(f"[session] projcache 读取失败 {projcache_path}: {e!r}")
-        
+        metadata = _read_projcache_metadata(session_id)
+
         session = cls(session_id=session_id)
-        
         session.cwd = metadata.get("cwd")
         session.plan_slug = metadata.get("plan_slug")
-        
+
         backend = get_session_backend()
         events = backend.load_all_events(session_id)
         if not events:
             return None
 
-        from .session_crash_recovery import validate_and_repair_events
-        repaired = validate_and_repair_events(events, session_id)
-        if len(repaired) > len(events):
-            # U6：修复落盘（"恢复是数据库的属性而非加载器的属性"，v2 execution.ts 哲学）——
-            # 合成 closer 回写后端，保证磁盘流 seq 连续、turn 配对；否则内存修复占用的
-            # seq 会在后续 append 时留下永久空洞，且每次加载重复修复
-            for ev in repaired[len(events):]:
-                try:
-                    backend.append(session_id, ev)
-                except Exception as e:
-                    print(f"[session] crash-recovery closer 落盘失败 {session_id}: {e!r}")
-        events = repaired
-
-        # U8 前向兼容：重放遇清单外未知类型记 warning 后跳过（不投影不进 LLM 消息，
-        # v2 bus.ts:787-805 语义）——未来版本写的事件不阻塞旧代码加载
-        from .event_types import ALL_KNOWN_EVENT_TYPES
-        unknown_types = sorted({
-            str(e.get("type", "")) for e in events
-        } - ALL_KNOWN_EVENT_TYPES)
-        if unknown_types:
-            logger.warning(
-                "[session %s] 重放遇到未知事件类型（跳过，前向兼容）: %s",
-                session_id, unknown_types,
-            )
-
-        events_by_seq: dict[int, dict] = {}
-        for event in events:
-            seq = event.get("seq")
-            if seq is not None and seq not in events_by_seq:
-                events_by_seq[seq] = event
-
-        # seq 空洞（历史 crash 残留）用占位事件填平：维持 "_log 以 seq 为下标"
-        # 的全局不变量（get_event/get_messages_for_llm 直接按 seq 索引，空洞会
-        # 错位甚至 IndexError）。占位仅内存不落盘，derive_messages 对未知类型返回 []
-        max_seq = max(events_by_seq.keys())
-        for seq in range(max_seq + 1):
-            event = events_by_seq.get(seq)
-            if event is None:
-                event = {"type": "seq_gap", "seq": seq, "time": 0, "session_id": session_id}
-            session._log.append(event)
-
-        session._next_seq = max_seq + 1
-
-        hidden_seqs = set()
-        for event in session._log:
-            if event.get("type") == "events_hidden":
-                hidden_seqs.update(event.get("hidden_seqs", []))
-
-        session._visible_seqs = [
-            e["seq"] for e in session._log
-            if e.get("seq") not in hidden_seqs and e.get("type") != "events_hidden"
-        ]
-        session._surface_generation = len(session._log)
-
-        from .session_projection_cache import restore_projections, SessionHeader
-        header = SessionHeader(
-            id=session.id,
-            version=1,
-            created_at=session.created_at,
-            cwd=session.cwd,
-            is_seeded=session.is_seeded,
-            inherited_event_count=session.inherited_event_count,
-        )
-        session._projections = restore_projections(session_id, session._log, header)
-
-        # U2：从 session/meta 投影恢复会话归属属性（子会话续跑依赖 origin/parent/agent_type）
-        if session._projections.get("origin"):
-            session.origin = session._projections["origin"]
-        if session._projections.get("parent_session"):
-            session.parent_session = session._projections["parent_session"]
-        if session._projections.get("agent_type"):
-            session.agent_type = session._projections["agent_type"]
+        events = _apply_crash_recovery(backend, events, session_id)
+        _warn_unknown_event_types(events, session_id)
+        _fill_session_log(session, events, session_id)
+        _compute_visibility(session)
+        _restore_projections_and_ownership(session, session_id)
 
         return session if session._log else None
     
@@ -514,15 +552,24 @@ def set_active_sessions_provider(fn: Callable[[], list["Session"]] | None) -> No
     _active_sessions_provider = fn
 
 
-def list_sessions() -> list[dict[str, Any]]:
-    """列出所有 session，包括磁盘上的和内存中的。直接从 projcache 读取投影数据。"""
-    import time as _time
-    _t0 = _time.time()
-    _ensure_dir()
-    results = []
-    seen_ids = set()
+def _new_session_metadata(session_id: str) -> dict[str, Any]:
+    """会话列表项默认元数据（各字段随后由 projcache 填充）。"""
+    return {
+        "id": session_id,
+        "name": session_id,
+        "cwd": "",
+        "startTime": "",
+        "model": "",
+        "parent_session": "",
+        "origin": "",
+        "agent_type": "",
+        "plan_slug": None,
+    }
 
-    # 1. 先从内存中获取活跃的 session（provider 由 session_manager 注册）
+
+def _collect_active_sessions(seen_ids: set) -> list[dict[str, Any]]:
+    """1. 先从内存中获取活跃的 session（provider 由 session_manager 注册）。"""
+    results = []
     if _active_sessions_provider is not None:
         for session in _active_sessions_provider():
             metadata = {
@@ -538,79 +585,81 @@ def list_sessions() -> list[dict[str, Any]]:
             }
             results.append(metadata)
             seen_ids.add(session.id)
-    
-    # 2. 直接从 projcache 文件读取投影数据（不需要读 session 文件）
-    import concurrent.futures
-    
-    def read_projcache(f):
-        try:
-            session_id = f.name.replace(".projcache.json", "")
-            if session_id in seen_ids:
-                return None
-            projcache = json.loads(f.read_text())
-            rows = projcache.get("rows", {})
-            
-            metadata = {
-                "id": session_id,
-                "name": session_id,
-                "cwd": "",
-                "startTime": "",
-                "model": "",
-                "parent_session": "",
-                "origin": "",
-                "agent_type": "",
-                "plan_slug": None,
-            }
-            
-            if rows.get("cwd") and rows["cwd"].get("val"):
-                metadata["cwd"] = rows["cwd"]["val"]
-            if rows.get("updated_at") and rows["updated_at"].get("val"):
-                metadata["startTime"] = rows["updated_at"]["val"]
-            if rows.get("title") and rows["title"].get("val"):
-                metadata["name"] = rows["title"]["val"]
-            if rows.get("plan_slug") and rows["plan_slug"].get("val"):
-                metadata["plan_slug"] = rows["plan_slug"]["val"]
-            if rows.get("origin") and rows["origin"].get("val"):
-                metadata["origin"] = rows["origin"]["val"]
-            if rows.get("parent_session") and rows["parent_session"].get("val"):
-                metadata["parent_session"] = rows["parent_session"]["val"]
-            if rows.get("agent_type") and rows["agent_type"].get("val"):
-                metadata["agent_type"] = rows["agent_type"]["val"]
-            
-            return metadata
-        except Exception as e:
-            print(f"[session] projcache 解析失败: {e!r}")
+    return results
+
+
+def _read_projcache_row(f: Path, seen_ids: set) -> dict[str, Any] | None:
+    """从单个 projcache 文件解析列表项；已见过/损坏的返回 None。"""
+    try:
+        session_id = f.name.replace(".projcache.json", "")
+        if session_id in seen_ids:
             return None
-    
+        projcache = json.loads(f.read_text())
+        rows = projcache.get("rows", {})
+
+        metadata = _new_session_metadata(session_id)
+        if rows.get("cwd") and rows["cwd"].get("val"):
+            metadata["cwd"] = rows["cwd"]["val"]
+        if rows.get("updated_at") and rows["updated_at"].get("val"):
+            metadata["startTime"] = rows["updated_at"]["val"]
+        if rows.get("title") and rows["title"].get("val"):
+            metadata["name"] = rows["title"]["val"]
+        if rows.get("plan_slug") and rows["plan_slug"].get("val"):
+            metadata["plan_slug"] = rows["plan_slug"]["val"]
+        if rows.get("origin") and rows["origin"].get("val"):
+            metadata["origin"] = rows["origin"]["val"]
+        if rows.get("parent_session") and rows["parent_session"].get("val"):
+            metadata["parent_session"] = rows["parent_session"]["val"]
+        if rows.get("agent_type") and rows["agent_type"].get("val"):
+            metadata["agent_type"] = rows["agent_type"]["val"]
+
+        return metadata
+    except Exception as e:
+        print(f"[session] projcache 解析失败: {e!r}")
+        return None
+
+
+def _collect_projcache_sessions(seen_ids: set) -> list[dict[str, Any]]:
+    """2. 直接从 projcache 文件读取投影数据（不需要读 session 文件），并发解析。"""
+    import concurrent.futures
+
+    results = []
     projcache_files = list(session_dir().glob("*.projcache.json"))
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-        futures = {executor.submit(read_projcache, f): f for f in projcache_files}
+        futures = {executor.submit(_read_projcache_row, f, seen_ids): f for f in projcache_files}
         for future in concurrent.futures.as_completed(futures):
             result = future.result()
             if result:
                 results.append(result)
                 seen_ids.add(result.get("id"))
-    
-    # 3. 后端兜底：有事件但 projcache 未落盘的会话也要能列出（两后端一致行为）
+    return results
+
+
+def _collect_backend_fallback_sessions(seen_ids: set) -> list[dict[str, Any]]:
+    """3. 后端兜底：有事件但 projcache 未落盘的会话也要能列出（两后端一致行为）。"""
+    results = []
     try:
         for sid in get_session_backend().list_session_ids():
             if sid in seen_ids:
                 continue
-            results.append({
-                "id": sid,
-                "name": sid,
-                "cwd": "",
-                "startTime": "",
-                "model": "",
-                "parent_session": "",
-                "origin": "",
-                "agent_type": "",
-                "plan_slug": None,
-            })
+            results.append(_new_session_metadata(sid))
             seen_ids.add(sid)
     except Exception as e:
         print(f"[session] backend list_session_ids 失败: {e!r}")
-    
+    return results
+
+
+def list_sessions() -> list[dict[str, Any]]:
+    """列出所有 session，包括磁盘上的和内存中的。直接从 projcache 读取投影数据。"""
+    import time as _time
+    _t0 = _time.time()
+    _ensure_dir()
+    seen_ids: set = set()
+
+    results = _collect_active_sessions(seen_ids)
+    results.extend(_collect_projcache_sessions(seen_ids))
+    results.extend(_collect_backend_fallback_sessions(seen_ids))
+
     _elapsed = _time.time() - _t0
     if _elapsed > 0.5:
         print(f"[PERF] list_sessions: {_elapsed:.2f}s for {len(results)} sessions")

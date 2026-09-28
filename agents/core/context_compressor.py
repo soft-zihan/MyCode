@@ -165,6 +165,85 @@ class ContextCompressor:
         self._truncation_count: int = 0
         self._background_tasks: set[asyncio.Task[Any]] = set()
 
+    def _should_compress(self, utilization: float, idle_seconds: float) -> bool:
+        """full 臂额外看空闲超时；其余臂只按利用率触发。"""
+        if self.arm == "full":
+            return (
+                utilization > self.tool_fold_threshold
+                or idle_seconds > self.idle_timeout_seconds
+            )
+        return utilization > self.tool_fold_threshold
+
+    def _tool_fold_sufficient(
+        self,
+        session: Any,
+        current_token_count: int,
+        message_tokens_before: int,
+        span: Any,
+    ) -> bool:
+        """工具折叠后预估利用率是否已低于会话折叠阈值（是则免做会话级折叠）。"""
+        estimated_tokens = self._estimate_tokens_after_fold(
+            current_token_count,
+            message_tokens_before,
+            session,
+        )
+        estimated_utilization = estimated_tokens / self.effective_window if self.effective_window else 0
+        if span:
+            span.add_metadata(
+                token_count_after_tool_fold=estimated_tokens,
+                utilization_after_tool_fold=round(estimated_utilization, 3),
+            )
+        return estimated_utilization < self.session_fold_threshold
+
+    async def _execute_compaction(
+        self,
+        session: Any,
+        current_token_count: int,
+        side_query: SideQueryFn | None,
+        session_id: str,
+        span: Any,
+    ) -> bool:
+        """按 arm 执行压缩：truncate → 直接截断；否则工具折叠，必要时会话折叠。"""
+        hidden_before = _count_hidden_seqs(session)
+        message_tokens_before = estimate_visible_message_tokens(session)
+
+        if self.arm == "truncate":
+            truncated = self._truncate_oldest_groups(
+                session, current_token_count, message_tokens_before
+            )
+            if span:
+                span.add_metadata(truncate=truncated)
+            _finish_compaction_span(span, session, hidden_before, truncated, False)
+            return truncated
+
+        folded = False
+        if self.arm == "session_only":
+            if span:
+                span.add_metadata(tool_fold=False)
+        else:
+            folded = await self._fold_tool_results(session, side_query)
+            if span:
+                span.add_metadata(tool_fold=folded)
+
+        if self.arm == "tool_only":
+            _finish_compaction_span(span, session, hidden_before, folded, False)
+            return folded
+
+        if folded and self._tool_fold_sufficient(
+            session, current_token_count, message_tokens_before, span
+        ):
+            _finish_compaction_span(span, session, hidden_before, folded, False)
+            return folded
+
+        session_folded = await self._fold_session(
+            session, side_query, session_id
+        )
+        folded = session_folded or folded
+        if span:
+            span.add_metadata(session_fold=session_folded)
+        _finish_compaction_span(span, session, hidden_before, folded, session_folded)
+        return folded
+
     async def run_pipeline(
         self,
         session: Any,
@@ -177,14 +256,7 @@ class ContextCompressor:
         utilization = current_token_count / self.effective_window if self.effective_window else 0
         idle_seconds = time.time() - last_api_call_time if last_api_call_time else 0
 
-        folded = False
-        if self.arm == "full":
-            should_compress = (
-                utilization > self.tool_fold_threshold
-                or idle_seconds > self.idle_timeout_seconds
-            )
-        else:
-            should_compress = utilization > self.tool_fold_threshold
+        should_compress = self._should_compress(utilization, idle_seconds)
 
         print(
             f"[compressor] check: arm={self.arm}, tokens={current_token_count}, utilization={utilization:.2%}, "
@@ -193,7 +265,6 @@ class ContextCompressor:
 
         if not should_compress:
             return False
-
 
         trigger = "utilization" if utilization > self.tool_fold_threshold else "idle"
         with trace_span(
@@ -208,56 +279,9 @@ class ContextCompressor:
                 "session_fold_threshold": self.session_fold_threshold,
             },
         ) as span:
-            hidden_before = _count_hidden_seqs(session)
-            message_tokens_before = estimate_visible_message_tokens(session)
-
-            if self.arm == "truncate":
-                truncated = self._truncate_oldest_groups(
-                    session, current_token_count, message_tokens_before
-                )
-                if span:
-                    span.add_metadata(truncate=truncated)
-                _finish_compaction_span(span, session, hidden_before, truncated, False)
-                return truncated
-
-            if self.arm == "session_only":
-                folded = False
-                if span:
-                    span.add_metadata(tool_fold=False)
-            else:
-                folded = await self._fold_tool_results(session, side_query)
-                if span:
-                    span.add_metadata(tool_fold=folded)
-
-            if self.arm == "tool_only":
-                _finish_compaction_span(span, session, hidden_before, folded, False)
-                return folded
-
-            if folded:
-                estimated_tokens = self._estimate_tokens_after_fold(
-                    current_token_count,
-                    message_tokens_before,
-                    session,
-                )
-                estimated_utilization = estimated_tokens / self.effective_window if self.effective_window else 0
-                if span:
-                    span.add_metadata(
-                        token_count_after_tool_fold=estimated_tokens,
-                        utilization_after_tool_fold=round(estimated_utilization, 3),
-                    )
-                if estimated_utilization < self.session_fold_threshold:
-                    _finish_compaction_span(span, session, hidden_before, folded, False)
-                    return folded
-
-            session_folded = await self._fold_session(
-                session, side_query, session_id
+            return await self._execute_compaction(
+                session, current_token_count, side_query, session_id, span
             )
-            folded = session_folded or folded
-            if span:
-                span.add_metadata(session_fold=session_folded)
-            _finish_compaction_span(span, session, hidden_before, folded, session_folded)
-
-        return folded
 
     def _truncate_oldest_groups(
         self,
@@ -537,6 +561,42 @@ class ContextCompressor:
                 result[call_id] = abstract
         return result
 
+    async def _resolve_fold_notes(
+        self,
+        side_query: SideQueryFn | None,
+        transcript: str,
+        previous_notes: str,
+        fallback_transcript: str,
+    ) -> tuple[str, str, str, bool]:
+        """有 side_query 走 LLM 编译会话笔记；否则用回退格式化。返回 (summary, notes, knowledge, validated)。"""
+        if side_query:
+            return await self._compile_session_notes(
+                side_query, transcript, previous_notes, fallback_transcript
+            )
+        summary = format_folded_memory(fallback_folded_memory(fallback_transcript))
+        return summary, "", "", False
+
+    def _spawn_wiki_fold_task(
+        self,
+        session: Any,
+        session_id: str,
+        session_notes: str,
+        side_query: SideQueryFn | None,
+    ) -> None:
+        """会话折叠后异步触发 Wiki 编译（fire-and-forget，任务持有防 GC）。"""
+        workspace = _current_workspace.get()
+        task = asyncio.create_task(
+            on_session_folded(
+                session_id=session_id,
+                session=session,
+                session_notes=session_notes,
+                side_query=side_query,
+                workspace=workspace,
+            )
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
     async def _fold_session(
         self,
         session: Any,
@@ -575,19 +635,13 @@ class ContextCompressor:
                 f"New conversation transcript:\n{transcript}"
             )
 
-        session_notes = ""
-        project_knowledge = ""
-        notes_validated = False
-
-        if side_query:
-            summary, session_notes, project_knowledge, notes_validated = (
-                await self._compile_session_notes(
-                    side_query, transcript, previous_notes, fallback_transcript
-                )
+        summary, session_notes, project_knowledge, notes_validated = (
+            await self._resolve_fold_notes(
+                side_query, transcript, previous_notes, fallback_transcript
             )
-        else:
-            summary = format_folded_memory(fallback_folded_memory(fallback_transcript))
+        )
 
+        # trajectory 模式保留用户组（任务锚点），dialog 模式全部隐藏；去重保序
         seqs_to_hide: list[int] = []
         for group in folded_groups:
             if fold_mode == "trajectory" and group.is_user:
@@ -613,18 +667,7 @@ class ContextCompressor:
         })
 
         if self.wiki_enabled:
-            workspace = _current_workspace.get()
-            task = asyncio.create_task(
-                on_session_folded(
-                    session_id=session_id,
-                    session=session,
-                    session_notes=session_notes,
-                    side_query=side_query,
-                    workspace=workspace,
-                )
-            )
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
+            self._spawn_wiki_fold_task(session, session_id, session_notes, side_query)
 
         self._session_fold_count += 1
         self._record_fold_event()

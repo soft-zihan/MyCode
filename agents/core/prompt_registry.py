@@ -27,11 +27,9 @@ class PromptInfo:
 _PROMPTS_DIR = Path(__file__).parent.parent / "prompts"
 
 
-def list_all_prompts() -> list[PromptInfo]:
-    """列出所有提示词。"""
+def _collect_main_prompt() -> list[PromptInfo]:
+    """1. 主系统提示词。"""
     prompts: list[PromptInfo] = []
-    
-    # 1. 主系统提示词
     system_txt = _PROMPTS_DIR / "system.txt"
     if system_txt.exists():
         prompts.append(PromptInfo(
@@ -42,8 +40,12 @@ def list_all_prompts() -> list[PromptInfo]:
             editable=True,
             content=system_txt.read_text(encoding="utf-8"),
         ))
-    
-    # 2. 子 Agent 提示词
+    return prompts
+
+
+def _collect_subagent_prompts() -> list[PromptInfo]:
+    """2. 子 Agent 提示词。"""
+    prompts: list[PromptInfo] = []
     subagent_dir = _PROMPTS_DIR / "subagent"
     if subagent_dir.exists():
         for f in sorted(subagent_dir.glob("*.txt")):
@@ -55,84 +57,87 @@ def list_all_prompts() -> list[PromptInfo]:
                 editable=True,
                 content=f.read_text(encoding="utf-8"),
             ))
-    
-    # 3. Side Query 提示词
-    # 这些是独立的提示词文件，不包括 hidden agent 对应的文件
+    return prompts
+
+
+# Side Query 提示词描述（不含 hidden agent 对应文件）
+_SIDE_QUERY_DESCRIPTIONS = {
+    "compile_session": "编译会话笔记",
+    "consolidate_v2": "Wiki 整理（git-diff 驱动）",
+    "explore": "技术调研",
+    "extract_goal": "提取目标标准",
+    "extract_knowledge": "提取持久知识",
+    "generate_skill": "生成 Skill",
+    "select_wiki": "选择相关 Wiki 条目",
+    "verify_goal": "验证目标达成",
+}
+
+# 这些文件已经在 hidden agent 中处理，不需要重复加载
+_HIDDEN_AGENT_FILES = {
+    "select_wiki.txt",
+    "compile_session.txt",
+    "generate_skill.txt",
+    "extract_goal.txt",
+}
+
+
+def _collect_side_query_prompts() -> list[PromptInfo]:
+    """3. Side Query 提示词（独立文件，排除 hidden agent 已覆盖的）。"""
+    prompts: list[PromptInfo] = []
     side_query_dir = _PROMPTS_DIR / "side_query"
-    if side_query_dir.exists():
-        side_query_descriptions = {
-            "compile_session": "编译会话笔记",
-            "consolidate_v2": "Wiki 整理（git-diff 驱动）",
-            "explore": "技术调研",
-            "extract_goal": "提取目标标准",
-            "extract_knowledge": "提取持久知识",
-            "generate_skill": "生成 Skill",
-            "select_wiki": "选择相关 Wiki 条目",
-            "verify_goal": "验证目标达成",
-        }
-        
-        # 这些文件已经在 hidden agent 中处理，不需要重复加载
-        hidden_agent_files = {
-            "select_wiki.txt",
-            "compile_session.txt",
-            "generate_skill.txt",
-            "extract_goal.txt",
-        }
-        
-        for f in sorted(side_query_dir.glob("*.txt")):
-            # 跳过已经在 hidden agent 中处理的文件
-            if f.name in hidden_agent_files:
-                continue
-                
-            prompts.append(PromptInfo(
-                name=f"side_query:{f.stem}",
-                category="side_query",
-                description=side_query_descriptions.get(f.stem, f"Side Query: {f.stem}"),
-                source=str(f),
-                editable=True,
-                content=f.read_text(encoding="utf-8"),
-            ))
-    
-    # 4. Hidden Agent 提示词（归类为 side_query）
-    # 这些 agent 的提示词在 agent_mode.py 中定义，或者从文件加载
+    if not side_query_dir.exists():
+        return prompts
+    for f in sorted(side_query_dir.glob("*.txt")):
+        # 跳过已经在 hidden agent 中处理的文件
+        if f.name in _HIDDEN_AGENT_FILES:
+            continue
+        prompts.append(PromptInfo(
+            name=f"side_query:{f.stem}",
+            category="side_query",
+            description=_SIDE_QUERY_DESCRIPTIONS.get(f.stem, f"Side Query: {f.stem}"),
+            source=str(f),
+            editable=True,
+            content=f.read_text(encoding="utf-8"),
+        ))
+    return prompts
+
+
+# hidden agent 到提示词文件的映射
+_HIDDEN_AGENT_PROMPT_FILES = {
+    "side_query_title": "generate_title.txt",
+    "side_query_wiki": "select_wiki.txt",
+    "side_query_compile": "compile_session.txt",
+    "side_query_skill": "generate_skill.txt",
+    "side_query_goal": "extract_goal.txt",
+}
+
+
+def _collect_hidden_agent_prompts() -> list[PromptInfo]:
+    """4. Hidden Agent 提示词（归类为 side_query）。
+
+    优先级：用户 override (~/.mycode/agents/<name>.md) > 提示词文件 > agent_mode.py 内置。
+    """
+    prompts: list[PromptInfo] = []
     user_agents_dir = Path.home() / ".mycode" / "agents"
-    
-    # 定义 hidden agent 到提示词文件的映射
-    hidden_agent_prompt_files = {
-        "side_query_title": "generate_title.txt",
-        "side_query_wiki": "select_wiki.txt",
-        "side_query_compile": "compile_session.txt",
-        "side_query_skill": "generate_skill.txt",
-        "side_query_goal": "extract_goal.txt",
-    }
-    
+
     for name, config in BUILTIN_HIDDEN_AGENTS.items():
         override_path = user_agents_dir / f"{name}.md"
-        has_override = override_path.exists()
-        
-        # 如果有 override 文件，读取完整内容（包括 frontmatter）
-        if has_override:
+        if override_path.exists():
+            # 如果有 override 文件，读取完整内容（包括 frontmatter）
             content = override_path.read_text(encoding="utf-8")
             source = str(override_path)
         else:
-            # 检查是否有对应的提示词文件
-            prompt_file = hidden_agent_prompt_files.get(name)
-            if prompt_file:
-                prompt_path = _PROMPTS_DIR / "side_query" / prompt_file
-                if prompt_path.exists():
-                    content = prompt_path.read_text(encoding="utf-8")
-                    source = str(prompt_path)
-                else:
-                    # 文件不存在，使用 agent_mode.py 中的提示词
-                    meta = {"name": name, "description": config.description}
-                    content = format_frontmatter(meta, config.system_prompt)
-                    source = "builtin"
+            prompt_file = _HIDDEN_AGENT_PROMPT_FILES.get(name)
+            prompt_path = _PROMPTS_DIR / "side_query" / prompt_file if prompt_file else None
+            if prompt_path is not None and prompt_path.exists():
+                content = prompt_path.read_text(encoding="utf-8")
+                source = str(prompt_path)
             else:
-                # 没有对应的提示词文件，使用 agent_mode.py 中的提示词
+                # 没有可用的提示词文件，使用 agent_mode.py 中的提示词
                 meta = {"name": name, "description": config.description}
                 content = format_frontmatter(meta, config.system_prompt)
                 source = "builtin"
-        
+
         # 使用更清晰的名称
         display_name = name.replace("side_query_", "")
         prompts.append(PromptInfo(
@@ -143,30 +148,48 @@ def list_all_prompts() -> list[PromptInfo]:
             editable=True,
             content=content,
         ))
-    
-    # 5. Plan Mode 策略文件
+    return prompts
+
+
+_PLAN_STRATEGY_DESCRIPTIONS = {
+    "grill-spec": "需求澄清策略",
+    "tasks": "任务拆分策略",
+    "execute": "执行策略",
+    "review": "审查策略",
+    "converge": "收敛策略",
+}
+
+
+def _collect_plan_strategy_prompts() -> list[PromptInfo]:
+    """5. Plan Mode 策略文件。"""
+    prompts: list[PromptInfo] = []
     strategies_dir = Path(__file__).parent.parent / "plan" / "strategies"
-    if strategies_dir.exists():
-        strategy_descriptions = {
-            "grill-spec": "需求澄清策略",
-            "tasks": "任务拆分策略",
-            "execute": "执行策略",
-            "review": "审查策略",
-            "converge": "收敛策略",
-        }
-        for category_dir in sorted(strategies_dir.iterdir()):
-            if category_dir.is_dir():
-                category = category_dir.name
-                for f in sorted(category_dir.glob("*.md")):
-                    prompts.append(PromptInfo(
-                        name=f"plan_strategy:{category}/{f.stem}",
-                        category="plan",
-                        description=f"{strategy_descriptions.get(category, category)}: {f.stem}",
-                        source=str(f),
-                        editable=True,
-                        content=f.read_text(encoding="utf-8"),
-                    ))
-    
+    if not strategies_dir.exists():
+        return prompts
+    for category_dir in sorted(strategies_dir.iterdir()):
+        if not category_dir.is_dir():
+            continue
+        category = category_dir.name
+        for f in sorted(category_dir.glob("*.md")):
+            prompts.append(PromptInfo(
+                name=f"plan_strategy:{category}/{f.stem}",
+                category="plan",
+                description=f"{_PLAN_STRATEGY_DESCRIPTIONS.get(category, category)}: {f.stem}",
+                source=str(f),
+                editable=True,
+                content=f.read_text(encoding="utf-8"),
+            ))
+    return prompts
+
+
+def list_all_prompts() -> list[PromptInfo]:
+    """列出所有提示词。"""
+    prompts: list[PromptInfo] = []
+    prompts.extend(_collect_main_prompt())
+    prompts.extend(_collect_subagent_prompts())
+    prompts.extend(_collect_side_query_prompts())
+    prompts.extend(_collect_hidden_agent_prompts())
+    prompts.extend(_collect_plan_strategy_prompts())
     return prompts
 
 
