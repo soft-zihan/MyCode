@@ -64,12 +64,23 @@ class TurnRunner:
 
         _ws_token = set_workspace(a.workspace)
         try:
-            with trace_context(
-                session_id=a.session_id if not a.is_sub_agent else None,
-                trace_name="agent-turn",
-                tags=trace_tags,
-            ):
-                await self.run_turn(user_message, trigger=trigger, trace_input=trace_input)
+            # BC-36：每轮 = 独立 agent-turn root trace。子代理 run / 唤醒轮经
+            # create_task 继承父 turn 的 OTel context，trace_context 会因
+            # _has_active_span 静默 no-op → 子代理全部 span 嵌进父 trace
+            # （子代理会话 0 trace、父 trace 貌似"自己干活"、wake 轮丢
+            # auto-wake trace）。无条件 detach 环境 context 保证 root 语义；
+            # 父子关联由父 trace 的 agent.general span（含 sub_session_id）承载
+            from opentelemetry import context as otel_context
+            _ctx_token = otel_context.attach(otel_context.Context())
+            try:
+                with trace_context(
+                    session_id=a.session_id if not a.is_sub_agent else None,
+                    trace_name="agent-turn",
+                    tags=trace_tags,
+                ):
+                    await self.run_turn(user_message, trigger=trigger, trace_input=trace_input)
+            finally:
+                otel_context.detach(_ctx_token)
         finally:
             reset_workspace(_ws_token)
 
