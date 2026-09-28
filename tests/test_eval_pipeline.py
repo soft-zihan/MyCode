@@ -15,7 +15,13 @@ from eval.langfuse.code_evaluators import (
     eval_tool_success,
 )
 from eval.langfuse.failure_classifier import FailureClassifier, FailureMode
-from eval.langfuse.judge import parse_judge_response, _tool_sequence_text, _truncate_middle
+from eval.langfuse.judge import (
+    parse_judge_response,
+    _tool_sequence_text,
+    _truncate_middle,
+    _judgeable_tool_obs,
+    _retrieved_context_text,
+)
 
 
 def _obs(type_: str, name: str, level: str = "DEFAULT", input=None, output=None, metadata: dict | None = None, start: str = "") -> dict:
@@ -200,6 +206,51 @@ class TestJudgeParsing:
         assert text.startswith("HEAD")
         assert text.endswith("FINAL ANSWER: 65")
         assert "truncated" in text
+
+
+class TestJudgeFidelity:
+    """BC-35：评审保真度——解析器嵌套花括号、系统 span 剔除、派发 kwargs、召回上下文。"""
+
+    def test_parse_nested_braces_in_reasoning(self):
+        raw = '{"score": 1.0, "reasoning": "GET /health returning {\'status\': \'ok\'} fully meeting"}'
+        assert parse_judge_response(raw)["score"] == 1.0
+
+    def test_parse_prose_with_nested_json(self):
+        raw = 'verdict:\n{"score": 0.5, "reasoning": "used {\'a\': 1} then done"}\nend'
+        assert parse_judge_response(raw)["score"] == 0.5
+
+    def test_mcp_init_excluded_from_sequence(self):
+        bundle = _bundle([
+            _obs("TOOL", "mcp.init", input="null", start="2026-01-01T00:00:01Z"),
+            _obs("TOOL", "tool.read_file", input="{}", start="2026-01-01T00:00:02Z"),
+        ])
+        text = _tool_sequence_text(bundle)
+        assert "mcp.init" not in text
+        assert "total_tool_calls=1" in text
+
+    def test_guard_skips_system_spans_only(self):
+        assert _judgeable_tool_obs(_bundle([_obs("TOOL", "mcp.init")])) == []
+
+    def test_agent_dispatch_kwargs_surfaced(self):
+        bundle = _bundle([
+            _obs("AGENT", "agent.general", input="记住口令",
+                 metadata={"agent_type": "general", "background": True},
+                 start="2026-01-01T00:00:01Z"),
+        ])
+        text = _tool_sequence_text(bundle)
+        assert "agent.general" in text
+        assert '"background": true' in text
+
+    def test_retrieved_context_from_output_and_metadata(self):
+        bundle = _bundle([
+            _obs("RETRIEVER", "wiki.recall", output="[feedback/use-pnpm.md]\n装依赖先用 pnpm",
+                 start="2026-01-01T00:00:01Z"),
+            _obs("RETRIEVER", "wiki.recall", metadata={"entries": ["knowledge/a.md"]},
+                 start="2026-01-01T00:00:02Z"),
+            _obs("RETRIEVER", "other.retriever", output="ignored", start="2026-01-01T00:00:03Z"),
+        ])
+        ctx = _retrieved_context_text(bundle)
+        assert "pnpm" in ctx and "knowledge/a.md" in ctx and "ignored" not in ctx
 
 
 class TestDatasetSync:

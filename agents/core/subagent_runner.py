@@ -117,7 +117,8 @@ async def execute_agent_tool(agent: "Agent", inp: dict, *, timeout_s: int) -> st
 
 async def _launch_job(agent: "Agent", sub_agent: "Agent", sub_session: Session, prompt: str,
                       *, agent_type: str, description: str, timeout_s: int,
-                      max_tool_calls: int | None, background: bool, resume: bool = False) -> ToolExecutionResult:
+                      max_tool_calls: int | None, background: bool, resume: bool = False,
+                      resume_session_id: str | None = None) -> ToolExecutionResult:
     """注册 job 并启动全生命周期 task（spawn/续跑共用）。
 
     background=true：标记后台化并立即返回 running 结果；
@@ -133,6 +134,7 @@ async def _launch_job(agent: "Agent", sub_agent: "Agent", sub_session: Session, 
     job.task = asyncio.create_task(_run_sub_agent_job(
         agent, job, sub_agent, sub_session, prompt,
         timeout_s=timeout_s, max_tool_calls=max_tool_calls, resume=resume,
+        background=background, resume_session_id=resume_session_id,
     ))
     register_job(job)
     # 让出一拍确保 job task 已进入运行体（到达首个 await 挂起点）：否则
@@ -199,7 +201,9 @@ async def _block_on_job(job: SubAgentJob) -> ToolExecutionResult:
 
 async def _run_sub_agent_job(agent: "Agent", job: SubAgentJob, sub_agent: "Agent",
                              sub_session: Session, prompt: str, *, timeout_s: int,
-                             max_tool_calls: int | None, resume: bool = False) -> None:
+                             max_tool_calls: int | None, resume: bool = False,
+                             background: bool = False,
+                             resume_session_id: str | None = None) -> None:
     """全生命周期 task：trace span → run → 封装 → sub_agent/end → 完成通知 → 注册表清理。
 
     在独立 task 中运行：前台提前返回（后台发起/转后台）后 span 与事件仍完整落账
@@ -226,6 +230,10 @@ async def _run_sub_agent_job(agent: "Agent", job: SubAgentJob, sub_agent: "Agent
                 "max_tool_calls": max_tool_calls,
                 "resume": resume,
                 "sub_session_id": job.sub_session_id,
+                # BC-35：派发 kwargs 入 span metadata——judge 只见 observations，
+                # 缺 background/session_id 时误判"未按要求参数派发"
+                "background": background,
+                "resume_session_id": resume_session_id,
             },
         ) as span:
             run_task = asyncio.create_task(sub_agent.run_once(prompt))
@@ -412,6 +420,7 @@ async def _resume_idle_sub_agent(agent: "Agent", inp: dict, resume_id: str, *, t
         agent_type=agent_type, description=description,
         timeout_s=timeout_s, max_tool_calls=max_tool_calls,
         background=bool(inp.get("background")), resume=True,
+        resume_session_id=resume_id,
     )
 
 

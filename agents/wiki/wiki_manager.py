@@ -649,6 +649,11 @@ async def select_relevant_wiki_entries(
                         recall_time_s=round(recall_time, 3),
                         entries=[e.rel_path for e in result],
                     )
+                    # BC-35：召回内容写入 span output——评审侧（judge）只见
+                    # observations，无此上下文会把"遵循记忆规则的回答"误判为错误
+                    span.update(output="\n---\n".join(
+                        f"[{e.rel_path}]\n{e.content[:500]}" for e in result
+                    )[:4000])
                 print(f"[wiki_select] hybrid_recall found {len(scored)} entries in {recall_time:.2f}s, returning {len(result)}")
                 return result
             else:
