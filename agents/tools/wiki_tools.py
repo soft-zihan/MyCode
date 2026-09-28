@@ -29,6 +29,78 @@ def _error(message: str) -> str:
     return json.dumps({"action": "error", "error": message}, ensure_ascii=False)
 
 
+def _prepare_remember_payload(
+    wiki_type: str, inp: dict, description: str
+) -> tuple[dict[str, str] | None, str | None]:
+    """校验并脱敏输入；返回 (payload, error)，payload 含 content/description
+    （workflow_pattern 另含 symptom/root_cause/workaround 供专用写入）。"""
+    if wiki_type == "workflow_pattern":
+        symptom = str(inp.get("symptom", "")).strip()
+        root_cause = str(inp.get("root_cause", "")).strip()
+        workaround = str(inp.get("workaround", "")).strip()
+        if not (symptom and root_cause and workaround):
+            return None, "workflow_pattern requires symptom, root_cause and workaround"
+        symptom, root_cause, workaround = (
+            redact_secrets(symptom), redact_secrets(root_cause), redact_secrets(workaround)
+        )
+        content = f"## Symptom\n{symptom}\n\n## Root cause\n{root_cause}\n\n## Workaround\n{workaround}"
+        return {
+            "content": content,
+            "description": description or symptom[:80],
+            "symptom": symptom,
+            "root_cause": root_cause,
+            "workaround": workaround,
+        }, None
+
+    content = str(inp.get("content", "")).strip()
+    if not content:
+        return None, "content is required"
+    content = redact_secrets(content)
+    return {"content": content, "description": description or content[:80]}, None
+
+
+async def _try_merge_similar(similar: list, content: str, side_query) -> str | None:
+    """高相似走 replace、中相似走 append 合并；未达阈值返回 None。"""
+    if not similar:
+        return None
+    top_entry, top_score = similar[0]
+    if top_score >= MERGE_REPLACE_THRESHOLD:
+        path = await asyncio.to_thread(
+            merge_wiki_entry, top_entry, content, mode="replace"
+        )
+        _maybe_consolidate(side_query)
+        return _result("merged", path, top_entry, top_score)
+    if top_score >= MERGE_APPEND_THRESHOLD:
+        path = await asyncio.to_thread(
+            merge_wiki_entry, top_entry, content, mode="append"
+        )
+        _maybe_consolidate(side_query)
+        return _result("appended", path, top_entry, top_score)
+    return None
+
+
+async def _create_remember_entry(wiki_type: str, name: str, payload: dict[str, str]):
+    """新建条目：workflow_pattern 走专用写入，其余走通用 write_wiki_entry。"""
+    if wiki_type == "workflow_pattern":
+        return await asyncio.to_thread(
+            write_workflow_pattern,
+            name=name,
+            symptom=payload["symptom"],
+            root_cause=payload["root_cause"],
+            workaround=payload["workaround"],
+            description=payload["description"],
+            extra_meta={"source": "agent"},
+        )
+    return await asyncio.to_thread(
+        write_wiki_entry,
+        wiki_type=wiki_type,
+        name=name,
+        content=payload["content"],
+        description=payload["description"],
+        extra_meta={"source": "agent"},
+    )
+
+
 async def remember(inp: dict, side_query=None) -> str:
     """写入一条持久记忆，自动去重合并。
 
@@ -49,65 +121,22 @@ async def remember(inp: dict, side_query=None) -> str:
     if not name:
         return _error("name is required")
 
-    if wiki_type == "workflow_pattern":
-        symptom = str(inp.get("symptom", "")).strip()
-        root_cause = str(inp.get("root_cause", "")).strip()
-        workaround = str(inp.get("workaround", "")).strip()
-        if not (symptom and root_cause and workaround):
-            return _error("workflow_pattern requires symptom, root_cause and workaround")
-        symptom, root_cause, workaround = (
-            redact_secrets(symptom), redact_secrets(root_cause), redact_secrets(workaround)
-        )
-        content = f"## Symptom\n{symptom}\n\n## Root cause\n{root_cause}\n\n## Workaround\n{workaround}"
-        description = description or symptom[:80]
-    else:
-        content = str(inp.get("content", "")).strip()
-        if not content:
-            return _error("content is required")
-        content = redact_secrets(content)
-        description = description or content[:80]
+    payload, error = _prepare_remember_payload(wiki_type, inp, description)
+    if error or payload is None:
+        return _error(error or "invalid input")
 
     try:
-        similar = await preflight_wiki_search(content, wiki_type)
+        similar = await preflight_wiki_search(payload["content"], wiki_type)
     except Exception as e:
         print(f"[remember] preflight failed ({type(e).__name__}: {e}), falling back to create")
         similar = []
 
     try:
-        if similar:
-            top_entry, top_score = similar[0]
-            if top_score >= MERGE_REPLACE_THRESHOLD:
-                path = await asyncio.to_thread(
-                    merge_wiki_entry, top_entry, content, mode="replace"
-                )
-                _maybe_consolidate(side_query)
-                return _result("merged", path, top_entry, top_score)
-            if top_score >= MERGE_APPEND_THRESHOLD:
-                path = await asyncio.to_thread(
-                    merge_wiki_entry, top_entry, content, mode="append"
-                )
-                _maybe_consolidate(side_query)
-                return _result("appended", path, top_entry, top_score)
+        merged = await _try_merge_similar(similar, payload["content"], side_query)
+        if merged:
+            return merged
 
-        if wiki_type == "workflow_pattern":
-            path = await asyncio.to_thread(
-                write_workflow_pattern,
-                name=name,
-                symptom=symptom,
-                root_cause=root_cause,
-                workaround=workaround,
-                description=description,
-                extra_meta={"source": "agent"},
-            )
-        else:
-            path = await asyncio.to_thread(
-                write_wiki_entry,
-                wiki_type=wiki_type,
-                name=name,
-                content=content,
-                description=description,
-                extra_meta={"source": "agent"},
-            )
+        path = await _create_remember_entry(wiki_type, name, payload)
         _maybe_consolidate(side_query)
         rel = str(path.relative_to(get_wiki_dir()))
         return json.dumps(

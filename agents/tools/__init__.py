@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from typing import Any
@@ -109,103 +110,90 @@ from agents.skills.skills import create_skill
 from agents.tools.runtime import get_runtime, DockerRuntime
 
 
-async def execute_tool(
-    name: str,
-    inp: dict,
-    read_file_state: dict[str, float] | None = None,
-) -> str:
-    """执行工具调用。"""
-    import asyncio
+_TOOL_HANDLERS: dict[str, Any] = {
+    "outline_file": outline_file,
+    "write_file": write_file,
+    "edit_file": edit_file,
+    "list_files": list_files,
+    "grep_search": grep_search,
+    "web_search": web_search,
+    "run_shell": run_shell,
+    "shell_status": shell_status,
+    "plan_propose": _plan_propose_tool,
+    "plan_status": _plan_status_tool,
+    "plan_list": _plan_list_tool,
+    "plan_update": _plan_update_tool,
+    "plan_task_start": _plan_task_start_tool,
+    "plan_task_done": _plan_task_done_tool,
+    "plan_task_failed": _plan_task_failed_tool,
+    "plan_complete": _plan_complete_tool,
+    "plan_add_artifact": _plan_add_artifact_tool,
+    "plan_read_artifact": _plan_read_artifact_tool,
+    "plan_archive": _plan_archive_tool,
+    "plan_explore": _plan_explore_tool,
+    "plan_save_explore": _plan_save_explore_tool,
+    "plan_continue": _plan_continue_tool,
+    "plan_retry": _plan_retry_tool,
+    "plan_recall": _plan_recall_tool,
+    "plan_abandon": _plan_abandon_tool,
+    "plan_reopen": _plan_reopen_tool,
+    "plan_check_expired": _plan_check_expired_tool,
+    "plan_pause": _plan_pause_tool,
+    "plan_resume": _plan_resume_tool,
+    "plan_skip": _plan_skip_tool,
+    "plan_redo": _plan_redo_tool,
+    "plan_rollback": _plan_rollback_tool,
+}
 
-    if name == "read_file":
-        result = read_file(inp)
-        if read_file_state is not None and not result.startswith("Error"):
-            rt = get_runtime()
-            if isinstance(rt, DockerRuntime):
-                abs_path = inp["file_path"]
-                if not abs_path.startswith("/"):
-                    abs_path = f"{rt.workdir}/{abs_path}"
-                read_file_state[abs_path] = 0
-            else:
-                abs_path = str(resolve_tool_path(inp["file_path"]).resolve())
-                try:
-                    read_file_state[abs_path] = os.path.getmtime(abs_path)
-                except OSError:
-                    pass
-        return _truncate_result(result)
 
-    if name in ("write_file", "edit_file") and read_file_state is not None:
-        rt = get_runtime()
-        if isinstance(rt, DockerRuntime):
-            abs_path = inp["file_path"]
-            if not abs_path.startswith("/"):
-                abs_path = f"{rt.workdir}/{abs_path}"
-        else:
-            abs_path = str(resolve_tool_path(inp["file_path"], must_exist=(name == "edit_file")).resolve())
-        if not isinstance(rt, DockerRuntime) and os.path.exists(abs_path):
-            # 允许写入空文件（刚创建的文件）
-            file_size = os.path.getsize(abs_path)
-            if file_size > 0:
-                if abs_path not in read_file_state:
-                    verb = "writing" if name == "write_file" else "editing"
-                    return f"Error: You must read this file before {verb}. Use read_file first to see its current contents."
-                if os.path.getmtime(abs_path) != read_file_state[abs_path]:
-                    verb = "writing" if name == "write_file" else "editing"
-                    return f"Warning: {inp['file_path']} was modified externally since your last read. Please read_file again before {verb}."
+def _resolve_abs_tool_path(inp: dict, must_exist: bool = False) -> str:
+    """工具路径解析为绝对路径（docker 下拼 runtime workdir，不落宿主磁盘）。"""
+    rt = get_runtime()
+    if isinstance(rt, DockerRuntime):
+        abs_path = inp["file_path"]
+        if not abs_path.startswith("/"):
+            abs_path = f"{rt.workdir}/{abs_path}"
+        return abs_path
+    return str(resolve_tool_path(inp["file_path"], must_exist=must_exist).resolve())
 
-    if name == "skill_create":
-        result = create_skill(
-            name=inp.get("name", ""),
-            description=inp.get("description", ""),
-            instructions=inp.get("instructions", ""),
-            when_to_use=inp.get("when_to_use") or inp.get("when-to-use", ""),
-            target=inp.get("target", "project"),
-            context=inp.get("context", "inline"),
-            user_invocable=bool(inp.get("user_invocable", False)),
-            allowed_tools=inp.get("allowed_tools"),
-            evidence=inp.get("evidence", ""),
-        )
-        return _truncate_result(json.dumps(result, ensure_ascii=False, indent=2))
 
-    handlers: dict = {
-        "outline_file": outline_file,
-        "write_file": write_file,
-        "edit_file": edit_file,
-        "list_files": list_files,
-        "grep_search": grep_search,
-        "web_search": web_search,
-        "run_shell": run_shell,
-        "shell_status": shell_status,
-        "plan_propose": _plan_propose_tool,
-        "plan_status": _plan_status_tool,
-        "plan_list": _plan_list_tool,
-        "plan_update": _plan_update_tool,
-        "plan_task_start": _plan_task_start_tool,
-        "plan_task_done": _plan_task_done_tool,
-        "plan_task_failed": _plan_task_failed_tool,
-        "plan_complete": _plan_complete_tool,
-        "plan_add_artifact": _plan_add_artifact_tool,
-        "plan_read_artifact": _plan_read_artifact_tool,
-        "plan_archive": _plan_archive_tool,
-        "plan_explore": _plan_explore_tool,
-        "plan_save_explore": _plan_save_explore_tool,
-        "plan_continue": _plan_continue_tool,
-        "plan_retry": _plan_retry_tool,
-        "plan_recall": _plan_recall_tool,
-        "plan_abandon": _plan_abandon_tool,
-        "plan_reopen": _plan_reopen_tool,
-        "plan_check_expired": _plan_check_expired_tool,
-        "plan_pause": _plan_pause_tool,
-        "plan_resume": _plan_resume_tool,
-        "plan_skip": _plan_skip_tool,
-        "plan_redo": _plan_redo_tool,
-        "plan_rollback": _plan_rollback_tool,
-    }
-    handler = handlers.get(name)
+def _check_write_freshness(
+    name: str, inp: dict, read_file_state: dict[str, float]
+) -> str | None:
+    """写前保护：未读过/读后被外部修改的文件拒绝写入；通过返回 None。"""
+    rt = get_runtime()
+    abs_path = _resolve_abs_tool_path(inp, must_exist=(name == "edit_file"))
+    if isinstance(rt, DockerRuntime) or not os.path.exists(abs_path):
+        return None
+    # 允许写入空文件（刚创建的文件）
+    file_size = os.path.getsize(abs_path)
+    if file_size > 0:
+        if abs_path not in read_file_state:
+            verb = "writing" if name == "write_file" else "editing"
+            return f"Error: You must read this file before {verb}. Use read_file first to see its current contents."
+        if os.path.getmtime(abs_path) != read_file_state[abs_path]:
+            verb = "writing" if name == "write_file" else "editing"
+            return f"Warning: {inp['file_path']} was modified externally since your last read. Please read_file again before {verb}."
+    return None
 
-    if not handler:
-        return f"Unknown tool: {name}"
 
+def _execute_skill_create(inp: dict) -> str:
+    result = create_skill(
+        name=inp.get("name", ""),
+        description=inp.get("description", ""),
+        instructions=inp.get("instructions", ""),
+        when_to_use=inp.get("when_to_use") or inp.get("when-to-use", ""),
+        target=inp.get("target", "project"),
+        context=inp.get("context", "inline"),
+        user_invocable=bool(inp.get("user_invocable", False)),
+        allowed_tools=inp.get("allowed_tools"),
+        evidence=inp.get("evidence", ""),
+    )
+    return _truncate_result(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+async def _call_tool_handler(name: str, handler: Any, inp: dict) -> str:
+    """调用 handler：async 直接 await，sync 走线程池；计时并截断结果。"""
     import inspect
     import time
     t0 = time.time()
@@ -216,7 +204,42 @@ async def execute_tool(
         print_info(f"[DEBUG] execute_tool: calling asyncio.to_thread for {name}")
         result = await asyncio.to_thread(handler, inp)
     print_info(f"[DEBUG] execute_tool: handler done for {name}, took {time.time()-t0:.2f}s")
-    result = _truncate_result(result)
+    return _truncate_result(result)
+
+
+async def execute_tool(
+    name: str,
+    inp: dict,
+    read_file_state: dict[str, float] | None = None,
+) -> str:
+    """执行工具调用。"""
+    if name == "read_file":
+        result = read_file(inp)
+        if read_file_state is not None and not result.startswith("Error"):
+            # 记录读取时 mtime（docker 下无宿主 mtime，记 0 表示"已读"）
+            abs_path = _resolve_abs_tool_path(inp)
+            if isinstance(get_runtime(), DockerRuntime):
+                read_file_state[abs_path] = 0
+            else:
+                try:
+                    read_file_state[abs_path] = os.path.getmtime(abs_path)
+                except OSError:
+                    pass
+        return _truncate_result(result)
+
+    if name in ("write_file", "edit_file") and read_file_state is not None:
+        freshness_error = _check_write_freshness(name, inp, read_file_state)
+        if freshness_error:
+            return freshness_error
+
+    if name == "skill_create":
+        return _execute_skill_create(inp)
+
+    handler = _TOOL_HANDLERS.get(name)
+    if not handler:
+        return f"Unknown tool: {name}"
+
+    result = await _call_tool_handler(name, handler, inp)
 
     if name in ("write_file", "edit_file") and read_file_state is not None and not result.startswith("Error"):
         abs_path = str(resolve_tool_path(inp["file_path"], must_exist=False).resolve())

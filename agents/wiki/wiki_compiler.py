@@ -83,6 +83,56 @@ _PROMPTS_DIR = Path(__file__).parent.parent / "prompts" / "side_query"
 EXTRACT_PROMPT = (_PROMPTS_DIR / "extract_knowledge.txt").read_text(encoding="utf-8")
 
 
+def _new_compile_stats() -> dict[str, int]:
+    return {
+        "knowledge": 0, "self_improvement": 0, "feedback": 0, "user": 0,
+        "reference": 0, "workflow_pattern": 0,
+        "deduped": 0,
+    }
+
+
+def _merge_compile_stats(total_stats: dict[str, int], stats: dict[str, int]) -> None:
+    for k, v in stats.items():
+        if isinstance(v, int):
+            total_stats[k] = total_stats.get(k, 0) + v
+
+
+async def _write_extracted_item(item: dict, source_segment: str) -> None:
+    """落盘单条提取结果：workflow_pattern 走专用写入，self_improvement 带 pending_confirm。"""
+    item_type = item.get("type", "")
+    name = item.get("name", "untitled")
+    description = item.get("description", "")
+
+    if item_type == "workflow_pattern":
+        await asyncio.to_thread(
+            write_workflow_pattern,
+            name=name,
+            symptom=item.get("symptom", ""),
+            root_cause=item.get("root_cause", ""),
+            workaround=item.get("workaround", ""),
+            description=description,
+            extra_meta={"source_segment": source_segment},
+        )
+    elif item_type == "self_improvement":
+        await asyncio.to_thread(
+            write_wiki_entry,
+            wiki_type="self_improvement",
+            name=name,
+            content=item.get("content", ""),
+            description=description,
+            extra_meta={"pending_confirm": "true", "source_segment": source_segment},
+        )
+    else:
+        await asyncio.to_thread(
+            write_wiki_entry,
+            wiki_type=item_type,
+            name=name,
+            content=item.get("content", ""),
+            description=description,
+            extra_meta={"source_segment": source_segment},
+        )
+
+
 async def compile_single_session(session_path: Path, side_query: Any) -> dict[str, int] | None:
     """编译单个 session 文件。
     
@@ -97,12 +147,8 @@ async def compile_single_session(session_path: Path, side_query: Any) -> dict[st
         return None
     
     try:
-        stats: dict[str, int] = {
-            "knowledge": 0, "self_improvement": 0, "feedback": 0, "user": 0,
-            "reference": 0, "workflow_pattern": 0,
-            "deduped": 0,
-        }
-        
+        stats = _new_compile_stats()
+
         result = parse_frontmatter(session_path.read_text())
         content = result.body
 
@@ -128,41 +174,11 @@ async def compile_single_session(session_path: Path, side_query: Any) -> dict[st
                     continue
                 
                 name = item.get("name", "untitled")
-                description = item.get("description", "")
-                
                 if _dedup_check(item_type, name):
                     stats["deduped"] += 1
                     continue
                 
-                if item_type == "workflow_pattern":
-                    await asyncio.to_thread(
-                        write_workflow_pattern,
-                        name=name,
-                        symptom=item.get("symptom", ""),
-                        root_cause=item.get("root_cause", ""),
-                        workaround=item.get("workaround", ""),
-                        description=description,
-                        extra_meta={"source_segment": source_segment},
-                    )
-                elif item_type == "self_improvement":
-                    await asyncio.to_thread(
-                        write_wiki_entry,
-                        wiki_type="self_improvement",
-                        name=name,
-                        content=item.get("content", ""),
-                        description=description,
-                        extra_meta={"pending_confirm": "true", "source_segment": source_segment},
-                    )
-                else:
-                    await asyncio.to_thread(
-                        write_wiki_entry,
-                        wiki_type=item_type,
-                        name=name,
-                        content=item.get("content", ""),
-                        description=description,
-                        extra_meta={"source_segment": source_segment},
-                    )
-                
+                await _write_extracted_item(item, source_segment)
                 stats[item_type] += 1
         
         await asyncio.to_thread(mark_session_compiled, session_path)
@@ -388,38 +404,12 @@ async def _generate_skill_from_pattern(entry: Any, side_query: Any) -> str | Non
         return None
 
 
-async def check_and_compile_pending_sessions(side_query: Any, threshold: int = 20) -> dict[str, int]:
-    """补编译：重试未编译 segment + 扫描落后 session。
-
-    两个来源：
-    1. 未编译的 segment 文件（编译失败/中断残留）→ 直接重试编译
-    2. 水位线落后 max_seq 超过 threshold 的 session（未触发过压缩）→ 从事件后端补捕获再编译
-
-    水位线只在编译成功后推进，失败留待下次重试。
-
-    Args:
-        side_query: side query 函数
-        threshold: 未提取事件数阈值，超过此值才触发补捕获
-
-    Returns:
-        总提取统计信息
-    """
-
-    total_stats: dict[str, int] = {
-        "knowledge": 0, "self_improvement": 0, "feedback": 0, "user": 0,
-        "reference": 0, "workflow_pattern": 0,
-        "deduped": 0,
-    }
-
-    def _merge(stats: dict[str, int]) -> None:
-        for k, v in stats.items():
-            if isinstance(v, int):
-                total_stats[k] = total_stats.get(k, 0) + v
-
-    # 阶段 1：重试未编译的 segment（失败/中断残留）
-    uncompiled = list_uncompiled_segments()
+async def _retry_uncompiled_segments(
+    side_query: Any, total_stats: dict[str, int]
+) -> set[str]:
+    """阶段 1：重试未编译的 segment（失败/中断残留）。返回有待重试 segment 的 session_id 集合。"""
     sessions_with_pending_segment: set[str] = set()
-    for seg_path in uncompiled:
+    for seg_path in list_uncompiled_segments():
         try:
             meta = parse_frontmatter(seg_path.read_text()).meta
             session_id = meta.get("session_id", "")
@@ -431,7 +421,7 @@ async def check_and_compile_pending_sessions(side_query: Any, threshold: int = 2
                 print(f"[wiki_backfill] compile lock busy, will retry later: {seg_path.name}")
                 continue
 
-            _merge(stats)
+            _merge_compile_stats(total_stats, stats)
             # 编译成功后才推进水位线
             if session_id:
                 seg_max_seq = int(meta.get("max_seq", "0"))
@@ -443,11 +433,21 @@ async def check_and_compile_pending_sessions(side_query: Any, threshold: int = 2
             print(f"[wiki_backfill] retry segment failed {seg_path.name}: {type(e).__name__}: {e}")
             register_compile_failure(seg_path)
             continue
+    return sessions_with_pending_segment
 
-    # 阶段 2：扫描水位线落后的 session（未触发过压缩）
+
+async def _compile_lagging_sessions(
+    side_query: Any,
+    threshold: int,
+    skip_session_ids: set[str],
+    total_stats: dict[str, int],
+) -> None:
+    """阶段 2：扫描水位线落后的 session（未触发过压缩），从事件后端补捕获再编译。
+
+    已有待重试 segment 的 session 跳过，避免重复捕获同一段事件。
+    """
     sessions_needing = find_sessions_needing_compilation(threshold)
-    # 已有待重试 segment 的 session 跳过，避免重复捕获同一段事件
-    sessions_needing = [s for s in sessions_needing if s[0] not in sessions_with_pending_segment]
+    sessions_needing = [s for s in sessions_needing if s[0] not in skip_session_ids]
 
     if sessions_needing:
         print(f"[wiki_backfill] found {len(sessions_needing)} sessions needing capture")
@@ -473,7 +473,7 @@ async def check_and_compile_pending_sessions(side_query: Any, threshold: int = 2
                 print(f"[wiki_backfill] compile lock busy, segment left for retry: {captured_path.name}")
                 continue
 
-            _merge(stats)
+            _merge_compile_stats(total_stats, stats)
             # 编译成功后才推进水位线
             max_event_seq = max(e.get("seq", 0) for e in events)
             set_last_extract_pos(session_id, max_event_seq)
@@ -482,4 +482,26 @@ async def check_and_compile_pending_sessions(side_query: Any, threshold: int = 2
             print(f"[wiki_backfill] error compiling session {session_id}: {type(e).__name__}: {e}")
             continue
 
+
+async def check_and_compile_pending_sessions(side_query: Any, threshold: int = 20) -> dict[str, int]:
+    """补编译：重试未编译 segment + 扫描落后 session。
+
+    两个来源：
+    1. 未编译的 segment 文件（编译失败/中断残留）→ 直接重试编译
+    2. 水位线落后 max_seq 超过 threshold 的 session（未触发过压缩）→ 从事件后端补捕获再编译
+
+    水位线只在编译成功后推进，失败留待下次重试。
+
+    Args:
+        side_query: side query 函数
+        threshold: 未提取事件数阈值，超过此值才触发补捕获
+
+    Returns:
+        总提取统计信息
+    """
+    total_stats = _new_compile_stats()
+    sessions_with_pending_segment = await _retry_uncompiled_segments(side_query, total_stats)
+    await _compile_lagging_sessions(
+        side_query, threshold, sessions_with_pending_segment, total_stats
+    )
     return total_stats

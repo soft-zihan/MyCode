@@ -149,6 +149,71 @@ def score_candidate(
     return total, signals
 
 
+async def _score_candidate_entries(
+    entries: list[WikiEntry],
+    query: str,
+    query_vec: Any,
+    query_terms: list[str],
+    cache: Any,
+    budget: Any,
+    score_threshold: float,
+) -> tuple[list[tuple[WikiEntry, float]], list[tuple[str, float, float]]]:
+    """对候选条目逐一评分：embedding 优先，冷启动预算耗尽/失败时降级关键词打分。"""
+    scored: list[tuple[WikiEntry, float]] = []
+    all_scores: list[tuple[str, float, float]] = []  # (rel_path, embedding_score, weighted_score)
+
+    for entry in entries:
+        text = embed_text_for_leaf(entry)
+        cached = cache.get_embedding(text)
+        if cached is not None:
+            entry_vec = cached
+        else:
+            if not budget.draw():
+                kw_score = _keyword_relevance(query, entry)
+                if kw_score > 0:
+                    scored.append((entry, kw_score * 0.5))
+                    all_scores.append((entry.rel_path, 0.0, kw_score * 0.5))
+                continue
+            try:
+                entry_vec = await embed_text(text)
+            except Exception:
+                kw_score = _keyword_relevance(query, entry)
+                if kw_score > 0:
+                    scored.append((entry, kw_score * 0.3))
+                    all_scores.append((entry.rel_path, 0.0, kw_score * 0.3))
+                continue
+
+        embedding_score = cosine_similarity(query_vec, entry_vec)
+        weighted_score, _ = score_candidate(query, entry, embedding_score, query_terms)
+        all_scores.append((entry.rel_path, embedding_score, weighted_score))
+
+        if weighted_score >= score_threshold * 100:
+            scored.append((entry, weighted_score / 100))
+
+    return scored, all_scores
+
+
+def _record_recall_span(
+    span: Any,
+    all_scores: list[tuple[str, float, float]],
+    result: list[tuple[WikiEntry, float]],
+) -> None:
+    """span 记录 top5 分数明细与 top3 结果路径。"""
+    if not span:
+        return
+    top_scores = sorted(all_scores, key=lambda x: -x[2])[:5]
+    metadata: dict[str, Any] = {
+        "result_count": len(result),
+        "top_scores": [
+            {"path": p, "emb": round(e, 3), "weighted": round(w, 1)}
+            for p, e, w in top_scores
+        ],
+    }
+    if result:
+        metadata["top_results"] = [e.rel_path for e, _ in result[:3]]
+    span.add_metadata(**metadata)
+
+
 async def semantic_recall(
     query: str,
     wiki_types: list[str] | None = None,
@@ -189,60 +254,19 @@ async def semantic_recall(
             return []
 
         cache = EmbeddingCache.get()
-
         budget = ColdBudget(max_cold=int(_get_setting("cold.maxCold", 50)))
         query_vec = await embed_text(query)
         query_terms = re.findall(r'\w+', query.lower())
 
-        scored: list[tuple[WikiEntry, float]] = []
-        all_scores: list[tuple[str, float, float]] = []  # (rel_path, embedding_score, weighted_score)
-        
-        for entry in entries:
-            text = embed_text_for_leaf(entry)
-            cached = cache.get_embedding(text)
-            if cached is not None:
-                entry_vec = cached
-            else:
-                if not budget.draw():
-                    kw_score = _keyword_relevance(query, entry)
-                    if kw_score > 0:
-                        scored.append((entry, kw_score * 0.5))
-                        all_scores.append((entry.rel_path, 0.0, kw_score * 0.5))
-                    continue
-                try:
-                    entry_vec = await embed_text(text)
-                except Exception:
-                    kw_score = _keyword_relevance(query, entry)
-                    if kw_score > 0:
-                        scored.append((entry, kw_score * 0.3))
-                        all_scores.append((entry.rel_path, 0.0, kw_score * 0.3))
-                    continue
-
-            embedding_score = cosine_similarity(query_vec, entry_vec)
-            weighted_score, _ = score_candidate(query, entry, embedding_score, query_terms)
-            all_scores.append((entry.rel_path, embedding_score, weighted_score))
-
-            if weighted_score >= score_threshold * 100:
-                scored.append((entry, weighted_score / 100))
-
+        scored, all_scores = await _score_candidate_entries(
+            entries, query, query_vec, query_terms, cache, budget, score_threshold
+        )
         cache.save()
 
         scored.sort(key=lambda x: -x[1])
         result = scored[:max_results]
-        
-        if span:
-            top_scores = sorted(all_scores, key=lambda x: -x[2])[:5]
-            metadata: dict[str, Any] = {
-                "result_count": len(result),
-                "top_scores": [
-                    {"path": p, "emb": round(e, 3), "weighted": round(w, 1)}
-                    for p, e, w in top_scores
-                ],
-            }
-            if result:
-                metadata["top_results"] = [e.rel_path for e, _ in result[:3]]
-            span.add_metadata(**metadata)
-        
+        _record_recall_span(span, all_scores, result)
+
         return result
 
 

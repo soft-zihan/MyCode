@@ -174,34 +174,9 @@ def _fit_context_budget(content: str, cfg: dict) -> tuple[str, bool]:
     return content[:head] + marker + content[-tail:], True
 
 
-def capture_session_to_session(
-    session_id: str,
-    events: list[dict],
-    segment_index: int = 1,
-) -> Path | None:
-    """捕获会话的一段事件到 session 文件。
-    
-    Args:
-        session_id: 会话 ID
-        events: 本次折叠的新事件列表（不是全部事件）
-        segment_index: 分段序号（同一个 session 可能有多段）
-    """
-    if not events:
-        return None
-    
-    now = datetime.now(timezone.utc)
-    session_dir = get_wiki_dir() / "session" / now.strftime("%Y/%m/%d")
-    session_dir.mkdir(parents=True, exist_ok=True)
-
-    slug = session_id.replace("/", "_").replace("\\", "_")[:40]
-    # 带分段序号，避免覆盖
-    filepath = session_dir / f"{slug}_seg{segment_index}.md"
-
-
-    cfg = _capture_settings()
-
-    # B1 修复：tool_result_msg 事件不带 tool_name，
-    # 从同段 assistant_message 的 tool_calls 反查 call_id → tool_name
+def _build_tool_name_index(events: list[dict]) -> dict[str, str]:
+    """B1 修复：tool_result_msg 事件不带 tool_name，
+    从同段 assistant_message 的 tool_calls 反查 call_id → tool_name。"""
     tool_name_by_call_id: dict[str, str] = {}
     for event in events:
         for tc in event.get("tool_calls") or []:
@@ -209,14 +184,19 @@ def capture_session_to_session(
             name = (tc.get("function") or {}).get("name") or ""
             if call_id and name:
                 tool_name_by_call_id[call_id] = name
+    return tool_name_by_call_id
 
-    # 从原始事件构建内容
+
+def _render_events_to_content(
+    events: list[dict], tool_name_by_call_id: dict[str, str], cfg: Any
+) -> str:
+    """从原始事件渲染捕获正文（用户/助手/思考/工具调用/工具结果分节）。"""
     content_parts = []
-    
+
     for event in events:
         event_type = event.get("type", "")
         content = event.get("content", "")
-        
+
         if event_type == "user_message":
             content_parts.append(f"## User\n{content}")
         elif event_type == "assistant_message":
@@ -241,8 +221,38 @@ def capture_session_to_session(
             )
             cleaned = _clean_tool_result(tool_name, content, cfg)
             content_parts.append(f"## Tool Result: {tool_name}\n{cleaned}")
+
+    return "\n\n".join(content_parts) if content_parts else "(empty session)"
+
+
+def capture_session_to_session(
+    session_id: str,
+    events: list[dict],
+    segment_index: int = 1,
+) -> Path | None:
+    """捕获会话的一段事件到 session 文件。
     
-    content = "\n\n".join(content_parts) if content_parts else "(empty session)"
+    Args:
+        session_id: 会话 ID
+        events: 本次折叠的新事件列表（不是全部事件）
+        segment_index: 分段序号（同一个 session 可能有多段）
+    """
+    if not events:
+        return None
+    
+    now = datetime.now(timezone.utc)
+    session_dir = get_wiki_dir() / "session" / now.strftime("%Y/%m/%d")
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    slug = session_id.replace("/", "_").replace("\\", "_")[:40]
+    # 带分段序号，避免覆盖
+    filepath = session_dir / f"{slug}_seg{segment_index}.md"
+
+    cfg = _capture_settings()
+
+    tool_name_by_call_id = _build_tool_name_index(events)
+    content = _render_events_to_content(events, tool_name_by_call_id, cfg)
+
     # 2.3：secrets 脱敏（segment 落盘前）
     content = redact_secrets(content)
     # 2.2：输入总预算，头尾保留中间截断

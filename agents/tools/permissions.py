@@ -204,82 +204,64 @@ def check_permission(
         return result
 
 
-def _check_permission_inner(
-    tool_name: str,
-    inp: dict,
-    mode: str = "default",
-    plan_dir: str | None = None,
-    sub_agent_type: str | None = None,
-    allowed_commands: list[str] | None = None,
-    plan_execution_active: bool = False,
-) -> dict:
-    """Internal permission check logic."""
-    if mode == "bypassPermissions":
-        return {"action": "allow"}
-
-    # 执行阶段禁止直接编辑 tasks.md
+def _check_plan_execution_guard(
+    tool_name: str, inp: dict, plan_execution_active: bool
+) -> dict | None:
+    """执行阶段禁止直接编辑 tasks.md（应走 mark_task_done/mark_task_failed）。"""
     if plan_execution_active and tool_name in EDIT_TOOLS:
         file_path = inp.get("file_path") or inp.get("path") or ""
         if "tasks.md" in file_path and ".mycode/plans" in file_path:
             return {"action": "deny", "message": "Direct editing of tasks.md is forbidden during plan execution. Use mark_task_done/mark_task_failed instead."}
+    return None
 
-    # Reviewer 子 Agent 的 run_shell 白名单验证
-    if sub_agent_type == "reviewer" and tool_name == "run_shell":
+
+def _check_reviewer_shell(
+    tool_name: str,
+    inp: dict,
+    sub_agent_type: str | None,
+    allowed_commands: list[str] | None,
+) -> dict | None:
+    """Reviewer 子 Agent 的 run_shell 白名单验证。"""
+    if sub_agent_type != "reviewer" or tool_name != "run_shell":
+        return None
+    command = inp.get("command", "")
+    if not allowed_commands:
+        return {"action": "deny", "message": "Reviewer run_shell: no allowed_commands provided"}
+    # 检查命令是否在白名单中
+    for allowed in allowed_commands:
+        if allowed.strip() and allowed.strip() in command:
+            return None
+    return {"action": "deny", "message": f"Reviewer run_shell: command not in whitelist. Allowed: {allowed_commands}"}
+
+
+def _check_plan_mode(tool_name: str, inp: dict, plan_dir: str | None) -> dict | None:
+    """plan 模式下的工具裁决；返回 None 表示无特殊裁决，继续走通用流程。"""
+    if tool_name == "todolist":
+        return {"action": "deny", "message": "todolist is disabled in plan mode. Use the plan system's tasks.md instead."}
+    if tool_name in EDIT_TOOLS:
+        file_path = inp.get("file_path") or inp.get("path")
+        # Plan 模式允许写 {plan_dir}/ 下任意文件
+        if plan_dir and file_path:
+            try:
+                from pathlib import Path
+                file_path_obj = Path(file_path).resolve()
+                plan_dir_obj = Path(plan_dir).resolve()
+                if file_path_obj.is_relative_to(plan_dir_obj):
+                    return {"action": "allow"}
+            except (ValueError, OSError):
+                pass
+        return {"action": "deny", "message": f"Blocked in plan mode: {tool_name}"}
+    if tool_name == "run_shell":
         command = inp.get("command", "")
-        if allowed_commands:
-            # 检查命令是否在白名单中
-            command_allowed = False
-            for allowed in allowed_commands:
-                if allowed.strip() and allowed.strip() in command:
-                    command_allowed = True
-                    break
-            if not command_allowed:
-                return {"action": "deny", "message": f"Reviewer run_shell: command not in whitelist. Allowed: {allowed_commands}"}
-        else:
-            return {"action": "deny", "message": "Reviewer run_shell: no allowed_commands provided"}
+        # Plan mode 允许只读命令
+        if _is_readonly_shell_command(command):
+            return {"action": "allow"}
+        return {"action": "deny", "message": "Shell commands blocked in plan mode (only read-only commands allowed)"}
+    return None
 
-    rule_result = _check_permission_rules(tool_name, inp)
-    if rule_result == "deny":
-        return {"action": "deny", "message": f"Denied by permission rule for {tool_name}"}
-    if rule_result == "allow":
-        return {"action": "allow"}
 
-    if tool_name in READ_TOOLS:
-        return {"action": "allow"}
-
-    if mode == "plan":
-        if tool_name == "todolist":
-            return {"action": "deny", "message": "todolist is disabled in plan mode. Use the plan system's tasks.md instead."}
-        if tool_name in EDIT_TOOLS:
-            file_path = inp.get("file_path") or inp.get("path")
-            # Plan 模式允许写 {plan_dir}/ 下任意文件
-            if plan_dir and file_path:
-                try:
-                    from pathlib import Path
-                    file_path_obj = Path(file_path).resolve()
-                    plan_dir_obj = Path(plan_dir).resolve()
-                    if file_path_obj.is_relative_to(plan_dir_obj):
-                        return {"action": "allow"}
-                except (ValueError, OSError):
-                    pass
-            return {"action": "deny", "message": f"Blocked in plan mode: {tool_name}"}
-        if tool_name == "run_shell":
-            command = inp.get("command", "")
-            # Plan mode 允许只读命令
-            if _is_readonly_shell_command(command):
-                return {"action": "allow"}
-            return {"action": "deny", "message": "Shell commands blocked in plan mode (only read-only commands allowed)"}
-
-    if tool_name == "enter_plan_mode":
-        return {"action": "allow"}
-    
-    if tool_name == "exit_plan_mode":
-        # Let the tool handle the confirmation internally with the plan content
-        return {"action": "allow"}
-
-    if mode == "acceptEdits" and tool_name in EDIT_TOOLS:
-        return {"action": "allow"}
-
+def _check_needs_confirmation(tool_name: str, inp: dict, mode: str) -> dict | None:
+    """有副作用的操作需要确认；dontAsk 模式自动拒绝。返回 None 表示无需确认。"""
     needs_confirm = False
     confirm_message = ""
 
@@ -303,5 +285,55 @@ def _check_permission_inner(
         if mode == "dontAsk":
             return {"action": "deny", "message": f"Auto-denied (dontAsk mode): {confirm_message}"}
         return {"action": "confirm", "message": confirm_message}
+    return None
+
+
+def _check_permission_inner(
+    tool_name: str,
+    inp: dict,
+    mode: str = "default",
+    plan_dir: str | None = None,
+    sub_agent_type: str | None = None,
+    allowed_commands: list[str] | None = None,
+    plan_execution_active: bool = False,
+) -> dict:
+    """Internal permission check logic."""
+    if mode == "bypassPermissions":
+        return {"action": "allow"}
+
+    # 执行阶段禁止直接编辑 tasks.md
+    guard = _check_plan_execution_guard(tool_name, inp, plan_execution_active)
+    if guard:
+        return guard
+
+    # Reviewer 子 Agent 的 run_shell 白名单验证
+    reviewer = _check_reviewer_shell(tool_name, inp, sub_agent_type, allowed_commands)
+    if reviewer:
+        return reviewer
+
+    rule_result = _check_permission_rules(tool_name, inp)
+    if rule_result == "deny":
+        return {"action": "deny", "message": f"Denied by permission rule for {tool_name}"}
+    if rule_result == "allow":
+        return {"action": "allow"}
+
+    if tool_name in READ_TOOLS:
+        return {"action": "allow"}
+
+    if mode == "plan":
+        plan_result = _check_plan_mode(tool_name, inp, plan_dir)
+        if plan_result:
+            return plan_result
+
+    if tool_name in ("enter_plan_mode", "exit_plan_mode"):
+        # Let the tool handle the confirmation internally with the plan content
+        return {"action": "allow"}
+
+    if mode == "acceptEdits" and tool_name in EDIT_TOOLS:
+        return {"action": "allow"}
+
+    confirmation = _check_needs_confirmation(tool_name, inp, mode)
+    if confirmation:
+        return confirmation
 
     return {"action": "allow"}
