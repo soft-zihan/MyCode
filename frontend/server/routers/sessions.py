@@ -272,127 +272,6 @@ def _compute_breakdown_from_stats(latest_stats: dict, agent: Any) -> dict[str, A
     }
 
 
-def _compute_breakdown_from_agent(agent: Any) -> dict[str, Any]:
-    messages = agent.messages or []
-    system_chars = 0
-    user_chars = 0
-    assistant_chars = 0
-    tool_result_chars = 0
-    message_count = 0
-
-    for msg in messages:
-        role = msg.get('role', '')
-        content = msg.get('content', '')
-        if isinstance(content, str):
-            chars = len(content)
-        elif isinstance(content, list):
-            chars = sum(len(item.get('text', '')) for item in content if isinstance(item, dict) and item.get('type') == 'text')
-        else:
-            chars = 0
-        if role == 'system':
-            system_chars = chars
-        elif role == 'user':
-            user_chars += chars
-            message_count += 1
-        elif role == 'assistant':
-            assistant_chars += chars
-            message_count += 1
-        elif role == 'tool':
-            tool_result_chars += chars
-            message_count += 1
-
-    from agents.tools.registry import get_active_tool_definitions
-    tools = getattr(agent, 'tools', [])
-    tool_defs = get_active_tool_definitions(tools)
-    tools_json = json.dumps([{
-        'name': t.get('name', ''),
-        'description': t.get('description', ''),
-        'parameters': t.get('parameters', {}),
-    } for t in tool_defs], ensure_ascii=False)
-    tools_chars = len(tools_json)
-    mcp_tool_count = sum(1 for t in tool_defs if t.get('name', '').startswith('mcp__'))
-    builtin_tool_count = len(tool_defs) - mcp_tool_count
-
-    try:
-        from agents.core.prompt import (
-            load_claude_md, build_skill_descriptions,
-            build_wiki_prompt_section, build_workspace_structure
-        )
-        system_claude_md_chars = len(load_claude_md())
-        system_skills_chars = len(build_skill_descriptions())
-        system_wiki_chars = len(build_wiki_prompt_section())
-        system_workspace_chars = len(build_workspace_structure())
-        system_base_chars = system_chars - system_claude_md_chars - system_skills_chars - system_wiki_chars - system_workspace_chars
-    except Exception:
-        system_base_chars = system_chars
-        system_claude_md_chars = 0
-        system_skills_chars = 0
-        system_wiki_chars = 0
-        system_workspace_chars = 0
-
-    is_plan_mode = getattr(agent, 'permission_mode', '') == 'plan'
-    plan_mode_chars = 0
-    if is_plan_mode and hasattr(agent, '_plan_mode_manager') and agent._plan_mode_manager:
-        try:
-            plan_mode_chars = len(agent._plan_mode_manager.build_plan_mode_prompt())
-        except Exception:
-            pass
-
-    actual_input_tokens = getattr(agent, 'last_input_token_count', 0)
-    total_chars = system_chars + tools_chars + user_chars + assistant_chars + tool_result_chars
-
-    if actual_input_tokens > 0 and total_chars > 0:
-        scale = actual_input_tokens / (total_chars / 4)
-        base_prompt_tokens = int(((system_base_chars + system_workspace_chars) / 4) * scale)
-        claude_md_tokens = int((system_claude_md_chars / 4) * scale)
-        skills_tokens = int((system_skills_chars / 4) * scale)
-        wiki_tokens = int((system_wiki_chars / 4) * scale)
-        tools_tokens = int((tools_chars / 4) * scale)
-        user_tokens = int((user_chars / 4) * scale)
-        assistant_tokens = int((assistant_chars / 4) * scale)
-        tool_tokens = int((tool_result_chars / 4) * scale)
-        plan_mode_tokens = int((plan_mode_chars / 4) * scale)
-    else:
-        base_prompt_tokens = (system_base_chars + system_workspace_chars) // 4
-        claude_md_tokens = system_claude_md_chars // 4
-        skills_tokens = system_skills_chars // 4
-        wiki_tokens = system_wiki_chars // 4
-        tools_tokens = tools_chars // 4
-        user_tokens = user_chars // 4
-        assistant_tokens = assistant_chars // 4
-        tool_tokens = tool_result_chars // 4
-        plan_mode_tokens = plan_mode_chars // 4
-
-    messages_tokens = user_tokens + assistant_tokens + tool_tokens
-
-    tool_result_by_name_chars = getattr(agent, '_tool_result_chars', {})
-    tool_result_by_name = {}
-    if tool_result_by_name_chars and tool_tokens > 0:
-        total_tool_chars = sum(tool_result_by_name_chars.values())
-        if total_tool_chars > 0:
-            for tool_name, chars in tool_result_by_name_chars.items():
-                tool_result_by_name[tool_name] = int(tool_tokens * (chars / total_tool_chars))
-
-    return {
-        "base_prompt_tokens": base_prompt_tokens,
-        "claude_md_tokens": claude_md_tokens,
-        "skills_tokens": skills_tokens,
-        "wiki_tokens": wiki_tokens,
-        "tools_tokens": tools_tokens,
-        "builtin_tool_count": builtin_tool_count,
-        "mcp_tool_count": mcp_tool_count,
-        "messages_tokens": messages_tokens,
-        "message_count": message_count,
-        "user_tokens": user_tokens,
-        "assistant_tokens": assistant_tokens,
-        "tool_tokens": tool_tokens,
-        "tool_result_by_name": tool_result_by_name,
-        "total_tokens": actual_input_tokens if actual_input_tokens > 0 else total_chars // 4,
-        "is_plan_mode": is_plan_mode,
-        "plan_mode_tokens": plan_mode_tokens,
-    }
-
-
 @router.delete("/api/sessions/{session_id}")
 def api_delete_session(session_id: str) -> dict[str, bool]:
     print(f"[DELETE] session_id={session_id}")
@@ -632,16 +511,8 @@ async def api_update_permission_mode(session_id: str, data: PermissionModeReques
     return {"success": True, "permission_mode": data.mode}
 
 
-@router.get("/api/sessions/{session_id}/token-breakdown")
-async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
-    """获取实际发给模型的 token 分解
-    
-    从事件日志最新 stats 事件读取细粒度 breakdown 数据（走 backend，两后端一致）
-    """
-    from agents.core.session import get_session_backend
-    backend = get_session_backend()
-    
-    _zero_breakdown = {
+def _zero_token_breakdown() -> dict[str, Any]:
+    return {
         "base_prompt_tokens": 0, "claude_md_tokens": 0, "skills_tokens": 0,
         "wiki_tokens": 0,
         "tools_tokens": 0, "builtin_tool_count": 0, "mcp_tool_count": 0,
@@ -650,65 +521,49 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
         "total_tokens": 0,
         "is_plan_mode": False, "plan_mode_tokens": 0,
     }
-    
-    if not backend.session_exists(session_id):
-        return _zero_breakdown
-    
-    # 从最新的 stats 事件读取
-    latest_stats = backend.get_latest_event(session_id, "stats") or {}
-    
-    if not latest_stats:
-        return _zero_breakdown
-    
-    actual_input_tokens = latest_stats.get("last_input_token_count", 0)
-    system_chars = latest_stats.get("system_chars", 0)
-    user_chars = latest_stats.get("user_chars", 0)
-    assistant_chars = latest_stats.get("assistant_chars", 0)
-    tool_result_chars = latest_stats.get("tool_result_chars", 0)
-    
-    # 检查是否有 breakdown 数据
-    has_breakdown = system_chars > 0 or user_chars > 0 or assistant_chars > 0 or tool_result_chars > 0
-    
-    if not has_breakdown:
-        # 从事件重建 messages
-        system_chars = 0
-        user_chars = 0
-        assistant_chars = 0
-        tool_result_chars = 0
-        message_count = 0
-        
-        for event in backend.load_all_events(session_id):
-            event_type = event.get("type", "")
-            
-            if event_type == "system_prompt":
-                system_chars = len(event.get("content", ""))
-            elif event_type == "user_message":
-                user_chars += len(event.get("content", ""))
-                message_count += 1
-            elif event_type == "assistant_message":
-                assistant_chars += len(event.get("content", ""))
-                message_count += 1
-            elif event_type == "tool_result_msg":
-                tool_result_chars += len(event.get("content", ""))
-                message_count += 1
-        
-        # 估算 system prompt 各部分（使用默认值）
-        if system_chars == 0:
-            system_chars = 6000  # 默认系统提示词大小
-        system_base_chars = int(system_chars * 0.55)  # 基础提示词占 55%
-        system_claude_md_chars = int(system_chars * 0.2)  # CLAUDE.md 占 20%
-        system_skills_chars = int(system_chars * 0.1)  # Skills 占 10%
-        system_wiki_chars = int(system_chars * 0.05)  # Wiki 占 5%
-        system_workspace_chars = int(system_chars * 0.05)  # Workspace 占 5%
-    else:
-        system_base_chars = latest_stats.get("system_base_chars", 0)
-        system_claude_md_chars = latest_stats.get("system_claude_md_chars", 0)
-        system_skills_chars = latest_stats.get("system_skills_chars", 0)
-        system_wiki_chars = latest_stats.get("system_wiki_chars", 0)
-        system_workspace_chars = latest_stats.get("system_workspace_chars", 0)
-        message_count = latest_stats.get("msg_count", 0)
-    
-    # 计算 tools 定义的字符数（用于缩放计算）
+
+
+def _rebuild_breakdown_chars(backend: Any, session_id: str) -> dict[str, int]:
+    """stats 缺少 breakdown 时从事件流重建各段字符数（保留原估算规则）。"""
+    system_chars = 0
+    user_chars = 0
+    assistant_chars = 0
+    tool_result_chars = 0
+    message_count = 0
+
+    for event in backend.load_all_events(session_id):
+        event_type = event.get("type", "")
+        if event_type == "system_prompt":
+            system_chars = len(event.get("content", ""))
+        elif event_type == "user_message":
+            user_chars += len(event.get("content", ""))
+            message_count += 1
+        elif event_type == "assistant_message":
+            assistant_chars += len(event.get("content", ""))
+            message_count += 1
+        elif event_type == "tool_result_msg":
+            tool_result_chars += len(event.get("content", ""))
+            message_count += 1
+
+    # 估算 system prompt 各部分（使用默认值）
+    if system_chars == 0:
+        system_chars = 6000  # 默认系统提示词大小
+    return {
+        "system_chars": system_chars,
+        "user_chars": user_chars,
+        "assistant_chars": assistant_chars,
+        "tool_result_chars": tool_result_chars,
+        "message_count": message_count,
+        "system_base_chars": int(system_chars * 0.55),       # 基础提示词占 55%
+        "system_claude_md_chars": int(system_chars * 0.2),   # CLAUDE.md 占 20%
+        "system_skills_chars": int(system_chars * 0.1),      # Skills 占 10%
+        "system_wiki_chars": int(system_chars * 0.05),       # Wiki 占 5%
+        "system_workspace_chars": int(system_chars * 0.05),  # Workspace 占 5%
+    }
+
+
+def _mcp_tools_chars(latest_stats: dict[str, Any]) -> tuple[int, int, int]:
+    """tools 定义字符数与 builtin/mcp 数量；MCP manager 不可用时退回 stats。"""
     try:
         from frontend.server.mcp_manager import global_mcp_manager
         tool_defs = global_mcp_manager.get_tool_definitions()
@@ -717,73 +572,115 @@ async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
             'description': t.get('description', ''),
             'parameters': t.get('parameters', {}),
         } for t in tool_defs], ensure_ascii=False)
-        tools_chars = len(tools_json)
-        builtin_tool_count = 0
-        mcp_tool_count = len(tool_defs)
-    except:
-        tools_chars = 0
-        builtin_tool_count = latest_stats.get("tool_count", 0)
-        mcp_tool_count = 0
+        return len(tools_json), 0, len(tool_defs)
+    except Exception:
+        return 0, latest_stats.get("tool_count", 0), 0
+
+
+def _scale_chars_to_tokens(chars: int, scale: Optional[float]) -> int:
+    """有实际 token 数时按缩放比换算 chars→tokens；否则按 4 chars≈1 token 估算。"""
+    if scale is not None:
+        return int((chars / 4) * scale)
+    return chars // 4
+
+
+def _distribute_tool_result_tokens(
+    by_name_chars: dict[str, int], tool_tokens: int
+) -> dict[str, int]:
+    """按各工具结果字符占比分摊 tool 结果总 token。"""
+    result: dict[str, int] = {}
+    if by_name_chars and tool_tokens > 0:
+        total_tool_chars = sum(by_name_chars.values())
+        if total_tool_chars > 0:
+            for tool_name, chars in by_name_chars.items():
+                result[tool_name] = int(tool_tokens * (chars / total_tool_chars))
+    return result
+
+
+def _resolve_breakdown_chars(
+    backend: Any, session_id: str, latest_stats: dict[str, Any]
+) -> dict[str, int]:
+    """优先取 stats 中的 breakdown 字符数；缺失则从事件流重建并补估算段。"""
+    system_chars = latest_stats.get("system_chars", 0)
+    user_chars = latest_stats.get("user_chars", 0)
+    assistant_chars = latest_stats.get("assistant_chars", 0)
+    tool_result_chars = latest_stats.get("tool_result_chars", 0)
+
+    has_breakdown = system_chars > 0 or user_chars > 0 or assistant_chars > 0 or tool_result_chars > 0
+    if not has_breakdown:
+        return _rebuild_breakdown_chars(backend, session_id)
+    return {
+        "system_chars": system_chars,
+        "user_chars": user_chars,
+        "assistant_chars": assistant_chars,
+        "tool_result_chars": tool_result_chars,
+        "message_count": latest_stats.get("msg_count", 0),
+        "system_base_chars": latest_stats.get("system_base_chars", 0),
+        "system_claude_md_chars": latest_stats.get("system_claude_md_chars", 0),
+        "system_skills_chars": latest_stats.get("system_skills_chars", 0),
+        "system_wiki_chars": latest_stats.get("system_wiki_chars", 0),
+        "system_workspace_chars": latest_stats.get("system_workspace_chars", 0),
+    }
+
+
+@router.get("/api/sessions/{session_id}/token-breakdown")
+async def api_get_token_breakdown(session_id: str) -> dict[str, Any]:
+    """获取实际发给模型的 token 分解
     
+    从事件日志最新 stats 事件读取细粒度 breakdown 数据（走 backend，两后端一致）
+    """
+    from agents.core.session import get_session_backend
+    backend = get_session_backend()
+
+    if not backend.session_exists(session_id):
+        return _zero_token_breakdown()
+
+    # 从最新的 stats 事件读取
+    latest_stats = backend.get_latest_event(session_id, "stats") or {}
+    if not latest_stats:
+        return _zero_token_breakdown()
+
+    actual_input_tokens = latest_stats.get("last_input_token_count", 0)
+    seg = _resolve_breakdown_chars(backend, session_id, latest_stats)
+
+    # 计算 tools 定义的字符数（用于缩放计算）
+    tools_chars, builtin_tool_count, mcp_tool_count = _mcp_tools_chars(latest_stats)
+
     # total_chars 包含 tools
-    total_chars = system_chars + tools_chars + user_chars + assistant_chars + tool_result_chars
-    
+    total_chars = (seg["system_chars"] + tools_chars + seg["user_chars"]
+                   + seg["assistant_chars"] + seg["tool_result_chars"])
+    scale: Optional[float] = None
     if actual_input_tokens > 0 and total_chars > 0:
         scale = actual_input_tokens / (total_chars / 4)
-        system_tokens = int((system_chars / 4) * scale)
-        user_tokens = int((user_chars / 4) * scale)
-        assistant_tokens = int((assistant_chars / 4) * scale)
-        tool_tokens = int((tool_result_chars / 4) * scale)
-        tools_definition_tokens = int((tools_chars / 4) * scale)
-        
-        base_prompt_tokens = int(((system_base_chars + system_workspace_chars) / 4) * scale)
-        claude_md_tokens = int((system_claude_md_chars / 4) * scale)
-        skills_tokens = int((system_skills_chars / 4) * scale)
-        wiki_tokens = int((system_wiki_chars / 4) * scale)
-    else:
-        system_tokens = system_chars // 4
-        user_tokens = user_chars // 4
-        assistant_tokens = assistant_chars // 4
-        tool_tokens = tool_result_chars // 4
-        tools_definition_tokens = tools_chars // 4
-        base_prompt_tokens = (system_base_chars + system_workspace_chars) // 4
-        claude_md_tokens = system_claude_md_chars // 4
-        skills_tokens = system_skills_chars // 4
-        wiki_tokens = system_wiki_chars // 4
-    
+
+    user_tokens = _scale_chars_to_tokens(seg["user_chars"], scale)
+    assistant_tokens = _scale_chars_to_tokens(seg["assistant_chars"], scale)
+    tool_tokens = _scale_chars_to_tokens(seg["tool_result_chars"], scale)
+    tools_definition_tokens = _scale_chars_to_tokens(tools_chars, scale)
     messages_tokens = user_tokens + assistant_tokens + tool_tokens
-    
-    # Plan mode
-    is_plan_mode = latest_stats.get("is_plan_mode", False)
-    plan_mode_chars = latest_stats.get("plan_mode_chars", 0)
-    plan_mode_tokens = int((plan_mode_chars / 4) * scale) if actual_input_tokens > 0 and total_chars > 0 else plan_mode_chars // 4
-    
+
     # 按工具名拆分的结果 token
-    tool_result_by_name_chars = latest_stats.get("tool_result_by_name", {})
-    tool_result_by_name = {}
-    if tool_result_by_name_chars and tool_tokens > 0:
-        total_tool_chars = sum(tool_result_by_name_chars.values())
-        if total_tool_chars > 0:
-            for tool_name, chars in tool_result_by_name_chars.items():
-                tool_result_by_name[tool_name] = int(tool_tokens * (chars / total_tool_chars))
-    
+    tool_result_by_name = _distribute_tool_result_tokens(
+        latest_stats.get("tool_result_by_name", {}), tool_tokens)
+
     return {
-        "base_prompt_tokens": base_prompt_tokens,
-        "claude_md_tokens": claude_md_tokens,
-        "skills_tokens": skills_tokens,
-        "wiki_tokens": wiki_tokens,
+        "base_prompt_tokens": _scale_chars_to_tokens(seg["system_base_chars"] + seg["system_workspace_chars"], scale),
+        "claude_md_tokens": _scale_chars_to_tokens(seg["system_claude_md_chars"], scale),
+        "skills_tokens": _scale_chars_to_tokens(seg["system_skills_chars"], scale),
+        "wiki_tokens": _scale_chars_to_tokens(seg["system_wiki_chars"], scale),
         "tools_tokens": tools_definition_tokens,
         "builtin_tool_count": builtin_tool_count,
         "mcp_tool_count": mcp_tool_count,
         "messages_tokens": messages_tokens,
-        "message_count": message_count if 'message_count' in dir() else latest_stats.get("msg_count", 0),
+        "message_count": seg["message_count"],
         "user_tokens": user_tokens,
         "assistant_tokens": assistant_tokens,
         "tool_tokens": tool_tokens,
         "tool_result_by_name": tool_result_by_name,
         "total_tokens": actual_input_tokens,
-        "is_plan_mode": is_plan_mode,
-        "plan_mode_tokens": plan_mode_tokens,
+        "is_plan_mode": latest_stats.get("is_plan_mode", False),
+        # Plan mode
+        "plan_mode_tokens": _scale_chars_to_tokens(latest_stats.get("plan_mode_chars", 0), scale),
     }
 
 
@@ -837,6 +734,64 @@ async def api_cancel_subagent(session_id: str, sub_session_id: str) -> dict[str,
     return {"success": True, "message": "Sub-agent cancel requested"}
 
 
+def _resolve_fork_name(base_name: str) -> str:
+    """生成不与现有会话重名的 fork 名称。"""
+    all_sessions = list_sessions()
+    fork_num = 1
+    while True:
+        fork_name = f"{base_name}(fork {fork_num})"
+        if not any(s.get("name") == fork_name for s in all_sessions):
+            return fork_name
+        fork_num += 1
+
+
+def _truncate_fork_events(events: list[dict], data: Optional["ForkRequest"]) -> list[dict]:
+    """按 fork 参数截断事件：at_seq 优先，其次 keep_user_messages。"""
+    truncated_events = list(events)
+    if data and data.at_seq is not None:
+        truncated_events = [e for e in events if e.get("seq", 0) < data.at_seq]
+        print(f"[FORK] truncating events at seq={data.at_seq}, kept={len(truncated_events)}")
+    elif data and data.keep_user_messages is not None:
+        user_count = 0
+        keep_until = len(truncated_events)
+        for i, event in enumerate(truncated_events):
+            if event.get("type") == "user_message":
+                user_count += 1
+                if user_count >= data.keep_user_messages:
+                    for j in range(i + 1, len(truncated_events)):
+                        if truncated_events[j].get("type") == "user_message":
+                            keep_until = j
+                            break
+                    else:
+                        keep_until = len(truncated_events)
+                    break
+        truncated_events = truncated_events[:keep_until]
+        print(f"[FORK] truncating events to keep {data.keep_user_messages} user messages, kept={len(truncated_events)}")
+    return truncated_events
+
+
+def _build_fork_projcache(new_session_id: str, copied_events: list[dict], cwd: Optional[str]) -> None:
+    """为 fork 出的新会话立即构建 projcache，前端列表无需等回放即可读投影。"""
+    try:
+        from agents.core.session_projection_cache import (
+            restore_projections,
+            SessionHeader,
+            FORMAT_VERSION,
+        )
+        header = SessionHeader(
+            id=new_session_id,
+            version=FORMAT_VERSION,
+            created_at=int(time.time() * 1000),
+            cwd=cwd,
+            is_seeded=False,
+            inherited_event_count=len(copied_events),
+        )
+        projections = restore_projections(new_session_id, copied_events, header)
+        print(f"[FORK] projcache built for {new_session_id}: title={projections.get('title')}")
+    except Exception as e:
+        print(f"[FORK] failed to build projcache: {e}")
+
+
 @router.post("/api/sessions/{session_id}/fork")
 async def api_fork_session(session_id: str, data: Optional[ForkRequest] = None) -> dict[str, Any]:
     """原子 Fork：从指定位置切割，创建新 session
@@ -879,38 +834,10 @@ async def api_fork_session(session_id: str, data: Optional[ForkRequest] = None) 
     base_name = original_title or session_id
     if "(fork " in base_name:
         base_name = base_name.rsplit("(fork ", 1)[0]
-    
-    all_sessions = list_sessions()
-    fork_num = 1
-    while True:
-        fork_name = f"{base_name}(fork {fork_num})"
-        exists = any(s.get("name") == fork_name for s in all_sessions)
-        if not exists:
-            break
-        fork_num += 1
-    
+    fork_name = _resolve_fork_name(base_name)
     print(f"[FORK] new: id={new_session_id}, name={fork_name}")
     
-    truncated_events = list(events)
-    if data and data.at_seq is not None:
-        truncated_events = [e for e in events if e.get("seq", 0) < data.at_seq]
-        print(f"[FORK] truncating events at seq={data.at_seq}, kept={len(truncated_events)}")
-    elif data and data.keep_user_messages is not None:
-        user_count = 0
-        keep_until = len(truncated_events)
-        for i, event in enumerate(truncated_events):
-            if event.get("type") == "user_message":
-                user_count += 1
-                if user_count >= data.keep_user_messages:
-                    for j in range(i + 1, len(truncated_events)):
-                        if truncated_events[j].get("type") == "user_message":
-                            keep_until = j
-                            break
-                    else:
-                        keep_until = len(truncated_events)
-                    break
-        truncated_events = truncated_events[:keep_until]
-        print(f"[FORK] truncating events to keep {data.keep_user_messages} user messages, kept={len(truncated_events)}")
+    truncated_events = _truncate_fork_events(events, data)
     
     copied_events = []
     for event in truncated_events:
@@ -933,27 +860,10 @@ async def api_fork_session(session_id: str, data: Optional[ForkRequest] = None) 
         backend.append(new_session_id, event)
     print(f"[FORK] wrote {len(copied_events)} events to {new_session_id}")
     
-    try:
-        from agents.core.session_projection_cache import (
-            restore_projections,
-            SessionHeader,
-            FORMAT_VERSION,
-        )
-        cwd = session.projections.get("cwd") if session else None
-        if not cwd and loaded is not None:
-            cwd = loaded.projections.get("cwd")
-        header = SessionHeader(
-            id=new_session_id,
-            version=FORMAT_VERSION,
-            created_at=int(time.time() * 1000),
-            cwd=cwd,
-            is_seeded=False,
-            inherited_event_count=len(copied_events),
-        )
-        projections = restore_projections(new_session_id, copied_events, header)
-        print(f"[FORK] projcache built for {new_session_id}: title={projections.get('title')}")
-    except Exception as e:
-        print(f"[FORK] failed to build projcache: {e}")
+    cwd = session.projections.get("cwd") if session else None
+    if not cwd and loaded is not None:
+        cwd = loaded.projections.get("cwd")
+    _build_fork_projcache(new_session_id, copied_events, cwd)
     
     return {
         "success": True,
@@ -1262,6 +1172,68 @@ def api_context_store(session_id: str) -> dict[str, Any]:
     return _build_payload(list(events))
 
 
+def _resolve_session_cwd(session_id: str) -> Optional[str]:
+    """会话 cwd：优先活 agent 工作区，其次会话元数据。"""
+    agent = _get_live_agent(session_id)
+    cwd = None
+    if agent is not None:
+        cwd = getattr(agent, 'workspace', None) or getattr(agent, 'cwd', None)
+
+    if not cwd:
+        # Try to get cwd from session metadata
+        for s in list_sessions():
+            if s.get("id") == session_id:
+                cwd = s.get("cwd")
+                break
+    return cwd
+
+
+def _is_snapshot_internal_path(path: str) -> bool:
+    return path.startswith(".mycode/") or path.startswith("manifests/")
+
+
+async def _collect_snapshot_file_entries(
+    items: Any,
+    git_repo: Any,
+    old_tree_hash: str,
+    new_tree_hash: Optional[str],
+    cwd: str,
+) -> list[dict[str, Any]]:
+    """从 diff/inspection 条目组装文件内容对。
+
+    new_tree_hash 为 None 表示单快照场景：new_content 读当前工作区文件。
+    """
+    files = []
+    for f in items:
+        if _is_snapshot_internal_path(f.path):
+            continue
+
+        old_content = ""
+        new_content = ""
+        is_new = f.status == "added"
+
+        # Get old content from first snapshot tree
+        if f.status in ("modified", "deleted"):
+            old_content = await git_repo.get_file_content(old_tree_hash, f.path)
+
+        # Get new content from last snapshot tree / current working tree
+        if f.status in ("added", "modified"):
+            if new_tree_hash is not None:
+                new_content = await git_repo.get_file_content(new_tree_hash, f.path)
+            else:
+                file_path = Path(cwd) / f.path
+                if file_path.exists():
+                    new_content = file_path.read_text(encoding="utf-8", errors="replace")
+
+        files.append({
+            "file_path": f.path,
+            "is_new": is_new,
+            "old_content": old_content,
+            "new_content": new_content,
+        })
+    return files
+
+
 @router.get("/api/sessions/{session_id}/file-changes")
 async def api_session_file_changes(session_id: str) -> dict[str, Any]:
     """Get file changes for a session using git-based snapshots.
@@ -1271,97 +1243,37 @@ async def api_session_file_changes(session_id: str) -> dict[str, Any]:
     """
     from agents.core.snapshot_service import SnapshotService
     from agents.core.git_repository import GitRepositoryManager
-    
-    # Get session cwd from metadata or active session
-    cwd = None
-    agent = _get_live_agent(session_id)
-    if agent is not None:
-        cwd = getattr(agent, 'workspace', None) or getattr(agent, 'cwd', None)
 
-    if not cwd:
-        # Try to get cwd from session metadata
-        from agents.core.session import list_sessions
-        for s in list_sessions():
-            if s.get("id") == session_id:
-                cwd = s.get("cwd")
-                break
-    
+    cwd = _resolve_session_cwd(session_id)
     if not cwd:
         return {"files": [], "total": 0}
-    
+
     snapshot_dir = Path.home() / ".mycode" / "snapshots"
     snapshot_service = SnapshotService(cwd, snapshot_dir)
     git_repo = GitRepositoryManager(cwd, snapshot_dir)
-    
+
     try:
         snapshots = await snapshot_service.list(session_id)
         if not snapshots:
             return {"files": [], "total": 0}
-        
+
         # Get the first and last snapshot
         first_snapshot = snapshots[-1]  # oldest
         last_snapshot = snapshots[0]    # newest
-        
-        files = []
-        
+        first_manifest = await snapshot_service.get_manifest(first_snapshot.id)
+
         if len(snapshots) == 1:
             # Only one snapshot, diff against current state
             inspection = await snapshot_service.inspect(first_snapshot.id)
-            first_manifest = await snapshot_service.get_manifest(first_snapshot.id)
-            
-            for f in inspection.files:
-                if f.path.startswith(".mycode/") or f.path.startswith("manifests/"):
-                    continue
-                    
-                old_content = ""
-                new_content = ""
-                is_new = f.status == "added"
-                
-                # Get old content from first snapshot tree
-                if f.status in ("modified", "deleted"):
-                    old_content = await git_repo.get_file_content(first_manifest.tree_hash, f.path)
-                
-                # Get new content from current working tree
-                if f.status in ("added", "modified"):
-                    file_path = Path(cwd) / f.path
-                    if file_path.exists():
-                        new_content = file_path.read_text(encoding="utf-8", errors="replace")
-                
-                files.append({
-                    "file_path": f.path,
-                    "is_new": is_new,
-                    "old_content": old_content,
-                    "new_content": new_content,
-                })
+            files = await _collect_snapshot_file_entries(
+                inspection.files, git_repo, first_manifest.tree_hash, None, cwd)
         else:
             # Diff between first and last snapshot
             diffs = await snapshot_service.diff(first_snapshot.id, last_snapshot.id)
-            first_manifest = await snapshot_service.get_manifest(first_snapshot.id)
             last_manifest = await snapshot_service.get_manifest(last_snapshot.id)
-            
-            for f in diffs:
-                if f.path.startswith(".mycode/") or f.path.startswith("manifests/"):
-                    continue
-                    
-                old_content = ""
-                new_content = ""
-                is_new = f.status == "added"
-                
-                # Get old content from first snapshot tree
-                if f.status in ("modified", "deleted"):
-                    old_content = await git_repo.get_file_content(first_manifest.tree_hash, f.path)
-                
-                # Get new content from last snapshot tree
-                if f.status in ("added", "modified"):
-                    new_content = await git_repo.get_file_content(last_manifest.tree_hash, f.path)
-                
-                files.append({
-                    "file_path": f.path,
-                    "is_new": is_new,
-                    "old_content": old_content,
-                    "new_content": new_content,
-                })
-        
+            files = await _collect_snapshot_file_entries(
+                diffs, git_repo, first_manifest.tree_hash, last_manifest.tree_hash, cwd)
+
         return {"files": files, "total": len(files)}
     except Exception as e:
         return {"files": [], "total": 0, "error": str(e)}

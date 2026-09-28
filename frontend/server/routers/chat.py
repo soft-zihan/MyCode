@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any, Optional
 
@@ -106,6 +107,83 @@ async def api_chat(data: ChatMessage) -> dict[str, Any]:
         }
 
 
+async def _restore_or_create_chat_session(sm: Any, data: ChatMessage, logger: Any):
+    """恢复既有会话或创建新会话；恢复时同步 permission mode。"""
+    agent, session = None, None
+    is_new_session = False
+    if data.session_id:
+        logger.info(f"[DEBUG] Trying to restore session: {data.session_id}")
+        result = await sm.restore(data.session_id, data.cwd)
+        if result:
+            agent, session = result
+            logger.info(f"[DEBUG] Session restored successfully: {session.id}")
+        else:
+            logger.warning(f"[DEBUG] Failed to restore session: {data.session_id}")
+
+    if not agent:
+        logger.info(f"[DEBUG] Creating new session (requested: {data.session_id})")
+        agent, session = sm.create(
+            data.model,
+            data.permission_mode,
+            data.cwd,
+            thinking=data.thinking,
+        )
+        is_new_session = True
+        logger.info(f"[DEBUG] New session created: {session.id}")
+
+        # Register project
+        if data.cwd:
+            from agents.core.project import register_project
+            register_project(data.cwd)
+    else:
+        # Session restored - check if agent type changed
+        if data.permission_mode and data.permission_mode != agent.permission_mode:
+            logger.info(f"[DEBUG] Syncing permission mode {agent.permission_mode} -> {data.permission_mode} for session {session.id}")
+            agent.set_permission_mode(data.permission_mode)
+    return agent, session, is_new_session
+
+
+def _spawn_title_generation(session: Any, message: str, logger: Any) -> None:
+    """后台生成标题并走事件流落盘（持久化 + 投影更新 + WS 广播，单一数据源）。"""
+    async def generate_title():
+        logger.info(f"[TITLE] Starting title generation for session {session.id}")
+        try:
+            from frontend.server.routers.sessions import generate_session_title
+            title_name = await generate_session_title(message)
+            logger.info(f"[TITLE] Generated name: {title_name}")
+            session.append("session/title", {"title": title_name})
+            logger.info(f"[TITLE] Title appended to event log for session {session.id}")
+        except Exception as e:
+            import traceback
+            logger.error(f"[TITLE] Title generation failed: {e}")
+            logger.error(f"[TITLE] Traceback: {traceback.format_exc()}")
+
+    asyncio.create_task(generate_title())
+    logger.info(f"[TITLE] Title generation task created for session {session.id}")
+
+
+def _spawn_chat_task(sm: Any, agent: Any, session: Any, full_message: str) -> Any:
+    """后台启动 agent.chat 并注册任务，供 stop/cancel 管理。"""
+    async def run_chat():
+        print(f"[DEBUG] run_chat: STARTED for session {session.id}")
+        try:
+            print(f"[DEBUG] run_chat: BEFORE agent.chat - agent.session_id = {agent.session_id}, agent.session.id = {agent.session.id}, id(agent.session) = {id(agent.session)}, session.id = {session.id}, id(session) = {id(session)}")
+            await agent.chat(full_message)
+            print(f"[DEBUG] run_chat: AFTER agent.chat - agent.session_id = {agent.session_id}, agent.session.id = {agent.session.id}")
+        except asyncio.CancelledError:
+            print(f"[DEBUG] run_chat: Task cancelled for session {session.id}")
+            raise
+        except Exception as e:
+            session.append("error", {"message": str(e)})
+        finally:
+            await agent.save()
+
+    chat_task = asyncio.create_task(run_chat())
+    print(f"[DEBUG] chat_task created: {chat_task}")
+    sm.register_chat_task(session.id, chat_task)
+    return chat_task
+
+
 @router.post("/api/chat/stream")
 async def api_chat_stream(data: ChatMessage) -> dict[str, Any]:
     """Start a chat turn. Events are pushed via WebSocket.
@@ -117,102 +195,38 @@ async def api_chat_stream(data: ChatMessage) -> dict[str, Any]:
     4. Events are pushed to the client via WebSocket (/ws/events)
     """
     from agents.session_manager import get_session_manager
-    import logging
-    import asyncio
     logger = logging.getLogger(__name__)
-    
+
     logger.info(f"[DEBUG] /api/chat/stream received session_id: {data.session_id}")
-    
+
     try:
         sm = get_session_manager()
-        
-        agent, session = None, None
-        is_new_session = False
-        if data.session_id:
-            logger.info(f"[DEBUG] Trying to restore session: {data.session_id}")
-            result = await sm.restore(data.session_id, data.cwd)
-            if result:
-                agent, session = result
-                logger.info(f"[DEBUG] Session restored successfully: {session.id}")
-            else:
-                logger.warning(f"[DEBUG] Failed to restore session: {data.session_id}")
-        
-        if not agent:
-            logger.info(f"[DEBUG] Creating new session (requested: {data.session_id})")
-            agent, session = sm.create(
-                data.model,
-                data.permission_mode,
-                data.cwd,
-                thinking=data.thinking,
-            )
-            is_new_session = True
-            logger.info(f"[DEBUG] New session created: {session.id}")
-            
-            # Register project
-            if data.cwd:
-                from agents.core.project import register_project
-                register_project(data.cwd)
-        else:
-            # Session restored - check if agent type changed
-            if data.permission_mode and data.permission_mode != agent.permission_mode:
-                logger.info(f"[DEBUG] Syncing permission mode {agent.permission_mode} -> {data.permission_mode} for session {session.id}")
-                agent.set_permission_mode(data.permission_mode)
-        
+        agent, session, is_new_session = await _restore_or_create_chat_session(sm, data, logger)
+
         # Build context
         full_message = build_message_with_context(data.message, data.context_files)
-        
+
         # session/created 事件已由 session_manager.create 追加到事件流
         # （持久化 + cwd 投影 + WS 全体广播，单一数据源）
-        
+
         if is_new_session:
             # Start title generation in background
-            async def generate_title():
-                logger.info(f"[TITLE] Starting title generation for session {session.id}")
-                try:
-                    from frontend.server.routers.sessions import generate_session_title
-                    title_name = await generate_session_title(data.message)
-                    logger.info(f"[TITLE] Generated name: {title_name}")
-                    # 标题走事件流（单一数据源）：持久化 + 投影更新 + WS 广播
-                    session.append("session/title", {"title": title_name})
-                    logger.info(f"[TITLE] Title appended to event log for session {session.id}")
-                except Exception as e:
-                    import traceback
-                    logger.error(f"[TITLE] Title generation failed: {e}")
-                    logger.error(f"[TITLE] Traceback: {traceback.format_exc()}")
-            
-            asyncio.create_task(generate_title())
-            logger.info(f"[TITLE] Title generation task created for session {session.id}")
-        
+            _spawn_title_generation(session, data.message, logger)
+
         # Start agent chat in background
-        async def run_chat():
-            print(f"[DEBUG] run_chat: STARTED for session {session.id}")
-            try:
-                print(f"[DEBUG] run_chat: BEFORE agent.chat - agent.session_id = {agent.session_id}, agent.session.id = {agent.session.id}, id(agent.session) = {id(agent.session)}, session.id = {session.id}, id(session) = {id(session)}")
-                await agent.chat(full_message)
-                print(f"[DEBUG] run_chat: AFTER agent.chat - agent.session_id = {agent.session_id}, agent.session.id = {agent.session.id}")
-            except asyncio.CancelledError:
-                print(f"[DEBUG] run_chat: Task cancelled for session {session.id}")
-                raise
-            except Exception as e:
-                session.append("error", {"message": str(e)})
-            finally:
-                await agent.save()
-        
-        chat_task = asyncio.create_task(run_chat())
-        print(f"[DEBUG] chat_task created: {chat_task}")
-        sm.register_chat_task(session.id, chat_task)
-        
+        chat_task = _spawn_chat_task(sm, agent, session, full_message)
+
         # 给任务一个机会开始执行
         await asyncio.sleep(0)
         print(f"[DEBUG] after sleep(0), chat_task done: {chat_task.done()}, cancelled: {chat_task.cancelled()}")
-        
+
         # Return session_id immediately
         print(f"[DEBUG] Returning session_id: {session.id}")
         return {
             "session_id": session.id,
             "is_new_session": is_new_session,
         }
-    
+
     except Exception as e:
         import traceback
         error_msg = f"Error processing message: {str(e)}\n\n{traceback.format_exc()}"
