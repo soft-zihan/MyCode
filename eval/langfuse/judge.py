@@ -18,20 +18,39 @@ JUDGE_MODEL_ENV = "MYCODE_JUDGE_MODEL"
 TASK_COMPLETION_PROMPT = """\
 You are an evaluation judge for an AI coding agent.
 
-## User request
+## User request (THIS turn only)
 {user_input}
+
+## Earlier turns in this session (context, oldest first)
+{prior_context}
 
 ## Memory/wiki context injected before this turn
 {retrieved_context}
 
+## Tools called this turn (name [status] only)
+{tools_summary}
+
 ## Agent final output
 {agent_output}
 
-Judge whether the agent's final output plausibly completes the user's request.
-You only see the request, injected memory context, and the final output (not the full transcript).
-IMPORTANT: If injected memory context contains project rules (e.g. a user-taught
-convention), an answer following that rule is CORRECT even if it contradicts
-general-world knowledge — the rule was explicitly taught by the user.
+Judge whether the agent's final output plausibly completes the user's request FOR THIS TURN.
+You see the request, session context, injected memory context, tool names called this
+turn, and the final output (not the full transcript).
+IMPORTANT:
+- Actions the agent took are evidenced by the tool list — if the requested action
+  appears there (e.g. compact_context, agent.general dispatch), the agent DID perform
+  it even when the prose output does not restate it.
+- This turn may be one step of a multi-turn scenario: earlier turns define what is being
+  asked (e.g. the user taught a workflow and THIS turn only asks to record/apply one step).
+  Judge against THIS turn's request as informed by earlier turns — do not demand work
+  that belongs to other turns.
+- If injected memory context contains project rules (e.g. a user-taught
+  convention), an answer following that rule is CORRECT even if it contradicts
+  general-world knowledge — the rule was explicitly taught by the user.
+- TEACHING scenario: when the user describes steps/workflows for the agent to RECORD
+  (e.g. "我现在教你...", "请记住...", "record this workflow"), the correct behavior is to
+  record and/or acknowledge — NOT to execute the described steps now. Never penalize
+  for not executing taught steps.
 Score 1.0 if the output directly addresses and plausibly completes the request,
 0.5 if partially addressed or unclear, 0.0 if it fails, refuses, or is unrelated.
 
@@ -40,8 +59,11 @@ Respond with JSON only: {{"score": <float 0-1>, "reasoning": "<one sentence>"}}"
 TRAJECTORY_PROMPT = """\
 You are an evaluation judge for an AI coding agent's execution trajectory.
 
-## User request
+## User request (THIS turn only)
 {user_input}
+
+## Earlier turns in this session (context, oldest first)
+{prior_context}
 
 ## Memory/wiki context injected before this turn
 {retrieved_context}
@@ -49,14 +71,21 @@ You are an evaluation judge for an AI coding agent's execution trajectory.
 ## Tool call sequence
 {tool_sequence}
 
-Judge trajectory quality: Are the tool choices reasonable for the request?
+Judge trajectory quality FOR THIS TURN: Are the tool choices reasonable for the request?
 Is there wasteful repetition, thrashing, or obvious wrong-tool usage?
 Notes:
+- Earlier turns define the multi-turn scenario; tools that belong to another step of the
+  scenario are not this turn's responsibility.
 - `agent.general` entries ARE sub-agent dispatches (the agent tool); their
   dispatch= JSON shows the actual kwargs (background/resume_session_id/...).
 - A [CANCELLED] or [BLOCKED] status may reflect a USER-REQUESTED cancellation
   or permission denial — judge it against the request, not as an automatic failure.
-- Answering from injected memory without tool calls can be the correct behavior.
+- Answering from injected memory or earlier-turn context without tool calls can be
+  the correct behavior.
+- TEACHING scenario: when the user describes steps/workflows for the agent to RECORD
+  (e.g. "我现在教你...", "第一步：运行 X", "record this workflow"), recording them (e.g. via
+  remember) instead of executing them is the CORRECT trajectory — do not penalize
+  "ignored the request to run X" when X was a taught step, not an execution request.
 Score 1.0 for an efficient sensible trajectory, 0.5 for noticeable waste,
 0.0 for a clearly broken trajectory (endless loops, irrelevant tools only).
 
@@ -107,6 +136,15 @@ def _truncate_middle(text: Any, *, head_chars: int = 1000, tail_chars: int = 400
 def _tool_status(obs: dict[str, Any]) -> str:
     metadata = obs.get("metadata") or {}
     outcome = str(metadata.get("outcome") or "").lower()
+    # 后台派发的 AGENT span 生命周期跨轮：CANCELLED 几乎总是后续轮的用户取消/
+    # 收尾清理。按轮评审时以"派发时刻"为准——当时已成功返回 state=running。
+    if (
+        obs.get("type") == "AGENT"
+        and isinstance(metadata, dict)
+        and metadata.get("background")
+        and outcome == "cancelled"
+    ):
+        return "ok-at-dispatch; background job cancelled in a LATER turn (by subsequent user request or cleanup), not a dispatch failure"
     if obs.get("level") == "ERROR" or outcome in {"error", "timeout", "cancelled", "blocked"}:
         return (outcome or "error").upper()
     return "ok"
@@ -116,7 +154,17 @@ def _tool_line(index: int, obs: dict[str, Any]) -> str:
     inp = obs.get("input")
     if not isinstance(inp, str):
         inp = json.dumps(inp, ensure_ascii=False, default=str)
-    line = f"{index}. {obs.get('name')} [{_tool_status(obs)}] input={inp[:200]}"
+    # 截断必须显式标注——否则 judge 把显示截断误判为"写入内容不完整"
+    shown = inp[:200] + (" …[display truncated; the actual call carried full input]" if len(inp) > 200 else "")
+    line = f"{index}. {obs.get('name')} [{_tool_status(obs)}] input={shown}"
+    # output 摘要：让 judge 看到调用实际效果（如 remember 的 action/path），
+    # 避免"看不到结果 → 断言没做"的误读
+    out = obs.get("output")
+    if out is not None:
+        if not isinstance(out, str):
+            out = json.dumps(out, ensure_ascii=False, default=str)
+        if out:
+            line += " output=" + out[:150].replace("\n", " ")
     # BC-35：AGENT observation = agent 工具派发，附上 kwargs（background/
     # resume_session_id/agent_type），否则 judge 看不到参数误判"未按要求派发"
     if obs.get("type") == "AGENT":
@@ -251,7 +299,58 @@ def _call_judge(prompt: str) -> dict[str, Any]:
     return parse_judge_response(resp.choices[0].message.content or "")
 
 
-def judge_task_completion(bundle: dict[str, Any]) -> dict[str, Any] | None:
+def build_prior_context(
+    client: Any,
+    current: dict[str, Any],
+    *,
+    bundle_cache: dict[str, dict[str, Any]] | None = None,
+    max_turns: int = 6,
+    input_chars: int = 300,
+    output_chars: int = 300,
+) -> str:
+    """M4-judge：同会话前序轮摘要（oldest first），消除逐轮评审的多阶段场景盲区。
+
+    只用 trace 级 input/output（不拉 observations），按 timestamp 排序取最近
+    max_turns 轮。无 sessionId（side-query 等）返回空串。
+    """
+    session_id = current.get("sessionId")
+    if not session_id:
+        return ""
+    cache = bundle_cache if bundle_cache is not None else {}
+    try:
+        peers = client.fetch_traces(limit=50, session_id=session_id)
+    except Exception:
+        return ""
+    ts = current.get("timestamp") or ""
+    earlier = sorted(
+        (t for t in peers if t.get("id") != current.get("id") and (t.get("timestamp") or "") < ts),
+        key=lambda t: t.get("timestamp") or "",
+    )[-max_turns:]
+    lines: list[str] = []
+    for t in earlier:
+        bundle = cache.get(t["id"])
+        if bundle is None:
+            try:
+                bundle = client.fetch_trace(t["id"])
+            except Exception:
+                continue
+            cache[t["id"]] = bundle
+        inp = str(bundle.get("input") or "").replace("\n", " ")[:input_chars]
+        out = str(bundle.get("output") or "").replace("\n", " ")[:output_chars]
+        lines.append(f"- user: {inp}\n  agent: {out}")
+    return "\n".join(lines)
+
+
+def _tools_summary_text(bundle: dict[str, Any]) -> str:
+    """本轮工具调用一览（name [status]），供 task_completion judge——
+    只看散文输出会把"做了但没复述"的行动判为未执行（compact/派发假 0 分类）。"""
+    obs = sorted(_judgeable_tool_obs(bundle), key=lambda o: o.get("startTime") or "")
+    if not obs:
+        return "(none)"
+    return ", ".join(f"{o.get('name')} [{_tool_status(o)}]" for o in obs)[:800]
+
+
+def judge_task_completion(bundle: dict[str, Any], prior_context: str = "") -> dict[str, Any] | None:
     """task_completion：用户请求 vs 最终输出。缺 input/output 时跳过。"""
     user_input = bundle.get("input")
     agent_output = bundle.get("output")
@@ -261,6 +360,8 @@ def judge_task_completion(bundle: dict[str, Any]) -> dict[str, Any] | None:
         user_input=_truncate_middle(user_input, head_chars=2000, tail_chars=1000),
         agent_output=_truncate_middle(agent_output, head_chars=1000, tail_chars=6000),
         retrieved_context=_retrieved_context_text(bundle) or "(none)",
+        prior_context=prior_context or "(first turn of this session)",
+        tools_summary=_tools_summary_text(bundle),
     )
     return _call_judge(prompt)
 
@@ -286,7 +387,7 @@ def _retrieved_context_text(bundle: dict[str, Any]) -> str:
     return "\n---\n".join(parts)[:4000]
 
 
-def judge_trajectory(bundle: dict[str, Any]) -> dict[str, Any] | None:
+def judge_trajectory(bundle: dict[str, Any], prior_context: str = "") -> dict[str, Any] | None:
     """trajectory：用户请求 vs 工具调用序列。无可评审工具调用时跳过。"""
     user_input = bundle.get("input")
     if not user_input:
@@ -298,11 +399,13 @@ def judge_trajectory(bundle: dict[str, Any]) -> dict[str, Any] | None:
         user_input=_truncate_middle(user_input, head_chars=1500, tail_chars=500),
         tool_sequence=_tool_sequence_text(bundle)[:12000],
         retrieved_context=retrieved or "(none)",
+        prior_context=prior_context or "(first turn of this session)",
     )
     return _call_judge(prompt)
 
 
-def judge_trace(client: Any, trace_id: str, *, task_completion: bool = True, trajectory: bool = True) -> list[dict[str, Any]]:
+def judge_trace(client: Any, trace_id: str, *, task_completion: bool = True, trajectory: bool = True,
+                prior_context: str = "") -> list[dict[str, Any]]:
     """对单条 trace 运行 LLM judges 并把分数写回 Langfuse。"""
     bundle = client.fetch_trace(trace_id)
     posted = []
@@ -312,7 +415,7 @@ def judge_trace(client: Any, trace_id: str, *, task_completion: bool = True, tra
     ):
         if not enabled:
             continue
-        result = fn(bundle)
+        result = fn(bundle, prior_context)
         if result is None:
             continue
         client.create_score(

@@ -85,6 +85,7 @@ class LangfuseApiClient:
         name: str | None = None,
         session_id: str | None = None,
         from_timestamp: str | datetime | None = None,
+        to_timestamp: str | datetime | None = None,
     ) -> list[dict[str, Any]]:
         response = self.api.trace.list(
             page=page,
@@ -92,6 +93,7 @@ class LangfuseApiClient:
             name=name,
             session_id=session_id,
             from_timestamp=_parse_timestamp(from_timestamp),
+            to_timestamp=_parse_timestamp(to_timestamp),
             request_options=self._request_options,
         )
         return [_model_to_dict(trace) for trace in response.data]

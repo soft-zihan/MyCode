@@ -11,6 +11,7 @@ def evaluate_traces(
     trace_ids: list[str],
     *,
     judge: bool = False,
+    prior_contexts: dict[str, str] | None = None,
     progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
@@ -36,7 +37,10 @@ def evaluate_traces(
 
         if judge:
             try:
-                posted = judge_trace(client, trace_id)
+                posted = judge_trace(
+                    client, trace_id,
+                    prior_context=(prior_contexts or {}).get(trace_id, ""),
+                )
                 entry["judge_scores"] = posted
             except Exception as e:
                 entry["judge_error"] = f"{type(e).__name__}: {e}"

@@ -211,6 +211,25 @@ class TestJudgeParsing:
 class TestJudgeFidelity:
     """BC-35：评审保真度——解析器嵌套花括号、系统 span 剔除、派发 kwargs、召回上下文。"""
 
+    def test_tool_line_truncation_marked(self):
+        from eval.langfuse.judge import _tool_line
+        line = _tool_line(1, _obs("TOOL", "write_file", input="x" * 500))
+        assert "display truncated" in line and "x" * 201 not in line
+
+    def test_tool_line_shows_output_excerpt(self):
+        from eval.langfuse.judge import _tool_line
+        line = _tool_line(1, _obs("TOOL", "tool.remember", input="{}",
+                                  output={"action": "created", "path": "workflow_pattern/x.md"}))
+        assert "output=" in line and "workflow_pattern/x.md" in line
+
+    def test_background_cancel_annotated_not_failure(self):
+        from eval.langfuse.judge import _tool_line
+        obs = _obs("AGENT", "agent.general", input="{}",
+                   metadata={"agent_type": "general", "background": True, "outcome": "cancelled"})
+        line = _tool_line(1, obs)
+        assert "ok-at-dispatch" in line and "cancelled in a LATER turn" in line
+        assert "[CANCELLED]" not in line
+
     def test_parse_nested_braces_in_reasoning(self):
         raw = '{"score": 1.0, "reasoning": "GET /health returning {\'status\': \'ok\'} fully meeting"}'
         assert parse_judge_response(raw)["score"] == 1.0
@@ -251,6 +270,101 @@ class TestJudgeFidelity:
         ])
         ctx = _retrieved_context_text(bundle)
         assert "pnpm" in ctx and "knowledge/a.md" in ctx and "ignored" not in ctx
+
+
+class TestJudgeSessionContext:
+    """M4-judge：逐轮评审注入同会话前序轮上下文。"""
+
+    class FakeSessionClient:
+        def __init__(self, peers, bundles):
+            self._peers = peers
+            self._bundles = bundles
+            self.session_queries = []
+
+        def fetch_traces(self, limit=50, session_id=None, **kwargs):
+            self.session_queries.append(session_id)
+            return [p for p in self._peers if p.get("sessionId") == session_id]
+
+        def fetch_trace(self, trace_id):
+            return self._bundles[trace_id]
+
+        def create_score(self, **kwargs):
+            return {"id": "s"}
+
+    def _fixture(self, n_prior=2):
+        peers, bundles = [], {}
+        for i in range(n_prior + 1):
+            tid = f"t{i}"
+            peers.append({"id": tid, "sessionId": "sess1",
+                          "timestamp": f"2026-09-28T00:00:0{i}Z"})
+            bundles[tid] = {"id": tid, "input": f"问{i}", "output": f"答{i}",
+                            "observations": []}
+        current = peers[-1]
+        return self.FakeSessionClient(peers, bundles), current, bundles
+
+    def test_orders_excludes_current_and_formats(self):
+        from eval.langfuse.judge import build_prior_context
+        client, current, _ = self._fixture(2)
+        ctx = build_prior_context(client, current)
+        assert ctx.index("问0") < ctx.index("问1")
+        assert f"问{current['id'][-1]}" not in ctx
+        assert "- user: 问0" in ctx and "agent: 答0" in ctx
+        assert client.session_queries == ["sess1"]
+
+    def test_max_turns_keeps_most_recent(self):
+        from eval.langfuse.judge import build_prior_context
+        client, current, _ = self._fixture(9)
+        ctx = build_prior_context(client, current, max_turns=3)
+        assert "问8" in ctx and "问7" in ctx and "问6" in ctx
+        assert "问5" not in ctx
+
+    def test_no_session_returns_empty(self):
+        from eval.langfuse.judge import build_prior_context
+        client, _, _ = self._fixture(2)
+        assert build_prior_context(client, {"id": "x", "timestamp": "2026-09-28T00:00:09Z"}) == ""
+
+    def test_fetch_error_degrades_to_empty(self):
+        from eval.langfuse.judge import build_prior_context
+
+        class Boom:
+            def fetch_traces(self, **kwargs):
+                raise RuntimeError("network")
+
+        assert build_prior_context(Boom(), {"id": "x", "sessionId": "s", "timestamp": "t"}) == ""
+
+    def test_prompts_receive_prior_context(self, monkeypatch):
+        import eval.langfuse.judge as judge_mod
+        captured = {}
+        monkeypatch.setattr(judge_mod, "_call_judge",
+                            lambda p: (captured.update(p=p), {"score": 1.0, "reasoning": ""})[1])
+        bundle = _bundle([_obs("TOOL", "read_file", input="{}")], input="本轮问题", output="本轮回答")
+        judge_mod.judge_task_completion(bundle, prior_context="- user: 前轮\n  agent: 前答")
+        assert "前轮" in captured["p"] and "Earlier turns" in captured["p"]
+        judge_mod.judge_trajectory(bundle, prior_context="- user: 前轮2\n  agent: 前答2")
+        assert "前轮2" in captured["p"]
+
+    def test_pipeline_passes_prior_contexts(self, monkeypatch):
+        import eval.langfuse.pipeline as pipeline_mod
+        seen = {}
+        monkeypatch.setattr(pipeline_mod, "judge_trace",
+                            lambda client, tid, **kw: seen.update({tid: kw.get("prior_context")}) or [])
+        client = self.FakeSessionClient([], {"t1": _bundle([_obs("TOOL", "read_file")], input="hi")})
+        pipeline_mod.evaluate_traces(client, ["t1"], judge=True, prior_contexts={"t1": "CTX"})
+        assert seen["t1"] == "CTX"
+
+
+    def test_completion_prompt_includes_tools_summary(self, monkeypatch):
+        import eval.langfuse.judge as judge_mod
+        captured = {}
+        monkeypatch.setattr(judge_mod, "_call_judge",
+                            lambda p: (captured.update(p=p), {"score": 1.0, "reasoning": ""})[1])
+        bundle = _bundle([
+            _obs("TOOL", "compact_context", input="{}"),
+            _obs("TOOL", "mcp.init", input="null"),
+        ], input="压缩上下文", output="已压缩")
+        judge_mod.judge_task_completion(bundle)
+        assert "compact_context [ok]" in captured["p"]
+        assert "mcp.init" not in captured["p"]
 
 
 class TestDatasetSync:

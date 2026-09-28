@@ -55,6 +55,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="MyCode Langfuse 评估管道")
     parser.add_argument("--limit", type=int, default=20, help="扫描 trace 数（默认 20）")
     parser.add_argument("--from-hours", type=float, default=24, help="只看最近 N 小时（默认 24，支持小数如 0.5）")
+    parser.add_argument("--from-timestamp", type=str, default=None,
+                        help="ISO 时间下界（优先于 --from-hours，精确窗口如单 run 收口）")
+    parser.add_argument("--to-timestamp", type=str, default=None, help="ISO 时间上界")
     parser.add_argument("--trace-id", type=str, default=None, help="只评估指定 trace")
     parser.add_argument("--judge", action="store_true", help="运行 LLM-as-Judge（task_completion/trajectory）")
     parser.add_argument("--sync-failures", action="store_true", help="失败案例回流 regression dataset")
@@ -71,12 +74,14 @@ def main() -> None:
     load_langfuse_env(PROJECT_ROOT)
     client = LangfuseApiClient()
 
-    from_ts = (datetime.now(timezone.utc) - timedelta(hours=args.from_hours)).isoformat()
+    from_ts = args.from_timestamp or (datetime.now(timezone.utc) - timedelta(hours=args.from_hours)).isoformat()
 
     if args.trace_id:
         trace_ids = [args.trace_id]
+        traces = []
     else:
-        traces = client.fetch_traces(limit=args.limit, from_timestamp=from_ts, name=args.name)
+        traces = client.fetch_traces(limit=args.limit, from_timestamp=from_ts,
+                                     to_timestamp=args.to_timestamp, name=args.name)
         if args.include_derived:
             trace_ids = [t["id"] for t in traces if t.get("id")]
         else:
@@ -84,6 +89,19 @@ def main() -> None:
             if excluded:
                 print(f"[eval] BC-24 筛选：排除派生 trace {excluded}（--include-derived 可关闭）")
     print(f"[eval] 待评估 traces: {len(trace_ids)}")
+
+    # M4-judge：逐轮评审注入同会话前序轮上下文（多阶段教学/执行轮的假阴性根治）
+    prior_contexts: dict[str, str] = {}
+    if args.judge:
+        from eval.langfuse.judge import build_prior_context
+        meta_by_id = {t["id"]: t for t in traces}
+        bundle_cache: dict[str, dict] = {}
+        for tid in trace_ids:
+            current = meta_by_id.get(tid) or client.fetch_trace(tid)
+            ctx = build_prior_context(client, current, bundle_cache=bundle_cache)
+            if ctx:
+                prior_contexts[tid] = ctx
+        print(f"[eval] 会话上下文：{len(prior_contexts)}/{len(trace_ids)} traces 带前序轮")
 
     def progress(payload: dict) -> None:
         result = payload["result"]
@@ -94,7 +112,8 @@ def main() -> None:
         if judge_error := result.get("judge_error"):
             print(f"    [judge] failed: {judge_error}")
 
-    summary = evaluate_traces(client, trace_ids, judge=args.judge, progress=progress)
+    summary = evaluate_traces(client, trace_ids, judge=args.judge,
+                              prior_contexts=prior_contexts, progress=progress)
     print(f"[eval] 完成：{summary['traces']} traces / {summary['code_scores']} code scores")
 
     if args.sync_failures:
