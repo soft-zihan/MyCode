@@ -235,6 +235,19 @@ def build_system_prompt(active_tools: set[str] | None = None) -> str:
 
     active_tools：当前工具名快照，用于条件化工具指引（None = 全量注入）。
     """
+    prompt, _ = build_system_prompt_with_breakdown(active_tools=active_tools)
+    return prompt
+
+
+def build_system_prompt_with_breakdown(
+    active_tools: set[str] | None = None,
+) -> tuple[str, dict[str, int]]:
+    """渲染 system prompt 并一次性产出各分段字符数（BC-23）。
+
+    分段大小在渲染时就地测量——观测方（token breakdown）直接读缓存，
+    不再为埋点重建重资产（load_claude_md/build_wiki_prompt_section 等）。
+    prompt 会话内真冻结（U5a），breakdown 与其同生命周期。
+    """
     import time
     from datetime import date
     _t0 = time.perf_counter()
@@ -288,4 +301,11 @@ def build_system_prompt(active_tools: set[str] | None = None) -> str:
             file=sys.stderr,
         )
 
-    return result
+    breakdown = {
+        "claude_md_chars": len(claude_md),
+        "agents_md_chars": len(agents_md),
+        "skills_chars": len(skills_section),
+        "wiki_chars": len(wiki_section),
+        "workspace_chars": len(workspace_structure),
+    }
+    return result, breakdown

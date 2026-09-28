@@ -340,26 +340,15 @@ class ModelCaller:
             elif role == "tool":
                 _tool_result_chars += chars
 
-        # System prompt 各部分（重新构建以获取各部分大小）
-        _system_base_chars = 0
-        _system_claude_md_chars = 0
-        _system_agents_md_chars = 0
-        _system_skills_chars = 0
-        _system_wiki_chars = 0
-        _system_workspace_chars = 0
-        try:
-            from agents.core.prompt import (
-                load_claude_md, load_agents_md, build_skill_descriptions,
-                build_wiki_prompt_section, build_workspace_structure
-            )
-            _system_claude_md_chars = len(load_claude_md())
-            _system_agents_md_chars = len(load_agents_md())
-            _system_skills_chars = len(build_skill_descriptions())
-            _system_wiki_chars = len(build_wiki_prompt_section())
-            _system_workspace_chars = len(build_workspace_structure())
-            _system_base_chars = _system_chars - _system_claude_md_chars - _system_agents_md_chars - _system_skills_chars - _system_wiki_chars - _system_workspace_chars
-        except Exception:
-            _system_base_chars = _system_chars
+        # System prompt 各部分（BC-23：读 build_system_prompt 渲染时的缓存，
+        # 不再每次调用重建重资产；custom prompt 时 breakdown 为空 = 无已知分段）
+        _bd = a._system_prompt_breakdown
+        _system_claude_md_chars = _bd.get("claude_md_chars", 0)
+        _system_agents_md_chars = _bd.get("agents_md_chars", 0)
+        _system_skills_chars = _bd.get("skills_chars", 0)
+        _system_wiki_chars = _bd.get("wiki_chars", 0)
+        _system_workspace_chars = _bd.get("workspace_chars", 0)
+        _system_base_chars = _system_chars - _system_claude_md_chars - _system_agents_md_chars - _system_skills_chars - _system_wiki_chars - _system_workspace_chars
 
         # plan mode 的额外 token 占用
         _plan_mode_chars = 0

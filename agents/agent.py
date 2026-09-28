@@ -270,6 +270,7 @@ class Agent:
         from .core.workspace import set_workspace, reset_workspace
         _ws_token = set_workspace(self.workspace)
         try:
+            self._system_prompt_breakdown: dict[str, int] = {}
             self._plan_mode_manager = PlanModeManager(
                 workspace=self.workspace,
                 session_id=self.session_id,

@@ -16,7 +16,7 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from agents.core.prompt import build_system_prompt
+from agents.core.prompt import build_system_prompt_with_breakdown
 
 if TYPE_CHECKING:
     from agents.agent import Agent
@@ -54,6 +54,7 @@ def refresh_runtime_system_prompt(agent: "Agent", force: bool = False) -> None:
     if agent._custom_system_prompt is not None:
         agent._base_system_prompt = agent._custom_system_prompt
         agent._system_prompt = agent._custom_system_prompt
+        agent._system_prompt_breakdown = {}
         agent.session.system_prompt = agent._custom_system_prompt
         return
     # U5a 真冻结：system prompt 会话内不变（所有模式，含 plan）。
@@ -69,8 +70,12 @@ def refresh_runtime_system_prompt(agent: "Agent", force: bool = False) -> None:
     _ws_token = set_workspace(agent.workspace)
     try:
         active_tools = {t.get("name") for t in agent.tools if t.get("name")}
-        agent._base_system_prompt = build_system_prompt(active_tools=active_tools)
-        agent._system_prompt = agent._base_system_prompt
+        # BC-23：渲染时一次性产出分段字符数并缓存——观测方只读缓存，
+        # 不再每次模型调用重建 claude_md/wiki/skills/workspace 重资产
+        prompt, breakdown = build_system_prompt_with_breakdown(active_tools=active_tools)
+        agent._base_system_prompt = prompt
+        agent._system_prompt = prompt
+        agent._system_prompt_breakdown = breakdown
         agent.session.system_prompt = agent._system_prompt
     finally:
         reset_workspace(_ws_token)
