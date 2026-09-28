@@ -253,9 +253,34 @@ class ToolCallTracker:
         outcome: str = "success",
         metadata: dict[str, Any] | None = None,
     ) -> ToolGuardDecision:
+        """记录工具执行结果并给出守卫决策（编排层；拆分自 102 行超限函数）。"""
         key = make_key(tool_name, args)
         metadata = dict(metadata or {})
         progress = has_meaningful_progress(metadata)
+        self._append_outcome_history(key, success, outcome, progress, metadata)
+
+        if success:
+            return self._record_success(key, tool_name, outcome)
+
+        failures, identical_threshold, streak_count = self._update_failure_streaks(
+            key, tool_name, outcome, progress, metadata,
+        )
+        block_info = self._detect_block(
+            key, tool_name, outcome, failures, identical_threshold, progress, streak_count,
+        )
+        self.last_decision = self._build_failure_decision(
+            tool_name, outcome, failures, progress, block_info,
+        )
+        return self.last_decision
+
+    def _append_outcome_history(
+        self,
+        key: tuple,
+        success: bool,
+        outcome: str,
+        progress: bool,
+        metadata: dict[str, Any],
+    ) -> None:
         self.outcome_history[key].append({
             "ts": time.time(),
             "success": success,
@@ -265,14 +290,23 @@ class ToolCallTracker:
         })
         self.outcome_history[key] = self.outcome_history[key][-20:]
 
-        if success:
-            self.consecutive_failures[key] = 0
-            self.blocked_keys.pop(key, None)
-            if self.tool_failure_streaks.get(tool_name, {}).get("outcome") in (None, outcome):
-                self.tool_failure_streaks.pop(tool_name, None)
-            self.last_decision = ToolGuardDecision(action="allow", verdict="success")
-            return self.last_decision
+    def _record_success(self, key: tuple, tool_name: str, outcome: str) -> ToolGuardDecision:
+        self.consecutive_failures[key] = 0
+        self.blocked_keys.pop(key, None)
+        if self.tool_failure_streaks.get(tool_name, {}).get("outcome") in (None, outcome):
+            self.tool_failure_streaks.pop(tool_name, None)
+        self.last_decision = ToolGuardDecision(action="allow", verdict="success")
+        return self.last_decision
 
+    def _update_failure_streaks(
+        self,
+        key: tuple,
+        tool_name: str,
+        outcome: str,
+        progress: bool,
+        metadata: dict[str, Any],
+    ) -> tuple[int, int, int]:
+        """返回 (consecutive_failures, identical_threshold, streak_count)。"""
         failures = self.consecutive_failures[key] + 1
         self.consecutive_failures[key] = failures
 
@@ -291,8 +325,18 @@ class ToolCallTracker:
             "progress": progress,
             "metadata": metadata,
         }
+        return failures, identical_threshold, streak_count
 
-        block_info: dict[str, Any] | None = None
+    def _detect_block(
+        self,
+        key: tuple,
+        tool_name: str,
+        outcome: str,
+        failures: int,
+        identical_threshold: int,
+        progress: bool,
+        streak_count: int,
+    ) -> dict[str, Any] | None:
         if failures >= identical_threshold:
             block_info = {
                 "scope": "identical_call",
@@ -304,7 +348,8 @@ class ToolCallTracker:
                 "progress": progress,
             }
             self.blocked_keys[key] = block_info
-        elif tool_name in LONG_RUNNING_TOOLS and outcome == "timeout":
+            return block_info
+        if tool_name in LONG_RUNNING_TOOLS and outcome == "timeout":
             threshold = AGENT_TIMEOUT_BLOCK_COUNT_WITH_PROGRESS if progress else AGENT_TIMEOUT_BLOCK_COUNT
             if streak_count >= threshold:
                 block_info = {
@@ -316,36 +361,43 @@ class ToolCallTracker:
                     "progress": progress,
                 }
                 self.blocked_tools[tool_name] = block_info
+                return block_info
+        return None
 
+    def _build_failure_decision(
+        self,
+        tool_name: str,
+        outcome: str,
+        failures: int,
+        progress: bool,
+        block_info: dict[str, Any] | None,
+    ) -> ToolGuardDecision:
         if block_info:
-            message = self._block_message(block_info)
-            self.last_decision = ToolGuardDecision(
+            return ToolGuardDecision(
                 action="block",
                 reason=block_info["scope"],
-                message=message,
+                message=self._block_message(block_info),
                 verdict="block_identical_failure" if block_info["scope"] == "identical_call" else "block_tool_timeout_streak",
                 metadata=block_info,
             )
-        elif failures >= 2:
+        if failures >= 2:
             message = (
                 f"工具 `{tool_name}` 已连续失败 {failures} 次，最近 outcome={outcome}。"
                 "不要重复相同调用；检查失败原因，缩小任务，换工具/参数，或直接给出当前证据下的结论。"
             )
-            self.last_decision = ToolGuardDecision(
+            return ToolGuardDecision(
                 action="warn",
                 reason="consecutive_failure",
                 message=message,
                 verdict="warn_consecutive_failure",
                 metadata={"tool": tool_name, "outcome": outcome, "consecutive_failures": failures, "progress": progress},
             )
-        else:
-            self.last_decision = ToolGuardDecision(
-                action="allow",
-                reason="failure_recorded",
-                verdict="failure_recorded",
-                metadata={"tool": tool_name, "outcome": outcome, "consecutive_failures": failures, "progress": progress},
-            )
-        return self.last_decision
+        return ToolGuardDecision(
+            action="allow",
+            reason="failure_recorded",
+            verdict="failure_recorded",
+            metadata={"tool": tool_name, "outcome": outcome, "consecutive_failures": failures, "progress": progress},
+        )
 
     def precheck(self, tool_name: str, args: dict[str, Any]) -> ToolGuardDecision:
         key = make_key(tool_name, args)

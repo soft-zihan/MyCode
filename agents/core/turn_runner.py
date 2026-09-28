@@ -8,9 +8,9 @@
 - ModelCaller：单次 LLM 请求-响应细节。
 
 行为与原 Agent._chat_inner 逐行等价（U0 纪律：不夹带功能变更）。
-已知既有缺陷保留（BC-22，待单独修复）：成功路径 turn/end 事件构建发生在
-finally 清空 _current_trace_id 之后 → trace_id 恒 None；abort/error 路径
-在 except 内构建事件故携带真实 trace_id。
+BC-22 已修复（遗留治理批）：成功路径 turn/end 的 trace_id 改从 turn_span
+取（真相源），不再受 finally 清空 _current_trace_id 的时序影响——三种路径
+（成功/abort/error）行为一致。
 """
 
 from __future__ import annotations
@@ -316,8 +316,9 @@ class TurnRunner:
                               _turn_start_input_tokens: int, _turn_start_output_tokens: int) -> None:
         """段5：turn/end 事件 + trace 收尾上报。
 
-        BC-22（既有缺陷，行为保留）：本段在 _run_turn_task 的 finally 清空
-        _current_trace_id 之后执行 → 成功路径 turn/end 的 trace_id 恒 None。
+        BC-22 修复：trace_id 从 turn_span（真相源）取，不读 a._current_trace_id——
+        后者在 _run_turn_task 的 finally 已清空，此前导致成功路径 turn/end 恒 None，
+        与 abort/error 路径（except 内构建、早于清空）行为不一致。
         """
         a = self._agent
         if a._loop_guard_stop_reason:
@@ -330,7 +331,7 @@ class TurnRunner:
             "turn": a._current_turn,
             "reason": turn_end_reason,
             "sub_agent_id": a._current_sub_agent_id,
-            "trace_id": a._current_trace_id,
+            "trace_id": turn_span.get_trace_id(),
         }
         if a._loop_guard_stop_reason:
             turn_end_event["loop_guard_reason"] = a._loop_guard_stop_reason

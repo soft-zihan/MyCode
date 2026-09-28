@@ -86,6 +86,7 @@ def write_wiki_entry(
     sub_dir: str = "",
     skip_if_unchanged: bool = False,
 ) -> Path:
+    """写入 wiki 条目（编排层；拆分自 95 行超限函数，行为逐行保持）。"""
     with trace_span(
         "wiki.write",
         metadata={
@@ -94,37 +95,12 @@ def write_wiki_entry(
             "description": description[:100],
         },
     ) as span:
-        wiki_dir = get_wiki_dir()
-        type_dir = _ensure_type_dir(wiki_dir, wiki_type)
-        if sub_dir:
-            type_dir = type_dir / sub_dir
-            type_dir.mkdir(parents=True, exist_ok=True)
+        wiki_dir, filepath, existed = _resolve_wiki_path(wiki_type, name, sub_dir)
 
-        slug = _slugify(name)
-        filename = f"{slug}.md"
-        filepath = type_dir / filename
-        existed = filepath.exists()
-
-        if skip_if_unchanged and existed:
-            try:
-                existing = parse_frontmatter(filepath.read_text())
-                existing_body = existing.body.strip()
-                existing_meta = existing.meta or {}
-                extra_meta_changed = any(
-                    str(existing_meta.get(key, "")) != str(value)
-                    for key, value in (extra_meta or {}).items()
-                )
-                if existing_body == str(content).strip() and not extra_meta_changed:
-                    if span:
-                        span.set_metadata("skipped", "unchanged")
-                    return filepath
-            except Exception as exc:
-                logger.warning(
-                    "[wiki_write] failed to compare existing entry %s: %s: %s",
-                    filepath.name,
-                    type(exc).__name__,
-                    exc,
-                )
+        if skip_if_unchanged and existed and _entry_unchanged(filepath, content, extra_meta):
+            if span:
+                span.set_metadata("skipped", "unchanged")
+            return filepath
 
         raw_meta: dict[str, str] = {
             "name": name,
@@ -139,38 +115,83 @@ def write_wiki_entry(
         meta = infer_facets(raw_meta, wiki_type)
         filepath.write_text(format_frontmatter(meta, content))
 
-        try:
-            snapshots_dir = Path.home() / ".mycode" / "snapshots"
-            svc = SnapshotService(str(get_workspace()), str(snapshots_dir))
-
-            def _capture():
-                return asyncio.run(svc.capture(session_id="wiki", label=f"wiki:{wiki_type}/{filename}"))
-
-            try:
-                asyncio.get_running_loop()
-            except RuntimeError:
-                snap = _capture()
-            else:
-                # 同步函数被事件循环内直接调用（应经 to_thread）：在独立线程跑，避免嵌套 loop
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    snap = pool.submit(_capture).result(timeout=30)
-            meta["checkpoint_id"] = snap.id
-            filepath.write_text(format_frontmatter(meta, content))
-        except Exception as exc:
-            logger.warning(
-                "[wiki_write] snapshot capture failed for %s/%s: %s: %s",
-                wiki_type,
-                filename,
-                type(exc).__name__,
-                exc,
-            )
+        _attach_snapshot_checkpoint(filepath, wiki_type, filepath.name, meta, content)
 
         record_wiki_change(str(filepath.relative_to(wiki_dir)))
-        _git_commit(f"wiki: {'update' if existed else 'add'} {wiki_type}/{filename}")
+        _git_commit(f"wiki: {'update' if existed else 'add'} {wiki_type}/{filepath.name}")
         update_wiki_index()
         if span:
             span.set_metadata("filepath", str(filepath.relative_to(wiki_dir)))
         return filepath
+
+
+def _resolve_wiki_path(wiki_type: str, name: str, sub_dir: str) -> tuple[Path, Path, bool]:
+    """返回 (wiki_dir, filepath, existed)。"""
+    wiki_dir = get_wiki_dir()
+    type_dir = _ensure_type_dir(wiki_dir, wiki_type)
+    if sub_dir:
+        type_dir = type_dir / sub_dir
+        type_dir.mkdir(parents=True, exist_ok=True)
+
+    slug = _slugify(name)
+    filepath = type_dir / f"{slug}.md"
+    return wiki_dir, filepath, filepath.exists()
+
+
+def _entry_unchanged(filepath: Path, content: str, extra_meta: dict[str, str] | None) -> bool:
+    """skip_if_unchanged 比较：正文与 extra_meta 均未变才 True；比较失败视为已变（照常写入）。"""
+    try:
+        existing = parse_frontmatter(filepath.read_text())
+        existing_body = existing.body.strip()
+        existing_meta = existing.meta or {}
+        extra_meta_changed = any(
+            str(existing_meta.get(key, "")) != str(value)
+            for key, value in (extra_meta or {}).items()
+        )
+        return existing_body == str(content).strip() and not extra_meta_changed
+    except Exception as exc:
+        logger.warning(
+            "[wiki_write] failed to compare existing entry %s: %s: %s",
+            filepath.name,
+            type(exc).__name__,
+            exc,
+        )
+        return False
+
+
+def _attach_snapshot_checkpoint(
+    filepath: Path,
+    wiki_type: str,
+    filename: str,
+    meta: dict[str, str],
+    content: str,
+) -> None:
+    """捕获快照并把 checkpoint_id 写回 frontmatter；失败仅告警不阻断写入。"""
+    try:
+        snapshots_dir = Path.home() / ".mycode" / "snapshots"
+        svc = SnapshotService(str(get_workspace()), str(snapshots_dir))
+
+        def _capture():
+            return asyncio.run(svc.capture(session_id="wiki", label=f"wiki:{wiki_type}/{filename}"))
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            snap = _capture()
+        else:
+            # 同步函数被事件循环内直接调用（应经 to_thread）：在独立线程跑，避免嵌套 loop
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                snap = pool.submit(_capture).result(timeout=30)
+        meta["checkpoint_id"] = snap.id
+        filepath.write_text(format_frontmatter(meta, content))
+    except Exception as exc:
+        logger.warning(
+            "[wiki_write] snapshot capture failed for %s/%s: %s: %s",
+            wiki_type,
+            filename,
+            type(exc).__name__,
+            exc,
+        )
 
 
 def write_workflow_pattern(

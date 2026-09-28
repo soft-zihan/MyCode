@@ -110,6 +110,10 @@ async def select_relevant_wiki_entries(
     side_query: Any,
     already_surfaced: set[str],
 ) -> list[WikiEntry]:
+    """wiki 召回主路径（编排层；拆分自 112 行超限函数，行为逐行保持）。
+
+    hybrid_recall 优先；无果/异常时降级 side_query LLM 选择（含关键词确定性兜底）。
+    """
     t0 = time.time()
 
     with trace_span(
@@ -138,34 +142,8 @@ async def select_relevant_wiki_entries(
             # B5：hybrid_recall 全量召回，主路径必须过滤冷却中条目再取 top5
             scored = [(e, sc) for e, sc in scored if e.rel_path not in already_surfaced]
             if scored:
-                result: list[WikiEntry] = []
-                for entry, score in scored[:5]:
-                    increment_applied_count(entry.rel_path)
-                    # 重新读取 entry 以获取更新后的 applied_count
-                    updated_entry = read_wiki_entry(entry.rel_path)
-                    if updated_entry:
-                        entry = updated_entry
-                    # 检查是否需要编译为 skill（未编译，或 pattern 内容已变更）
-                    if entry.type == "workflow_pattern":
-                        applied_count = int(entry.meta.get("applied_count", "0"))
-                        if applied_count >= 2 and is_skill_stale(entry):
-                            # 异步编译 skill
-                            asyncio.create_task(
-                                _try_compile_skill(entry.rel_path, side_query)
-                            )
-                            print(f"[skill_compile] triggered for {entry.rel_path} (applied_count={applied_count})")
-                    result.append(entry)
-                if span:
-                    span.add_metadata(
-                        recalled_count=len(result),
-                        recall_time_s=round(recall_time, 3),
-                        entries=[e.rel_path for e in result],
-                    )
-                    # BC-35：召回内容写入 span output——评审侧（judge）只见
-                    # observations，无此上下文会把"遵循记忆规则的回答"误判为错误
-                    span.update(output="\n---\n".join(
-                        f"[{e.rel_path}]\n{e.content[:500]}" for e in result
-                    )[:4000])
+                result = _process_recalled_top5(scored[:5], side_query)
+                _annotate_recall_span(span, result, recall_time)
                 print(f"[wiki_select] hybrid_recall found {len(scored)} entries in {recall_time:.2f}s, returning {len(result)}")
                 return result
             else:
@@ -177,46 +155,92 @@ async def select_relevant_wiki_entries(
                 span.record_error(e)
             print(f"[wiki_select] hybrid_recall error: {type(e).__name__}: {e}")
 
-        manifest = _format_wiki_manifest(candidates)
-        try:
-            text = await side_query(
-                SELECT_WIKI_PROMPT,
-                f"Query: {query}\n\nAvailable wiki entries:\n{manifest}",
-            )
-            match = re.search(r"\{[\s\S]*\}", text)
-            selected_paths: list[str] = []
-            if match:
-                try:
-                    parsed = json.loads(match.group(0))
-                    selected_paths = parsed.get("selected_entries", [])
-                except Exception:
-                    selected_paths = []
-            if not selected_paths:
-                selected_paths = [e.rel_path for e in candidates if e.rel_path in text]
+        return await _side_query_select(query, candidates, side_query, span)
 
-            by_path = {e.rel_path: e for e in candidates}
-            selected = [by_path[p] for p in selected_paths if p in by_path][:5]
 
-            if not selected:
-                # side_query 空返回（如推理模型 reasoning 吃光 max_tokens）时的确定性兜底：
-                # 按 query 词与 name/description/content 的重叠度取 top5，0 分不注入
-                selected = _keyword_fallback_select(query, candidates)
-                if selected:
-                    print(f"[wiki_select] side_query empty, keyword fallback selected {len(selected)} entries")
-
-            result = []
-            for e in selected:
-                increment_applied_count(e.rel_path)
-                result.append(e)
-            if span:
-                span.add_metadata(
-                    recalled_count=len(result),
-                    method="side_query",
-                    entries=[e.rel_path for e in result],
+def _process_recalled_top5(top5: list[tuple[WikiEntry, Any]], side_query: Any) -> list[WikiEntry]:
+    """召回后处理：applied_count++ → 重读 entry → workflow_pattern 达阈值触发编译。"""
+    result: list[WikiEntry] = []
+    for entry, score in top5:
+        increment_applied_count(entry.rel_path)
+        # 重新读取 entry 以获取更新后的 applied_count
+        updated_entry = read_wiki_entry(entry.rel_path)
+        if updated_entry:
+            entry = updated_entry
+        # 检查是否需要编译为 skill（未编译，或 pattern 内容已变更）
+        if entry.type == "workflow_pattern":
+            applied_count = int(entry.meta.get("applied_count", "0"))
+            if applied_count >= 2 and is_skill_stale(entry):
+                # 异步编译 skill
+                asyncio.create_task(
+                    _try_compile_skill(entry.rel_path, side_query)
                 )
-            return result
-        except Exception:
-            return []
+                print(f"[skill_compile] triggered for {entry.rel_path} (applied_count={applied_count})")
+        result.append(entry)
+    return result
+
+
+def _annotate_recall_span(span, result: list[WikiEntry], recall_time: float) -> None:
+    if span:
+        span.add_metadata(
+            recalled_count=len(result),
+            recall_time_s=round(recall_time, 3),
+            entries=[e.rel_path for e in result],
+        )
+        # BC-35：召回内容写入 span output——评审侧（judge）只见
+        # observations，无此上下文会把"遵循记忆规则的回答"误判为错误
+        span.update(output="\n---\n".join(
+            f"[{e.rel_path}]\n{e.content[:500]}" for e in result
+        )[:4000])
+
+
+async def _side_query_select(
+    query: str,
+    candidates: list[WikiEntry],
+    side_query: Any,
+    span,
+) -> list[WikiEntry]:
+    """side_query LLM 兜底选择；解析失败/空返回时走关键词确定性兜底。"""
+    manifest = _format_wiki_manifest(candidates)
+    try:
+        text = await side_query(
+            SELECT_WIKI_PROMPT,
+            f"Query: {query}\n\nAvailable wiki entries:\n{manifest}",
+        )
+        match = re.search(r"\{[\s\S]*\}", text)
+        selected_paths: list[str] = []
+        if match:
+            try:
+                parsed = json.loads(match.group(0))
+                selected_paths = parsed.get("selected_entries", [])
+            except Exception:
+                selected_paths = []
+        if not selected_paths:
+            selected_paths = [e.rel_path for e in candidates if e.rel_path in text]
+
+        by_path = {e.rel_path: e for e in candidates}
+        selected = [by_path[p] for p in selected_paths if p in by_path][:5]
+
+        if not selected:
+            # side_query 空返回（如推理模型 reasoning 吃光 max_tokens）时的确定性兜底：
+            # 按 query 词与 name/description/content 的重叠度取 top5，0 分不注入
+            selected = _keyword_fallback_select(query, candidates)
+            if selected:
+                print(f"[wiki_select] side_query empty, keyword fallback selected {len(selected)} entries")
+
+        result = []
+        for e in selected:
+            increment_applied_count(e.rel_path)
+            result.append(e)
+        if span:
+            span.add_metadata(
+                recalled_count=len(result),
+                method="side_query",
+                entries=[e.rel_path for e in result],
+            )
+        return result
+    except Exception:
+        return []
 
 
 WIKI_RECALL_COOLDOWN_TURNS = 5
