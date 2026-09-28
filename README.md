@@ -1,17 +1,16 @@
 # MyCode
 
-自进化的 Agentic Coding Runtime。不是 API Wrapper，而是完整的编排框架（Harness）：模型只产生 tool_call，由 Harness 负责权限检查、工具执行、结果回写与事件持久化，形成持续多轮 ReAct 闭环。
+编译式自进化的可观测 Coding Agent，支持 openaicompatible 端点。
 
-核心能力：
+核心特点：
 
-- **Event 溯源会话**：Event 为唯一数据源，jsonl / sqlite 双后端，支持回退（rewind）与投影缓存
-- **两级渐进式上下文压缩**：工具折叠（浅，可逆）→ 会话折叠（深，LLM 摘要），Surface 索引机制保证恢复字节精确
-- **Wiki 项目记忆**：会话笔记、项目知识异步编译、语义召回（embedding）、五重 Memory 防污染
-- **Skill 自进化**：在线候选沉淀 → 评测 → 晋升的完整闭环
-- **Plan 系统**：多阶段策略路由（grill-spec / tasks / execute / review / converge），各阶段可独立绑定模型
-- **全链路可观测**：Langfuse tracing + bad case 检测 + 三层评测体系（单元 / smoke 全链 / benchmark）
-
-评测结果（详见 eval/）：SWE-bench Verified 38.2% · HLE 20.2% · LOCOMO 51.8%（+9.7 vs 关闭持久记忆）· SkillsBench 65.5%（+24.1 vs No Skill）。
+* **Event-Sourcing 架构**：append-only 事件日志为唯一数据源（JSONL/SQLite 双后端，统一 Protocol 抽象，双份测试），对话、压缩、rewind/fork、崩溃恢复（Torn Tail 修复 + write-ahead claim + 启动 interrupted 扫描，覆盖子会话）、wiki 知识提取、前端重建全部派生于 Event；索引降低 message 构造开销，checkpoint + tail replay 快速冷启动，前端懒加载分页，WebSocket 单连接多路复用，断连续传，交互和可视化良好。
+* **上下文工程**：上下文组装时系统提示词冻结，易变更内容后置，长任务 prefix cache 命中率平均**高于96%**. **双层可逆无感压缩**，工具折叠（可逆、按 key 取回）→ 会话折叠（hidden agent 编译会话笔记带校验 + 项目知识回写 wiki）渐进升级；压缩前编辑内容可查询，(跨)会话内容可检索。 LOCA-128k×100k 压力窗四臂消融：**Pass@1 66.7%，高于朴素截断 33.4pp、仅工具折叠 20.0pp、仅会话折叠 13.4pp**. steer 消息支持排队/插入。todolist 列表渐进式披露。
+* **LLM-wiki 自进化**：从 Event 中自动提取会话笔记、结构化 memory. 写入前预检索去重 + 8 信号加权评分，元索引 + Embedding + bm25 混合召回 + drop-rung ladder；**高频 workflow pattern 编译为 skill**，验证门禁严格门控。
+* **Git 快照机制**：独立 git 仓库+ alternates 机制共享原项目 objects 节省空间；git tree 对象捕获文件状态，文件编辑三阶段回退（stage → commit → clear），wiki 可差分编译、版本可追溯。
+* **多 Agent 协同**：主 Agent 根据模式隔离工具，子 Agent 可自定义（独立 Tools+MCP+Skills 分担上下文压力，**前台阻塞可转后台，可二次调用**），后台 hidden Agent 防阻塞，模型配置差异化.
+* **工具系统**：ToolRegister（链式披露、出错重试、超时保护、先读后写、权限检查、完整保护、防注入） + MCP（Stdio + Streamable HTTP） 工具输出定界符防御间接提示注入。
+* **全链路观测和评估**：OTel + Langfuse 搭建 Trace，建立单元测试和端到端评估回归，覆盖 Agent Loop、Wiki 编译和召回、Skill 生成等，实现修改效果可观测、可验证，badcase 可定位、可修复。
 
 ## 架构
 
@@ -29,19 +28,20 @@
        ~/.my-code/config.json              模型端点配置
 ```
 
-| 目录 | 说明 |
-| --- | --- |
-| `agents/` | Agent Loop、上下文压缩、会话存储、工具、Skill 进化、Wiki 记忆、Plan 系统、提示词 |
+
+| 目录        | 说明                                                                                  |
+| ------------- | --------------------------------------------------------------------------------------- |
+| `agents/`   | Agent Loop、上下文压缩、会话存储、工具、Skill 进化、Wiki 记忆、Plan 系统、提示词      |
 | `frontend/` | React + Vite 前端与 FastAPI 后端（`frontend/server/`），openapi.json 为前后端契约单源 |
-| `eval/` | smoke 全链评测、Langfuse judge、GAIA / HLE / LOCA / SkillsBench 基准 |
-| `tests/` | unit / integration / e2e 三层测试 |
-| `start.sh` | 一键启停脚本 |
+| `eval/`     | smoke 全链评测、Langfuse judge、GAIA / HLE / LOCA / SkillsBench 基准                  |
+| `tests/`    | unit / integration / e2e 三层测试                                                     |
+| `start.sh`  | 一键启停脚本                                                                          |
 
 ## 环境要求
 
-- Python 3.11+（开发环境 3.14）
-- Node.js 18+（开发环境 26）
-- macOS / Linux（`start.sh` 依赖 `lsof`）
+- Python 3.11+
+- Node.js 18+
+- macOS / Linux
 
 ## 安装
 
@@ -81,23 +81,24 @@ cd frontend && npm install && cd ..
 }
 ```
 
-Wiki 语义召回需要 embedding 配置（默认 SiliconFlow 的 `BAAI/bge-large-zh-v1.5`，免费；也可切本机 ollama），同样可在 UI 中配置。
+Wiki 语义召回需要 embedding 配置，同样可在 UI 中配置。
 
 ## 环境变量（可选）
 
 在项目根创建 `.env`（已 gitignore），`start.sh` 会自动加载：
 
-| 变量 | 默认 | 说明 |
-| --- | --- | --- |
-| `MYCODE_TRACING` | `1` | Langfuse tracing 开关 |
-| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | 空 | Langfuse 密钥（不填则仅本地日志） |
-| `LANGFUSE_BASE_URL` | `https://cloud.langfuse.com` | Langfuse 服务地址 |
-| `MYCODE_SESSION_BACKEND` | `jsonl` | 会话后端：`jsonl` / `sqlite` |
-| `MYCODE_HOST` | 空（仅本机） | 远程部署监听地址，如 `0.0.0.0` |
-| `MYCODE_AUTH_TOKEN` | 空 | 暴露服务时的 Bearer 鉴权 token |
-| `MYCODE_SIDE_MODEL` | 空 | 压缩 side query 使用的辅助端点 |
-| `MYCODE_SKILL_AUTO_ACTIVATE` | 开 | Skill 自动激活开关 |
-| `MYCODE_AUTO_SKILL_EVOLUTION` | 开 | Skill 在线自进化开关 |
+
+| 变量                                          | 默认                         | 说明                              |
+| ----------------------------------------------- | ------------------------------ | ----------------------------------- |
+| `MYCODE_TRACING`                              | `1`                          | Langfuse tracing 开关             |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | 空                           | Langfuse 密钥（不填则仅本地日志） |
+| `LANGFUSE_BASE_URL`                           | `https://cloud.langfuse.com` | Langfuse 服务地址                 |
+| `MYCODE_SESSION_BACKEND`                      | `jsonl`                      | 会话后端：`jsonl` / `sqlite`      |
+| `MYCODE_HOST`                                 | 空（仅本机）                 | 远程部署监听地址，如`0.0.0.0`     |
+| `MYCODE_AUTH_TOKEN`                           | 空                           | 暴露服务时的 Bearer 鉴权 token    |
+| `MYCODE_SIDE_MODEL`                           | 空                           | 压缩 side query 使用的辅助端点    |
+| `MYCODE_SKILL_AUTO_ACTIVATE`                  | 开                           | Skill 自动激活开关                |
+| `MYCODE_AUTO_SKILL_EVOLUTION`                 | 开                           | Skill 在线自进化开关              |
 
 ## 启动
 
@@ -139,7 +140,3 @@ python -m eval.gaia.runner --sample 10
 - 会话事件：`~/.mycode/sessions/*.events.jsonl`
 - 模型配置：`~/.my-code/config.json`
 - 运行日志：`logs/`
-
-## Docker
-
-暂不提供容器化部署，请按上述步骤原生运行。
