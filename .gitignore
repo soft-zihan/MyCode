@@ -287,3 +287,11 @@ docs/
 openspec/
 eval/EVALUATION_PLAN.md
 tests/PLAN_SYSTEM_TEST_PLAN.md
+
+# 本地工作文件与密钥配置（不入库）
+opencode.json
+script.txt
+对话记录
+Janus/
+frontend/.vite/
+/*.png
