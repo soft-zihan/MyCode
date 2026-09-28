@@ -12,11 +12,11 @@ from typing import Any
 
 
 from agents.tools.paths import resolve_tool_path, workspace_guard_error
+from agents.tools.runtime import get_runtime, DockerRuntime
 
 
 def read_file(inp: dict) -> str:
     try:
-        from agents.tools.runtime import get_runtime, DockerRuntime
         rt = get_runtime()
 
         if isinstance(rt, DockerRuntime):
@@ -54,7 +54,6 @@ def read_file(inp: dict) -> str:
 
 def write_file(inp: dict) -> str:
     try:
-        from agents.tools.runtime import get_runtime, DockerRuntime
         rt = get_runtime()
 
         if isinstance(rt, DockerRuntime):
@@ -106,7 +105,6 @@ def _generate_diff(old_content: str, old_string: str, new_string: str) -> str:
 
 def edit_file(inp: dict) -> str:
     try:
-        from agents.tools.runtime import get_runtime, DockerRuntime
         rt = get_runtime()
 
         if isinstance(rt, DockerRuntime):
@@ -138,7 +136,6 @@ def edit_file(inp: dict) -> str:
 
 def list_files(inp: dict) -> str:
     try:
-        from agents.tools.runtime import get_runtime, DockerRuntime
         rt = get_runtime()
 
         if isinstance(rt, DockerRuntime):

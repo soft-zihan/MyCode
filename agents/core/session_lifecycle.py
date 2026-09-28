@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from agents.core.text_sanitization import sanitize_for_utf8
+from agents.core.rewind_service import get_rewind_service
+from agents.logging import print_info
 
 
 @dataclass
@@ -142,7 +144,6 @@ class SessionLifecycle:
 # ── Agent 级生命周期操作（U0 从 Agent 迁入；Agent 保留同名门面）──
 
 def restore_agent_session(agent: Any, data: dict) -> None:
-    from agents.logging import print_info
 
     state = SessionState(session_id=agent.session_id, model=agent.model)
     agent._session_lifecycle.restore(state, data, agent.session)
@@ -151,7 +152,6 @@ def restore_agent_session(agent: Any, data: dict) -> None:
 
 async def rewind_agent_turns(agent: Any, n: int = 1) -> str:
     """统一回退：对话回退 N 轮 + 文件恢复到快照（原子操作）。"""
-    from agents.core.rewind_service import get_rewind_service
     svc = get_rewind_service()
     plan = await svc.stage(
         agent.session_id, turns=n, session=agent.session, workspace=str(agent.workspace)

@@ -17,6 +17,10 @@ from agents.tools.file_snapshot import capture_file_snapshot
 from agents.tools.registry import CONCURRENCY_SAFE_TOOLS
 from agents.observability.tool_tracker import ToolCallTracker, check_tool_warnings
 from agents.wiki.wiki_manager import format_wiki_for_injection
+from agents.core.snapshot_service import SnapshotService
+from agents.logging import print_error, print_info
+from agents.observability.bad_cases import BadCase, BadCaseSeverity, BadCaseSource, BadCaseStatus, create_bad_case
+from agents.tools.permissions import check_permission
 
 if TYPE_CHECKING:
     from agents.agent import Agent
@@ -40,14 +44,6 @@ class AgentLoop:
     def _auto_mark_bad_case(self, signal_type: str, diagnosis: dict, tool_name: str | None = None) -> None:
         import json
         import uuid
-        from agents.logging import print_error
-        from agents.observability.bad_cases import (
-            BadCase,
-            BadCaseSeverity,
-            BadCaseSource,
-            BadCaseStatus,
-            create_bad_case,
-        )
 
         diagnosis_with_context = dict(diagnosis)
         diagnosis_with_context["trace_id"] = getattr(self._agent, "_current_trace_id", None)
@@ -126,7 +122,6 @@ class AgentLoop:
             self._agent.increment_turns()
             budget = self._agent.check_budget()
             if budget["exceeded"]:
-                from agents.logging import print_info
                 print_info(f"Budget exceeded: {budget['reason']}")
                 await self._drop_queued("budget_exceeded")
                 # U5a：turn/cost 预算耗尽同样走收敛应答（旧实现直接 break，
@@ -214,7 +209,6 @@ class AgentLoop:
 
     async def _prepare_turn(self, user_message: str | None) -> None:
         """准备轮次：清理消息、重置状态、创建快照。None=自动唤醒轮（U3b）。"""
-        from agents.core.snapshot_service import SnapshotService
         from pathlib import Path
         
         a = self._agent
@@ -406,8 +400,6 @@ class AgentLoop:
 
     async def _handle_tool_calls(self, tool_calls: list[dict]) -> bool:
         """处理工具调用：权限检查、执行、结果收集。"""
-        from agents.tools.permissions import check_permission
-        from agents.logging import print_info
 
         print_info(f"[DEBUG] _handle_tool_calls: start, {len(tool_calls)} tools")
         a = self._agent
@@ -464,7 +456,6 @@ class AgentLoop:
 
             oai_checked.append({"tc": tc, "fn": fn_name, "inp": inp, "allowed": True})
 
-        from agents.logging import print_info
         print_info(f"[DEBUG] _handle_tool_calls: calling _execute_tool_batches with {len(oai_checked)} tools")
         guard_stop = await self._execute_tool_batches(oai_checked)
         print_info(f"[DEBUG] _handle_tool_calls: done, guard_stop={guard_stop}")
@@ -472,7 +463,6 @@ class AgentLoop:
 
     async def _execute_tool_batches(self, oai_checked: list[dict]) -> bool:
         """执行工具批次：并发安全工具并行执行，其他顺序执行。返回是否触发 loop guard stop。"""
-        from agents.logging import print_info
 
         print_info(f"[DEBUG] _execute_tool_batches: start, {len(oai_checked)} tools")
         a = self._agent
@@ -682,7 +672,6 @@ class AgentLoop:
 
     async def _execute_sequential_batch(self, items: list[dict]) -> tuple[bool, bool, str | None]:
         """顺序执行工具批次。返回 (是否触发上下文清理, 是否触发 loop guard, guard reason)。"""
-        from agents.logging import print_info
 
         print_info(f"[DEBUG] _execute_sequential_batch: start, {len(items)} tools")
         a = self._agent
@@ -723,7 +712,6 @@ class AgentLoop:
         返回 (context_break, guard_stop, guard_reason)；context_break 时提前返回
         （与原实现一致：不再走警告检查与 append_tool_message）。
         """
-        from agents.logging import print_info
         import time
 
         a = self._agent

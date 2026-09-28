@@ -27,6 +27,7 @@ from agents.plan.strategy_loader import (
     strategy_config_from_app_config,
 )
 from agents.plan.plan_manager import complete_plan, get_plans_dir
+from agents.core.workspace import get_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,6 @@ class PlanExecutor:
     @classmethod
     def for_plan(cls, slug: str) -> "PlanExecutor":
         """从全局应用配置 + 当前 workspace 上下文创建。"""
-        from agents.core.workspace import get_workspace
 
         return cls(
             slug=slug,

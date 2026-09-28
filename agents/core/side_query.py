@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 import openai
 
 from agents.core.model_registry import resolve_side_endpoint
+from agents.observability.trace import trace_span
 
 if TYPE_CHECKING:
     from agents.agent import Agent
@@ -51,7 +52,6 @@ class SideQueryFactory:
             return None
 
         async def _sq_openai(system: str, user_message: str) -> str:
-            from agents.observability.trace import trace_span
 
             messages = [
                 {"role": "system", "content": system},

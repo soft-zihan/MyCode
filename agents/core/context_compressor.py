@@ -36,6 +36,9 @@ from .session_memory import (
     fallback_folded_memory,
     format_folded_memory,
 )
+from agents.core.workspace import _current_workspace
+from agents.observability.trace import trace_span
+from agents.wiki.pipeline import on_session_folded
 
 logger = logging.getLogger(__name__)
 
@@ -191,7 +194,6 @@ class ContextCompressor:
         if not should_compress:
             return False
 
-        from agents.observability.trace import trace_span
 
         trigger = "utilization" if utilization > self.tool_fold_threshold else "idle"
         with trace_span(
@@ -321,7 +323,6 @@ class ContextCompressor:
         if len(session.events) < 4:
             return False
 
-        from agents.observability.trace import trace_span
 
         with trace_span("compact", metadata={"trigger": "manual"}) as span:
             hidden_before = _count_hidden_seqs(session)
@@ -612,8 +613,6 @@ class ContextCompressor:
         })
 
         if self.wiki_enabled:
-            from agents.core.workspace import _current_workspace
-            from agents.wiki.pipeline import on_session_folded
             workspace = _current_workspace.get()
             task = asyncio.create_task(
                 on_session_folded(

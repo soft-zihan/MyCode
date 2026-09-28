@@ -13,6 +13,9 @@ from typing import Any
 
 from agents.observability.trace import trace_span
 from agents.wiki.store import list_wiki_entries, WikiEntry
+from agents.wiki.evolution.embedding import embed_text, embed_text_for_leaf, cosine_similarity, ColdBudget, EmbeddingCache
+from agents.wiki.evolution.priority_rerank import rerank_within_bands
+from agents.wiki.evolution.settings import get_setting, get_setting as _get_setting
 
 
 LESSON_ATOM_TYPE = "self_improvement"
@@ -156,13 +159,8 @@ async def semantic_recall(
 
     score_threshold 缺省取 settings recall.scoreThreshold。
     """
-    from agents.wiki.evolution.settings import get_setting
     if score_threshold is None:
         score_threshold = float(get_setting("recall.scoreThreshold", 0.12))
-    from agents.wiki.evolution.embedding import (
-        embed_text, embed_text_for_leaf, cosine_similarity,
-        ColdBudget, EmbeddingCache,
-    )
 
     with trace_span(
         "wiki.recall.semantic",
@@ -192,7 +190,6 @@ async def semantic_recall(
 
         cache = EmbeddingCache.get()
 
-        from agents.wiki.evolution.settings import get_setting as _get_setting
         budget = ColdBudget(max_cold=int(_get_setting("cold.maxCold", 50)))
         query_vec = await embed_text(query)
         query_terms = re.findall(r'\w+', query.lower())
@@ -259,7 +256,6 @@ async def hybrid_recall(
 
     score_threshold 缺省取 settings recall.scoreThreshold。
     """
-    from agents.wiki.evolution.settings import get_setting
     if score_threshold is None:
         score_threshold = float(get_setting("recall.scoreThreshold", 0.12))
     with trace_span(
@@ -301,7 +297,6 @@ async def hybrid_recall(
         combined = semantic_results + keyword_results
         combined.sort(key=lambda x: -x[1])
 
-        from agents.wiki.evolution.priority_rerank import rerank_within_bands
         combined = rerank_within_bands(combined)
 
         result = combined[:max_results]
@@ -331,7 +326,6 @@ def recall_lessons(
     max_results: int = 5,
 ) -> dict[str, Any]:
     """关键词 recall（同步 fallback）。"""
-    from agents.wiki.evolution.settings import get_setting
     if score_threshold is None:
         score_threshold = float(get_setting("recall.scoreThreshold", 0.12))
     entries = list_wiki_entries(LESSON_ATOM_TYPE)

@@ -236,8 +236,8 @@ async def test_session_fold_merges_previous_notes_and_replaces_old_summary(monke
     async def fake_on_session_folded(**kwargs):
         wiki_calls.append(kwargs)
 
-    import agents.wiki.pipeline as wiki_pipeline
-    monkeypatch.setattr(wiki_pipeline, "on_session_folded", fake_on_session_folded)
+    import agents.core.context_compressor as cc_mod
+    monkeypatch.setattr(cc_mod, "on_session_folded", fake_on_session_folded)
 
     compressor = ContextCompressor(
         effective_window=1000,
@@ -402,10 +402,10 @@ async def test_notes_invalid_then_retry_valid(monkeypatch):
             return json.dumps({"session_notes": "## Objective\n- broken", "project_knowledge": ""})
         return json.dumps({"session_notes": _valid_notes(" retry"), "project_knowledge": "k"})
 
-    import agents.wiki.pipeline as wiki_pipeline
+    import agents.core.context_compressor as cc_mod
     async def _noop(**kwargs):
         return None
-    monkeypatch.setattr(wiki_pipeline, "on_session_folded", _noop)
+    monkeypatch.setattr(cc_mod, "on_session_folded", _noop)
 
     compressor = _make_fold_compressor()
     assert await compressor._fold_session(session, side_query, "sess")
@@ -424,10 +424,10 @@ async def test_notes_invalid_twice_keeps_content_and_audits(monkeypatch):
     async def side_query(system: str, user: str) -> str:
         return json.dumps({"session_notes": "## Objective\n- still broken", "project_knowledge": ""})
 
-    import agents.wiki.pipeline as wiki_pipeline
+    import agents.core.context_compressor as cc_mod
     async def _noop(**kwargs):
         return None
-    monkeypatch.setattr(wiki_pipeline, "on_session_folded", _noop)
+    monkeypatch.setattr(cc_mod, "on_session_folded", _noop)
 
     compressor = _make_fold_compressor()
     assert await compressor._fold_session(session, side_query, "sess")

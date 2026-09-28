@@ -13,6 +13,7 @@ import time
 from typing import Any, AsyncIterator
 
 from agents.core.request_context import new_request_id
+from agents.core.rewind_service import get_rewind_service
 
 
 class AgentService:
@@ -112,7 +113,6 @@ class AgentService:
 
     async def rewind_stage(self, *, turns: int | None = None, keep_user_messages: int | None = None) -> dict:
         """生成回退计划预览（活跃 session：使用内存事件 + 当前 workspace）。"""
-        from agents.core.rewind_service import get_rewind_service
         plan = await get_rewind_service().stage(
             self._agent.session_id,
             turns=turns,
@@ -124,7 +124,6 @@ class AgentService:
 
     async def rewind_commit(self, plan_id: str) -> dict:
         """执行回退计划（活跃 session：同步截断内存事件日志）。"""
-        from agents.core.rewind_service import get_rewind_service
         return await get_rewind_service().commit(plan_id, session=self._agent.session)
 
     def fork(self) -> str:

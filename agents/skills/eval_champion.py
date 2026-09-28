@@ -13,6 +13,7 @@ from agents._utils import (
 )
 from agents.core.workspace import get_workspace
 from .skill_file_ops import get_evolution_dir
+from agents.observability.trace import trace_event
 
 ONLINE_EVAL_DIR = "online-eval"
 
@@ -135,7 +136,6 @@ def _activate_champion(skill_name: str, snapshot: dict[str, Any], lineage_id: st
     Returns:
         {"activated": bool, "path": str, "reason": str}
     """
-    from agents.observability.trace import trace_event
 
     active_path = _find_active_skill_path(skill_name)
     if not active_path:

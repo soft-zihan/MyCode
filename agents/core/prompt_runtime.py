@@ -17,6 +17,7 @@ import time
 from typing import TYPE_CHECKING
 
 from agents.core.prompt import build_system_prompt_with_breakdown
+from agents.core.workspace import set_workspace, reset_workspace
 
 if TYPE_CHECKING:
     from agents.agent import Agent
@@ -66,7 +67,6 @@ def refresh_runtime_system_prompt(agent: "Agent", force: bool = False) -> None:
     # session.system_prompt setter 不 bump generation，缓存无损。
     if not force and agent.session.system_prompt:
         return
-    from agents.core.workspace import set_workspace, reset_workspace
     _ws_token = set_workspace(agent.workspace)
     try:
         active_tools = {t.get("name") for t in agent.tools if t.get("name")}

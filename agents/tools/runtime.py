@@ -12,6 +12,7 @@ import os
 import subprocess
 from pathlib import Path
 from typing import Protocol
+from agents.core.workspace import get_workspace
 
 
 class Runtime(Protocol):
@@ -44,14 +45,12 @@ class LocalRuntime:
     def read_file(self, path: str) -> str:
         p = Path(path)
         if not p.is_absolute():
-            from agents.core.workspace import get_workspace
             p = get_workspace() / p
         return p.read_text(errors="replace")
     
     def write_file(self, path: str, content: str) -> None:
         p = Path(path)
         if not p.is_absolute():
-            from agents.core.workspace import get_workspace
             p = get_workspace() / p
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content)
@@ -64,7 +63,6 @@ class LocalRuntime:
         """
         import os
         import signal
-        from agents.core.workspace import get_workspace
         proc = subprocess.Popen(
             command,
             shell=True,
@@ -87,7 +85,6 @@ class LocalRuntime:
     
     def list_files(self, base: str, pattern: str) -> list[str]:
         import os
-        from agents.core.workspace import get_workspace
         base_path = Path(base)
         if not base_path.is_absolute():
             base_path = get_workspace() / base_path
@@ -103,7 +100,6 @@ class LocalRuntime:
         return files
     
     def grep_search(self, pattern: str, path: str, include: str | None = None) -> str:
-        from agents.core.workspace import get_workspace
         p = Path(path)
         if not p.is_absolute():
             path = str(get_workspace() / p)

@@ -104,6 +104,9 @@ from agents.tools.permissions import (
     load_permission_rules,
     reset_permission_cache,
 )
+from agents.logging import print_info
+from agents.skills.skills import create_skill
+from agents.tools.runtime import get_runtime, DockerRuntime
 
 
 async def execute_tool(
@@ -117,7 +120,6 @@ async def execute_tool(
     if name == "read_file":
         result = read_file(inp)
         if read_file_state is not None and not result.startswith("Error"):
-            from agents.tools.runtime import get_runtime, DockerRuntime
             rt = get_runtime()
             if isinstance(rt, DockerRuntime):
                 abs_path = inp["file_path"]
@@ -133,7 +135,6 @@ async def execute_tool(
         return _truncate_result(result)
 
     if name in ("write_file", "edit_file") and read_file_state is not None:
-        from agents.tools.runtime import get_runtime, DockerRuntime
         rt = get_runtime()
         if isinstance(rt, DockerRuntime):
             abs_path = inp["file_path"]
@@ -153,7 +154,6 @@ async def execute_tool(
                     return f"Warning: {inp['file_path']} was modified externally since your last read. Please read_file again before {verb}."
 
     if name == "skill_create":
-        from agents.skills.skills import create_skill
         result = create_skill(
             name=inp.get("name", ""),
             description=inp.get("description", ""),
@@ -208,7 +208,6 @@ async def execute_tool(
 
     import inspect
     import time
-    from agents.logging import print_info
     t0 = time.time()
     if inspect.iscoroutinefunction(handler):
         print_info(f"[DEBUG] execute_tool: calling async handler for {name}")

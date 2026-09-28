@@ -11,10 +11,10 @@ import re
 from pathlib import Path
 
 from agents.tools.paths import resolve_tool_path, workspace_guard_error
+from agents.tools.runtime import get_runtime, DockerRuntime
 
 
 def grep_search(inp: dict) -> str:
-    from agents.tools.runtime import get_runtime, DockerRuntime
     rt = get_runtime()
     pattern = inp["pattern"]
 

@@ -16,6 +16,8 @@ from typing import Any
 
 from agents.logging import print_error
 from agents.observability.trace import start_trace_span
+from agents.core.workspace import get_workspace
+from agents.tools.runtime import get_runtime
 
 
 BACKGROUND_JOBS: dict[str, dict[str, Any]] = {}
@@ -105,7 +107,6 @@ atexit.register(_kill_all_background_jobs)
 
 def _start_background_shell(command: str) -> str:
     try:
-        from agents.core.workspace import get_workspace
         proc = subprocess.Popen(
             command,
             shell=True,
@@ -193,7 +194,6 @@ def run_shell(inp: dict) -> str:
     if inp.get("background"):
         return _start_background_shell(inp["command"])
     try:
-        from agents.tools.runtime import get_runtime
         rt = get_runtime()
         timeout_ms = inp.get("timeout", 30000)
         timeout_s = timeout_ms / 1000

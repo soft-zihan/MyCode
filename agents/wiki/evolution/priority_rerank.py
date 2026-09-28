@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from agents.wiki.store import WikiEntry
+from agents.wiki.evolution.settings import get_setting
 
 
 PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
@@ -30,7 +31,6 @@ def rerank_within_bands(
         return []
 
     if band_width is None:
-        from agents.wiki.evolution.settings import get_setting
         band_width = float(get_setting("recall.priorityBand", 0.05))
 
     items.sort(key=lambda x: -x[1])

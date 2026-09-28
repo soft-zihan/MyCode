@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .session import session_dir
+from agents.config import DEFAULT_CONTEXT_WINDOW
 
 
 FORMAT_VERSION = 1
@@ -295,7 +296,6 @@ def _apply_context_used(state: int, event: dict[str, Any]) -> int:
 
 
 def _init_context_total() -> int:
-    from agents.config import DEFAULT_CONTEXT_WINDOW
     return DEFAULT_CONTEXT_WINDOW
 
 

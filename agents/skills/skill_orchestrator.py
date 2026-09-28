@@ -14,6 +14,8 @@ import time
 from typing import Any, Awaitable, Callable
 
 from agents.logging import print_confirmation, print_error, print_info
+from agents.skills.skill_evaluator import evaluate_online_skill_evolution_async
+from agents.skills.skill_extractor import online_ingest
 
 
 # 类型别名
@@ -260,11 +262,6 @@ class SkillOrchestrator:
         if side_query is None:
             return {"ok": False, "action": "no_side_query"}
 
-        try:
-            from agents.skills.skill_extractor import online_ingest
-        except Exception:
-            return {"ok": False, "action": "import_error"}
-
         # EvoSkill 启发：合并失败信号到 hint
         hint_parts = []
         tool_error_hint = str(window.get("tool_error_hint") or "").strip()
@@ -304,8 +301,6 @@ class SkillOrchestrator:
         评测失败只记日志，不影响主进化流程。
         """
         try:
-            from agents.skills.skill_evaluator import evaluate_online_skill_evolution_async
-
             report = await evaluate_online_skill_evolution_async(side_query=side_query)
             aggregate = report.get("aggregate") if isinstance(report, dict) else {}
             champion_statuses = aggregate.get("champion_statuses") if isinstance(aggregate, dict) else {}

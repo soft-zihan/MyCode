@@ -221,9 +221,10 @@ def test_agent_tool_schema_has_session_id_and_no_plan_type():
 def test_agent_tool_enum_refreshed_per_request(monkeypatch):
     """D7：type enum 每次请求现场重解析，自定义代理可被模型选择；原静态 schema 不被污染。"""
     from agents.core.model_caller import _to_openai_tools
-    import agents.core.subagent as subagent_mod
+    import agents.core.model_caller as model_caller_mod
 
-    monkeypatch.setattr(subagent_mod, "get_available_agent_types", lambda: [
+    # 消费方绑定（模块级 import）——补丁必须打在 model_caller 命名空间
+    monkeypatch.setattr(model_caller_mod, "get_available_agent_types", lambda: [
         {"name": "explore", "description": ""},
         {"name": "reviewer", "description": ""},
         {"name": "general", "description": ""},

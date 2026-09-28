@@ -37,6 +37,9 @@ from agents.wiki.store import (
     WikiEntry,
 )
 from agents.wiki.wiki_manager import preflight_wiki_search
+from agents.core.frontmatter import parse_frontmatter, format_frontmatter
+from agents.wiki.evolution.lifecycle import disable_entry, truncate_archived_body
+from agents.wiki.evolution.settings import get_setting
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +172,6 @@ def _entry_freshness_key(entry: WikiEntry) -> str:
 
 async def mark_stale_entries() -> int:
     """按 settings consolidate.staleAfterMonths 标记 stale，返回标记数。"""
-    from agents.wiki.evolution.settings import get_setting
 
     stale_months = int(get_setting("consolidate.staleAfterMonths", 3))
     now = datetime.now(timezone.utc)
@@ -191,7 +193,6 @@ async def mark_stale_entries() -> int:
 
 
 def _mark_entry_stale(entry: WikiEntry) -> None:
-    from agents.core.frontmatter import parse_frontmatter, format_frontmatter
 
     filepath = get_wiki_dir() / entry.rel_path
     if not filepath.exists():
@@ -257,7 +258,6 @@ async def _select_material(
 # ── 动作执行 ──
 
 def _set_meta(entry_path: str, updates: dict[str, str]) -> bool:
-    from agents.core.frontmatter import parse_frontmatter, format_frontmatter
 
     filepath = get_wiki_dir() / entry_path
     if not filepath.exists():
@@ -269,7 +269,6 @@ def _set_meta(entry_path: str, updates: dict[str, str]) -> bool:
 
 
 def _rewrite_body(entry_path: str, new_content: str) -> bool:
-    from agents.core.frontmatter import parse_frontmatter, format_frontmatter
 
     filepath = get_wiki_dir() / entry_path
     if not filepath.exists():
@@ -284,7 +283,6 @@ def _rewrite_body(entry_path: str, new_content: str) -> bool:
 
 
 def _archive(entry_path: str, *, superseded_by: str = "", merged_into: str = "") -> bool:
-    from agents.wiki.evolution.lifecycle import disable_entry, truncate_archived_body
 
     entry = read_wiki_entry(entry_path)
     if not entry:
@@ -370,7 +368,6 @@ def _execute_actions(actions: list[dict]) -> dict[str, int]:
 
 def _verify_targets(actions: list[dict]) -> list[str]:
     """校验：动作涉及的文件仍存在且 frontmatter 可解析。返回损坏清单。"""
-    from agents.core.frontmatter import parse_frontmatter
 
     broken = []
     for action in actions:

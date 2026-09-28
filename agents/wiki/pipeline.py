@@ -29,6 +29,7 @@ from agents.wiki.wiki_capture import (
 )
 from agents.wiki.wiki_compiler import check_and_compile_pending_sessions, compile_single_session
 from agents.wiki.wiki_consolidator import maybe_schedule_consolidate
+from agents.core.workspace import set_workspace, reset_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,6 @@ async def on_session_folded(
     workspace 用于恢复 contextvar（后台 task 不继承调用方上下文时兜底）。
     """
     if workspace is not None:
-        from agents.core.workspace import set_workspace, reset_workspace
         token = set_workspace(workspace)
         try:
             await _run(session_id, session, session_notes, side_query)

@@ -23,9 +23,10 @@ def test_agent_description_lists_available_types():
 
 
 def test_agent_description_includes_custom_agents(monkeypatch):
-    import agents.core.subagent as subagent
+    import agents.core.model_caller as model_caller
 
-    monkeypatch.setattr(subagent, "get_available_agent_types", lambda: [
+    # 消费方绑定（模块级 import）——补丁必须打在 model_caller 命名空间
+    monkeypatch.setattr(model_caller, "get_available_agent_types", lambda: [
         {"name": "explore", "description": "e"},
         {"name": "custom-x", "description": "does X"},
     ])

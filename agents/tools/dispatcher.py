@@ -18,6 +18,17 @@ from agents.core.frontmatter import parse_frontmatter
 from agents.tools.registry import EDIT_TOOLS
 from agents.tools.result import ToolExecutionResult
 from agents.wiki.store import get_wiki_dir
+from agents.core.context_events import collect_hidden_seqs
+from agents.core.snapshot_service import SnapshotService
+from agents.core.subagent_runner import execute_agent_tool, execute_subagent_cancel_tool
+from agents.logging import print_info, print_error
+from agents.observability.trace import trace_span
+from agents.plan.plan_tool_executor import execute_plan_mode_tool
+from agents.skills.skills import discover_skills, execute_skill
+from agents.tools import execute_tool
+from agents.tools.question_tools import handle_ask_user
+from agents.tools.todo_tools import handle_todolist
+from agents.tools.wiki_tools import remember
 
 
 class ToolDispatcher:
@@ -48,8 +59,6 @@ class ToolDispatcher:
         """执行工具调用（带超时、结构化 outcome 和 trace）。"""
         from contextlib import nullcontext
 
-        from agents.observability.trace import trace_span
-        from agents.logging import print_info
 
         _tool_t0 = time.time()
         try:
@@ -93,7 +102,6 @@ class ToolDispatcher:
                 if span:
                     span.record_error(e)
                     span.add_metadata(duration_s=duration_s, outcome="error", success=False)
-                from agents.logging import print_error
                 print_error(f"[ERROR] Tool '{name}' failed: {type(e).__name__}: {e}")
                 return ToolExecutionResult(
                     text=f"Error: tool '{name}' failed: {type(e).__name__}: {e}",
@@ -143,7 +151,6 @@ class ToolDispatcher:
     def _timeout_result(self, span, name: str, duration_s: float, timeout: int,
                         *, detail: str, error: Exception) -> ToolExecutionResult:
         """超时路径（asyncio.TimeoutError / 显式 TimeoutError 统一封装）。"""
-        from agents.logging import print_error
         if span:
             span.record_error(error)
             span.add_metadata(timeout_s=timeout, duration_s=duration_s, outcome="timeout", success=False)
@@ -164,7 +171,6 @@ class ToolDispatcher:
         if name == "search_history":
             return self._execute_search_history_tool(inp)
         if name == "remember":
-            from agents.tools.wiki_tools import remember
             return await remember(inp, side_query=self.agent._build_side_query(max_tokens=6000))
         if name == "list_session_notes":
             return self._execute_list_session_notes_tool(inp)
@@ -173,21 +179,16 @@ class ToolDispatcher:
         if name == "git_diff_session":
             return await self._execute_git_diff_session_tool(inp)
         if name in ("enter_plan_mode", "exit_plan_mode"):
-            from agents.plan.plan_tool_executor import execute_plan_mode_tool
             return await execute_plan_mode_tool(self.agent, name)
         if name == "agent":
-            from agents.core.subagent_runner import execute_agent_tool
             return await execute_agent_tool(self.agent, inp, timeout_s=self.get_tool_timeout("agent"))
         if name == "subagent_cancel":
-            from agents.core.subagent_runner import execute_subagent_cancel_tool
             return await execute_subagent_cancel_tool(self.agent, inp)
         if name == "ask_user":
-            from agents.tools.question_tools import handle_ask_user
             return await handle_ask_user(self.agent.session, inp, abort_fn=lambda: self.agent.abort_requested())
         if name == "todolist":
             if self.agent.permission_mode == "plan":
                 return "Error: todolist is disabled in plan mode. Use the plan system's tasks.md instead."
-            from agents.tools.todo_tools import handle_todolist
             result = handle_todolist(self.agent.session.id, inp)
             self.agent.session.append("todo/updated", {"session_id": self.agent.session.id})
             return result
@@ -196,8 +197,6 @@ class ToolDispatcher:
         if self.agent._mcp_manager.is_mcp_tool(name):
             return await self.agent._mcp_manager.call_tool(name, inp)
 
-        from agents.logging import print_info
-        from agents.tools import execute_tool
         print_info(f"[DEBUG] execute_tool_call_inner: calling execute_tool for {name}")
         result = await execute_tool(name, inp, self.agent._read_file_state)
         print_info(f"[DEBUG] execute_tool_call_inner: execute_tool done for {name}")
@@ -245,7 +244,6 @@ class ToolDispatcher:
         Available Skills 段一直广告"call the `skill` tool"——模型调用只会得到
         Unknown tool。U9（模型主动调 skill 生成图表）依赖此通路，按原契约恢复。
         """
-        from agents.skills.skills import discover_skills, execute_skill
 
         skill_name = str(inp.get("skill_name") or "").strip()
         if not skill_name:
@@ -256,7 +254,6 @@ class ToolDispatcher:
             return f"Error: unknown skill '{skill_name}'. Available skills: {available}"
         if result.get("context") == "fork":
             # fork：独立子代理执行 skill 指令，保护主上下文窗口
-            from agents.core.subagent_runner import execute_agent_tool
             return await execute_agent_tool(
                 self.agent,
                 {"type": "general", "prompt": result["prompt"], "description": f"skill:{skill_name}"},
@@ -304,7 +301,6 @@ class ToolDispatcher:
 
         call_id = key.removeprefix("snip:")
 
-        from agents.core.context_events import collect_hidden_seqs
 
         hidden_seqs = collect_hidden_seqs(self.agent.session.events)
 
@@ -329,7 +325,6 @@ class ToolDispatcher:
 
         limit = int(inp.get("limit") or 20)
 
-        from agents.core.context_events import collect_hidden_seqs
 
         hidden_seqs = collect_hidden_seqs(self.agent.session.events)
 
@@ -417,7 +412,6 @@ class ToolDispatcher:
 
     async def _execute_git_diff_before_last_compress_tool(self, inp: dict) -> str:
         """执行 git_diff_before_last_compress 工具。"""
-        from agents.core.snapshot_service import SnapshotService
         from pathlib import Path
 
         session_id = self.agent.session_id
@@ -458,7 +452,6 @@ class ToolDispatcher:
 
     async def _execute_git_diff_session_tool(self, inp: dict) -> str:
         """执行 git_diff_session 工具。"""
-        from agents.core.snapshot_service import SnapshotService
         from pathlib import Path
 
         session_id = str(inp.get("session_id") or "").strip()

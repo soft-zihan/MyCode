@@ -23,6 +23,8 @@ from agents.core.text_sanitization import safe_utf8_text, sanitize_for_utf8
 from agents.tools.registry import get_active_tool_definitions
 from agents.wiki.citation import CitationStripper, strip_citations
 from agents.wiki.store import increment_usage
+from agents.core.subagent import get_available_agent_types
+from agents.observability.trace import trace_span
 
 if TYPE_CHECKING:
     from agents.agent import Agent
@@ -50,7 +52,6 @@ def _to_openai_tools(tools: list[dict]) -> list[dict]:
         description = t["description"]
         if t["name"] == "agent":
             if dynamic_agent_types is None:
-                from agents.core.subagent import get_available_agent_types
                 _types = [n for n in get_available_agent_types() if n.get("name")]
                 dynamic_agent_types = [n["name"] for n in _types]
                 dynamic_agent_list = "; ".join(
@@ -181,7 +182,6 @@ class ModelCaller:
         tool_choice="none"：保留工具定义但禁止调用（v2 llm.ts 收敛模式——
         工具数组参与 prefix cache，摘掉 tools 会使缓存整体失效）。
         """
-        from agents.observability.trace import trace_span
 
         a = self._agent
         _model_t0 = time.time()

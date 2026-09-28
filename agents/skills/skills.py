@@ -18,6 +18,7 @@ from .skill_file_ops import (
     record_skill_feedback,
     record_skill_invocation,
 )
+from agents.observability.trace import trace_event
 
 
 @dataclass
@@ -137,7 +138,6 @@ def _load_executable_skills(skills: list[SkillDefinition]) -> None:
     from .executable_skills import load_executable_skills
     result = load_executable_skills(executable_dirs)
 
-    from agents.observability.trace import trace_event
     trace_event(
         "skill.load_batch",
         metadata={

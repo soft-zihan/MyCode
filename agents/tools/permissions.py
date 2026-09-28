@@ -16,6 +16,7 @@ from typing import Any
 from agents.core.workspace import get_workspace
 from agents.tools.paths import resolve_tool_path
 from agents.tools.registry import READ_TOOLS, EDIT_TOOLS
+from agents.observability.trace import trace_span
 
 
 DANGEROUS_PATTERNS = [
@@ -173,7 +174,6 @@ def check_permission(
     if mode == "bypassPermissions":
         return _check_permission_inner(tool_name, inp, mode, plan_dir, sub_agent_type, allowed_commands, plan_execution_active)
 
-    from agents.observability.trace import trace_span
 
     permission_input = {
         "tool_name": tool_name,

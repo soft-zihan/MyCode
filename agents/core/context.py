@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from typing import Any
+from agents.logging import print_info
 
 
 class ContextManager:
@@ -55,7 +56,6 @@ class ContextManager:
         self.agent.total_input_tokens = 0
         self.agent.total_output_tokens = 0
         self.agent.reset_context_token_estimate()
-        from agents.logging import print_info
         print_info("Conversation cleared.")
 
     def clear_history_keep_system(self) -> None:
@@ -73,7 +73,6 @@ class ContextManager:
         """手动压缩会话。返回是否实际执行了折叠。"""
         compacted = await self._compact_conversation(trigger="manual")
         if not compacted:
-            from agents.logging import print_info
             print_info("Nothing to compact yet.")
         return compacted
 
@@ -97,7 +96,6 @@ class ContextManager:
             self.agent.session_id,
         )
         if compacted:
-            from agents.logging import print_info
             print_info("Conversation compacted.")
             self.agent.reset_context_token_estimate()
         return compacted

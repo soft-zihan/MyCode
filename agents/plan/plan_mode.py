@@ -14,7 +14,10 @@ import re
 from pathlib import Path
 from typing import Callable, Awaitable, Any
 
-from agents.plan.strategy_loader import load_strategy, VALID_STAGES
+from agents.plan.strategy_loader import load_strategy, VALID_STAGES, strategy_config_from_app_config
+from agents.logging import print_error
+from agents.plan.plan_manager import count_tasks, create_plan, get_plan, append_tasks_to_plan, add_artifact
+from agents.plan.plan_models import PlanGranularity
 
 
 class PlanModeManager:
@@ -46,7 +49,6 @@ class PlanModeManager:
         plan_dir = self._plan_dir or self.generate_plan_dir()
 
         # 加载各阶段策略（全局应用配置为底，会话级覆盖）
-        from agents.plan.strategy_loader import strategy_config_from_app_config
         cfg = {**strategy_config_from_app_config(), **self.strategy_config}
         grill_spec_content, _, _ = load_strategy(
             "grill-spec",
@@ -164,7 +166,6 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
         if not self._plan_dir:
             return {"valid": False, "errors": ["plan_dir not set"], "artifacts": {}, "granularity": "standard"}
 
-        from agents.plan.plan_manager import count_tasks
 
         plan_path = self._plan_dir / "plan.md"
         spec_path = self._plan_dir / "spec.md"
@@ -223,14 +224,6 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
         granularity="minimal"：轻量轨，plan.md 为源文档，
         checkbox 任务清单转换为结构化 tasks.md（执行状态机依赖）。
         """
-        from agents.plan.plan_manager import (
-            create_plan,
-            get_plan,
-            append_tasks_to_plan,
-            add_artifact,
-        )
-        from agents.plan.plan_models import PlanGranularity
-        from agents.logging import print_error
 
         if granularity == "minimal":
             if not plan_md.strip():

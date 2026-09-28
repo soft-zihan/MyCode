@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from agents.wiki.store import WikiEntry
+from agents.config import get_embedding_config
 
 
 # 兜底零向量/缓存元信息用默认维度；真实维度以 API 返回向量为准
@@ -28,7 +29,6 @@ def content_hash(text: str) -> str:
 
 def get_embedding_model() -> str:
     """embedding 模型名（全局配置 ~/.my-code/config.json embedding.model，BC-30）。"""
-    from agents.config import get_embedding_config
     return get_embedding_config().model
 
 
@@ -130,7 +130,6 @@ def set_cached_embedding(text: str, embedding: list[float], model: str | None = 
 
 async def embed_text(text: str, model: str | None = None) -> list[float]:
     """生成文本的 embedding（后端/模型/密钥来自全局配置，失败时重试）。"""
-    from agents.config import get_embedding_config
 
     model = _resolve_model(model)
     cached = get_cached_embedding(text, model)
@@ -150,7 +149,6 @@ async def embed_text(text: str, model: str | None = None) -> list[float]:
 
 async def _call_openai_embedding(text: str, model: str) -> list[float]:
     """调用 OpenAI 兼容 /embeddings API（SiliconFlow 等，BC-30）。"""
-    from agents.config import get_embedding_config
 
     cfg = get_embedding_config()
     url = f"{cfg.base_url.rstrip('/')}/embeddings"

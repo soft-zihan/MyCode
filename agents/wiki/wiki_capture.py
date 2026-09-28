@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import Any
 
 from agents.wiki.store import get_wiki_dir, _git_commit
+from agents.core.frontmatter import format_frontmatter, parse_frontmatter
+from agents.core.session import get_session_backend
+from agents.wiki.evolution.settings import get_setting
+from agents.wiki.redact import redact_secrets
 
 
 def _get_extract_state_path() -> Path:
@@ -52,7 +56,6 @@ def set_last_extract_pos(session_id: str, pos: int) -> None:
 
 def get_all_session_ids() -> list[str]:
     """获取所有 session ID（走 SessionBackend，两后端一致）。"""
-    from agents.core.session import get_session_backend
     return get_session_backend().list_session_ids()
 
 
@@ -61,7 +64,6 @@ def get_session_workspace(session_id: str) -> str | None:
 
     只读事件头部窗口（seq < 10）；找不到返回 None。
     """
-    from agents.core.session import get_session_backend
     try:
         head_events = get_session_backend().get_events(session_id, from_seq=0, to_seq=10)
     except Exception as e:
@@ -78,7 +80,6 @@ def get_session_workspace(session_id: str) -> str | None:
 
 def get_session_max_seq(session_id: str) -> int:
     """获取指定 session 的最大 seq（backend 尾部高效查询，避免全量加载）。"""
-    from agents.core.session import get_session_backend
     last = get_session_backend().get_last_event(session_id)
     if last is None:
         return 0
@@ -90,7 +91,6 @@ def get_session_max_seq(session_id: str) -> int:
 
 def get_session_events_from_seq(session_id: str, from_seq: int) -> list[dict]:
     """从指定 seq 之后读取 session 事件（走全局 backend）。"""
-    from agents.core.session import get_session_backend
     return get_session_backend().get_events(session_id, from_seq=from_seq + 1)
 
 
@@ -109,8 +109,6 @@ def find_sessions_needing_compilation(threshold: int = 10) -> list[tuple[str, in
         进行中场景由压缩触发覆盖）
     """
     import time
-    from agents.core.session import get_session_backend
-    from agents.wiki.evolution.settings import get_setting
 
     idle_ms = float(get_setting("capture.idleMinutes", 30)) * 60 * 1000
     now_ms = int(time.time() * 1000)
@@ -142,7 +140,6 @@ def find_sessions_needing_compilation(threshold: int = 10) -> list[tuple[str, in
 
 
 def _capture_settings() -> dict:
-    from agents.wiki.evolution.settings import get_setting
     return {
         "tool_result_max_chars": int(get_setting("capture.toolResultMaxChars", 500)),
         "context_ratio": float(get_setting("capture.contextRatio", 0.7)),
@@ -200,7 +197,6 @@ def capture_session_to_session(
     # 带分段序号，避免覆盖
     filepath = session_dir / f"{slug}_seg{segment_index}.md"
 
-    from agents.wiki.redact import redact_secrets
 
     cfg = _capture_settings()
 
@@ -263,7 +259,6 @@ def capture_session_to_session(
         "truncated": "true" if truncated else "false",
     }
 
-    from agents.core.frontmatter import format_frontmatter
     filepath.write_text(format_frontmatter(meta, content))
     _git_commit(f"wiki: capture session {session_id} segment {segment_index}")
     return filepath
@@ -281,7 +276,6 @@ def _parse_tool_name_from_wrapper(content: Any) -> str:
 
 
 def mark_session_compiled(filepath: Path) -> None:
-    from agents.core.frontmatter import parse_frontmatter, format_frontmatter
     if not filepath.exists():
         # BC-6：后台补编译与外部清理（如评测 workspace 重置）可能并发，
         # segment 消失视为无需标记，跳过而非炸掉整轮 backfill
@@ -308,7 +302,6 @@ def register_compile_failure(filepath: Path) -> bool:
     Returns:
         True 表示已达上限并终态化。
     """
-    from agents.core.frontmatter import parse_frontmatter, format_frontmatter
     try:
         result = parse_frontmatter(filepath.read_text())
         attempts = int(result.meta.get("compile_attempts", "0")) + 1
@@ -342,7 +335,6 @@ def list_uncompiled_segments() -> list[Path]:
 
     compiled=failed 是毒丸终态，不再重试。
     """
-    from agents.core.frontmatter import parse_frontmatter
     session_root = get_wiki_dir() / "session"
     if not session_root.exists():
         return []

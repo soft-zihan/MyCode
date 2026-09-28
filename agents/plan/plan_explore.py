@@ -21,7 +21,6 @@ class ExploreResult:
 
 
 def save_explore_result(topic: str, content: str) -> Path:
-    from agents.plan.plan_manager import get_plans_dir, _slugify, _git_commit
 
     plans_dir = get_plans_dir()
     explorations_dir = plans_dir / "_explorations"
@@ -36,7 +35,6 @@ def save_explore_result(topic: str, content: str) -> Path:
 
 
 def list_explorations() -> list[Path]:
-    from agents.plan.plan_manager import get_plans_dir
 
     plans_dir = get_plans_dir()
     explorations_dir = plans_dir / "_explorations"
@@ -49,6 +47,7 @@ def list_explorations() -> list[Path]:
 
 # 从文件加载 side query 提示词
 from pathlib import Path
+from agents.plan.plan_manager import get_plans_dir, _slugify, _git_commit
 _PROMPTS_DIR = Path(__file__).parent.parent / "prompts" / "side_query"
 EXPLORE_PROMPT = (_PROMPTS_DIR / "explore.txt").read_text(encoding="utf-8")
 

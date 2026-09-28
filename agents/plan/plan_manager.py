@@ -12,7 +12,7 @@ from pathlib import Path
 
 from agents.core.workspace import get_workspace
 from agents.core.frontmatter import parse_frontmatter, format_frontmatter
-from agents.plan.task_models import normalize_status
+from agents.plan.task_models import normalize_status, parse_tasks_from_markdown
 from agents.plan.plan_models import Plan, PlanStatus, PlanGranularity, Task
 
 
@@ -574,7 +574,6 @@ def get_last_task_commit(slug: str, task_id: int) -> str:
 
 def get_structured_tasks(slug: str) -> list:
     """获取结构化任务列表。"""
-    from agents.plan.task_models import parse_tasks_from_markdown
     
     plan_dir = get_plans_dir() / slug
     tasks_path = plan_dir / "tasks.md"

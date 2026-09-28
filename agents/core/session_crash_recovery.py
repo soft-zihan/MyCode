@@ -18,6 +18,8 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from typing import Any
+from agents.core.session import session_dir, Session, get_session_backend
+from agents.session_manager import get_session_manager
 
 # 闭合 turn 的事件集合（D4 一致性：abort 端点写 turn/cancel，同样终结 running）
 _TURN_CLOSER_TYPES = ("turn/end", "turn/cancel")
@@ -212,7 +214,6 @@ def _projcache_running_candidates() -> list[str]:
     """projcache running=True 的会话 ID（廉价初筛，事件流才是最终裁决）。"""
     import json
 
-    from agents.core.session import session_dir
 
     candidates = []
     for f in session_dir().glob("*.projcache.json"):
@@ -249,7 +250,6 @@ def scan_and_mark_interrupted() -> list[dict[str, Any]]:
     补 session/interrupted 用户可见标记 → 强制刷新投影缓存。
     脏缓存（事件流已平衡）只重建 checkpoint 不写事件；孤儿缓存直接清理。
     """
-    from agents.core.session import Session, get_session_backend
 
     backend = get_session_backend()
     repaired: list[dict[str, Any]] = []
@@ -292,7 +292,6 @@ async def shutdown_active_sessions(timeout_s: float = 2.0) -> list[str]:
     """
     import asyncio
 
-    from agents.session_manager import get_session_manager
 
     sm = get_session_manager()
     live: list[tuple[Any, Any]] = []

@@ -34,6 +34,9 @@ from agents.wiki.wiki_capture import (
     set_last_extract_pos,
     list_uncompiled_segments,
 )
+from agents.core.frontmatter import parse_frontmatter
+from agents.skills.skill_evaluator import evaluate_online_skill_evolution_async
+from agents.wiki.wiki_capture import register_compile_failure, get_last_extract_pos
 
 
 COMPILE_LOCK_FILE = ".compile.lock"
@@ -100,7 +103,6 @@ async def compile_single_session(session_path: Path, side_query: Any) -> dict[st
             "deduped": 0,
         }
         
-        from agents.core.frontmatter import parse_frontmatter
         result = parse_frontmatter(session_path.read_text())
         content = result.body
 
@@ -362,7 +364,6 @@ async def compile_to_skill(pattern_rel_path: str, side_query: Any) -> str | None
     # 验证门禁：新 skill 变体落盘后运行在线评测，
     # 仅当严格优于历史最佳（分差 >= 0.01 且无新增硬失败）才晋升 champion
     try:
-        from agents.skills.skill_evaluator import evaluate_online_skill_evolution_async
 
         await evaluate_online_skill_evolution_async(side_query=side_query)
     except Exception as e:
@@ -403,7 +404,6 @@ async def check_and_compile_pending_sessions(side_query: Any, threshold: int = 2
     Returns:
         总提取统计信息
     """
-    from agents.core.frontmatter import parse_frontmatter
 
     total_stats: dict[str, int] = {
         "knowledge": 0, "self_improvement": 0, "feedback": 0, "user": 0,
@@ -436,13 +436,11 @@ async def check_and_compile_pending_sessions(side_query: Any, threshold: int = 2
             if session_id:
                 seg_max_seq = int(meta.get("max_seq", "0"))
                 if seg_max_seq > 0:
-                    from agents.wiki.wiki_capture import get_last_extract_pos
                     if seg_max_seq > get_last_extract_pos(session_id):
                         set_last_extract_pos(session_id, seg_max_seq)
             print(f"[wiki_backfill] retried segment {seg_path.name}: {sum(v for v in stats.values() if isinstance(v, int))} entries")
         except Exception as e:
             print(f"[wiki_backfill] retry segment failed {seg_path.name}: {type(e).__name__}: {e}")
-            from agents.wiki.wiki_capture import register_compile_failure
             register_compile_failure(seg_path)
             continue
 

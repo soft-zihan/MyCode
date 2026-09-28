@@ -33,6 +33,8 @@ from agents.plan.plan_manager import (
 from agents.plan.plan_models import PlanStatus, PlanGranularity
 from agents.plan.plan_explore import save_explore_result, build_explore_prompt
 from agents.plan.plan_recall import recall_plans, format_recall_results
+from agents.plan.plan_executor import PlanExecutor
+from agents.plan.plan_manager import update_plan_tags
 
 
 def plan_propose(inp: dict) -> str:
@@ -149,7 +151,6 @@ def plan_update(inp: dict) -> str:
 
     tags = inp.get("tags")
     if tags is not None:
-        from agents.plan.plan_manager import update_plan_tags
         if not update_plan_tags(slug, tags):
             return f"Error: failed to update tags"
 
@@ -198,7 +199,6 @@ def plan_task_done(inp: dict) -> str:
     if mark_task_done(slug, int(task_id), commit=commit, verification=verification):
         result = json.dumps({"status": "done", "slug": slug, "task_id": task_id, "commit": commit})
         try:
-            from agents.plan.plan_executor import PlanExecutor
             guidance = PlanExecutor.for_plan(slug).build_review_guidance()
         except Exception:
             guidance = ""

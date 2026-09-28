@@ -19,6 +19,9 @@ from agents.core.job_registry import SubAgentJob, get_job, pop_job, register_job
 from agents.core.model_registry import resolve_agent_endpoint
 from agents.core.session import Session
 from agents.tools.result import ToolExecutionResult
+from agents.core.subagent import get_sub_agent_config
+from agents.logging import print_sub_agent_start, print_sub_agent_end
+from agents.observability.trace import trace_span
 
 if TYPE_CHECKING:
     from agents.agent import Agent
@@ -97,8 +100,6 @@ async def execute_agent_tool(agent: "Agent", inp: dict, *, timeout_s: int) -> st
     if resume_id:
         return await _resume_agent_tool(agent, inp, resume_id, timeout_s=timeout_s)
 
-    from agents.core.subagent import get_sub_agent_config
-    from agents.logging import print_sub_agent_start
 
     agent_type = inp.get("type", "general")
     description = inp.get("description", "sub-agent task")
@@ -211,7 +212,6 @@ async def _run_sub_agent_job(agent: "Agent", job: SubAgentJob, sub_agent: "Agent
     在独立 task 中运行：前台提前返回（后台发起/转后台）后 span 与事件仍完整落账
     （v2 subagent-job.ts:36-53 的 run=resume+取最后 assistant 文本模式）。
     """
-    from agents.observability.trace import trace_span
 
     state: dict[str, Any] = {
         "status": "error", "outcome": "error", "summary": "", "output_text": "",
@@ -376,8 +376,6 @@ async def _join_running_sub_agent(agent: "Agent", inp: dict, resume_id: str,
 
 async def _resume_idle_sub_agent(agent: "Agent", inp: dict, resume_id: str, *, timeout_s: int) -> ToolExecutionResult:
     """空闲子会话：从事件流恢复 Session（含 crash recovery），配置现场重解析后起新 turn。"""
-    from agents.core.subagent import get_sub_agent_config
-    from agents.logging import print_sub_agent_start
 
     sub_session = Session.load_from_events(resume_id)
     if sub_session is None:
@@ -665,7 +663,6 @@ def _finalize_sub_agent(agent: "Agent", span, sub_agent: "Agent", sub_session: S
                         state: dict[str, Any], start_time: float, timeout_s: int,
                         max_tool_calls: int | None) -> None:
     """落 sub_agent/end 事件 + span 收尾（无论成功/取消/异常都执行）。"""
-    from agents.logging import print_sub_agent_end
 
     duration_s = round(time.time() - start_time, 2)
     tool_call_count = int(getattr(sub_agent, "_tool_call_count", 0) or 0)

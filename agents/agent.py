@@ -32,6 +32,10 @@ from agents.logging import print_info, print_assistant_text, print_error
 from agents.plan.plan_mode import PlanModeManager
 from agents.tools.dispatcher import ToolDispatcher
 from agents.core.context import ContextManager
+from agents.config import DEFAULT_AUTO_COMPACT_THRESHOLD, DEFAULT_CONTEXT_WINDOW, get_endpoint_by_model
+from agents.core.auto_wake import auto_wake_budget_exhausted
+from agents.core.context_compressor import COMPRESSION_ARMS
+from agents.core.options import AgentOptions
 
 
 def _get_max_output_tokens(model: str) -> int:
@@ -69,7 +73,6 @@ class Agent:
                  options: Any | None=None,):
         # 段1：参数归一——显式 kwargs 收敛为 AgentOptions（传入 options 实例则整体覆盖，
         # 与原"options 展开"语义一致；非 AgentOptions 的 options 值按原语义忽略）
-        from agents.core.options import AgentOptions
         if not isinstance(options, AgentOptions):
             options = AgentOptions(
                 permission_mode=permission_mode, model=model, api_base=api_base, api_key=api_key,
@@ -107,11 +110,6 @@ class Agent:
         self._api_base = opts.api_base
         self._api_key = opts.api_key
         self._side_query = SideQueryFactory(self)
-        from agents.config import (
-            DEFAULT_AUTO_COMPACT_THRESHOLD,
-            DEFAULT_CONTEXT_WINDOW,
-            get_endpoint_by_model,
-        )
         _ep = get_endpoint_by_model(opts.model)
         self.auto_compact_threshold = DEFAULT_AUTO_COMPACT_THRESHOLD
         # thinking 解析链：请求级覆盖 > 端点配置 > None（跟随模型默认）
@@ -120,7 +118,6 @@ class Agent:
         # thinking_feedback 解析链：请求级覆盖 > 端点配置 > False（剥离历史思考）
         if self.thinking_feedback is None:
             self.thinking_feedback = bool(_ep.thinking_feedback) if _ep is not None else False
-        from agents.core.context_compressor import COMPRESSION_ARMS
         self.compression_arm = opts.compression_arm or "full"
         if self.compression_arm not in COMPRESSION_ARMS:
             raise ValueError(f"compression_arm must be one of {sorted(COMPRESSION_ARMS)}, got {self.compression_arm!r}")
@@ -418,7 +415,6 @@ class Agent:
         唤醒尚未结束 / 预算耗尽（连续 auto_wake 轮无真实 user_message ≥3，
         v2 restart.ts:26-33 per-turn 预算思想）。
         """
-        from agents.core.auto_wake import auto_wake_budget_exhausted
 
         if self.is_sub_agent:
             return False

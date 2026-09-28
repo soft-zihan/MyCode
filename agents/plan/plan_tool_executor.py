@@ -14,6 +14,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from agents.logging import print_info
+from agents.observability.trace import trace_event
+from agents.plan.plan_executor import PlanExecutor
+from agents.plan.plan_manager import start_plan_execution
+from agents.plan.plan_mode import PlanModeManager
 
 if TYPE_CHECKING:
     from agents.agent import Agent
@@ -49,7 +53,6 @@ def format_plan_tasks_block(exec_result: dict) -> str:
     slug = exec_result.get("slug", "")
     if slug:
         try:
-            from agents.plan.plan_executor import PlanExecutor
             executor = PlanExecutor.for_plan(slug)
             execute_guide = executor.build_execute_instructions()
             if execute_guide:
@@ -111,7 +114,6 @@ def _validate_and_load_draft(mgr: Any) -> str | _PlanDraft:
     tasks_content = draft["tasks"]
     plan_md = draft["plan"]
     if granularity == "minimal" and not tasks_content:
-        from agents.plan.plan_mode import PlanModeManager
         tasks_content = PlanModeManager.checkbox_tasks_to_structured(plan_md)
 
     full_plan = "\n\n".join(
@@ -145,7 +147,6 @@ async def _request_approval(agent: "Agent", mgr: Any, full_plan: str) -> tuple[s
 
 
 async def _exit_plan_mode(agent: "Agent") -> str:
-    from agents.observability.trace import trace_event
 
     if agent.permission_mode != "plan":
         return "Not in plan mode."
@@ -175,7 +176,6 @@ async def _exit_plan_mode(agent: "Agent") -> str:
 
 def _finalize_plan_exit(agent: "Agent", mgr: Any, draft: _PlanDraft, choice: str) -> str:
     """批准路径：integration 落地 + 模式切换 + trace 上报 + 结果消息组装。"""
-    from agents.observability.trace import trace_event
 
     execute = choice in ("clear-and-execute", "execute")
     # 行为保留：approval_fn 分支仅 execute/clear-and-execute 做 integration；
@@ -223,7 +223,6 @@ def _finalize_plan_exit(agent: "Agent", mgr: Any, draft: _PlanDraft, choice: str
     result_msg += f"## Approved Plan:\n{draft.full_plan}\n\n"
 
     if plan_result and plan_result.get("slug"):
-        from agents.plan.plan_manager import start_plan_execution
         plan_slug = plan_result["slug"]
         print_info(f"Starting plan execution: {plan_slug}")
 

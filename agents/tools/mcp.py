@@ -43,6 +43,7 @@ import httpx
 
 from agents.core.workspace import get_workspace
 from agents.logging import print_error, print_info
+from agents.observability.trace import trace_span
 
 
 # ─── 单个 MCP 连接：一个 McpConnection 对应一个 MCP Server 子进程 ──────────────────
@@ -491,7 +492,6 @@ class McpManager:
 
     async def call_tool(self, prefixed_name: str, args: dict) -> str:
         """把带前缀的 MCP 工具调用路由到正确的 MCP Server。"""
-        from agents.observability.trace import trace_span
         # 工具名格式为 mcp__serverName__toolName。
         parts = prefixed_name.split("__")
         if len(parts) < 3:

@@ -156,7 +156,7 @@ async def test_execute_tool_call_returns_structured_timeout(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_agent_timeout_writes_sub_agent_end(monkeypatch):
-    monkeypatch.setattr("agents.core.subagent.get_sub_agent_config", lambda agent_type: {
+    monkeypatch.setattr("agents.core.subagent_runner.get_sub_agent_config", lambda agent_type: {
         "system_prompt": "test",
         "tools": [],
         "model_ref": "",
@@ -190,7 +190,7 @@ async def test_agent_timeout_writes_sub_agent_end(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_sub_agent_end_uses_child_tool_counters(monkeypatch):
-    monkeypatch.setattr("agents.core.subagent.get_sub_agent_config", lambda agent_type: {
+    monkeypatch.setattr("agents.core.subagent_runner.get_sub_agent_config", lambda agent_type: {
         "system_prompt": "test",
         "tools": [],
         "model_ref": "",
@@ -557,7 +557,7 @@ class BudgetFakeAgent(FakeAgent):
 
 @pytest.mark.asyncio
 async def test_sub_agent_tool_budget_returns_partial_result(monkeypatch):
-    monkeypatch.setattr("agents.core.subagent.get_sub_agent_config", lambda agent_type: {
+    monkeypatch.setattr("agents.core.subagent_runner.get_sub_agent_config", lambda agent_type: {
         "system_prompt": "test",
         "tools": [],
         "model_ref": "",

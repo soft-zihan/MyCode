@@ -22,6 +22,9 @@ from typing import TYPE_CHECKING, Any
 from agents.core.text_sanitization import safe_utf8_text
 from agents.logging import print_divider, print_error
 from agents.wiki.store import list_pending_confirm_entries
+from agents.core.workspace import set_workspace, reset_workspace
+from agents.observability.trace import trace_context, trace_span
+from agents.tools.mcp_registry import global_registry
 
 if TYPE_CHECKING:
     from agents.agent import Agent
@@ -53,8 +56,6 @@ class TurnRunner:
         extra_tags: tuple[str, ...] = (),
         trace_input: str | None = None,
     ) -> None:
-        from agents.core.workspace import set_workspace, reset_workspace
-        from agents.observability.trace import trace_context
 
         a = self._agent
         trace_tags = ["sub-agent"] if a.is_sub_agent else ["main-agent"]
@@ -125,7 +126,6 @@ class TurnRunner:
         ready_skill_extraction_window = self._pop_skill_extraction_window(original_user_message)
         self._reset_turn_state()
 
-        from agents.observability.trace import trace_span
 
         _turn_event_start_seq = a.session.seq
         _turn_t0 = time.time()
@@ -202,7 +202,6 @@ class TurnRunner:
             return
         print("[DEBUG] agent.chat: initializing MCP")
         a._mcp_initialized = True
-        from agents.observability.trace import trace_span
         with trace_span("mcp.init") as span:
             try:
                 await asyncio.wait_for(
@@ -211,7 +210,6 @@ class TurnRunner:
                 )
                 mcp_defs = a._mcp_manager.get_tool_definitions()
                 if mcp_defs:
-                    from agents.tools.mcp_registry import global_registry
                     for mcp_def in mcp_defs:
                         parts = mcp_def["name"].split("__")
                         if len(parts) >= 3:

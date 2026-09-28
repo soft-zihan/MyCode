@@ -23,6 +23,7 @@ from .core.session import get_latest_session_id, Session
 from .tools import set_background_done_callback
 from .logging import print_info, print_error, print_warning
 from .cli import registry as cli_registry, handle_skill_invocation
+from agents.core.workspace import get_workspace
 
 
 def parse_args() -> argparse.Namespace:
@@ -115,7 +116,6 @@ _AT_REF_MAX_BYTES = 32 * 1024
 
 
 def _expand_at_references(text: str) -> tuple[str, list[str]]:
-    from agents.core.workspace import get_workspace
     notes: list[str] = []
 
     def _sub(m: re.Match) -> str:

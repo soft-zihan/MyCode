@@ -16,6 +16,7 @@ import ast
 import re
 
 from agents.tools.paths import resolve_tool_path
+from agents.tools.runtime import get_runtime, DockerRuntime
 
 _LANG_BY_EXT = {
     ".py": "python",
@@ -37,7 +38,6 @@ Entry = tuple[int, int, int, str]
 
 def outline_file(inp: dict) -> str:
     try:
-        from agents.tools.runtime import get_runtime, DockerRuntime
         rt = get_runtime()
 
         if isinstance(rt, DockerRuntime):

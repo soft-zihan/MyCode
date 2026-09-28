@@ -4,6 +4,7 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Awaitable, Callable
+from agents.observability.trace import trace_span
 
 
 SideQuery = Callable[[str, str], Awaitable[str]]
@@ -283,7 +284,6 @@ async def online_ingest(
     target: str = "project",
 ) -> dict[str, Any]:
     from .skills import record_online_provenance
-    from agents.observability.trace import trace_span
 
     with trace_span("skill.extract") as span:
         try:

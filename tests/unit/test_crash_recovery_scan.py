@@ -199,8 +199,8 @@ async def test_shutdown_active_sessions(session_env, monkeypatch):
     s2.append("turn/start", {"turn": 1})
     a2 = _FakeAgent(s2, stubborn=True)  # 收不了尾，需要合成
 
-    import agents.session_manager as smgr
-    monkeypatch.setattr(smgr, "get_session_manager", lambda: _FakeManager([(s1, a1), (s2, a2)]))
+    import agents.core.session_crash_recovery as scr
+    monkeypatch.setattr(scr, "get_session_manager", lambda: _FakeManager([(s1, a1), (s2, a2)]))
 
     closed = await shutdown_active_sessions(timeout_s=0.3)
 
@@ -216,8 +216,8 @@ async def test_shutdown_active_sessions(session_env, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_shutdown_no_active_sessions(session_env, monkeypatch):
-    import agents.session_manager as smgr
-    monkeypatch.setattr(smgr, "get_session_manager", lambda: _FakeManager([]))
+    import agents.core.session_crash_recovery as scr
+    monkeypatch.setattr(scr, "get_session_manager", lambda: _FakeManager([]))
     assert await shutdown_active_sessions() == []
 
 

@@ -43,7 +43,7 @@ async def test_embed_text_openai_backend_and_cache(home, monkeypatch):
     import agents.config as config_mod
     from agents.wiki.evolution import embedding as emb
 
-    monkeypatch.setattr(config_mod, "get_embedding_config",
+    monkeypatch.setattr(emb, "get_embedding_config",
                         lambda: EmbeddingConfig(api_key="test-key"))
 
     calls = []
@@ -68,7 +68,7 @@ async def test_embed_text_ollama_backend_routes(home, monkeypatch):
     import agents.config as config_mod
     from agents.wiki.evolution import embedding as emb
 
-    monkeypatch.setattr(config_mod, "get_embedding_config",
+    monkeypatch.setattr(emb, "get_embedding_config",
                         lambda: EmbeddingConfig(backend="ollama", model="qwen3-embedding"))
 
     called = []
@@ -88,7 +88,7 @@ async def test_embed_text_unsupported_backend_raises(home, monkeypatch):
     import agents.config as config_mod
     from agents.wiki.evolution import embedding as emb
 
-    monkeypatch.setattr(config_mod, "get_embedding_config",
+    monkeypatch.setattr(emb, "get_embedding_config",
                         lambda: EmbeddingConfig(backend="nope"))
     with pytest.raises(RuntimeError, match="unsupported embedding backend"):
         await emb.embed_text("test")

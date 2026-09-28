@@ -35,8 +35,6 @@ class SessionManager:
         context_window: int | None = None,
     ) -> tuple[Any, Session]:
         """创建新 session 和 agent。"""
-        from agents.agent import Agent
-        from agents.config import load_config
         import logging
         logger = logging.getLogger(__name__)
         
@@ -109,8 +107,6 @@ class SessionManager:
             if not session:
                 return None
             
-            from agents.agent import Agent
-            from agents.config import load_config
             
             config = load_config()
             api_key, api_base, model_name = self._resolve_model(config, None)
@@ -200,5 +196,7 @@ def get_session_manager() -> SessionManager:
 # M4 解环：导入时注册活跃会话 provider——core.session.list_sessions 不再
 # 运行时反向 import 本模块（依赖单向化）
 from agents.core.session import set_active_sessions_provider  # noqa: E402
+from agents.agent import Agent
+from agents.config import load_config
 
 set_active_sessions_provider(lambda: get_session_manager().active_sessions())

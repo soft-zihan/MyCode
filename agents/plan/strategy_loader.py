@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Any
+from agents.config import load_config
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,6 @@ VALID_STAGES = frozenset(DEFAULT_STRATEGIES.keys())
 
 def strategy_config_from_app_config() -> dict[str, str]:
     """从全局应用配置读取五阶段策略选择（键名转为连字符阶段名）。"""
-    from agents.config import load_config
 
     c = load_config().plan_strategies
     return {
