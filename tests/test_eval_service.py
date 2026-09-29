@@ -133,7 +133,14 @@ def test_eval_service_abort_marks_task_aborted(monkeypatch, tmp_path):
         state = service.create_state(options)
         task = asyncio.create_task(service.run(state, options))
         service.tasks[state.run_id] = task
-        await asyncio.sleep(0)
+        # run() 用 asyncio.to_thread 加载任务，单次 sleep(0) 等不到 state.tasks 被填充，
+        # abort 会落在"任务加载之前"——那样只测到空 run 被取消，测不到 in-flight 取消。
+        # 轮询到任务就绪再 abort；FakeAdapter.run_task 的 0.2s delay 留出取消窗口。
+        for _ in range(200):
+            if state.tasks:
+                break
+            await asyncio.sleep(0.01)
+        assert state.tasks, "tasks were never loaded before abort"
         assert service.abort_run(state.run_id) is True
         try:
             await task

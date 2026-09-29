@@ -33,7 +33,7 @@ user-invocable: false
 
 ## 怎么调用
 
-脚本目录：`${CLAUDE_SKILL_DIR}/scripts/`。用 run_shell 执行（项目有 .venv 时用 `.venv/bin/python`，否则 `python3`）。所有脚本成功时打印 `OUT=<绝对路径>`。
+脚本目录：`${MYCODE_SKILL_DIR}/scripts/`。用 run_shell 执行（项目有 .venv 时用 `.venv/bin/python`，否则 `python3`）。所有脚本成功时打印 `OUT=<绝对路径>`。
 
 ### 1. matplotlib 图表（line / bar / scatter / heatmap）
 

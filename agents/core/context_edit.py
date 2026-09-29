@@ -2,12 +2,13 @@
 
 核心约束：删除消息必须保持工具调用配对完整性。
 - OpenAI：assistant 消息的 tool_calls 必须与后续 role="tool" 且
-  tool_call_id 匹配的消息成对存在；
-- Anthropic：assistant 消息里的 tool_use block 必须与紧邻的 user 消息里的
-  tool_result block 成对存在。
+  tool_call_id 匹配的消息成对存在。
 
 因此删除以"组"为单位：任何一条消息所属的配对组被整体删除，
 保证删除后消息历史仍然合法。
+
+只支持 OpenAI 兼容协议（use_openai=False 时不做配对，每条消息自成一组），
+因此 Anthropic 风格的 tool_use/tool_result block 配对不在处理范围内。
 """
 
 from __future__ import annotations

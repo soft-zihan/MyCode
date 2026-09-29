@@ -73,7 +73,6 @@ def _resolve_model(cli_model: str | None) -> str:
     return (
         _clean_env(cli_model)
         or _clean_env(os.environ.get("MODEL"))
-        or _clean_env(os.environ.get("MINI_CLAUDE_MODEL"))
         or "deepseek-chat"
     )
 
@@ -91,10 +90,10 @@ def _load_env_file() -> None:
 
 
 def _resolve_api_config(cli_api_base: str | None) -> tuple[str | None, str | None]:
-    generic_api_key = _clean_env(os.environ.get("APIKEY")) or _clean_env(os.environ.get("MINI_CLAUDE_API_KEY"))
+    generic_api_key = _clean_env(os.environ.get("APIKEY"))
     openai_api_key = _clean_env(os.environ.get("OPENAI_API_KEY"))
 
-    generic_api_base = _clean_env(os.environ.get("API")) or _clean_env(os.environ.get("MINI_CLAUDE_API_BASE"))
+    generic_api_base = _clean_env(os.environ.get("API"))
     openai_api_base = _clean_env(os.environ.get("OPENAI_BASE_URL"))
 
     resolved_api_base = _clean_env(cli_api_base) or generic_api_base or openai_api_base

@@ -25,7 +25,6 @@ class AgentOptions:
     # 模型配置
     model: str = "deepseek-chat"
     api_base: str | None = None
-    anthropic_base_url: str | None = None
     api_key: str | None = None
     
     # 思考模式
@@ -72,7 +71,6 @@ class AgentOptions:
             "permission_mode": self.permission_mode,
             "model": self.model,
             "api_base": self.api_base,
-            "anthropic_base_url": self.anthropic_base_url,
             "api_key": self.api_key,
             "thinking": self.thinking,
             "thinking_feedback": self.thinking_feedback,

@@ -5,6 +5,7 @@ Plan 是主动的目标规划，存储在 .mycode/plans/ 下，跟随主项目�
 
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 from datetime import datetime, timezone
@@ -15,6 +16,8 @@ from agents.core.frontmatter import parse_frontmatter, format_frontmatter
 from agents.plan.task_models import normalize_status, parse_tasks_from_markdown
 from agents.plan.plan_models import Plan, PlanStatus, PlanGranularity, Task
 
+
+logger = logging.getLogger(__name__)
 
 VALID_STATUSES = {s.value for s in PlanStatus}
 VALID_GRANULARITIES = {g.value for g in PlanGranularity}
@@ -494,7 +497,13 @@ def check_expired_plans() -> list[dict]:
 # ── Git ──
 
 def _git_commit(message: str) -> None:
-    """Commit 只收 `.mycode/plans/` 目录，不碰仓库其他未提交变更。"""
+    """Commit 只收 `.mycode/plans/` 目录，不碰仓库其他未提交变更。
+
+    这里提交进的是**用户自己的项目仓库**（plans 跟随主仓库，见模块 docstring），
+    因此沿用用户的 git 身份，不注入合成身份——否则会篡改用户历史的作者信息。
+    代价是用户未配置 git 身份时提交会失败；此前该失败被 `except: pass` 完全吞掉，
+    plan 的版本追溯会静默失效且无从排查，故改为记 warning。
+    """
     plans_dir = get_plans_dir()
     try:
         subprocess.run(
@@ -507,12 +516,17 @@ def _git_commit(message: str) -> None:
         )
         if staged.returncode == 0:
             return
-        subprocess.run(
+        result = subprocess.run(
             ["git", "commit", "-m", message, "--", "."],
-            cwd=plans_dir, capture_output=True, timeout=10, check=True,
+            cwd=plans_dir, capture_output=True, timeout=10, text=True,
         )
-    except Exception:
-        pass
+        if result.returncode != 0:
+            logger.warning(
+                "[plan_git] commit failed (rc=%s): %s",
+                result.returncode, (result.stderr or "").strip()[:300],
+            )
+    except Exception as exc:
+        logger.warning("[plan_git] commit error: %s: %s", type(exc).__name__, exc)
 
 
 # ── Ledger (v2.0) ──

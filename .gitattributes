@@ -1,0 +1,14 @@
+# Normalize line endings in the repository; checkout uses the platform default.
+* text=auto
+
+# Shell scripts must be LF in the working tree regardless of platform.
+# This project targets Linux/macOS only, but contributors cloning on Windows
+# commonly have core.autocrlf=true, which rewrites these to CRLF on checkout.
+# bash then fails on every line with `$'\r': command not found`, so the scripts
+# break under WSL, containers and CI even though the repository content is LF.
+# .gitattributes takes precedence over core.autocrlf.
+*.sh text eol=lf
+mycode text eol=lf
+mycode-web text eol=lf
+agents/plan/scripts/task-brief text eol=lf
+agents/plan/scripts/review-package text eol=lf

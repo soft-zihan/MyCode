@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 双后端门禁：与 scripts/run_tests.sh 的 pytest 腿等价（不含需要真实服务与
+  # 模型凭据的 smoke 腿）。矩阵覆盖 README 声明的 Python 下限 3.11。
+  backend:
+    name: pytest py${{ matrix.python-version }} / ${{ matrix.session-backend }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+        session-backend: [jsonl, sqlite]
+    env:
+      MYCODE_SESSION_BACKEND: ${{ matrix.session-backend }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Run unit + integration tests
+        run: python -m pytest tests/ -q --ignore=tests/e2e
+
+  frontend:
+    name: frontend (vitest + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Type check + production build
+        run: npm run build
+
+  # 这些脚本是唯一的启动/门禁入口，且必须保持 LF——Windows 上 core.autocrlf
+  # 检出成 CRLF 会让 bash 在 Linux 下逐行报 `$'\r': command not found`。
+  shell:
+    name: shell script syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reject CRLF in bash-interpreted files
+        run: |
+          bad=0
+          for f in $(git ls-files '*.sh' mycode mycode-web 'agents/plan/scripts/*'); do
+            [ -f "$f" ] || continue
+            if grep -qU $'\r' "$f"; then
+              echo "::error file=$f::contains CRLF line endings"
+              bad=1
+            fi
+          done
+          exit $bad
+
+      - name: bash -n syntax check
+        run: |
+          for f in $(git ls-files '*.sh' mycode mycode-web 'agents/plan/scripts/*'); do
+            [ -f "$f" ] || continue
+            bash -n "$f" || exit 1
+          done

@@ -65,7 +65,7 @@ export interface Endpoint {
   model: string;
   base_url: string;
   has_api_key: boolean;
-  protocol: 'openai' | 'anthropic';
+  protocol: 'openai';
 }
 
 export interface Project {

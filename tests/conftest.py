@@ -12,8 +12,8 @@ def isolated_home(tmp_path, monkeypatch):
     """Point HOME and memory/session dirs at a temp dir for every test.
 
     agents.session derives its paths from Path.home() or
-    Path.cwd(), so redirecting both keeps tests from touching ~/.BearCode,
-    ~/.bear-code or the real project's .bear/ directory.
+    Path.cwd(), so redirecting both keeps tests from touching ~/.mycode,
+    ~/.my-code or the real project's .mycode/ directory.
     """
     home = tmp_path / "home"
     home.mkdir()
@@ -26,13 +26,8 @@ def isolated_home(tmp_path, monkeypatch):
         "APIKEY",
         "API",
         "MODEL",
-        "MINI_CLAUDE_MODEL",
-        "MINI_CLAUDE_API_KEY",
-        "MINI_CLAUDE_API_BASE",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_BASE_URL",
     ):
         monkeypatch.delenv(var, raising=False)
     yield home

@@ -5,6 +5,19 @@ PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 PIDFILE_BACKEND="$PROJECT_ROOT/logs/.backend.pid"
 PIDFILE_FRONTEND="$PROJECT_ROOT/logs/.frontend.pid"
 
+# logs/ 内容全被 .gitignore 按 basename 忽略，git 不跟踪空目录，
+# 全新克隆里它并不存在——不先建好，下面重定向与 pidfile 写入会让 set -e 直接中止启动。
+mkdir -p "$PROJECT_ROOT/logs"
+
+# setsid 让服务脱离调用方会话：WSL / CI 里那种瞬时 shell 退出时会按会话整树回收
+# 进程，nohup 挡不住（它只忽略 SIGHUP）。macOS 不自带 util-linux 的 setsid，
+# 缺失时退回纯 nohup——对"在终端里启动后关掉终端"这一常规场景 nohup 已经够用。
+if command -v setsid >/dev/null 2>&1; then
+    SETSID="setsid"
+else
+    SETSID=""
+fi
+
 BACKEND_PORT=5555
 FRONTEND_PORT=8090
 
@@ -30,8 +43,20 @@ stop_backend() {
         local pid
         pid=$(cat "$PIDFILE_BACKEND")
         kill "$pid" 2>/dev/null || true
+        # 必须等优雅退出：lifespan 的 shutdown 段要 flush Langfuse trace，并给活跃
+        # 会话合成 turn/end{shutdown}。下面的 kill_port 是 kill -9，不等就等于每次
+        # stop/restart 都丢 trace、并把在跑的会话留成 interrupted（下次启动误判为崩溃）。
+        local waited=0
+        while kill -0 "$pid" 2>/dev/null && (( waited < 20 )); do
+            sleep 0.5
+            waited=$((waited + 1))
+        done
         rm -f "$PIDFILE_BACKEND"
-        log "后端已停止 (pid=$pid)"
+        if kill -0 "$pid" 2>/dev/null; then
+            log "后端未在 10s 内优雅退出，将强制清理 (pid=$pid)"
+        else
+            log "后端已停止 (pid=$pid)"
+        fi
     fi
     kill_port "$BACKEND_PORT"
 }
@@ -61,7 +86,9 @@ start_backend() {
     export LANGFUSE_TRACING_ENABLED="${LANGFUSE_TRACING_ENABLED:-true}"
     export LANGFUSE_BASE_URL="${LANGFUSE_BASE_URL:-https://cloud.langfuse.com}"
     export MYCODE_SESSION_BACKEND="${MYCODE_SESSION_BACKEND:-jsonl}"
-    nohup env -i PATH="$PATH" HOME="$HOME" MYCODE_TRACING="$MYCODE_TRACING" LANGFUSE_TRACING_ENABLED="$LANGFUSE_TRACING_ENABLED" MYCODE_SESSION_BACKEND="$MYCODE_SESSION_BACKEND" LANGFUSE_PUBLIC_KEY="${LANGFUSE_PUBLIC_KEY:-}" LANGFUSE_SECRET_KEY="${LANGFUSE_SECRET_KEY:-}" LANGFUSE_BASE_URL="$LANGFUSE_BASE_URL" LANGFUSE_TRACING_ENVIRONMENT="${LANGFUSE_TRACING_ENVIRONMENT:-}" LANGFUSE_RELEASE="${LANGFUSE_RELEASE:-}" MYCODE_LANGFUSE_PROJECT_ID="${MYCODE_LANGFUSE_PROJECT_ID:-}" MYCODE_HOST="${MYCODE_HOST:-}" MYCODE_AUTH_TOKEN="${MYCODE_AUTH_TOKEN:-}" python frontend/server/main.py > "$PROJECT_ROOT/logs/.backend.log" 2>&1 &
+    # PYTHONUNBUFFERED=1：stdout 重定向到日志文件时默认全缓冲，应用的 print 诊断
+    # （[STARTUP]/[SHUTDOWN] 等）会滞留缓冲区、丢失或与 stderr 的 uvicorn 日志乱序。
+    $SETSID nohup env -i PATH="$PATH" HOME="$HOME" PYTHONUNBUFFERED=1 MYCODE_TRACING="$MYCODE_TRACING" LANGFUSE_TRACING_ENABLED="$LANGFUSE_TRACING_ENABLED" MYCODE_SESSION_BACKEND="$MYCODE_SESSION_BACKEND" LANGFUSE_PUBLIC_KEY="${LANGFUSE_PUBLIC_KEY:-}" LANGFUSE_SECRET_KEY="${LANGFUSE_SECRET_KEY:-}" LANGFUSE_BASE_URL="$LANGFUSE_BASE_URL" LANGFUSE_TRACING_ENVIRONMENT="${LANGFUSE_TRACING_ENVIRONMENT:-}" LANGFUSE_RELEASE="${LANGFUSE_RELEASE:-}" MYCODE_LANGFUSE_PROJECT_ID="${MYCODE_LANGFUSE_PROJECT_ID:-}" MYCODE_HOST="${MYCODE_HOST:-}" MYCODE_AUTH_TOKEN="${MYCODE_AUTH_TOKEN:-}" python frontend/server/main.py > "$PROJECT_ROOT/logs/.backend.log" 2>&1 &
     echo $! > "$PIDFILE_BACKEND"
     log "后端已启动 (pid=$!, log=.backend.log) [TRACING=$MYCODE_TRACING, SESSION=$MYCODE_SESSION_BACKEND]"
 }
@@ -69,13 +96,15 @@ start_backend() {
 start_frontend() {
     log "启动前端 (Vite @ port $FRONTEND_PORT) ..."
     cd "$PROJECT_ROOT/frontend"
-    nohup npm run dev > "$PROJECT_ROOT/logs/.frontend.log" 2>&1 &
+    $SETSID nohup npm run dev > "$PROJECT_ROOT/logs/.frontend.log" 2>&1 &
     echo $! > "$PIDFILE_FRONTEND"
     log "前端已启动 (pid=$!, log=.frontend.log)"
 }
 
 wait_ready() {
-    local port=$1 name=$2 max_wait=${3:-10}
+    # 60s：后端启动会串行尝试连接 .mcp.json 里的每个 MCP server，配置了不可达
+    # server 时冷启动可超过 10s。与 scripts/run_tests.sh 的 wait_health 对齐。
+    local port=$1 name=$2 max_wait=${3:-60}
     local elapsed=0
     while ! lsof -ti:"$port" >/dev/null 2>&1; do
         sleep 1
@@ -140,7 +169,7 @@ do_status() {
 
 # ── main ─────────────────────────────────────────────────────────────────────
 
-case "${1:-}" in
+case "${1:-start}" in
     start)   do_start   ;;
     stop)    do_stop    ;;
     restart) do_restart ;;
@@ -148,7 +177,7 @@ case "${1:-}" in
     *)
         echo "用法: $0 {start|stop|restart|status}"
         echo ""
-        echo "  start    启动前后端服务"
+        echo "  start    启动前后端服务（默认，可省略）"
         echo "  stop     停止所有服务"
         echo "  restart  重启所有服务"
         echo "  status   查看服务状态"

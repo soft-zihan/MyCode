@@ -1,10 +1,19 @@
 openai>=1.0.0
 prompt_toolkit>=3.0.0
 python-dotenv>=1.0.0
-rich>=13.0.0
-textual>=0.50.0
-tqdm>=4.66.0
 opentelemetry-sdk>=1.41.0
 opentelemetry-exporter-otlp-proto-http>=1.41.0
 httpx>=0.27.0
 ddgs>=9.16.0
+
+# Web backend (frontend/server/)
+fastapi>=0.115.0
+uvicorn>=0.30.0
+pydantic>=2.7.0
+python-frontmatter>=1.1.0
+websockets>=12.0
+
+# Agent runtime (wiki settings/recall, observability)
+PyYAML>=6.0
+aiohttp>=3.9.0
+langfuse>=3.0.0

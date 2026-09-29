@@ -1,6 +1,9 @@
 # MyCode
 
-编译式自进化的可观测 Coding Agent，支持 openaicompatible 端点。
+[![CI](https://github.com/soft-zihan/MyCode/actions/workflows/ci.yml/badge.svg)](https://github.com/soft-zihan/MyCode/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+编译式自进化的可观测 Coding Agent，支持任意 OpenAI 兼容端点。
 
 核心特点：
 
@@ -42,6 +45,7 @@
 - Python 3.11+
 - Node.js 18+
 - macOS / Linux
+- `lsof`（`start.sh` 用它做端口探活与清理；精简的 Linux 容器镜像常缺，需自行安装）
 
 ## 安装
 
@@ -52,6 +56,9 @@ cd MyCode
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+
+# 跑测试 / 评测还需 pytest、requests（已含上一行依赖）
+pip install -r requirements-dev.txt
 
 cd frontend && npm install && cd ..
 ```
@@ -83,33 +90,67 @@ cd frontend && npm install && cd ..
 
 Wiki 语义召回需要 embedding 配置，同样可在 UI 中配置。
 
+`routing.primary` 可省略，省略时静默回退到 `endpoints` 中的第一个端点——建议显式写明，避免调整端点顺序时主模型被意外改变。
+
+**embedding 需要独立端点**：模型网关通常不提供 `/embeddings`（实测会 404），需单独准备，例如 SiliconFlow：
+
+```json
+{
+  "embedding": {
+    "backend": "openai",
+    "base_url": "https://api.siliconflow.cn/v1",
+    "api_key": "sk-...",
+    "model": "BAAI/bge-large-zh-v1.5"
+  }
+}
+```
+
+未配置或调用失败时，召回自动降级为关键词打分（`recall.py` 中 embedding 异常被捕获后回退 `_keyword_relevance`），服务仍正常运行，只是语义召回能力下降。
+
 ## 环境变量（可选）
 
-在项目根创建 `.env`（已 gitignore），`start.sh` 会自动加载：
+复制模板后按需填写，`start.sh` 会自动加载 `.env`（已 gitignore）：
 
+```bash
+cp .env.example .env
+```
 
 | 变量                                          | 默认                         | 说明                              |
 | ----------------------------------------------- | ------------------------------ | ----------------------------------- |
-| `MYCODE_TRACING`                              | `1`                          | Langfuse tracing 开关             |
+| `MYCODE_TRACING`                              | `1`（经 `start.sh`）         | Langfuse tracing 开关；直接跑后端时默认关 |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | 空                           | Langfuse 密钥（不填则仅本地日志） |
 | `LANGFUSE_BASE_URL`                           | `https://cloud.langfuse.com` | Langfuse 服务地址                 |
 | `MYCODE_SESSION_BACKEND`                      | `jsonl`                      | 会话后端：`jsonl` / `sqlite`      |
 | `MYCODE_HOST`                                 | 空（仅本机）                 | 远程部署监听地址，如`0.0.0.0`     |
 | `MYCODE_AUTH_TOKEN`                           | 空                           | 暴露服务时的 Bearer 鉴权 token    |
 | `MYCODE_SIDE_MODEL`                           | 空                           | 压缩 side query 使用的辅助端点    |
-| `MYCODE_SKILL_AUTO_ACTIVATE`                  | 开                           | Skill 自动激活开关                |
+| `MYCODE_SKILL_AUTO_ACTIVATE`                  | **关**（观察模式）           | Skill champion 自动激活，需显式开启 |
 | `MYCODE_AUTO_SKILL_EVOLUTION`                 | 开                           | Skill 在线自进化开关              |
+
+## MCP 配置（可选）
+
+MCP server 配置读 `<项目根>/.mcp.json`，该文件已 gitignore。仓库提供 `.mcp.json.example` 作为模板：
+
+```bash
+cp .mcp.json.example .mcp.json   # 然后删掉用不到的 server 条目
+```
+
+不配置也完全可用（后端启动时 MCP 为 0 tools）。**注意**：模板里的 server 需要各自的可执行文件（`npx`、`code-review-graph`），保留用不到的条目会让后端启动时逐个尝试连接直至超时，显著拖慢冷启动。
+
+另可配置全局 `~/.mycode/settings.json` 与项目级 `.mycode/settings.json`，三者合并，后读取的覆盖同名 server。
 
 ## 启动
 
 ```bash
-./start.sh            # 启动后端(:5555) + 前端(:8090)
+./start.sh            # 启动后端(:5555) + 前端(:8090)，等价于 ./start.sh start
 ./start.sh status     # 查看状态
 ./start.sh restart    # 重启
 ./start.sh stop       # 停止
 ```
 
-访问 http://localhost:8090 。日志在 `logs/.backend.log` 与 `logs/.frontend.log`。
+访问 http://localhost:8090 。日志在 `logs/.backend.log` 与 `logs/.frontend.log`（`logs/` 由脚本自动创建）。
+
+`stop` / `restart` 会等后端优雅退出（最多 10s）再强制清理端口——lifespan 的关闭段需要 flush Langfuse trace 并给活跃会话合成 `turn/end{shutdown}`。
 
 远程访问推荐 SSH 隧道（无需鉴权）：
 
@@ -117,23 +158,45 @@ Wiki 语义召回需要 embedding 配置，同样可在 UI 中配置。
 ssh -L 8090:localhost:8090 -L 5555:localhost:5555 user@server
 ```
 
-直接暴露公网需显式设置 `MYCODE_HOST=0.0.0.0` 与 `MYCODE_AUTH_TOKEN`。
+直接暴露公网需显式设置 `MYCODE_HOST=0.0.0.0` 与 `MYCODE_AUTH_TOKEN`。注意这只约束后端：`frontend/vite.config.ts` 的 dev server 固定绑 `0.0.0.0`，`:8090` 默认即对局域网可达（静态界面无鉴权，`/api` 经代理仍受 token 保护）。生产部署请用 `npm run build` 产物配合反向代理，而非 dev server。
+
+## 命令行入口
+
+除 Web UI 外，仓库根目录提供两个可执行入口：
+
+```bash
+./scripts/install-mycode.sh   # 把 mycode 软链到 /usr/local/bin（需写权限，否则按提示 sudo）
+
+mycode [options] [prompt]     # 终端 REPL，工作区为当前目录（可从任意路径调用）
+mycode-web [start|stop|...]   # start.sh 的软链包装，默认 start
+```
+
+`mycode` 会优先使用项目自带的 `.venv/bin/python`（探测 `import openai` 判断依赖是否装好），找不到时回退 `python3`。
 
 ## 测试与评测
 
 ```bash
 source .venv/bin/activate
 
-# 单元 + 集成测试（jsonl / sqlite 双腿）
+# 单元测试
 python -m pytest tests/unit -q
 
-# 全链路 smoke 评测（需已配置模型；接 Langfuse 后可评审）
+# 单元 + 集成，jsonl / sqlite 双后端各跑一遍（仓库门禁）
+./scripts/run_tests.sh
+./scripts/run_tests.sh --smoke   # 追加全链路 smoke（jsonl 腿）
+
+# 全链路 smoke 评测：HTTP/WS 客户端，需先 ./start.sh 起后端并配好模型
 python -m eval.smoke.runner --suite chain
 python -m eval.langfuse.run_evals --judge
 
-# GAIA 对比实验（独立 benchmark，固定 Level 3）
+# GAIA 对比实验（独立 benchmark，固定 Level 3；需已配置模型）
 python -m eval.gaia.runner --sample 10
+
+# 前端单元测试 + 类型检查 + 构建
+cd frontend && npm test && npm run build && cd ..
 ```
+
+CI（`.github/workflows/ci.yml`）在 push / PR 时跑：后端 `pytest tests/ --ignore=tests/e2e` 的 **Python 3.11 × 3.12 × jsonl / sqlite** 四格矩阵、前端 `npm ci && npm test && npm run build`，以及 shell 脚本的 `bash -n` 与 CRLF 拒绝检查。smoke / GAIA 腿需要真实服务与模型凭据，不在 CI 内。
 
 ## 数据位置
 

@@ -40,7 +40,7 @@ def test_execute_skill_substitutes_runtime_vars(tmp_path):
     assert str(tmp_path / "artifacts" / "sess-42") in prompt
     assert "${ARTIFACTS_DIR}" not in prompt
     assert "${SESSION_ID}" not in prompt
-    # ${CLAUDE_SKILL_DIR} 指向内置技能目录（脚本模板可执行）
+    # ${MYCODE_SKILL_DIR} 指向内置技能目录（脚本模板可执行）
     scripts_dir = Path(prompt.split("脚本目录：`")[1].split("`")[0])
     assert (scripts_dir / "matplotlib_chart.py").is_file()
     assert "scripts/matplotlib_chart.py" in prompt or "matplotlib_chart.py" in prompt

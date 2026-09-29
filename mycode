@@ -16,10 +16,11 @@ while [ -L "$SOURCE" ]; do
 done
 SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 
-# 优先用项目自带 venv 的 python（探测哪个装了依赖），回退到 python3
+# 优先用项目自带 venv 的 python（探测哪个装了依赖），回退到 python3。
+# 探测 openai：它是 requirements.txt 的第一项，任何可用环境必然装了它。
 PY="python3"
 for cand in "$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/.venv-1/bin/python"; do
-  if [ -x "$cand" ] && "$cand" -c "import anthropic" >/dev/null 2>&1; then
+  if [ -x "$cand" ] && "$cand" -c "import openai" >/dev/null 2>&1; then
     PY="$cand"
     break
   fi

@@ -562,6 +562,13 @@ def record_wiki_change(rel_path: str) -> None:
         _BATCH_STACK[-1].append(rel_path)
 
 
+# wiki 仓库是本工具自建自管的内部仓库，从不推送远端，因此用固定合成身份提交，
+# 不依赖也不污染用户的全局 git 配置。缺身份时 git commit 会以 "empty ident name"
+# 失败——WSL、容器和 CI 上很常见（这些环境的 /etc/passwd GECOS 字段为空，git
+# 无法自动推导 user.name）。
+_GIT_IDENTITY = ["-c", "user.name=MyCode", "-c", "user.email=mycode@localhost"]
+
+
 def _do_commit(wiki_dir: Path, message: str, changes: list[str]) -> None:
     """执行 git commit。"""
     try:
@@ -569,12 +576,17 @@ def _do_commit(wiki_dir: Path, message: str, changes: list[str]) -> None:
             ["git", "add"] + changes,
             cwd=wiki_dir, capture_output=True, timeout=10,
         )
-        subprocess.run(
-            ["git", "commit", "-m", message, "--allow-empty"],
-            cwd=wiki_dir, capture_output=True, timeout=10,
+        result = subprocess.run(
+            ["git", *_GIT_IDENTITY, "commit", "-m", message, "--allow-empty"],
+            cwd=wiki_dir, capture_output=True, timeout=10, text=True,
         )
-    except Exception:
-        pass
+        if result.returncode != 0:
+            logger.warning(
+                "[wiki_git] commit failed (rc=%s): %s",
+                result.returncode, (result.stderr or "").strip()[:300],
+            )
+    except Exception as exc:
+        logger.warning("[wiki_git] commit error: %s: %s", type(exc).__name__, exc)
 
 
 def _git_commit(message: str) -> None:
@@ -584,10 +596,15 @@ def _git_commit(message: str) -> None:
             ["git", "add", "-A"],
             cwd=wiki_dir, capture_output=True, timeout=10,
         )
-        subprocess.run(
-            ["git", "commit", "-m", message, "--allow-empty"],
-            cwd=wiki_dir, capture_output=True, timeout=10,
+        result = subprocess.run(
+            ["git", *_GIT_IDENTITY, "commit", "-m", message, "--allow-empty"],
+            cwd=wiki_dir, capture_output=True, timeout=10, text=True,
         )
+        if result.returncode != 0:
+            logger.warning(
+                "[wiki_git] commit failed (rc=%s): %s",
+                result.returncode, (result.stderr or "").strip()[:300],
+            )
     except Exception as exc:
         logger.warning("[wiki_git] commit failed: %s: %s", type(exc).__name__, exc)
 
@@ -600,9 +617,16 @@ def init_wiki_git() -> None:
     try:
         subprocess.run(["git", "init"], cwd=wiki_dir, capture_output=True, timeout=10)
         subprocess.run(["git", "add", "-A"], cwd=wiki_dir, capture_output=True, timeout=10)
-        subprocess.run(
-            ["git", "commit", "-m", "wiki: init", "--allow-empty"],
-            cwd=wiki_dir, capture_output=True, timeout=10,
+        result = subprocess.run(
+            ["git", *_GIT_IDENTITY, "commit", "-m", "wiki: init", "--allow-empty"],
+            cwd=wiki_dir, capture_output=True, timeout=10, text=True,
         )
+        if result.returncode != 0:
+            # 首提交失败 => 仓库无 HEAD => consolidate/diff 全程走 no_commits 分支，
+            # wiki 版本追溯静默失效。这条必须吵出来。
+            logger.warning(
+                "[wiki_git] init commit failed (rc=%s): %s",
+                result.returncode, (result.stderr or "").strip()[:300],
+            )
     except Exception as exc:
         logger.warning("[wiki_git] init failed: %s: %s", type(exc).__name__, exc)

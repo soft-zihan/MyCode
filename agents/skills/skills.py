@@ -80,7 +80,7 @@ def resolve_skill_prompt(skill: SkillDefinition, args: object, substitutions: di
     # 支持在 SKILL.md 正文中使用 $ARGUMENTS 或 ${ARGUMENTS} 引用用户参数。
     prompt = re.sub(r"\$ARGUMENTS|\$\{ARGUMENTS\}", str(args or ""), prompt)
     # 支持 skill 引用自己的目录，例如读取同目录下的 references/scripts。
-    prompt = prompt.replace("${CLAUDE_SKILL_DIR}", skill.skill_dir)
+    prompt = prompt.replace("${MYCODE_SKILL_DIR}", skill.skill_dir)
     # U9：调用方注入的运行时变量（如 ${SESSION_ID}/${ARTIFACTS_DIR}）
     for key, value in (substitutions or {}).items():
         prompt = prompt.replace(key, value)

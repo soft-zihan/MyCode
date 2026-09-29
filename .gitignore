@@ -140,6 +140,8 @@ celerybeat.pid
 # Environments
 .env
 .envrc
+# Local MCP server config — copy .mcp.json.example and prune what you don't use
+.mcp.json
 .venv
 .venv-1/
 env/
@@ -253,6 +255,8 @@ paper/
 project-learning/
 
 # Runtime PID and log files
+# logs/ is created by start.sh; ignore the whole dir, not just the known basenames
+logs/
 .backend.pid
 .frontend.pid
 .backend.log

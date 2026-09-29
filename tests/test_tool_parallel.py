@@ -30,7 +30,7 @@ class ToolParallelTest:
         self.base_url = base_url
         self.events: List[SSEEvent] = []
         self.session_id: str = None
-        self.test_dir = Path("/tmp/bearcode_test_parallel")
+        self.test_dir = Path("/tmp/mycode_test_parallel")
         self.trace_events: List[Dict] = []
         
     def setup(self):

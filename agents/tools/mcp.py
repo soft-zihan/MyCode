@@ -44,6 +44,11 @@ import httpx
 from agents.core.workspace import get_workspace
 from agents.logging import print_error, print_info
 from agents.observability.trace import trace_span
+from agents.version import __version__
+
+
+# initialize 握手与 _meta 里上报给 MCP Server 的客户端标识。
+_CLIENT_INFO = {"name": "mycode", "version": __version__}
 
 
 # ─── 单个 MCP 连接：一个 McpConnection 对应一个 MCP Server 子进程 ──────────────────
@@ -155,9 +160,9 @@ class McpConnection:
         """执行 MCP 初始化握手。"""
         # initialize 是 MCP 连接建立后的第一步，用于协商协议版本和客户端信息。
         await self._send_request("initialize", {
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": MCP_PROTOCOL_VERSION,
             "capabilities": {},
-            "clientInfo": {"name": "mini-claude", "version": "1.0.0"},
+            "clientInfo": _CLIENT_INFO,
         })
         # 初始化请求成功后，按 MCP 协议发送 initialized 通知。
         self._send_notification("notifications/initialized")
@@ -256,7 +261,7 @@ class McpHttpConnection:
     def _build_meta(self) -> dict:
         return {
             "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
-            "io.modelcontextprotocol/clientInfo": {"name": "mini-claude", "version": "1.0.0"},
+            "io.modelcontextprotocol/clientInfo": _CLIENT_INFO,
             "io.modelcontextprotocol/clientCapabilities": {},
         }
 
@@ -358,7 +363,7 @@ class McpHttpConnection:
             await self._send_request("initialize", {
                 "protocolVersion": MCP_PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": {"name": "mini-claude", "version": "1.0.0"},
+                "clientInfo": _CLIENT_INFO,
             })
         except RuntimeError as e:
             if "404" in str(e) or "-32601" in str(e):

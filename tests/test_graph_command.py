@@ -1,6 +1,6 @@
 """/graph 命令层测试：子命令分发、CLI 缺失提示、帮助文本。
 
-代码图谱本体由外部 code-review-graph（MCP + CLI）提供，BearCode 侧
+代码图谱本体由外部 code-review-graph（MCP + CLI）提供，MyCode 侧
 只有薄薄的命令层（agents/graph_cmd.py），这里用假可执行文件验证它：
 - 命令拼装与输出透传（fake CLI + PATH 注入）
 - 未安装 CLI 时给出安装提示
