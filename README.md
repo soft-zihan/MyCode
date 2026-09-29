@@ -140,3 +140,7 @@ python -m eval.gaia.runner --sample 10
 - 会话事件：`~/.mycode/sessions/*.events.jsonl`
 - 模型配置：`~/.my-code/config.json`
 - 运行日志：`logs/`
+
+## License
+
+[MIT](LICENSE)
