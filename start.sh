@@ -153,6 +153,27 @@ do_restart() {
     do_start
 }
 
+# 生产模式：后端直接托管 frontend/dist，不再跑 Vite dev server。
+# dev server 无压缩、带 HMR 开销、且固定绑 0.0.0.0，只适合本地开发。
+do_prod() {
+    log "===== 生产模式（后端托管构建产物）====="
+    if [[ ! -d "$PROJECT_ROOT/frontend/dist" ]]; then
+        log "未发现 frontend/dist，先构建前端 ..."
+        (cd "$PROJECT_ROOT/frontend" && npm run build)
+    fi
+    stop_frontend
+    stop_backend
+    sleep 1
+    start_backend
+    wait_ready "$BACKEND_PORT" "后端"
+    echo ""
+    log "   就绪 → http://localhost:$BACKEND_PORT"
+    log "   此模式下 :$FRONTEND_PORT 不使用，status 会显示前端未运行，属正常。"
+    log "   前端有改动时：(cd frontend && npm run build) 后 ./start.sh prod"
+    log ""
+    log "停止服务: ./start.sh stop"
+}
+
 do_status() {
     echo "===== 服务状态 ====="
     if lsof -ti:"$BACKEND_PORT" >/dev/null 2>&1; then
@@ -173,11 +194,13 @@ case "${1:-start}" in
     start)   do_start   ;;
     stop)    do_stop    ;;
     restart) do_restart ;;
+    prod)    do_prod    ;;
     status)  do_status  ;;
     *)
-        echo "用法: $0 {start|stop|restart|status}"
+        echo "用法: $0 {start|stop|restart|prod|status}"
         echo ""
-        echo "  start    启动前后端服务（默认，可省略）"
+        echo "  start    启动前后端服务（默认，可省略；前端为 Vite dev server）"
+        echo "  prod     生产模式：构建前端并由后端托管 dist，不跑 dev server"
         echo "  stop     停止所有服务"
         echo "  restart  重启所有服务"
         echo "  status   查看服务状态"

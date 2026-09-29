@@ -5,12 +5,14 @@
 压缩永不触发，不适合消融（BC-16）。
 
 用法：
-    .venv/bin/python -m eval.loca.runner --config-set 64k --window 100k --arm full
-    .venv/bin/python -m eval.loca.runner --sample 10 --select head   # 固定前 10（确定性）
+    # 正式实验：全量跑完整个 config set（缺省行为，无需 --sample）
+    .venv/bin/python -m eval.loca.runner --config-set 128k --window 100k --arm full
     .venv/bin/python -m eval.loca.runner --indices 0,7,14 --arm truncate --window 100k
+    # 探测/校准：只跑子集（能力区间探测、触发验证）
+    .venv/bin/python -m eval.loca.runner --sample 3 --select head
 
-采样：--select head（默认）取配置文件顺序前 N，跨 run 完全可复现；
---select random 用 --seed 随机抽 N；--indices 显式指定。
+采样：缺省即全量。--select head（默认）按配置文件顺序取，跨 run 完全可复现；
+--select random 用 --seed 随机取；--indices 显式指定。--sample N 把上述任一方式截到前 N 个。
 """
 
 from __future__ import annotations
@@ -57,17 +59,19 @@ def _loca_commit(loca_repo: Path) -> str | None:
         return None
 
 
-def select_indices(total: int, sample: int, select: str, seed: int, indices: str | None) -> list[int]:
+def select_indices(total: int, sample: int | None, select: str, seed: int, indices: str | None) -> list[int]:
+    """挑选配置下标。sample 为 None 表示全量（跑完整个 config set）。"""
     if indices:
         picked = sorted({int(x) for x in indices.split(",") if x.strip()})
         for i in picked:
             if not 0 <= i < total:
                 raise SystemExit(f"--indices 越界: {i} (共 {total} 个配置)")
         return picked
+    n = total if sample is None else min(sample, total)
     if select == "head":
-        return list(range(min(sample, total)))
+        return list(range(n))
     rng = random.Random(seed)
-    return sorted(rng.sample(range(total), min(sample, total)))
+    return sorted(rng.sample(range(total), n))
 
 
 def _summarize(rows: list[dict[str, Any]], total_tasks: int) -> dict[str, Any]:
@@ -96,7 +100,8 @@ def main() -> None:
     parser.add_argument("--config-set", default="64k",
                         choices=["8k", "16k", "32k", "64k", "96k", "128k", "256k"],
                         help="环境描述长度预设（默认 64k）")
-    parser.add_argument("--sample", type=int, default=10, help="每批任务数（默认 10）")
+    parser.add_argument("--sample", type=int, default=None,
+                        help="只跑前 N / 随机 N 个配置（探测或复现用）；缺省为全量跑完整个 config set")
     parser.add_argument("--select", choices=["head", "random"], default="head",
                         help="head=固定取前 N（确定性，默认）；random=按 --seed 随机抽样")
     parser.add_argument("--seed", type=int, default=42, help="random 抽样种子")

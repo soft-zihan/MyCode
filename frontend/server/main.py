@@ -7,8 +7,10 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
@@ -161,6 +163,34 @@ app.include_router(artifacts_router)
 @app.get("/api/health")
 def api_health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+# ── 生产态静态托管 ──────────────────────────────────────────────────────────
+# frontend/dist 存在时由后端直接托管构建产物，无需再跑 Vite dev server
+# （dev server 只适合本地开发：无压缩、带 HMR 开销、且固定绑 0.0.0.0）。
+# 必须注册在所有 router 之后——Starlette 按注册顺序匹配，否则会吞掉 /api。
+_FRONTEND_DIST = (project_root / "frontend" / "dist").resolve()
+
+if _FRONTEND_DIST.is_dir():
+    if (_FRONTEND_DIST / "assets").is_dir():
+        app.mount("/assets", StaticFiles(directory=_FRONTEND_DIST / "assets"), name="assets")
+
+    # include_in_schema=False：frontend/openapi.json 是前后端契约单源，
+    # 这个 catch-all 不属于 API 面，不能让它污染契约。
+    @app.get("/{spa_path:path}", include_in_schema=False)
+    async def spa_fallback(spa_path: str):
+        """SPA 路由回退：命中真实文件则返回该文件，否则返回 index.html。"""
+        # /api 下的未知路径必须仍返回 JSON 404，否则 API 客户端会收到一坨 HTML
+        if spa_path == "api" or spa_path.startswith("api/"):
+            raise HTTPException(status_code=404)
+        if spa_path:
+            candidate = (_FRONTEND_DIST / spa_path).resolve()
+            # 防目录穿越：解析后仍须落在 dist 内
+            if candidate.is_file() and candidate.is_relative_to(_FRONTEND_DIST):
+                return FileResponse(candidate)
+        return FileResponse(_FRONTEND_DIST / "index.html")
+
+    print(f"[static] 托管前端构建产物: {_FRONTEND_DIST}")
 
 
 if __name__ == "__main__":
