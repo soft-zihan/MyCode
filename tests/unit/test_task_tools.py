@@ -75,6 +75,40 @@ def test_add_rejects_whitespace_only_content(ws):
     assert list_tasks("s") == []
 
 
+def test_add_rejects_non_string_detail(ws):
+    """C1 的第一道防线：模型边界必须回可恢复的 Error，而不是 ok:true。
+
+    未修时 detail=12345 原样落盘（`or ""` 只收窄 nullity 不收窄类型），此后每次
+    请求推式层与常驻层都抛 AttributeError 并被两处宽 except 吞掉——两层永久静默
+    关闭，而模型收到的最后一个信号是「成功」。
+    """
+    raw = handle_task_list("s", {"operation": "add", "content": "A", "detail": 12345})
+    assert raw.startswith("Error")
+    assert "detail" in raw
+    assert list_tasks("s") == []          # 什么都没落盘
+
+
+def test_add_rejects_non_string_acceptance(ws):
+    """acceptance 是同一个类型收窄口径的第二个字段（对象是这里的典型模型错误）。"""
+    raw = handle_task_list("s", {"operation": "add", "content": "A",
+                                 "acceptance": {"cmd": "pytest"}})
+    assert raw.startswith("Error")
+    assert "acceptance" in raw
+    assert list_tasks("s") == []
+
+
+def test_update_rejects_non_string_content(ws):
+    """update 侧同一口径：content 传数组不得污染已有条目。"""
+    added = _call({"operation": "add", "content": "A", "detail": "方案A"})
+    raw = handle_task_list("s", {"operation": "update", "id": added["task"]["id"],
+                                 "content": ["a", "b"]})
+    assert raw.startswith("Error")
+    assert "content" in raw
+    got = list_tasks("s")[0]
+    assert got.content == "A"             # 原值未被改写
+    assert got.detail == "方案A"
+
+
 def test_add_with_after_id_inserts_in_middle(ws):
     a = _call({"operation": "add", "content": "A"})["task"]
     _call({"operation": "add", "content": "C"})

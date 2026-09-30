@@ -47,6 +47,17 @@ def _normalize_status(value: str) -> str:
     return value if value in VALID_STATUSES else TASK_STATUS_PENDING
 
 
+def _as_str(value: Any) -> str:
+    """把任意 JSON 值收窄为 str；非字符串（int/dict/list/None）一律变空串。
+
+    模型可能给 detail 传一个步骤数组或给 acceptance 传一个对象。不收窄就会让
+    .strip() 在每请求路径上抛 AttributeError，被 model_caller 与 prompt_runtime
+    两处宽 except 吞掉——推式与常驻两层会永久静默关闭，而工具早已回过 ok:true，
+    模型没有任何可见的恢复路径。这里是最后一道防线；第一道在工具边界。
+    """
+    return value if isinstance(value, str) else ""
+
+
 def get_tasks_dir() -> Path:
     # 目录名刻意保留 "todos"：非模型可见契约，改名需迁移回退路径而收益为零
     d = get_workspace() / ".mycode" / "todos"
@@ -75,24 +86,25 @@ class TaskItem:
     def from_dict(cls, data: dict[str, Any]) -> TaskItem:
         seq = data.get("detail_origin_seq")
         started = data.get("started_seq")
-        # content/detail/acceptance/error 四个字符串字段一律用 `or ""` 而非
-        # `.get(k, "")` 收窄：显式 JSON null（例如未来 UI/API 写入方）不能变成
-        # None——needs_disclosure / format_disclosure_block / _first_line 会对
-        # 它们调 .strip()，None 会在每模型请求的路径上抛 AttributeError，而那条
-        # 路径包着 try/except，异常会被吞成「常驻层静默消失」。在 from_dict 收窄
-        # 对任何写入方、任何消费方都生效。
+        # content/detail/acceptance/error 四个字符串字段一律过 _as_str：既收窄
+        # nullity（显式 JSON null，例如未来 UI/API 写入方）也收窄**类型**（模型
+        # 给 detail 传步骤数组、给 acceptance 传对象——网关不强制 schema 类型）。
+        # 不收窄就会让 needs_disclosure / format_disclosure_block / _first_line 的
+        # .strip() 在每模型请求的路径上抛 AttributeError，而那两处宽 except 会把它
+        # 吞成「推式层与常驻层永久静默关闭」。在 from_dict 收窄对任何写入方、任何
+        # 消费方都生效。
         return cls(
             id=data.get("id", 0),
-            content=data.get("content") or "",
+            content=_as_str(data.get("content")),
             status=_normalize_status(data.get("status", TASK_STATUS_PENDING)),
             priority=data.get("priority", TASK_PRIORITY_MEDIUM),
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
-            detail=data.get("detail") or "",
-            acceptance=data.get("acceptance") or "",
+            detail=_as_str(data.get("detail")),
+            acceptance=_as_str(data.get("acceptance")),
             detail_origin_seq=seq if isinstance(seq, int) else None,
             started_seq=started if isinstance(started, int) else None,
-            error=data.get("error") or "",
+            error=_as_str(data.get("error")),
         )
 
 

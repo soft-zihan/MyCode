@@ -174,6 +174,31 @@ def _coerce_id(value) -> int | None:
         return None
 
 
+# 四个字符串字段（设计 §四）。schema 已声明 type: string，但网关不强制，所以
+# 边界必须自己校验——这是 C1 的第一道防线，第二道是 task_store._as_str。
+_STRING_FIELDS = ("content", "detail", "acceptance", "error")
+
+
+def _check_string_fields(inp: dict) -> str | None:
+    """模型边界的类型校验：本次调用里**提供了的**字符串字段必须是 str。
+
+    为什么不能只靠 from_dict 的 _as_str：_as_str 只能把坏值收窄成 ""，模型收到的
+    仍是 ok:true —— 它以为自己写下了一段执行方案，实际什么都没存，而 S 与披露层
+    都不会告诉它。这里给模型一个可恢复的信号（Error: detail must be a string）。
+    非字符串的 detail（步骤数组）是完全可能的模型错误，而它一旦落盘就会让
+    .strip() 在每请求路径上抛 AttributeError，被 model_caller 与 prompt_runtime
+    两处宽 except 吞掉：推式与常驻两层永久静默关闭，且没有 agent 可见的恢复路径。
+
+    Plan 2 的 outcome 与 Plan 3 的写端点都会加字段——这个模式（类型校验属于模型
+    边界，不只属于反序列化）从现在起就是既定的。
+    """
+    for key in _STRING_FIELDS:
+        value = inp.get(key)
+        if value is not None and not isinstance(value, str):
+            return f"Error: {key} must be a string"
+    return None
+
+
 def handle_task_list(session_id: str, inp: dict, current_seq: int | None = None) -> str:
     """处理 task_list 工具调用。
 
@@ -191,6 +216,9 @@ def handle_task_list(session_id: str, inp: dict, current_seq: int | None = None)
     ignored = _ignored_keys(operation, inp)
 
     if operation == "add":
+        type_error = _check_string_fields(inp)
+        if type_error:
+            return type_error
         content = (inp.get("content") or "").strip()
         if not content:
             return "Error: content is required for add operation"
@@ -211,6 +239,9 @@ def handle_task_list(session_id: str, inp: dict, current_seq: int | None = None)
         task_id = _coerce_id(inp.get("id"))
         if task_id is None:
             return "Error: id is required for update operation"
+        type_error = _check_string_fields(inp)
+        if type_error:
+            return type_error
         status = inp.get("status")
         if status is not None and status not in VALID_STATUSES:
             return f"Error: invalid status '{status}'. Valid: {sorted(VALID_STATUSES)}"
