@@ -423,11 +423,24 @@ def test_from_dict_coerces_null_strings_to_empty(ws):
     assert item.error == ""
 
 
+def test_from_dict_coerces_null_content_to_empty(ws):
+    """content 是第四个字符串字段，收窄口径必须与 detail/acceptance/error 一致。
+
+    `content: null` 会让 format_task_list_block 里的 _first_line 抛
+    AttributeError，被 prompt_runtime 的 try/except 吞掉——整个常驻层就每请求
+    静默消失。在反序列化边界收窄，对每个消费方都生效，而不只是 S。
+    """
+    item = TaskItem.from_dict({"id": 1, "content": None})
+    assert item.content == ""
+
+
 # --- 清单摘要块 S（常驻尾部通道内容）---------------------------------------
 #
 # S 是每请求都要重发一次的常驻块，所以这两组性质是本节的重点：
 # (1) 绝不含 detail —— 含了就等于把「全量方案常驻」换皮保留，渐进式披露作废；
-# (2) 每个单行字段都限长 —— 不限长的字段是按请求数付费的无界成本。
+# (2) 每个单行字段都限长，且用的是 **S 自己的**上限（content 80 / acceptance 160
+#     / error 200），不是一次性披露块的 500 —— 常驻块的预算必须按「每请求都付」
+#     来定，否则 (1) 只是字段级承诺：模型可以把自由文本停在 acceptance 里让它常驻。
 
 
 def test_s_block_empty_for_no_tasks():
@@ -459,19 +472,22 @@ def test_s_block_includes_acceptance():
                     acceptance="pytest tests/unit -q")
     block = format_task_list_block([item], item)
     assert "pytest tests/unit -q" in block
-    # acceptance 是模型自填的自由文本，常驻块里必须限长（与披露块同一上限）
+    # acceptance 是模型自填的自由文本，常驻块里必须限长。用的是 S 自己的上限
+    # （160），不是披露块的 500：S 每请求重发，500 会让模型能把 500 字符自由
+    # 文本停在 acceptance 里变成常驻成本，「S 不含 detail」就退化成字段级承诺。
     long_item = TaskItem(id=1, content="跑测试", status="pending",
                          acceptance="A" * 5000)
     long_block = format_task_list_block([long_item], long_item)
-    assert "A" * 500 in long_block
-    assert "A" * 501 not in long_block
+    assert "A" * 160 in long_block
+    assert "A" * 161 not in long_block
 
 
 def test_s_block_never_includes_detail():
     item = TaskItem(id=1, content="跑测试", status="pending",
                     detail="一大段详细方案不该出现在常驻块里")
     block = format_task_list_block([item], item)
-    assert "一大段详细方案" not in block
+    assert "跑测试" in block                        # 先证明 S 真的渲染出来了
+    assert "一大段详细方案" not in block             # 再证明它不含 detail
 
 
 def test_s_block_shows_error_first_line_for_failed():
@@ -480,12 +496,13 @@ def test_s_block_shows_error_first_line_for_failed():
     block = format_task_list_block([item], item)
     assert "AssertionError: 3 != 4" in block
     assert "Traceback" not in block
-    # error 同样限长：先取首行，再截到上限（traceback 首行本身也可能很长）
+    # error 同样限长：先取首行，再截到 S 自己的上限（200，只需认得出是哪个失败；
+    # 披露块的 500 是一次性注入的预算，不适用于每请求重发的常驻块）
     long_item = TaskItem(id=1, content="跑测试", status="failed",
                          error="E" * 5000)
     long_block = format_task_list_block([long_item], long_item)
-    assert "E" * 500 in long_block
-    assert "E" * 501 not in long_block
+    assert "E" * 200 in long_block
+    assert "E" * 201 not in long_block
 
 
 def test_s_block_lists_skipped_count_separately():
@@ -511,3 +528,24 @@ def test_s_block_truncates_long_content_to_one_line():
     long_block = format_task_list_block([long_item], long_item)
     assert "C" * 80 in long_block
     assert "C" * 81 not in long_block
+
+
+def test_s_block_all_skipped_footer_does_not_claim_all_complete():
+    """listed 为空不止「全部完成」一种成因。
+
+    全 skipped 时 header 写着 `(0/3 done, 3 skipped)`，footer 再说「全部完成」
+    就是自相矛盾的事实错误——而 S 是模型判断计划状态的常驻依据。footer 因此
+    按 `done == len(tasks)` 分档：真全完成才说「全部完成」，否则只陈述可核的
+    事实「无未完成条目」。
+    """
+    tasks = [_item(1, "skipped"), _item(2, "skipped"), _item(3, "skipped")]
+    block = format_task_list_block(tasks, None)
+    assert "(0/3 done, 3 skipped)" in block
+    assert "全部完成" not in block
+    assert "（无未完成条目）" in block
+
+    # 反向：真全部完成时仍然说「全部完成」，别把两档写反
+    done_tasks = [_item(1, "completed"), _item(2, "completed")]
+    done_block = format_task_list_block(done_tasks, None)
+    assert "(2/2 done)" in done_block
+    assert "（全部完成）" in done_block

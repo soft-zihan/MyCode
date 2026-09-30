@@ -55,10 +55,16 @@ def test_task_block_present_when_list_non_empty(ws):
 
 
 def test_task_block_never_contains_detail(ws):
-    """常驻块里有 detail 就等于放弃渐进式披露——全量方案又变成常驻的了。"""
+    """常驻块里有 detail 就等于放弃渐进式披露——全量方案又变成常驻的了。
+
+    必须先正向证明 S 在尾部里：否则「S 被 prompt_runtime 的 try/except 吞掉」或
+    「S 压根没渲染」都能让下面那条负向断言平凡为真，而这条测试是整份设计里最
+    吃重的那条性质的端到端钉子。
+    """
     add_task("s1", "重构 X", detail="一大段不该常驻的方案")
     tails = build_tail_system_messages(_agent())
-    assert all("一大段不该常驻的方案" not in t for t in tails)
+    assert any("重构 X" in t for t in tails)                  # 先证明 S 真的在
+    assert all("一大段不该常驻的方案" not in t for t in tails)   # 再证明它不含 detail
 
 
 def test_task_block_comes_before_fold_guidance(ws):

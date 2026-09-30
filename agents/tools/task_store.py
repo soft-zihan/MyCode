@@ -75,13 +75,15 @@ class TaskItem:
     def from_dict(cls, data: dict[str, Any]) -> TaskItem:
         seq = data.get("detail_origin_seq")
         started = data.get("started_seq")
-        # detail/acceptance/error 用 `or ""` 而非 `.get(k, "")` 收窄：显式 JSON
-        # null（例如未来 UI/API 写入方）不能变成 None——needs_disclosure 与
-        # format_disclosure_block 会对它们调 .strip()，None 会在每模型请求的
-        # 路径上抛 AttributeError。在 from_dict 收窄对任何写入方都生效。
+        # content/detail/acceptance/error 四个字符串字段一律用 `or ""` 而非
+        # `.get(k, "")` 收窄：显式 JSON null（例如未来 UI/API 写入方）不能变成
+        # None——needs_disclosure / format_disclosure_block / _first_line 会对
+        # 它们调 .strip()，None 会在每模型请求的路径上抛 AttributeError，而那条
+        # 路径包着 try/except，异常会被吞成「常驻层静默消失」。在 from_dict 收窄
+        # 对任何写入方、任何消费方都生效。
         return cls(
             id=data.get("id", 0),
-            content=data.get("content", ""),
+            content=data.get("content") or "",
             status=_normalize_status(data.get("status", TASK_STATUS_PENDING)),
             priority=data.get("priority", TASK_PRIORITY_MEDIUM),
             created_at=data.get("created_at", ""),
@@ -358,15 +360,26 @@ def format_disclosure_block(item: TaskItem) -> str:
 # 属于 detail），所以比 acceptance/error 的上限更紧。
 _S_CONTENT_CHAR_LIMIT = 80
 
+# S 是常驻块，每请求重发，所以它的单行上限必须远小于一次性披露块的上限。
+# acceptance 的契约是「一条命令」（设计 §六），160 字符足够；error 只需认得出
+# 是哪个失败，200 字符足够。_DISCLOSURE_LINE_CHAR_LIMIT (500) 保留给披露块。
+_S_ACCEPTANCE_CHAR_LIMIT = 160
+_S_ERROR_CHAR_LIMIT = 200
 
-def _first_line(value: str, limit: int) -> str:
-    """单行化 + 限长。空/纯空白返回 ""。
+
+def _first_line(value: str | None, limit: int) -> str:
+    """单行化 + 限长。空/纯空白/None 返回 ""。
 
     S 与披露块共享同一条约束：常驻或注入的文本里不许出现换行——一个多行字段会把
     「一条任务一行」的块结构撑散，模型也就没法再按行定位条目。先 strip 再取首行，
     这样 content 以换行开头时不会渲染出一个空条目。
+
+    `(value or "")` 是防御性收窄：from_dict 已把四个字符串字段的显式 null 归一成
+    ""，但 TaskItem 也可以被直接构造（例如未来的写端点绕过 from_dict）。S 每请求
+    都渲染且外层包着 try/except，一个 None 字段会把整个常驻层吞掉，所以这里对
+    三个字段一次性免疫，而不是逐个调用点去防。
     """
-    stripped = value.strip()
+    stripped = (value or "").strip()
     if not stripped:
         return ""
     return stripped.splitlines()[0].strip()[:limit]
@@ -401,7 +414,10 @@ def format_task_list_block(tasks: list[TaskItem], focus: TaskItem | None) -> str
 
     lines = [header]
     if not listed:
-        lines.append("（全部完成）")
+        # listed 为空有两种成因：真的全部完成，或剩下的全是 skipped。后者若也说
+        # 「全部完成」，就和 header 的 `(0/3 done, 3 skipped)` 自相矛盾——S 是
+        # 模型判断计划状态的常驻依据，footer 不能说错。
+        lines.append("（全部完成）" if done == len(tasks) else "（无未完成条目）")
         return "\n".join(lines)
 
     focus_id = focus.id if focus is not None else None
@@ -409,12 +425,15 @@ def format_task_list_block(tasks: list[TaskItem], focus: TaskItem | None) -> str
         marker = ">" if task.id == focus_id else " "
         content = _first_line(task.content, _S_CONTENT_CHAR_LIMIT)
         line = f"{marker} #{task.id} {content}  [{task.status}]"
-        # acceptance/error 复用披露块的单行上限：两者语义相同（模型自填的单行
-        # 自由文本），不必各立一个数字。
-        acceptance = _first_line(task.acceptance, _DISCLOSURE_LINE_CHAR_LIMIT)
+        # acceptance/error 用 S 自己的上限，**不复用**披露块的
+        # _DISCLOSURE_LINE_CHAR_LIMIT (500)：披露块是一次性注入，S 每请求重发。
+        # 沿用 500 会让「S 不含 detail」这条性质退化成字段级而非内容级——模型
+        # 可以把 500 字符自由文本停在 acceptance 里让它变成常驻成本，而那正是
+        # 常驻层存在的目的所要防止的。
+        acceptance = _first_line(task.acceptance, _S_ACCEPTANCE_CHAR_LIMIT)
         if acceptance:
             line += f"  验收: {acceptance}"
-        error = _first_line(task.error, _DISCLOSURE_LINE_CHAR_LIMIT)
+        error = _first_line(task.error, _S_ERROR_CHAR_LIMIT)
         if task.status == TASK_STATUS_FAILED and error:
             line += f"  错误: {error}"
         lines.append(line)

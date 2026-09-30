@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import time
+import traceback
 from typing import TYPE_CHECKING
 
 from agents.core.prompt import build_system_prompt_with_breakdown
@@ -47,6 +48,13 @@ def build_tail_system_messages(agent: "Agent") -> list[str]:
     # 条目只报计数，所以 S 随计划推进而收缩。刻意不含 detail —— detail 走
     # task_disclosure 的条件注入，常驻块带上它就等于放弃渐进式披露。
     #
+    # 但这次读**不是**无副作用的纯查询，别按「读投影」的字面意思理解它：
+    # get_tasks_dir() 每次调用都 mkdir（幂等），load_tasks() 遇到坏文件会把它
+    # 改名成 {stem}.corrupt-{ts}.json 隔离掉再返回空清单。也就是说连从不使用
+    # 任务的 session 也会每请求发一次 mkdir 系统调用。两处行为都刻意保留
+    # （隔离是防「读失败退化成空清单→下次 save 覆盖全文件」的丢数据保护，
+    # mkdir 幂等且极便宜），此处只是不把副作用藏进一句轻描淡写的注释里。
+    #
     # 这是每请求的第二次 store 读（另一次是 model_caller 里
     # ensure_focus_detail_visible → list_tasks）。**已评估并接受，别再重新论证**：
     # 两次读的是同一个小 JSON——实测 5 条清单 2 KB、11 条带长 detail 的清单
@@ -65,7 +73,13 @@ def build_tail_system_messages(agent: "Agent") -> list[str]:
             if task_block:
                 tails.append(task_block)
     except Exception as e:
-        print_error(f"[task_list] tail block failed: {e!r}")
+        # 带 traceback：S 组装路径里的编程错误不该只以一个裸 repr 现身——这条
+        # 路径每次模型请求都跑，静默退化会让整个常驻层消失，而裸 repr 连是哪一
+        # 行都看不出来（与 model_caller 的披露调用点同一措辞、同一理由）。
+        # 仍然吞掉——尾部组装绝不能阻断模型调用。
+        print_error(
+            f"[task_list] tail block failed: {e!r}\n{traceback.format_exc()}"
+        )
 
     utilization = agent.estimated_context_tokens / agent.effective_window if agent.effective_window else 0.0
     last_fold = "never" if not agent._fold_last_time else f"{int((time.time() - agent._fold_last_time) / 60)}m ago"
