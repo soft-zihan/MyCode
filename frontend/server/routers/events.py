@@ -61,4 +61,4 @@ async def api_get_tasks(session_id: str):
     from agents.tools.task_store import list_todos
 
     items = list_todos(session_id)
-    return {"todos": [item.to_dict() for item in items]}
+    return {"tasks": [item.to_dict() for item in items]}

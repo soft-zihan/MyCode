@@ -12,11 +12,11 @@ import type { RewindPlan } from '../../../api/client';
 import { useChatNodes } from '../../../components/chat/nodes';
 import type { UserNode } from '../../../components/chat/nodes/types';
 import { sessionStore, wsManager, eventRouter, useSessionStore } from '../../../store';
-import type { PermissionRequest, QuestionRequest, TodoItem, FileSnapshot } from '../../../store/SessionStore';
+import type { PermissionRequest, QuestionRequest, TaskItem, FileSnapshot } from '../../../store/SessionStore';
 import { logger } from '../../../utils/logger';
 
 const EMPTY_FILE_SNAPSHOTS: FileSnapshot[] = [];
-const EMPTY_TODOS: TodoItem[] = [];
+const EMPTY_TASKS: TaskItem[] = [];
 const EMPTY_STATS = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
 
 const CHARS_PER_TOKEN = 4;
@@ -122,7 +122,7 @@ export function useChat() {
   const hasMoreHistory = useSessionStore(() => sessionId ? sessionStore.get(sessionId)?.hasMore ?? false : false);
   const pendingPermission = useSessionStore(() => sessionId ? sessionStore.getPendingPermission(sessionId) : undefined);
   const pendingQuestion = useSessionStore(() => sessionId ? sessionStore.getPendingQuestion(sessionId) : undefined);
-  const todos = useSessionStore(() => sessionId ? sessionStore.getTodos(sessionId) : EMPTY_TODOS);
+  const tasks = useSessionStore(() => sessionId ? sessionStore.getTasks(sessionId) : EMPTY_TASKS);
   const planSlug = useSessionStore(() => sessionId ? sessionStore.getPlanSlug(sessionId) : undefined);
   const fileSnapshots = useSessionStore(() => sessionId ? sessionStore.getFileSnapshots(sessionId) : EMPTY_FILE_SNAPSHOTS);
   const contextUsed = useSessionStore(() => sessionId ? sessionStore.getContextUsed(sessionId) : 0);
@@ -285,8 +285,8 @@ export function useChat() {
         sessionStore.setPendingQuestion(eventSessionId, undefined);
       }
       
-      if (eventType === 'todo/updated') {
-        fetchTodos(eventSessionId);
+      if (eventType === 'task_list/updated') {
+        fetchTasks(eventSessionId);
       }
       
       if (eventType === 'plan/updated') {
@@ -866,24 +866,24 @@ export function useChat() {
     }
   }, [pendingPermission, currentSessionId]);
 
-  const fetchTodos = useCallback(async (sessionId: string) => {
+  const fetchTasks = useCallback(async (sessionId: string) => {
     try {
       const apiBase = (window as any).__MYCODE_API_BASE__ || '/api';
-      const res = await fetch(`${apiBase}/todos/${sessionId}`);
+      const res = await fetch(`${apiBase}/tasks/${sessionId}`);
       if (res.ok) {
         const data = await res.json();
-        sessionStore.setTodos(sessionId, data.todos || []);
+        sessionStore.setTasks(sessionId, data.tasks || []);
       }
     } catch (err) {
-      console.error('Failed to fetch todos:', err);
+      console.error('Failed to fetch tasks:', err);
     }
   }, []);
 
   useEffect(() => {
     if (currentSessionId) {
-      fetchTodos(currentSessionId);
+      fetchTasks(currentSessionId);
     }
-  }, [currentSessionId, fetchTodos]);
+  }, [currentSessionId, fetchTasks]);
 
   const handleQuestionRespond = useCallback(async (answer: string) => {
     if (!pendingQuestion || !currentSessionId) return;
@@ -968,7 +968,7 @@ export function useChat() {
     sessionStats,
     pendingPermission,
     pendingQuestion,
-    todos,
+    tasks,
     sessionRefreshTrigger,
     chatSnapshot,
     pendingSteerMessages,

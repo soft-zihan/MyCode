@@ -57,7 +57,7 @@ EMITTED_TYPES = {
 }
 
 FRONTEND_CONSUMED_TYPES = {
-    # useChatNodes/useChat/EventRouter/EvalPage 实际消费面（2026-09-24 扫描）
+    # useChatNodes/useChat/EventRouter/EvalPage 实际消费面（2026-09-30 扫描）
     "thinking", "text", "tool_call", "tool_result",
     "user_message", "error", "stats", "turn/start", "turn/end",
     "context/compacted", "tool_folded", "session_folded",

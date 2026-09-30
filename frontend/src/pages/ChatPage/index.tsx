@@ -15,7 +15,7 @@ import { QuestionDialog } from '../../components/agent/QuestionDialog';
 import { ApprovalBar } from '../../components/agent/ApprovalBar';
 import { PlanApprovalDialog } from '../../components/agent/PlanApprovalDialog';
 import { WikiPlanPanel } from '../../components/agent/WikiPlanPanel';
-import { TodoListPanel } from '../../components/chat/TodoListPanel';
+import { TaskListPanel } from '../../components/chat/TaskListPanel';
 import { BackgroundTasksPanel } from '../../components/chat/BackgroundTasksPanel';
 import { PageLayout } from '../../components/PageLayout';
 import { useChat } from './hooks/useChat';
@@ -106,7 +106,7 @@ export default function ChatPage() {
     sessionStats,
     pendingPermission,
     pendingQuestion,
-    todos,
+    tasks,
     chatSnapshot,
     pendingSteerMessages,
     setPendingSteerMessages,
@@ -331,9 +331,9 @@ export default function ChatPage() {
             />
           )}
 
-          {/* TodoList Panel */}
-          {todos && todos.length > 0 && (
-            <TodoListPanel todos={todos} />
+          {/* TaskList Panel */}
+          {tasks && tasks.length > 0 && (
+            <TaskListPanel tasks={tasks} />
           )}
 
           {/* U3a: Background Tasks Panel */}

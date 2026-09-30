@@ -1,17 +1,20 @@
 import React from 'react';
 import { CheckCircle2, Circle, Clock, XCircle, ListTodo } from 'lucide-react';
 
-export interface TodoItem {
+export interface TaskItem {
   id: number;
   content: string;
-  status: 'pending' | 'in_progress' | 'completed' | 'cancelled';
+  status: 'pending' | 'in_progress' | 'completed' | 'skipped' | 'failed';
   priority: 'high' | 'medium' | 'low';
   created_at: string;
   updated_at: string;
+  detail: string;
+  acceptance: string;
+  error: string;
 }
 
-interface TodoListPanelProps {
-  todos: TodoItem[];
+interface TaskListPanelProps {
+  tasks: TaskItem[];
 }
 
 const getStatusIcon = (status: string) => {
@@ -20,8 +23,10 @@ const getStatusIcon = (status: string) => {
       return <CheckCircle2 className="w-4 h-4 text-green-500" />;
     case 'in_progress':
       return <Clock className="w-4 h-4 text-indigo-500 animate-pulse" />;
-    case 'cancelled':
+    case 'skipped':
       return <XCircle className="w-4 h-4 text-gray-400" />;
+    case 'failed':
+      return <XCircle className="w-4 h-4 text-red-500" />;
     default:
       return <Circle className="w-4 h-4 text-gray-300" />;
   }
@@ -44,8 +49,10 @@ const getStatusColor = (status: string) => {
   switch (status) {
     case 'completed':
       return 'text-gray-400 line-through';
-    case 'cancelled':
+    case 'skipped':
       return 'text-gray-400 line-through';
+    case 'failed':
+      return 'text-red-700 font-medium';
     case 'in_progress':
       return 'text-indigo-700 font-medium';
     default:
@@ -53,14 +60,14 @@ const getStatusColor = (status: string) => {
   }
 };
 
-export const TodoListPanel: React.FC<TodoListPanelProps> = ({ todos }) => {
-  if (todos.length === 0) {
+export const TaskListPanel: React.FC<TaskListPanelProps> = ({ tasks }) => {
+  if (tasks.length === 0) {
     return null;
   }
 
-  const pending = todos.filter(t => t.status === 'pending').length;
-  const inProgress = todos.filter(t => t.status === 'in_progress').length;
-  const completed = todos.filter(t => t.status === 'completed').length;
+  const pending = tasks.filter(t => t.status === 'pending').length;
+  const inProgress = tasks.filter(t => t.status === 'in_progress').length;
+  const completed = tasks.filter(t => t.status === 'completed').length;
 
   return (
     <div className="mx-4 mb-2">
@@ -71,25 +78,25 @@ export const TodoListPanel: React.FC<TodoListPanelProps> = ({ todos }) => {
             任务清单
           </span>
           <span className="text-xs text-gray-500 ml-auto">
-            {completed}/{todos.length} 完成
+            {completed}/{tasks.length} 完成
             {inProgress > 0 && ` · ${inProgress} 进行中`}
           </span>
         </div>
 
         <div className="divide-y divide-gray-100">
-          {todos.map((todo) => (
+          {tasks.map((task) => (
             <div
-              key={todo.id}
+              key={task.id}
               className="flex items-start gap-2 px-3 py-2 hover:bg-gray-50"
             >
-              {getStatusIcon(todo.status)}
+              {getStatusIcon(task.status)}
               <div className="flex-1 min-w-0">
-                <p className={`text-sm ${getStatusColor(todo.status)}`}>
-                  {todo.content}
+                <p className={`text-sm ${getStatusColor(task.status)}`}>
+                  {task.content}
                 </p>
               </div>
-              <span className={`text-xs ${getPriorityColor(todo.priority)}`}>
-                {todo.priority === 'high' ? '●' : todo.priority === 'medium' ? '○' : '◌'}
+              <span className={`text-xs ${getPriorityColor(task.priority)}`}>
+                {task.priority === 'high' ? '●' : task.priority === 'medium' ? '○' : '◌'}
               </span>
             </div>
           ))}
@@ -100,7 +107,7 @@ export const TodoListPanel: React.FC<TodoListPanelProps> = ({ todos }) => {
             <div className="h-1.5 bg-gray-200 rounded-full overflow-hidden">
               <div
                 className="h-full bg-green-500 transition-all duration-300"
-                style={{ width: `${(completed / todos.length) * 100}%` }}
+                style={{ width: `${(completed / tasks.length) * 100}%` }}
               />
             </div>
           </div>
@@ -110,4 +117,4 @@ export const TodoListPanel: React.FC<TodoListPanelProps> = ({ todos }) => {
   );
 };
 
-export default TodoListPanel;
+export default TaskListPanel;

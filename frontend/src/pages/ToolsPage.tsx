@@ -372,7 +372,7 @@ const toolDetails: Record<string, {
     executionMode: 'sequential',
     category: '用户交互',
   },
-  todolist: {
+  task_list: {
     idempotent: false,
     returns: '任务清单操作结果。',
     errorHandling: '操作失败时返回错误信息。',

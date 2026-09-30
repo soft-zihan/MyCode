@@ -18,13 +18,16 @@ export interface QuestionRequest {
   context?: string;
 }
 
-export interface TodoItem {
+export interface TaskItem {
   id: number;
   content: string;
-  status: 'pending' | 'in_progress' | 'completed' | 'cancelled';
+  status: 'pending' | 'in_progress' | 'completed' | 'skipped' | 'failed';
   priority: 'high' | 'medium' | 'low';
   created_at: string;
   updated_at: string;
+  detail: string;
+  acceptance: string;
+  error: string;
 }
 
 export interface FileSnapshot {
@@ -55,7 +58,7 @@ export interface SessionState {
   lastSeq: number;
   pendingPermission?: PermissionRequest;
   pendingQuestion?: QuestionRequest;
-  todos?: TodoItem[];
+  tasks?: TaskItem[];
   fileSnapshots: FileSnapshot[];
   contextUsed: number;
   contextTotal: number;
@@ -91,7 +94,7 @@ export function createEmptySessionState(sessionId: string | null = null): Sessio
 
 const emptySnapshot: ChatSnapshot = { order: [], nodes: new Map() };
 const EMPTY_ARRAY: FileSnapshot[] = [];
-const EMPTY_TODO_ARRAY: TodoItem[] = [];
+const EMPTY_TASK_ARRAY: TaskItem[] = [];
 const EMPTY_STATS = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
 
 class SessionStore {
@@ -286,13 +289,13 @@ class SessionStore {
     this.notify();
   }
 
-  getTodos(sessionId: string): TodoItem[] {
-    return this.sessions.get(sessionId)?.todos ?? EMPTY_TODO_ARRAY;
+  getTasks(sessionId: string): TaskItem[] {
+    return this.sessions.get(sessionId)?.tasks ?? EMPTY_TASK_ARRAY;
   }
 
-  setTodos(sessionId: string, todos: TodoItem[]): void {
+  setTasks(sessionId: string, tasks: TaskItem[]): void {
     const state = this.getOrCreate(sessionId);
-    state.todos = todos;
+    state.tasks = tasks;
     this.notify();
   }
 
