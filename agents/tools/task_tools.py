@@ -9,13 +9,13 @@ import json
 from typing import Any
 
 from agents.tools.task_store import (
-    add_todo,
-    update_todo,
-    remove_todo,
-    list_todos,
+    add_task,
+    update_task,
+    remove_task,
+    list_tasks,
     VALID_STATUSES,
     VALID_PRIORITIES,
-    TODO_PRIORITY_MEDIUM,
+    TASK_PRIORITY_MEDIUM,
 )
 
 
@@ -62,8 +62,8 @@ def handle_todolist(session_id: str, inp: dict) -> str:
         content = inp.get("content", "")
         if not content:
             return "Error: content is required for add operation"
-        priority = inp.get("priority", TODO_PRIORITY_MEDIUM)
-        item = add_todo(session_id, content, priority)
+        priority = inp.get("priority", TASK_PRIORITY_MEDIUM)
+        item = add_task(session_id, content, priority)
         return json.dumps({
             "ok": True,
             "action": "added",
@@ -76,7 +76,7 @@ def handle_todolist(session_id: str, inp: dict) -> str:
             return "Error: id is required for update operation"
         status = inp.get("status")
         content = inp.get("content")
-        item = update_todo(session_id, todo_id, status=status, content=content)
+        item = update_task(session_id, todo_id, status=status, content=content)
         if item is None:
             return f"Error: todo with id {todo_id} not found"
         return json.dumps({
@@ -89,7 +89,7 @@ def handle_todolist(session_id: str, inp: dict) -> str:
         todo_id = inp.get("id")
         if todo_id is None:
             return "Error: id is required for remove operation"
-        removed = remove_todo(session_id, todo_id)
+        removed = remove_task(session_id, todo_id)
         if not removed:
             return f"Error: todo with id {todo_id} not found"
         return json.dumps({
@@ -99,7 +99,7 @@ def handle_todolist(session_id: str, inp: dict) -> str:
         }, ensure_ascii=False, indent=2)
     
     if operation == "list":
-        items = list_todos(session_id)
+        items = list_tasks(session_id)
         return json.dumps({
             "ok": True,
             "count": len(items),

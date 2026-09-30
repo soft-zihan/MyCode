@@ -1,6 +1,9 @@
-"""TodoList 存储 — JSON 文件持久化。
+"""TaskList 存储 — JSON 文件持久化。
 
-存储在 ~/.mycode/todos/{session_id}.json
+存储在 ~/.mycode/todos/{session_id}.json（目录名刻意保留，见 get_tasks_dir）。
+
+本模块是纯 JSON IO 层：**禁止 import agents.core.session**。事件 seq 一律由调用方
+作为参数传入（`detail_origin_seq` / `current_seq`），以保持 store 与事件流解耦。
 """
 
 from __future__ import annotations
@@ -15,68 +18,99 @@ from typing import Any
 from agents.core.workspace import get_workspace
 
 
-TODO_STATUS_PENDING = "pending"
-TODO_STATUS_IN_PROGRESS = "in_progress"
-TODO_STATUS_COMPLETED = "completed"
-TODO_STATUS_CANCELLED = "cancelled"
+TASK_STATUS_PENDING = "pending"
+TASK_STATUS_IN_PROGRESS = "in_progress"
+TASK_STATUS_COMPLETED = "completed"
+TASK_STATUS_SKIPPED = "skipped"
+TASK_STATUS_FAILED = "failed"
 
-VALID_STATUSES = {TODO_STATUS_PENDING, TODO_STATUS_IN_PROGRESS, TODO_STATUS_COMPLETED, TODO_STATUS_CANCELLED}
+VALID_STATUSES = {
+    TASK_STATUS_PENDING,
+    TASK_STATUS_IN_PROGRESS,
+    TASK_STATUS_COMPLETED,
+    TASK_STATUS_SKIPPED,
+    TASK_STATUS_FAILED,
+}
 
-TODO_PRIORITY_HIGH = "high"
-TODO_PRIORITY_MEDIUM = "medium"
-TODO_PRIORITY_LOW = "low"
+# 旧 JSON 里的 cancelled 归一化为 skipped，不做文件迁移
+_LEGACY_STATUS_ALIASES = {"cancelled": TASK_STATUS_SKIPPED}
 
-VALID_PRIORITIES = {TODO_PRIORITY_HIGH, TODO_PRIORITY_MEDIUM, TODO_PRIORITY_LOW}
+TASK_PRIORITY_HIGH = "high"
+TASK_PRIORITY_MEDIUM = "medium"
+TASK_PRIORITY_LOW = "low"
+
+VALID_PRIORITIES = {TASK_PRIORITY_HIGH, TASK_PRIORITY_MEDIUM, TASK_PRIORITY_LOW}
 
 
-def get_todos_dir() -> Path:
+def _normalize_status(value: str) -> str:
+    value = _LEGACY_STATUS_ALIASES.get(value, value)
+    return value if value in VALID_STATUSES else TASK_STATUS_PENDING
+
+
+def get_tasks_dir() -> Path:
+    # 目录名刻意保留 "todos"：非模型可见契约，改名需迁移回退路径而收益为零
     d = get_workspace() / ".mycode" / "todos"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 @dataclass
-class TodoItem:
+class TaskItem:
     id: int
     content: str
-    status: str = TODO_STATUS_PENDING
-    priority: str = TODO_PRIORITY_MEDIUM
+    status: str = TASK_STATUS_PENDING
+    priority: str = TASK_PRIORITY_MEDIUM
     created_at: str = ""
     updated_at: str = ""
-    
+    detail: str = ""
+    acceptance: str = ""
+    detail_origin_seq: int | None = None
+    started_seq: int | None = None
+    error: str = ""
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-    
+
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> TodoItem:
+    def from_dict(cls, data: dict[str, Any]) -> TaskItem:
+        seq = data.get("detail_origin_seq")
+        started = data.get("started_seq")
         return cls(
             id=data.get("id", 0),
             content=data.get("content", ""),
-            status=data.get("status", TODO_STATUS_PENDING),
-            priority=data.get("priority", TODO_PRIORITY_MEDIUM),
+            status=_normalize_status(data.get("status", TASK_STATUS_PENDING)),
+            priority=data.get("priority", TASK_PRIORITY_MEDIUM),
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
+            detail=data.get("detail", ""),
+            acceptance=data.get("acceptance", ""),
+            detail_origin_seq=seq if isinstance(seq, int) else None,
+            started_seq=started if isinstance(started, int) else None,
+            error=data.get("error", ""),
         )
 
 
 @dataclass
-class TodoList:
+class TaskList:
     session_id: str
-    todos: list[TodoItem] = field(default_factory=list)
+    tasks: list[TaskItem] = field(default_factory=list)
     next_id: int = 1
-    
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
-            "todos": [t.to_dict() for t in self.todos],
+            "tasks": [t.to_dict() for t in self.tasks],
             "next_id": self.next_id,
         }
-    
+
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> TodoList:
+    def from_dict(cls, data: dict[str, Any]) -> TaskList:
+        raw = data.get("tasks")
+        if raw is None:
+            raw = data.get("todos", [])  # 旧文件用 "todos" 键
         return cls(
             session_id=data.get("session_id", ""),
-            todos=[TodoItem.from_dict(t) for t in data.get("todos", [])],
+            tasks=[TaskItem.from_dict(t) for t in raw],
             next_id=data.get("next_id", 1),
         )
 
@@ -86,65 +120,93 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def load_todos(session_id: str) -> TodoList:
-    todos_dir = get_todos_dir()
-    path = todos_dir / f"{session_id}.json"
+def load_tasks(session_id: str) -> TaskList:
+    tasks_dir = get_tasks_dir()
+    path = tasks_dir / f"{session_id}.json"
     if not path.exists():
-        return TodoList(session_id=session_id)
+        return TaskList(session_id=session_id)
     try:
         data = json.loads(path.read_text())
-        return TodoList.from_dict(data)
+        return TaskList.from_dict(data)
     except Exception:
-        return TodoList(session_id=session_id)
+        return TaskList(session_id=session_id)
 
 
-def save_todos(todo_list: TodoList) -> None:
-    todos_dir = get_todos_dir()
-    path = todos_dir / f"{todo_list.session_id}.json"
-    path.write_text(json.dumps(todo_list.to_dict(), indent=2, ensure_ascii=False))
+def save_tasks(task_list: TaskList) -> None:
+    tasks_dir = get_tasks_dir()
+    path = tasks_dir / f"{task_list.session_id}.json"
+    path.write_text(json.dumps(task_list.to_dict(), indent=2, ensure_ascii=False))
 
 
-def add_todo(session_id: str, content: str, priority: str = TODO_PRIORITY_MEDIUM) -> TodoItem:
-    todo_list = load_todos(session_id)
+def add_task(
+    session_id: str,
+    content: str,
+    priority: str = TASK_PRIORITY_MEDIUM,
+    detail: str = "",
+    acceptance: str = "",
+    after_id: int | None = None,
+) -> TaskItem:
+    task_list = load_tasks(session_id)
     now = _now_iso()
-    item = TodoItem(
-        id=todo_list.next_id,
+    item = TaskItem(
+        id=task_list.next_id,
         content=content,
-        status=TODO_STATUS_PENDING,
-        priority=priority if priority in VALID_PRIORITIES else TODO_PRIORITY_MEDIUM,
+        status=TASK_STATUS_PENDING,
+        priority=priority if priority in VALID_PRIORITIES else TASK_PRIORITY_MEDIUM,
         created_at=now,
         updated_at=now,
+        detail=detail,
+        acceptance=acceptance,
     )
-    todo_list.todos.append(item)
-    todo_list.next_id += 1
-    save_todos(todo_list)
+    task_list.next_id += 1
+    # after_id 的插入位置在 Task 5 实现；此处先追加
+    task_list.tasks.append(item)
+    save_tasks(task_list)
     return item
 
 
-def update_todo(session_id: str, todo_id: int, status: str | None = None, content: str | None = None) -> TodoItem | None:
-    todo_list = load_todos(session_id)
-    for item in todo_list.todos:
-        if item.id == todo_id:
+def update_task(
+    session_id: str,
+    task_id: int,
+    status: str | None = None,
+    content: str | None = None,
+    detail: str | None = None,
+    acceptance: str | None = None,
+    error: str | None = None,
+    after_id: int | None = None,
+    current_seq: int | None = None,
+) -> TaskItem | None:
+    # after_id（移动位置）在 Task 5 实现；current_seq（写 started_seq）在 Task 8 实现。
+    # 本任务只接住这两个参数，不做任何处理。
+    task_list = load_tasks(session_id)
+    for item in task_list.tasks:
+        if item.id == task_id:
             if status is not None and status in VALID_STATUSES:
                 item.status = status
             if content is not None:
                 item.content = content
+            if detail is not None:
+                item.detail = detail
+            if acceptance is not None:
+                item.acceptance = acceptance
+            if error is not None:
+                item.error = error
             item.updated_at = _now_iso()
-            save_todos(todo_list)
+            save_tasks(task_list)
             return item
     return None
 
 
-def remove_todo(session_id: str, todo_id: int) -> bool:
-    todo_list = load_todos(session_id)
-    original_len = len(todo_list.todos)
-    todo_list.todos = [t for t in todo_list.todos if t.id != todo_id]
-    if len(todo_list.todos) < original_len:
-        save_todos(todo_list)
+def remove_task(session_id: str, task_id: int) -> bool:
+    task_list = load_tasks(session_id)
+    original_len = len(task_list.tasks)
+    task_list.tasks = [t for t in task_list.tasks if t.id != task_id]
+    if len(task_list.tasks) < original_len:
+        save_tasks(task_list)
         return True
     return False
 
 
-def list_todos(session_id: str) -> list[TodoItem]:
-    todo_list = load_todos(session_id)
-    return todo_list.todos
+def list_tasks(session_id: str) -> list[TaskItem]:
+    task_list = load_tasks(session_id)
+    return task_list.tasks

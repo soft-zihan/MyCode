@@ -58,7 +58,7 @@ async def api_respond_question(data: QuestionResponseData):
 @router.get("/api/tasks/{session_id}")
 async def api_get_tasks(session_id: str):
     """获取会话任务清单。"""
-    from agents.tools.task_store import list_todos
+    from agents.tools.task_store import list_tasks
 
-    items = list_todos(session_id)
+    items = list_tasks(session_id)
     return {"tasks": [item.to_dict() for item in items]}
