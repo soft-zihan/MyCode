@@ -345,6 +345,30 @@ def test_registry_advertises_exactly_one_task_list_schema():
     assert advertised is TASK_LIST_TOOL
 
 
+def test_task_list_is_not_granted_to_general_subagents(ws):
+    """I3：子智能体拿不到常驻层，所以也不该拿到这个工具。
+
+    prompt_runtime.build_tail_system_messages 在 _custom_system_prompt 非空时提前
+    返回 []，而 subagent_runner 给**每个**子智能体都传 custom_system_prompt；但
+    model_caller 的披露调用点是无条件的。于是一个 general 子智能体照工具描述建了
+    清单、永远看不到摘要 S、被告诉没必要调 list，却仍要每折叠周期付最多 6000
+    字符的 detail 注入；它的清单对用户也不可见（面板只取父 session id），store
+    文件是孤儿。控制器裁定选项 (a)：从子智能体排除，最小且最诚实。
+    """
+    from agents.core.subagent import get_sub_agent_config
+
+    names = {t["name"] for t in get_sub_agent_config("general")["tools"]}
+    assert "task_list" not in names
+    assert "agent" not in names          # 既有排除项没被顺手改掉
+    assert "read_file" in names          # 也没有把整张工具表一起排除掉
+
+
+def test_task_list_still_granted_to_main_agent():
+    """I3 的对照面：排除只发生在子智能体，主智能体（Agent.tools = tool_definitions）
+    照旧拿到 task_list —— 否则这条修复会把整个特性关掉。"""
+    assert "task_list" in {t["name"] for t in tool_definitions}
+
+
 def test_acceptance_description_names_the_event_log_gate():
     """设计 §六 的措辞：completed 需要事件日志里有通过的验证命令。
 

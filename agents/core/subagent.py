@@ -149,7 +149,18 @@ def get_sub_agent_config(agent_type: str) -> dict:
     """
     # 子智能体不应具备的工具：
     # - agent: 避免递归创建子代理导致控制流复杂化
-    _sub_agent_excluded = {"agent"}
+    # - task_list: 子智能体拿不到三层可见性里的**常驻层**——
+    #   prompt_runtime.build_tail_system_messages 在 _custom_system_prompt 非空时
+    #   提前返回 []，而 subagent_runner 给每个子智能体都传 custom_system_prompt；
+    #   但 model_caller 的披露调用点是无条件的，于是它照样付「推」层最多 6000 字符
+    #   的 detail 注入。工具描述承诺的「清单摘要常驻你的上下文尾部，无需反复调
+    #   list」对它是假的，而它的清单对用户也不可见（面板只取父 session id）、store
+    #   文件成为孤儿。半残特性 + 孤儿文件，故整条排除（控制器裁定的选项 a）。
+    #   若将来真需要长任务子智能体自己追踪进度，正确的形状是把 S 移到那个提前返回
+    #   之上（届时需 un-pin test_prompt_freeze 与
+    #   test_custom_system_prompt_suppresses_all_tails），而不是留着这个。
+    #   explore / reviewer 是白名单制，本来就不含 task_list，不受影响。
+    _sub_agent_excluded = {"agent", "task_list"}
 
     custom = _discover_custom_agents().get(agent_type)
     if custom:
