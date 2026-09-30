@@ -75,6 +75,10 @@ class TaskItem:
     def from_dict(cls, data: dict[str, Any]) -> TaskItem:
         seq = data.get("detail_origin_seq")
         started = data.get("started_seq")
+        # detail/acceptance/error 用 `or ""` 而非 `.get(k, "")` 收窄：显式 JSON
+        # null（例如未来 UI/API 写入方）不能变成 None——needs_disclosure 与
+        # format_disclosure_block 会对它们调 .strip()，None 会在每模型请求的
+        # 路径上抛 AttributeError。在 from_dict 收窄对任何写入方都生效。
         return cls(
             id=data.get("id", 0),
             content=data.get("content", ""),
@@ -82,11 +86,11 @@ class TaskItem:
             priority=data.get("priority", TASK_PRIORITY_MEDIUM),
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
-            detail=data.get("detail", ""),
-            acceptance=data.get("acceptance", ""),
+            detail=data.get("detail") or "",
+            acceptance=data.get("acceptance") or "",
             detail_origin_seq=seq if isinstance(seq, int) else None,
             started_seq=started if isinstance(started, int) else None,
-            error=data.get("error", ""),
+            error=data.get("error") or "",
         )
 
 
@@ -202,16 +206,27 @@ def update_task(
     after_id: int | None = None,
     current_seq: int | None = None,
 ) -> TaskItem | None:
-    # current_seq（写 started_seq）在 Task 8 实现；本任务只接住这个参数，不做任何处理。
+    # current_seq 由调用方传入（dispatcher 传承载本次 tool_calls 的 assistant
+    # 消息的 seq），用于两处记账：
+    # - started_seq：首次转入 in_progress 时写入，重入不覆盖（Plan 2 的验收
+    #   闸门靠它界定扫描区间）。
+    # - detail_origin_seq：detail 被编辑时重指向 current_seq。既不清空（模型
+    #   自己刚写的 detail 正躺在那次 tool_calls 参数里，清空会导致一次纯重复
+    #   注入）也不保持不动（指向旧事件会在旧事件被折叠而新编辑仍可见时多注入
+    #   一次）。current_seq 为 None 时记为 None，代价是之后多披露一次——安全
+    #   方向，不做特判。
     task_list = load_tasks(session_id)
     for item in task_list.tasks:
         if item.id == task_id:
             if status is not None and status in VALID_STATUSES:
                 item.status = status
+                if status == TASK_STATUS_IN_PROGRESS and item.started_seq is None:
+                    item.started_seq = current_seq
             if content is not None:
                 item.content = content
             if detail is not None:
                 item.detail = detail
+                item.detail_origin_seq = current_seq
             if acceptance is not None:
                 item.acceptance = acceptance
             if error is not None:

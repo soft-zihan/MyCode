@@ -27,7 +27,7 @@ from agents.plan.plan_tool_executor import execute_plan_mode_tool
 from agents.skills.skills import discover_skills, execute_skill
 from agents.tools import execute_tool
 from agents.tools.question_tools import handle_ask_user
-from agents.tools.task_tools import handle_todolist
+from agents.tools.task_tools import handle_task_list
 from agents.tools.wiki_tools import remember
 
 
@@ -192,7 +192,16 @@ class ToolDispatcher:
                     "Error: task_list is disabled in plan mode. Write the plan into "
                     "tasks.md; approved tasks are materialized into task_list automatically."
                 )
-            result = handle_todolist(self.agent.session.id, inp)
+            # current_seq = 承载本次 tool_calls 的 assistant 消息的 seq。
+            # 不能用 session.seq - 1：assistant_message 落盘后 step/end 还会占一个
+            # seq（agent_loop.py:_run_step），且同批次先执行的工具的 tool_result_msg
+            # 也先落盘，handler 运行时「最后一个 seq」早已越过 assistant 消息。
+            # last_usage_seq 在 assistant_message 落盘时即被记录
+            # （agent_loop.py:95 mark_last_usage_position），工具执行期间不变，
+            # 恰好就是那条消息的 seq（重置只发生在 clear/compaction，均在模型
+            # 调用之前，不在工具执行窗口内）。
+            current_seq = self.agent.last_usage_seq
+            result = handle_task_list(self.agent.session.id, inp, current_seq=current_seq)
             self.agent.session.append("task_list/updated", {"session_id": self.agent.session.id})
             return result
         if name == "skill":

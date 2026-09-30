@@ -409,3 +409,14 @@ def test_disclosure_block_tells_model_to_mark_in_progress():
         "完成前需有通过的验收命令。）"
     ) in block
     assert "已不在你的可见上下文中" not in block
+
+
+def test_from_dict_coerces_null_strings_to_empty(ws):
+    """义务 6：显式 JSON null 不得变成 None —— needs_disclosure /
+    format_disclosure_block 会对这些字段调 .strip()，None 会在每模型请求
+    的路径上抛 AttributeError。"""
+    item = TaskItem.from_dict({"id": 1, "content": "x", "detail": None,
+                               "acceptance": None, "error": None})
+    assert item.detail == ""
+    assert item.acceptance == ""
+    assert item.error == ""

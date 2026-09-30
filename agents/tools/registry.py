@@ -11,6 +11,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Awaitable
 
+from agents.tools.task_tools import TASK_LIST_TOOL
+
 ToolDef = dict
 PermissionMode = str
 
@@ -367,39 +369,9 @@ tool_definitions: list[ToolDef] = [
             "required": ["question"],
         },
     },
-    {
-        "name": "task_list",
-        "description": "管理任务清单。用于追踪多步任务的进度。Plan 模式下禁用。",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "operation": {
-                    "type": "string",
-                    "enum": ["add", "update", "remove", "list"],
-                    "description": "操作类型",
-                },
-                "id": {
-                    "type": "integer",
-                    "description": "任务 ID（update/remove 时必需）",
-                },
-                "content": {
-                    "type": "string",
-                    "description": "任务内容（add 时必需，update 时可选）",
-                },
-                "status": {
-                    "type": "string",
-                    "enum": ["pending", "in_progress", "completed", "cancelled"],
-                    "description": "任务状态（update 时可选）",
-                },
-                "priority": {
-                    "type": "string",
-                    "enum": ["high", "medium", "low"],
-                    "description": "任务优先级（add 时可选，默认 medium）",
-                },
-            },
-            "required": ["operation"],
-        },
-    },
+    # 单一定义源在 task_tools.TASK_LIST_TOOL（schema 与 handler 同处一个模块，
+    # 词表变更不会再悄悄分叉）。task_tools 不 import registry，无循环。
+    TASK_LIST_TOOL,
     {
         "name": "agent",
         "description": "Launch a sub-agent to handle a task autonomously. Sub-agents have isolated context and return their result wrapped in a <subagent session_id=... state=...> tag. RESUME: pass session_id (from that tag) to continue the same sub-agent — it keeps full memory of its earlier work, so the prompt only needs the new instruction. Omit session_id to spawn a fresh sub-agent — then the prompt must contain ALL needed context.",
