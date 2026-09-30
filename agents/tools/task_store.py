@@ -150,6 +150,21 @@ def save_tasks(task_list: TaskList) -> None:
     )
 
 
+def _insert_after(tasks: list[TaskItem], item: TaskItem, after_id: int | None) -> None:
+    """原地插入。after_id=None 追加末尾；0 插到最前；id 不存在则退回追加末尾。"""
+    if after_id is None:
+        tasks.append(item)
+        return
+    if after_id == 0:
+        tasks.insert(0, item)
+        return
+    for index, existing in enumerate(tasks):
+        if existing.id == after_id:
+            tasks.insert(index + 1, item)
+            return
+    tasks.append(item)
+
+
 def add_task(
     session_id: str,
     content: str,
@@ -171,8 +186,7 @@ def add_task(
         acceptance=acceptance,
     )
     task_list.next_id += 1
-    # after_id 的插入位置在 Task 5 实现；此处先追加
-    task_list.tasks.append(item)
+    _insert_after(task_list.tasks, item, after_id)
     save_tasks(task_list)
     return item
 
@@ -188,8 +202,7 @@ def update_task(
     after_id: int | None = None,
     current_seq: int | None = None,
 ) -> TaskItem | None:
-    # after_id（移动位置）在 Task 5 实现；current_seq（写 started_seq）在 Task 8 实现。
-    # 本任务只接住这两个参数，不做任何处理。
+    # current_seq（写 started_seq）在 Task 8 实现；本任务只接住这个参数，不做任何处理。
     task_list = load_tasks(session_id)
     for item in task_list.tasks:
         if item.id == task_id:
@@ -203,6 +216,9 @@ def update_task(
                 item.acceptance = acceptance
             if error is not None:
                 item.error = error
+            if after_id is not None:
+                task_list.tasks = [t for t in task_list.tasks if t.id != task_id]
+                _insert_after(task_list.tasks, item, after_id)
             item.updated_at = _now_iso()
             save_tasks(task_list)
             return item

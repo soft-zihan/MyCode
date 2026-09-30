@@ -15,8 +15,10 @@ from agents.tools.task_store import (
     add_task,
     find_focus,
     get_tasks_dir,
+    list_tasks,
     load_tasks,
     save_tasks,
+    update_task,
 )
 
 
@@ -164,3 +166,54 @@ def test_out_of_order_completion_leaves_focus_on_earliest_pending():
     # #3 已完成而 #1 仍 pending：焦点是 #1，不是 #4
     tasks = [_item(1, "pending"), _item(3, "completed"), _item(4, "pending")]
     assert find_focus(tasks).id == 1
+
+
+def test_add_appends_to_end_by_default(ws):
+    add_task("s", "A")
+    add_task("s", "B")
+    assert [t.content for t in list_tasks("s")] == ["A", "B"]
+
+
+def test_add_with_after_id_inserts_in_middle(ws):
+    a = add_task("s", "A")
+    add_task("s", "C")
+    add_task("s", "B", after_id=a.id)
+    assert [t.content for t in list_tasks("s")] == ["A", "B", "C"]
+
+
+def test_add_with_after_id_zero_inserts_at_front(ws):
+    add_task("s", "B")
+    add_task("s", "A", after_id=0)
+    assert [t.content for t in list_tasks("s")] == ["A", "B"]
+
+
+def test_add_with_unknown_after_id_falls_back_to_append(ws):
+    add_task("s", "A")
+    add_task("s", "Z", after_id=999)
+    assert [t.content for t in list_tasks("s")] == ["A", "Z"]
+
+
+def test_update_with_after_id_moves_item(ws):
+    a = add_task("s", "A")
+    b = add_task("s", "B")
+    c = add_task("s", "C")
+    update_task("s", a.id, after_id=c.id)
+    assert [t.content for t in list_tasks("s")] == ["B", "C", "A"]
+
+
+def test_move_preserves_ids_and_detail(ws):
+    a = add_task("s", "A", detail="detail-A", acceptance="pytest -k a")
+    b = add_task("s", "B")
+    update_task("s", a.id, after_id=b.id)
+    moved = list_tasks("s")[1]
+    assert moved.id == a.id
+    assert moved.detail == "detail-A"
+    assert moved.acceptance == "pytest -k a"
+
+
+def test_add_ids_stay_monotonic_after_insert(ws):
+    a = add_task("s", "A")
+    b = add_task("s", "B")
+    mid = add_task("s", "MID", after_id=a.id)
+    assert mid.id == 3  # next_id 递增，与位置无关
+    assert [t.id for t in list_tasks("s")] == [a.id, mid.id, b.id]
