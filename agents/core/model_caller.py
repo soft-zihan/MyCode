@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import time
+import traceback
 from typing import TYPE_CHECKING, Any
 
 from agents.core.retry import ContentLevelError, with_retry
@@ -207,7 +208,11 @@ class ModelCaller:
                 try:
                     ensure_focus_detail_visible(a.session)
                 except Exception as e:
-                    print_error(f"[task_disclosure] injection failed: {e!r}")
+                    # 带 traceback：披露路径里的编程错误不该只以一个裸 repr 现身。
+                    # 仍然吞掉——披露绝不能阻断模型调用。
+                    print_error(
+                        f"[task_disclosure] injection failed: {e!r}\n{traceback.format_exc()}"
+                    )
                 create_params, raw_messages, metrics = self._assemble_request(span, tools_enabled, tool_choice)
                 metrics.update(self._compute_token_breakdown(raw_messages))
                 stream = await a.openai_client.chat.completions.create(**create_params)
