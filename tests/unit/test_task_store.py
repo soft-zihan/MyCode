@@ -16,6 +16,7 @@ from agents.tools.task_store import (
     add_task,
     clip_detail,
     find_focus,
+    format_disclosure_block,
     get_tasks_dir,
     list_tasks,
     load_tasks,
@@ -329,3 +330,43 @@ def test_mark_detail_disclosed_unknown_id_is_noop(ws):
     add_task("s", "A")
     mark_detail_disclosed("s", 999, 1)  # 不抛异常
     assert list_tasks("s")[0].detail_origin_seq is None
+
+
+def test_disclosure_block_contains_id_content_acceptance_and_detail():
+    item = TaskItem(id=3, content="重构 X", detail="改 _assemble_request",
+                    acceptance="pytest tests/unit/test_model_caller.py")
+    block = format_disclosure_block(item)
+    assert "<system-reminder>" in block and "</system-reminder>" in block
+    assert "#3" in block
+    assert "重构 X" in block
+    assert "改 _assemble_request" in block
+    assert "pytest tests/unit/test_model_caller.py" in block
+
+
+def test_disclosure_block_omits_acceptance_line_when_empty():
+    item = TaskItem(id=1, content="写文档", detail="步骤一二三", acceptance="")
+    block = format_disclosure_block(item)
+    assert "验收:" not in block
+    assert "步骤一二三" in block
+
+
+def test_disclosure_block_shows_error_for_failed_item():
+    item = TaskItem(id=2, content="跑测试", detail="细节", status="failed",
+                    error="AssertionError: 3 != 4")
+    block = format_disclosure_block(item)
+    assert "AssertionError: 3 != 4" in block
+
+
+def test_disclosure_block_empty_when_no_detail():
+    assert format_disclosure_block(TaskItem(id=1, content="x", detail="")) == ""
+
+
+def test_disclosure_block_clips_long_detail():
+    item = TaskItem(id=1, content="x", detail="y" * 9000)
+    block = format_disclosure_block(item)
+    assert "已截断" in block
+
+
+def test_disclosure_block_tells_model_to_mark_in_progress():
+    item = TaskItem(id=5, content="部署", detail="先跑迁移")
+    assert "in_progress" in format_disclosure_block(item)

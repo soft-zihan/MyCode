@@ -299,3 +299,31 @@ def mark_detail_disclosed(session_id: str, task_id: int, seq: int) -> None:
             item.detail_origin_seq = seq
             save_tasks(task_list)
             return
+
+
+def format_disclosure_block(item: TaskItem) -> str:
+    """把焦点条的详细执行方案拼成注入块。detail 为空时返回空串（不注入）。
+
+    用 <system-reminder> 包裹，与 wiki 召回注入同一约定
+    （agents/core/turn_runner.py:117-123）。
+    """
+    if not item.detail.strip():
+        return ""
+
+    lines = [
+        "<system-reminder>",
+        f"## 当前任务的执行方案（#{item.id} {item.content}）",
+    ]
+    if item.acceptance.strip():
+        lines.append(f"验收: {item.acceptance.strip()}")
+    if item.status == TASK_STATUS_FAILED and item.error.strip():
+        lines.append(f"上次失败原因: {item.error.strip()}")
+    lines.append("")
+    lines.append(clip_detail(item.detail))
+    lines.append("")
+    lines.append(
+        f"（自动披露：这段方案已不在你的可见上下文中，故重新注入。"
+        f"开始执行时把 #{item.id} 标为 in_progress。）"
+    )
+    lines.append("</system-reminder>")
+    return "\n".join(lines)
