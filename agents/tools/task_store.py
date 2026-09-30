@@ -352,3 +352,71 @@ def format_disclosure_block(item: TaskItem) -> str:
     )
     lines.append("</system-reminder>")
     return "\n".join(lines)
+
+
+# S（清单摘要）里 content 的上限。content 的契约是「一句话摘要」（怎么做/为什么
+# 属于 detail），所以比 acceptance/error 的上限更紧。
+_S_CONTENT_CHAR_LIMIT = 80
+
+
+def _first_line(value: str, limit: int) -> str:
+    """单行化 + 限长。空/纯空白返回 ""。
+
+    S 与披露块共享同一条约束：常驻或注入的文本里不许出现换行——一个多行字段会把
+    「一条任务一行」的块结构撑散，模型也就没法再按行定位条目。先 strip 再取首行，
+    这样 content 以换行开头时不会渲染出一个空条目。
+    """
+    stripped = value.strip()
+    if not stripped:
+        return ""
+    return stripped.splitlines()[0].strip()[:limit]
+
+
+def format_task_list_block(tasks: list[TaskItem], focus: TaskItem | None) -> str:
+    """清单摘要 S —— 常驻尾部 ephemeral 通道的内容。空清单返回 ""。
+
+    刻意不含 detail：那会让常驻块变成全量方案，等于放弃渐进式披露（spec §六
+    三层可见性——detail 只走「推」与「拉」两层，不走常驻层）。S 每请求都重发
+    一次，所以这里出现的每个字符都是按请求数付费的。
+
+    已完成/已跳过只报计数，不逐条列 content，所以 S 随计划推进而**收缩**。
+
+    纯函数：只读传入的列表，不碰 store、不碰 session（本模块禁止 import
+    session）。焦点条由调用方算好传进来（见 find_focus），本函数只负责渲染。
+    """
+    if not tasks:
+        return ""
+
+    done = sum(1 for t in tasks if t.status == TASK_STATUS_COMPLETED)
+    skipped = sum(1 for t in tasks if t.status == TASK_STATUS_SKIPPED)
+    listed = [
+        t for t in tasks
+        if t.status not in (TASK_STATUS_COMPLETED, TASK_STATUS_SKIPPED)
+    ]
+
+    header = f"# Task List  ({done}/{len(tasks)} done"
+    if skipped:
+        header += f", {skipped} skipped"
+    header += ")"
+
+    lines = [header]
+    if not listed:
+        lines.append("（全部完成）")
+        return "\n".join(lines)
+
+    focus_id = focus.id if focus is not None else None
+    for task in listed:
+        marker = ">" if task.id == focus_id else " "
+        content = _first_line(task.content, _S_CONTENT_CHAR_LIMIT)
+        line = f"{marker} #{task.id} {content}  [{task.status}]"
+        # acceptance/error 复用披露块的单行上限：两者语义相同（模型自填的单行
+        # 自由文本），不必各立一个数字。
+        acceptance = _first_line(task.acceptance, _DISCLOSURE_LINE_CHAR_LIMIT)
+        if acceptance:
+            line += f"  验收: {acceptance}"
+        error = _first_line(task.error, _DISCLOSURE_LINE_CHAR_LIMIT)
+        if task.status == TASK_STATUS_FAILED and error:
+            line += f"  错误: {error}"
+        lines.append(line)
+
+    return "\n".join(lines)

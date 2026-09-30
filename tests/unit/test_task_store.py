@@ -17,6 +17,7 @@ from agents.tools.task_store import (
     clip_detail,
     find_focus,
     format_disclosure_block,
+    format_task_list_block,
     get_tasks_dir,
     list_tasks,
     load_tasks,
@@ -420,3 +421,93 @@ def test_from_dict_coerces_null_strings_to_empty(ws):
     assert item.detail == ""
     assert item.acceptance == ""
     assert item.error == ""
+
+
+# --- 清单摘要块 S（常驻尾部通道内容）---------------------------------------
+#
+# S 是每请求都要重发一次的常驻块，所以这两组性质是本节的重点：
+# (1) 绝不含 detail —— 含了就等于把「全量方案常驻」换皮保留，渐进式披露作废；
+# (2) 每个单行字段都限长 —— 不限长的字段是按请求数付费的无界成本。
+
+
+def test_s_block_empty_for_no_tasks():
+    assert format_task_list_block([], None) == ""
+
+
+def test_s_block_shows_done_count_not_done_items():
+    tasks = [
+        _item(1, "completed"), _item(2, "completed"), _item(3, "pending"),
+    ]
+    block = format_task_list_block(tasks, tasks[2])
+    assert "2/3" in block
+    assert "task1" not in block
+    assert "task2" not in block
+    assert "task3" in block
+
+
+def test_s_block_marks_focus():
+    tasks = [_item(1, "pending"), _item(2, "in_progress")]
+    block = format_task_list_block(tasks, tasks[1])
+    focus_line = next(line for line in block.splitlines() if "#2" in line)
+    other_line = next(line for line in block.splitlines() if "#1" in line)
+    assert focus_line.lstrip().startswith(">")
+    assert not other_line.lstrip().startswith(">")
+
+
+def test_s_block_includes_acceptance():
+    item = TaskItem(id=1, content="跑测试", status="pending",
+                    acceptance="pytest tests/unit -q")
+    block = format_task_list_block([item], item)
+    assert "pytest tests/unit -q" in block
+    # acceptance 是模型自填的自由文本，常驻块里必须限长（与披露块同一上限）
+    long_item = TaskItem(id=1, content="跑测试", status="pending",
+                         acceptance="A" * 5000)
+    long_block = format_task_list_block([long_item], long_item)
+    assert "A" * 500 in long_block
+    assert "A" * 501 not in long_block
+
+
+def test_s_block_never_includes_detail():
+    item = TaskItem(id=1, content="跑测试", status="pending",
+                    detail="一大段详细方案不该出现在常驻块里")
+    block = format_task_list_block([item], item)
+    assert "一大段详细方案" not in block
+
+
+def test_s_block_shows_error_first_line_for_failed():
+    item = TaskItem(id=1, content="跑测试", status="failed",
+                    error="AssertionError: 3 != 4\nTraceback ...")
+    block = format_task_list_block([item], item)
+    assert "AssertionError: 3 != 4" in block
+    assert "Traceback" not in block
+    # error 同样限长：先取首行，再截到上限（traceback 首行本身也可能很长）
+    long_item = TaskItem(id=1, content="跑测试", status="failed",
+                         error="E" * 5000)
+    long_block = format_task_list_block([long_item], long_item)
+    assert "E" * 500 in long_block
+    assert "E" * 501 not in long_block
+
+
+def test_s_block_lists_skipped_count_separately():
+    tasks = [_item(1, "skipped"), _item(2, "pending")]
+    block = format_task_list_block(tasks, tasks[1])
+    assert "skipped" in block.lower() or "跳过" in block
+    assert "task1" not in block
+
+
+def test_s_block_shows_status_for_each_listed_item():
+    tasks = [_item(1, "in_progress"), _item(2, "pending")]
+    block = format_task_list_block(tasks, tasks[0])
+    assert "in_progress" in block
+    assert "pending" in block
+
+
+def test_s_block_truncates_long_content_to_one_line():
+    item = TaskItem(id=1, content="第一行\n第二行", status="pending")
+    block = format_task_list_block([item], item)
+    assert "第二行" not in block
+    # content 是「一句话摘要」，比 acceptance/error 更短的上限
+    long_item = TaskItem(id=1, content="C" * 500, status="pending")
+    long_block = format_task_list_block([long_item], long_item)
+    assert "C" * 80 in long_block
+    assert "C" * 81 not in long_block
