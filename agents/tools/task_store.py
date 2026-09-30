@@ -199,8 +199,16 @@ def save_tasks(task_list: TaskList) -> None:
     挪走。等并发写入方落地后再补原子性就不是几行了。
 
     同目录是必需的：os.replace 只在同一文件系统上原子。临时名以 "." 开头且带
-    .tmp- 中缀，既不会被 `*.json` 的读取方撞上，也不会与真实 session 文件同名。
+    .tmp- 中缀，既不会被 `*.json` 的读取方撞上，也不会与真实 session 文件同名；
+    mkstemp 的随机后缀让并发写入方（Plan 3 的 UI 端点）不会互相踩临时文件。
     刻意不 fsync——威胁模型是并发/被打断的写入留下半截文件，不是掉电。
+
+    刻意**不复用** session.py 的 atomic_write_text：(1) 本模块禁止 import
+    agents.core.session；(2) 那个 helper 用 tmp.write_text 不带 encoding（跟随
+    locale）且用 Path.rename（Windows 上目标已存在会失败），两处都比这里弱。
+
+    副作用：mkstemp 建的文件是 0600，而 write_text 之前是 0644。store 在
+    ~/.mycode 下、只由同一用户的进程读写，收紧到 0600 无害且更合适。
     """
     tasks_dir = get_tasks_dir()
     path = tasks_dir / f"{task_list.session_id}.json"

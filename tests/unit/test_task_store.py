@@ -582,10 +582,10 @@ def test_from_dict_coerces_non_string_fields_to_empty(ws):
     非字符串的 detail/acceptance（模型完全可能给 detail 传一个步骤数组、给
     acceptance 传一个对象；网关不强制 schema 类型）会原样落盘、重载后类型仍在，
     此后**每次**模型请求：推式层 needs_disclosure → item.detail.strip() 抛
-    AttributeError 被 model_caller 的宽 except 吞掉，常驻层 _first_line →
-    (value or "").strip() 同样被 prompt_runtime 吞掉（实测 `any Task List
-    block? False`）。失败是黏性的、对模型静默的（工具早回过 ok:true）、且自我
-    遮掩的（本该显示清单的 S 正是坏掉的那个）。
+    AttributeError 被 model_caller 的宽 except 吞掉，常驻层 _first_line 的 .strip()
+    同样被 prompt_runtime 吞掉（实测 `tails returned: 1 | any Task List block?
+    False`）。失败是黏性的、对模型静默的（工具早回过 ok:true）、且自我遮掩的
+    （本该显示清单的 S 正是坏掉的那个）。
 
     这是最后一道防线，第一道在 task_tools 的模型边界（见 test_task_tools.py）。
     """
