@@ -262,11 +262,17 @@ def find_focus(tasks: list[TaskItem]) -> TaskItem | None:
     return None
 
 
-# 注入体积上限。理由：persist_large_result（agents/tools/executor.py:27）把超 30KB
-# 的工具结果换成 200 行预览，_truncate_result（agents/tools/registry.py:25-33）在
-# 50K 字符处保头尾截断。不限长的 detail 可能把整个结果推过阈值或被切掉尾巴。
+# 单次注入的 detail 体积上限。理由是 token 成本：这段文本每被折叠一次就要重注入
+# 一次，不限长会让每次重注入的代价无上界，也会让承载它的那段缓存前缀频繁变动。
+# 注意它**不是**为了躲开 persist_large_result（executor.py:27，30KB）或
+# _truncate_result（registry.py:25-33，50K 字符）——那两个阈值只作用于工具结果，
+# 而披露块走的是 memory_injection 事件（见 spec §五），根本不经它们。
 # store 里始终存全量，只有注入块被截断。
 DETAIL_DISCLOSURE_CHAR_LIMIT = 6000
+
+# 披露块里单行字段（acceptance / error）的上限。error 是模型自填的自由文本，
+# 通常是一段 traceback；不限长会让整个披露块的体积在这个轴上无界。
+_DISCLOSURE_LINE_CHAR_LIMIT = 500
 
 
 def clip_detail(detail: str) -> str:
@@ -315,15 +321,19 @@ def format_disclosure_block(item: TaskItem) -> str:
         f"## 当前任务的执行方案（#{item.id} {item.content}）",
     ]
     if item.acceptance.strip():
-        lines.append(f"验收: {item.acceptance.strip()}")
+        lines.append(
+            f"验收: {item.acceptance.strip()[:_DISCLOSURE_LINE_CHAR_LIMIT]}"
+        )
     if item.status == TASK_STATUS_FAILED and item.error.strip():
-        lines.append(f"上次失败原因: {item.error.strip()}")
+        lines.append(
+            f"上次失败原因: {item.error.strip()[:_DISCLOSURE_LINE_CHAR_LIMIT]}"
+        )
     lines.append("")
     lines.append(clip_detail(item.detail))
     lines.append("")
     lines.append(
-        f"（自动披露：这段方案已不在你的可见上下文中，故重新注入。"
-        f"开始执行时把 #{item.id} 标为 in_progress。）"
+        f"（自动披露。开始执行时把 #{item.id} 标为 in_progress；"
+        f"完成前需有通过的验收命令。）"
     )
     lines.append("</system-reminder>")
     return "\n".join(lines)

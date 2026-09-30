@@ -301,6 +301,12 @@ def test_disclosure_after_context_clear_empty_visible():
     assert needs_disclosure(item, []) is True
 
 
+def test_needs_disclosure_accepts_a_tuple():
+    item = TaskItem(id=1, content="x", detail="方案", detail_origin_seq=7)
+    assert needs_disclosure(item, (3, 7, 9)) is False
+    assert needs_disclosure(item, (3, 9)) is True
+
+
 def test_clip_detail_under_limit_is_unchanged():
     assert clip_detail("短方案") == "短方案"
 
@@ -309,6 +315,15 @@ def test_clip_detail_over_limit_is_truncated_with_marker():
     clipped = clip_detail("x" * (DETAIL_DISCLOSURE_CHAR_LIMIT + 500))
     assert len(clipped) < DETAIL_DISCLOSURE_CHAR_LIMIT + 200
     assert "截断" in clipped
+    assert clipped.startswith("x" * DETAIL_DISCLOSURE_CHAR_LIMIT)
+
+
+def test_clip_detail_boundary_at_exactly_limit_and_one_over():
+    exact = "x" * DETAIL_DISCLOSURE_CHAR_LIMIT
+    assert clip_detail(exact) == exact        # 恰好等于上限：原样返回，不加标记
+    over = clip_detail(exact + "y")
+    assert over.startswith(exact)             # 6000 字符全部保留
+    assert "截断" in over
 
 
 def test_mark_detail_disclosed_persists_seq(ws):
@@ -357,8 +372,26 @@ def test_disclosure_block_shows_error_for_failed_item():
     assert "AssertionError: 3 != 4" in block
 
 
+def test_disclosure_block_omits_error_line_when_status_is_not_failed():
+    item = TaskItem(id=1, content="x", detail="方案", status="pending",
+                    error="上一轮留下的陈旧错误")
+    assert "上一轮留下的陈旧错误" not in format_disclosure_block(item)
+
+
+def test_disclosure_block_caps_long_error_text():
+    item = TaskItem(id=1, content="x", detail="方案", status="failed",
+                    error="E" * 5000)
+    block = format_disclosure_block(item)
+    assert "E" * 500 in block
+    assert "E" * 501 not in block
+
+
 def test_disclosure_block_empty_when_no_detail():
     assert format_disclosure_block(TaskItem(id=1, content="x", detail="")) == ""
+
+
+def test_disclosure_block_empty_for_whitespace_only_detail():
+    assert format_disclosure_block(TaskItem(id=1, content="x", detail="  \n ")) == ""
 
 
 def test_disclosure_block_clips_long_detail():
@@ -369,4 +402,10 @@ def test_disclosure_block_clips_long_detail():
 
 def test_disclosure_block_tells_model_to_mark_in_progress():
     item = TaskItem(id=5, content="部署", detail="先跑迁移")
-    assert "in_progress" in format_disclosure_block(item)
+    block = format_disclosure_block(item)
+    assert "in_progress" in block
+    assert (
+        "（自动披露。开始执行时把 #5 标为 in_progress；"
+        "完成前需有通过的验收命令。）"
+    ) in block
+    assert "已不在你的可见上下文中" not in block
