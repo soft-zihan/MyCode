@@ -13,6 +13,7 @@ from agents.tools.task_store import (
     TaskItem,
     TaskList,
     add_task,
+    find_focus,
     get_tasks_dir,
     load_tasks,
     save_tasks,
@@ -120,3 +121,46 @@ def test_quarantine_then_save_does_not_lose_the_quarantined_copy(ws):
     add_task("s1", "新任务")              # 随后正常写入
     assert [t.content for t in load_tasks("s1").tasks] == ["新任务"]
     assert len(list(get_tasks_dir().glob("s1.corrupt-*.json"))) == 1
+
+
+def _item(i: int, status: str) -> TaskItem:
+    return TaskItem(id=i, content=f"task{i}", status=status)
+
+
+def test_focus_prefers_in_progress_over_earlier_pending():
+    tasks = [_item(1, "pending"), _item(2, "in_progress"), _item(3, "pending")]
+    assert find_focus(tasks).id == 2
+
+
+def test_focus_falls_back_to_failed_over_earlier_pending():
+    tasks = [_item(1, "pending"), _item(2, "failed"), _item(3, "pending")]
+    assert find_focus(tasks).id == 2
+
+
+def test_focus_prefers_in_progress_over_failed():
+    tasks = [_item(1, "failed"), _item(2, "in_progress")]
+    assert find_focus(tasks).id == 2
+
+
+def test_focus_skips_completed_and_skipped():
+    tasks = [_item(1, "completed"), _item(2, "skipped"), _item(3, "pending")]
+    assert find_focus(tasks).id == 3
+
+
+def test_focus_returns_none_when_all_terminal():
+    assert find_focus([_item(1, "completed"), _item(2, "skipped")]) is None
+
+
+def test_focus_returns_none_for_empty_list():
+    assert find_focus([]) is None
+
+
+def test_inserted_pending_does_not_steal_focus_from_in_progress():
+    # 中途插一条更靠前的 pending，焦点仍锁定 in_progress
+    assert find_focus([_item(9, "pending"), _item(2, "in_progress")]).id == 2
+
+
+def test_out_of_order_completion_leaves_focus_on_earliest_pending():
+    # #3 已完成而 #1 仍 pending：焦点是 #1，不是 #4
+    tasks = [_item(1, "pending"), _item(3, "completed"), _item(4, "pending")]
+    assert find_focus(tasks).id == 1

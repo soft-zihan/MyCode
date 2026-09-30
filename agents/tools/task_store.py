@@ -222,3 +222,25 @@ def remove_task(session_id: str, task_id: int) -> bool:
 def list_tasks(session_id: str) -> list[TaskItem]:
     task_list = load_tasks(session_id)
     return task_list.tasks
+
+
+_FOCUS_STATUS_ORDER = (
+    TASK_STATUS_IN_PROGRESS,
+    TASK_STATUS_FAILED,
+    TASK_STATUS_PENDING,
+)
+
+
+def find_focus(tasks: list[TaskItem]) -> TaskItem | None:
+    """推导焦点条：in_progress > failed > pending，各档取列表顺序第一个。
+
+    读列表状态而非事件记账，所以乱序完成、中途插条、跳过、resume 都自愈。
+    in_progress 优先意味着中途插入的 pending 条不会抢走正在执行任务的焦点。
+    failed 排在 pending 之前，是旧 plan_continue 里 has_failed_tasks 硬闸门的
+    软版本：不阻塞，但失败条会被披露出来，模型没法假装没看见。
+    """
+    for status in _FOCUS_STATUS_ORDER:
+        for task in tasks:
+            if task.status == status:
+                return task
+    return None
