@@ -422,7 +422,10 @@ class _SeqStubAgent:
     """最小 agent 替身：last_usage_seq 已被同批次的 compact_context 重置成 -1。"""
 
     def __init__(self):
-        self.session = Session(session_id="s", origin="test")
+        # origin="sub_agent" 落进 DERIVED_SESSION_ORIGINS（session.py），会话不进
+        # 用户会话列表/清理/最近会话投影。Global Constraints 要求测试会话一律用它，
+        # 不用 origin="test"（不是派生 origin，会污染用户会话列表）。
+        self.session = Session(session_id="s", origin="sub_agent")
         self.session_id = self.session.id
         self.current_sub_agent_id = None
         self.permission_mode = "default"
@@ -478,7 +481,7 @@ def _make_batch_stub_agent(calls: list):
         return ToolExecutionResult(text="ok", status="ok", outcome="success")
 
     return SimpleNamespace(
-        session=Session(session_id="loop-stub", origin="test"),
+        session=Session(session_id="loop-stub", origin="sub_agent"),
         _current_turn=1,
         _current_step=0,
         _tool_call_count=0,
