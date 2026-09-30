@@ -288,6 +288,7 @@ RESUME_PACKAGING.md
 trace.md
 docs/
 .opencode/
+.superpowers/
 openspec/
 eval/EVALUATION_PLAN.md
 tests/PLAN_SYSTEM_TEST_PLAN.md
