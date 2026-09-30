@@ -13,7 +13,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from agents.core.workspace import get_workspace
 
@@ -260,3 +260,42 @@ def find_focus(tasks: list[TaskItem]) -> TaskItem | None:
             if task.status == status:
                 return task
     return None
+
+
+# 注入体积上限。理由：persist_large_result（agents/tools/executor.py:27）把超 30KB
+# 的工具结果换成 200 行预览，_truncate_result（agents/tools/registry.py:25-33）在
+# 50K 字符处保头尾截断。不限长的 detail 可能把整个结果推过阈值或被切掉尾巴。
+# store 里始终存全量，只有注入块被截断。
+DETAIL_DISCLOSURE_CHAR_LIMIT = 6000
+
+
+def clip_detail(detail: str) -> str:
+    if len(detail) <= DETAIL_DISCLOSURE_CHAR_LIMIT:
+        return detail
+    kept = detail[:DETAIL_DISCLOSURE_CHAR_LIMIT]
+    dropped = len(detail) - DETAIL_DISCLOSURE_CHAR_LIMIT
+    return f"{kept}\n\n[... 已截断 {dropped} 字符；完整方案在 task_list store 里，用 task_list get 取 ...]"
+
+
+def needs_disclosure(item: TaskItem | None, visible_seqs: Sequence[int]) -> bool:
+    """焦点条的 detail 是否需要（重新）注入上下文。
+
+    默认不披露：模型自己写的 detail 已经在它那次 tool_calls 的参数里，折叠前
+    一直可见，再注入一份是纯重复。只有承载它的事件已被折叠隐藏、上下文被 clear、
+    或从未注入过（detail_origin_seq is None，例如 plan 物化出来的）时才注入。
+    """
+    if item is None or not item.detail.strip():
+        return False
+    if item.detail_origin_seq is None:
+        return True
+    return item.detail_origin_seq not in visible_seqs
+
+
+def mark_detail_disclosed(session_id: str, task_id: int, seq: int) -> None:
+    """记录 detail 已进入上下文的承载事件 seq，作为下次判定的依据。"""
+    task_list = load_tasks(session_id)
+    for item in task_list.tasks:
+        if item.id == task_id:
+            item.detail_origin_seq = seq
+            save_tasks(task_list)
+            return

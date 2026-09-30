@@ -7,16 +7,20 @@ import pytest
 
 from agents.core.workspace import reset_workspace, set_workspace
 from agents.tools.task_store import (
+    DETAIL_DISCLOSURE_CHAR_LIMIT,
     TASK_STATUS_PENDING,
     TASK_STATUS_SKIPPED,
     VALID_STATUSES,
     TaskItem,
     TaskList,
     add_task,
+    clip_detail,
     find_focus,
     get_tasks_dir,
     list_tasks,
     load_tasks,
+    mark_detail_disclosed,
+    needs_disclosure,
     save_tasks,
     update_task,
 )
@@ -260,3 +264,68 @@ def test_update_combining_status_change_and_move_keeps_both(ws):
     assert got[2].status == "in_progress"
     assert got[2].detail == "方案A"
     assert got[2].acceptance == "pytest -k a"
+
+
+def test_no_disclosure_when_item_is_none():
+    assert needs_disclosure(None, [1, 2, 3]) is False
+
+
+def test_no_disclosure_when_detail_empty():
+    item = TaskItem(id=1, content="x", detail="", detail_origin_seq=None)
+    assert needs_disclosure(item, [1, 2]) is False
+
+
+def test_no_disclosure_when_detail_is_whitespace_only():
+    item = TaskItem(id=1, content="x", detail="   \n ", detail_origin_seq=None)
+    assert needs_disclosure(item, [1, 2]) is False
+
+
+def test_disclosure_when_never_injected():
+    item = TaskItem(id=1, content="x", detail="方案", detail_origin_seq=None)
+    assert needs_disclosure(item, [1, 2]) is True
+
+
+def test_no_disclosure_when_origin_seq_still_visible():
+    item = TaskItem(id=1, content="x", detail="方案", detail_origin_seq=7)
+    assert needs_disclosure(item, [3, 7, 9]) is False
+
+
+def test_disclosure_when_origin_seq_was_folded_away():
+    item = TaskItem(id=1, content="x", detail="方案", detail_origin_seq=7)
+    assert needs_disclosure(item, [3, 9]) is True
+
+
+def test_disclosure_after_context_clear_empty_visible():
+    item = TaskItem(id=1, content="x", detail="方案", detail_origin_seq=7)
+    assert needs_disclosure(item, []) is True
+
+
+def test_clip_detail_under_limit_is_unchanged():
+    assert clip_detail("短方案") == "短方案"
+
+
+def test_clip_detail_over_limit_is_truncated_with_marker():
+    clipped = clip_detail("x" * (DETAIL_DISCLOSURE_CHAR_LIMIT + 500))
+    assert len(clipped) < DETAIL_DISCLOSURE_CHAR_LIMIT + 200
+    assert "截断" in clipped
+
+
+def test_mark_detail_disclosed_persists_seq(ws):
+    item = add_task("s", "A", detail="方案A")
+    assert item.detail_origin_seq is None
+    mark_detail_disclosed("s", item.id, 99)
+    assert list_tasks("s")[0].detail_origin_seq == 99
+
+
+def test_mark_detail_disclosed_preserves_detail_text(ws):
+    item = add_task("s", "A", detail="方案A", acceptance="pytest")
+    mark_detail_disclosed("s", item.id, 99)
+    got = list_tasks("s")[0]
+    assert got.detail == "方案A"
+    assert got.acceptance == "pytest"
+
+
+def test_mark_detail_disclosed_unknown_id_is_noop(ws):
+    add_task("s", "A")
+    mark_detail_disclosed("s", 999, 1)  # 不抛异常
+    assert list_tasks("s")[0].detail_origin_seq is None
