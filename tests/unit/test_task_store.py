@@ -517,8 +517,9 @@ def test_disclosure_block_caps_long_content():
     item = TaskItem(id=1, content="C" * 100_000, detail="短方案",
                     acceptance="A" * 5000, status="failed", error="E" * 5000)
     block = format_disclosure_block(item)
-    # 上界：detail 6000 + content 80 + acceptance 500 + error 500 + 包装若干。
-    # 取 10_000 —— 远高于真实值（约 7.2k），又远低于未修时的 100,113。
+    # 实测：本条 item 的块是 1,207 字符；detail 顶到 6000 上限时约 7.3k。取
+    # 10_000 作为上界——覆盖最坏 detail 仍有余量，又远低于未修时同样输入的
+    # 100,113（content 无界时块的体积由 content 决定，与 detail 上限无关）。
     assert len(block) < 10_000
     assert "C" * 80 in block and "C" * 81 not in block      # _S_CONTENT_CHAR_LIMIT
     assert "A" * 500 in block and "A" * 501 not in block    # _DISCLOSURE_LINE_CHAR_LIMIT
