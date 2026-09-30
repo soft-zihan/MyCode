@@ -401,6 +401,41 @@ def test_disclosure_block_clips_long_detail():
     assert "已截断" in block
 
 
+def test_disclosure_block_caps_long_content():
+    """I4：content 此前**无上限、无换行归一化**地插进标题，§五 的 6000 字符上限
+    于是可被轻易击穿（实测：10 万字符 content + 10 字符 detail → 100,113 字符的
+    注入块，是上限的 16.7 倍）。三个插值字段一律走 _first_line 之后，块的总体积
+    只由 DETAIL_DISCLOSURE_CHAR_LIMIT 与几个有界的单行字段决定。
+    """
+    item = TaskItem(id=1, content="C" * 100_000, detail="短方案",
+                    acceptance="A" * 5000, status="failed", error="E" * 5000)
+    block = format_disclosure_block(item)
+    # 上界：detail 6000 + content 80 + acceptance 500 + error 500 + 包装若干。
+    # 取 10_000 —— 远高于真实值（约 7.2k），又远低于未修时的 100,113。
+    assert len(block) < 10_000
+    assert "C" * 80 in block and "C" * 81 not in block      # _S_CONTENT_CHAR_LIMIT
+    assert "A" * 500 in block and "A" * 501 not in block    # _DISCLOSURE_LINE_CHAR_LIMIT
+    assert "E" * 500 in block and "E" * 501 not in block
+    header = block.splitlines()[1]
+    assert header.startswith("## 当前任务的执行方案（#1 ")
+    assert "\n" not in header
+
+
+def test_disclosure_block_single_lines_multiline_fields():
+    """I4 的另一半：多行字段会把块的「一个字段一行」结构撑散。
+
+    未修时一条三行的 acceptance 会渲染成三行，模型再也无法按行定位字段（S 早已有
+    这条约束，披露块没有——两套写法该收敛的正是这个语义）。
+    """
+    item = TaskItem(id=1, content="第一行\n第二行", detail="方案",
+                    acceptance="pytest -k a\npytest -k b\npytest -k c")
+    block = format_disclosure_block(item)
+    assert "第二行" not in block
+    assert "pytest -k b" not in block
+    assert sum(1 for line in block.splitlines()
+               if line.startswith("验收: ")) == 1
+
+
 def test_disclosure_block_tells_model_to_mark_in_progress():
     item = TaskItem(id=5, content="部署", detail="先跑迁移")
     block = format_disclosure_block(item)

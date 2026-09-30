@@ -323,6 +323,35 @@ DETAIL_DISCLOSURE_CHAR_LIMIT = 6000
 # 通常是一段 traceback；不限长会让整个披露块的体积在这个轴上无界。
 _DISCLOSURE_LINE_CHAR_LIMIT = 500
 
+# content 的上限。content 的契约是「一句话摘要」（怎么做/为什么属于 detail），
+# 所以比 acceptance/error 更紧；披露块标题与 S 的条目行**共用**这一个上限——
+# content 在哪儿渲染都是同一句话摘要，没有理由在两处取不同的界。
+_S_CONTENT_CHAR_LIMIT = 80
+
+# S 是常驻块，每请求重发，所以它的单行上限必须远小于一次性披露块的上限。
+# acceptance 的契约是「一条命令」（设计 §六），160 字符足够；error 只需认得出
+# 是哪个失败，200 字符足够。_DISCLOSURE_LINE_CHAR_LIMIT (500) 保留给披露块。
+_S_ACCEPTANCE_CHAR_LIMIT = 160
+_S_ERROR_CHAR_LIMIT = 200
+
+
+def _first_line(value: Any, limit: int) -> str:
+    """单行化 + 限长。空/纯空白/None/非字符串返回 ""。
+
+    S 与披露块共享同一条约束：常驻或注入的文本里不许出现换行——一个多行字段会把
+    「一条任务一行」/「一个字段一行」的块结构撑散，模型也就没法再按行定位条目或
+    字段。先 strip 再取首行，这样 content 以换行开头时不会渲染出一个空条目。
+
+    `_as_str` 是防御性收窄：from_dict 已把四个字符串字段的显式 null 与非字符串
+    归一成 ""，但 TaskItem 也可以被直接构造（例如未来的写端点绕过 from_dict）。
+    S 每请求都渲染且外层包着 try/except，一个 None（或一个 int）字段会把整个常驻
+    层吞掉，所以这里对所有插值字段一次性免疫，而不是逐个调用点去防。
+    """
+    stripped = _as_str(value).strip()
+    if not stripped:
+        return ""
+    return stripped.splitlines()[0].strip()[:limit]
+
 
 def clip_detail(detail: str) -> str:
     if len(detail) <= DETAIL_DISCLOSURE_CHAR_LIMIT:
@@ -361,22 +390,28 @@ def format_disclosure_block(item: TaskItem) -> str:
 
     用 <system-reminder> 包裹，与 wiki 召回注入同一约定
     （agents/core/turn_runner.py:117-123）。
+
+    三个插值字段（content / acceptance / error）一律走 _first_line —— 单行化 +
+    限长。此前只有 acceptance/error 有界且不取首行，content 两样都没有，于是
+    §五 的 6000 字符注入上限可被轻易击穿（实测：10 万字符 content + 10 字符
+    detail → 100,113 字符的注入块，16.7×），而一条多行 acceptance 会把块的
+    「一个字段一行」结构撑散。detail 是唯一允许多行且长到 6000 的字段，它由
+    clip_detail 单独限界。
     """
     if not item.detail.strip():
         return ""
 
     lines = [
         "<system-reminder>",
-        f"## 当前任务的执行方案（#{item.id} {item.content}）",
+        f"## 当前任务的执行方案（#{item.id} "
+        f"{_first_line(item.content, _S_CONTENT_CHAR_LIMIT)}）",
     ]
-    if item.acceptance.strip():
-        lines.append(
-            f"验收: {item.acceptance.strip()[:_DISCLOSURE_LINE_CHAR_LIMIT]}"
-        )
-    if item.status == TASK_STATUS_FAILED and item.error.strip():
-        lines.append(
-            f"上次失败原因: {item.error.strip()[:_DISCLOSURE_LINE_CHAR_LIMIT]}"
-        )
+    acceptance = _first_line(item.acceptance, _DISCLOSURE_LINE_CHAR_LIMIT)
+    if acceptance:
+        lines.append(f"验收: {acceptance}")
+    error = _first_line(item.error, _DISCLOSURE_LINE_CHAR_LIMIT)
+    if item.status == TASK_STATUS_FAILED and error:
+        lines.append(f"上次失败原因: {error}")
     lines.append("")
     lines.append(clip_detail(item.detail))
     lines.append("")
@@ -386,35 +421,6 @@ def format_disclosure_block(item: TaskItem) -> str:
     )
     lines.append("</system-reminder>")
     return "\n".join(lines)
-
-
-# S（清单摘要）里 content 的上限。content 的契约是「一句话摘要」（怎么做/为什么
-# 属于 detail），所以比 acceptance/error 的上限更紧。
-_S_CONTENT_CHAR_LIMIT = 80
-
-# S 是常驻块，每请求重发，所以它的单行上限必须远小于一次性披露块的上限。
-# acceptance 的契约是「一条命令」（设计 §六），160 字符足够；error 只需认得出
-# 是哪个失败，200 字符足够。_DISCLOSURE_LINE_CHAR_LIMIT (500) 保留给披露块。
-_S_ACCEPTANCE_CHAR_LIMIT = 160
-_S_ERROR_CHAR_LIMIT = 200
-
-
-def _first_line(value: str | None, limit: int) -> str:
-    """单行化 + 限长。空/纯空白/None 返回 ""。
-
-    S 与披露块共享同一条约束：常驻或注入的文本里不许出现换行——一个多行字段会把
-    「一条任务一行」的块结构撑散，模型也就没法再按行定位条目。先 strip 再取首行，
-    这样 content 以换行开头时不会渲染出一个空条目。
-
-    `(value or "")` 是防御性收窄：from_dict 已把四个字符串字段的显式 null 归一成
-    ""，但 TaskItem 也可以被直接构造（例如未来的写端点绕过 from_dict）。S 每请求
-    都渲染且外层包着 try/except，一个 None 字段会把整个常驻层吞掉，所以这里对
-    三个字段一次性免疫，而不是逐个调用点去防。
-    """
-    stripped = (value or "").strip()
-    if not stripped:
-        return ""
-    return stripped.splitlines()[0].strip()[:limit]
 
 
 def format_task_list_block(tasks: list[TaskItem], focus: TaskItem | None) -> str:
