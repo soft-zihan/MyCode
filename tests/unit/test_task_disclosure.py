@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import pytest
 
+from agents.core.circuit_breaker import llm_circuit_breaker
+from agents.core.model_caller import ModelCaller
 from agents.core.session import Session
 from agents.core.workspace import reset_workspace, set_workspace
 from agents.tools.task_disclosure import ensure_focus_detail_visible
@@ -253,3 +255,118 @@ def test_bookkeeping_failure_rolls_back_the_injection(ws, monkeypatch):
     # 回滚后特性自愈：下一次调用（记账已恢复）照常注入并记上正确的 seq
     assert ensure_focus_detail_visible(s) is True
     assert list_tasks("s1")[0].detail_origin_seq in s.visible_seqs
+
+
+# --- 调用点接线（I2）--------------------------------------------------------
+#
+# `model_caller._attempt` 里那次调用是 ensure_focus_detail_visible 的**唯一**生产
+# 调用点（repo-wide grep 确认）。此前没有任何测试驱动 ModelCaller.call/_attempt，
+# 于是把那个调用连同它的 try/except 守卫一起删掉，全套测试仍然全绿，而整个推式层
+# 已经消失——本分支第三次出现「承重不变量只由散文守着」。
+#
+# 形状：记录器打在 model_caller 命名空间里的 ensure_focus_detail_visible 上，哨兵
+# 打在 _assemble_request 上（同步方法，抛异常即短路）。于是既不需要伪造异步 chunk
+# 流（_consume_stream 根本不会执行），又能用「记录器先于哨兵」一条断言同时钉住两件
+# 事：调用点存在，且它在装配之前——后者正是设计依赖的顺序（落在装配之后，本次请求
+# 就看不到刚注入的 detail）。刻意不用 inspect.getsource 做源码文本断言：那种检查
+# 脆且 repo 里无先例。
+
+
+class _WiringAgent:
+    """ModelCaller.call/_attempt 真正读到的全部属性（照 model_caller.py 读出来的）。
+
+    call 读 model / _current_turn / _current_step / is_sub_agent（trace_span 的
+    metadata），_attempt 读 check_and_compact 与 session。哨兵短路在装配处，所以
+    messages / openai_client / _system_prompt_breakdown 这些一概不需要。
+    """
+
+    def __init__(self, session, order: list):
+        self.session = session
+        self.model = "test-model"
+        self._current_turn = 1
+        self._current_step = 0
+        self.is_sub_agent = False
+        self._order = order
+
+    async def check_and_compact(self):
+        self._order.append("check_and_compact")
+
+
+def _sentinel_assemble(order: list):
+    def _assemble(self, span, tools_enabled, tool_choice=None):
+        order.append("assemble")
+        raise RuntimeError("sentinel: 短路在装配处")
+    return _assemble
+
+
+@pytest.fixture
+def _reset_circuit_breaker():
+    """with_retry 会向模块级熔断器记一次失败；不复位就把它漏给后续测试。"""
+    yield
+    llm_circuit_breaker.record_success()
+
+
+async def test_disclosure_call_site_fires_before_request_assembly(
+    ws, monkeypatch, _reset_circuit_breaker
+):
+    order: list = []
+    session = _session()
+
+    def _recorder(sess):
+        order.append("disclosure")
+        assert sess is session        # 传的是 session 本体，不是 session.id
+        return False
+
+    monkeypatch.setattr(
+        "agents.core.model_caller.ensure_focus_detail_visible", _recorder)
+    monkeypatch.setattr(ModelCaller, "_assemble_request", _sentinel_assemble(order))
+
+    with pytest.raises(RuntimeError, match="sentinel"):
+        await ModelCaller(_WiringAgent(session, order)).call()
+
+    # check_and_compact 在前（折叠可能刚把上一次披露隐藏掉），装配在最后
+    assert order == ["check_and_compact", "disclosure", "assemble"]
+
+
+async def test_disclosure_failure_does_not_block_the_model_call(
+    ws, monkeypatch, _reset_circuit_breaker
+):
+    """守卫的另一半：披露抛异常也要继续走到装配（绝不能阻断模型调用）。"""
+    order: list = []
+    session = _session()
+
+    def _boom(sess):
+        order.append("disclosure")
+        raise AttributeError("'int' object has no attribute 'strip'")
+
+    monkeypatch.setattr(
+        "agents.core.model_caller.ensure_focus_detail_visible", _boom)
+    monkeypatch.setattr(ModelCaller, "_assemble_request", _sentinel_assemble(order))
+
+    with pytest.raises(RuntimeError, match="sentinel"):
+        await ModelCaller(_WiringAgent(session, order)).call()
+
+    assert order == ["check_and_compact", "disclosure", "assemble"]
+
+
+async def test_call_site_really_injects_the_focus_detail(
+    ws, monkeypatch, _reset_circuit_breaker
+):
+    """不用替身：真 ensure_focus_detail_visible 经调用点注入到 agent.session。
+
+    上面两条把函数换成了记录器，只证明「有个调用点」；这一条证明那个调用点传的
+    session 是对的、注入真的落盘、并且记了账（否则每次模型调用都会重注入）。
+    """
+    add_task("s1", "A", detail="方案A")
+    session = _session()
+    order: list = []
+    monkeypatch.setattr(ModelCaller, "_assemble_request", _sentinel_assemble(order))
+
+    with pytest.raises(RuntimeError, match="sentinel"):
+        await ModelCaller(_WiringAgent(session, order)).call()
+
+    injected = [e for e in session.events if e.get("type") == "memory_injection"]
+    assert len(injected) == 1
+    assert "方案A" in injected[0]["content"]
+    assert list_tasks("s1")[0].detail_origin_seq == injected[0]["seq"]
+
