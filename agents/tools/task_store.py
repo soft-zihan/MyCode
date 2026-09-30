@@ -4,6 +4,7 @@
 
 本模块是纯 JSON IO 层：**禁止 import agents.core.session**。事件 seq 一律由调用方
 作为参数传入（`detail_origin_seq` / `current_seq`），以保持 store 与事件流解耦。
+（`agents.logging` 是允许的：它是叶子模块，隔离坏文件时必须留痕，见 _quarantine。）
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from agents.core.workspace import get_workspace
+from agents.logging import print_error
 
 
 TASK_STATUS_PENDING = "pending"
@@ -145,18 +147,44 @@ def load_tasks(session_id: str) -> TaskList:
         return TaskList(session_id=session_id)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+        # 读/解析失败不能退化成「空清单」：所有 mutating 调用方都是 load → mutate
+        # → save，空清单会让下一次 save 直接覆盖掉整个文件，静默丢数据。把坏文件
+        # 挪到一边保留证据再返回空清单，工具仍可用。异常范围刻意收窄——意料之外
+        # 的错误应当抛出来，不该被当成「文件坏了」。
+        return _quarantine(path, session_id, f"unreadable/invalid JSON: {e!r}")
+    try:
         return TaskList.from_dict(data)
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-        # 读失败不能退化成「空清单」：所有 mutating 调用方都是 load → mutate → save，
-        # 空清单会让下一次 save 直接覆盖掉整个文件，静默丢数据。把坏文件挪到一边
-        # 保留证据再返回空清单，工具仍可用。异常范围刻意收窄——意料之外的错误
-        # 应当抛出来，不该被当成「文件坏了」。
-        quarantine = path.with_name(f"{path.stem}.corrupt-{int(time.time())}.json")
-        try:
-            path.rename(quarantine)
-        except OSError:
-            pass
+    except (AttributeError, TypeError, KeyError) as e:
+        # JSON 合法但**形状**非法（例如 {"tasks": "x"}、顶层是数组、条目是标量、
+        # status 是不可哈希的对象）。此前 from_dict 在上面那个 try 内部，而这些
+        # 异常不在收窄的元组里 → 不隔离 → 文件永远坏着、每请求重抛，并让
+        # GET /api/tasks/{id} 永久 500。形状损坏与读/解析损坏走同一条隔离路径，
+        # 但日志文案可区分，operator 才分得清是文件被截断还是写入方写错了结构。
+        # 收窄依然是刻意的：这三类之外的错误（编程错误）应当抛出来。
+        return _quarantine(path, session_id, f"shape-corrupt JSON: {e!r}")
+
+
+def _quarantine(path: Path, session_id: str, reason: str) -> TaskList:
+    """把坏文件挪到一边并**打日志**，返回空清单。
+
+    隔离本身改动了用户的文件系统，而两层（S 与推式披露）会随之同时消失——不打
+    日志的话唯一证据是一个要人手工去 `~/.mycode/todos/` 里找的重命名文件。rename
+    失败（跨设备、权限、Windows 上被占用）也要响一声，否则就是「隔离没发生且
+    无人知晓」。
+    """
+    quarantine = path.with_name(f"{path.stem}.corrupt-{int(time.time())}.json")
+    try:
+        path.rename(quarantine)
+    except OSError as e:
+        print_error(
+            f"[task_store] {reason}; quarantine rename failed for {path}: {e!r}"
+        )
         return TaskList(session_id=session_id)
+    print_error(
+        f"[task_store] {reason}; quarantined {path} -> {quarantine}"
+    )
+    return TaskList(session_id=session_id)
 
 
 def save_tasks(task_list: TaskList) -> None:

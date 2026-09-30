@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 
@@ -129,6 +130,66 @@ def test_quarantine_then_save_does_not_lose_the_quarantined_copy(ws):
     add_task("s1", "新任务")              # 随后正常写入
     assert [t.content for t in load_tasks("s1").tasks] == ["新任务"]
     assert len(list(get_tasks_dir().glob("s1.corrupt-*.json"))) == 1
+
+
+def test_shape_corrupt_file_is_quarantined_not_left_to_raise_forever(ws):
+    """I5：JSON 合法但形状非法的文件此前**根本不隔离**。
+
+    `TaskList.from_dict(data)` 在 try 内部，而 except 元组是
+    (JSONDecodeError, UnicodeDecodeError, OSError)，`{"tasks": "x"}` 抛的是
+    AttributeError —— 不在元组里，于是文件永远坏着、每请求重抛，并让
+    `GET /api/tasks/{id}` 永久 500（隔离本来是「保留证据 + 工具仍可用」，
+    这条路两样都没有）。
+    """
+    path = get_tasks_dir() / "s1.json"
+    path.write_text('{"session_id": "s1", "tasks": "not a list"}', encoding="utf-8")
+
+    assert load_tasks("s1").tasks == []          # 返回空清单而不是抛
+    assert not path.exists()                     # 原文件已挪走
+    quarantined = list(get_tasks_dir().glob("s1.corrupt-*.json"))
+    assert len(quarantined) == 1
+    assert "not a list" in quarantined[0].read_text(encoding="utf-8")   # 证据保留
+
+    add_task("s1", "新任务")                      # 随后仍可正常写入
+    assert [t.content for t in load_tasks("s1").tasks] == ["新任务"]
+
+
+def test_shape_corrupt_variants_are_all_quarantined(ws):
+    """形状损坏不止「tasks 是字符串」一种：列表里塞标量、JSON 顶层是数组、
+    status 是不可哈希的对象，走的都必须是同一条隔离路径。"""
+    for name, payload in (
+        ("scalar-item", '{"session_id": "s", "tasks": [1, 2]}'),
+        ("top-level-list", '[1, 2, 3]'),
+        ("unhashable-status", '{"session_id": "s", "tasks": [{"id": 1, "status": {}}]}'),
+    ):
+        session_id = f"shape-{name}"
+        path = get_tasks_dir() / f"{session_id}.json"
+        path.write_text(payload, encoding="utf-8")
+        assert load_tasks(session_id).tasks == [], name
+        assert not path.exists(), name
+        assert len(list(get_tasks_dir().glob(f"{session_id}.corrupt-*.json"))) == 1, name
+
+
+def test_quarantine_is_logged_naming_both_paths(ws, caplog):
+    """I5：隔离改动了用户的文件系统却一行日志都没有（本模块此前不 import 任何
+    日志模块）——两层同时消失，唯一证据是一个要人手工去找的重命名文件。"""
+    d = get_tasks_dir()
+    (d / "parse.json").write_text("NOT JSON AT ALL", encoding="utf-8")
+    (d / "shape.json").write_text('{"tasks": "not a list"}', encoding="utf-8")
+
+    with caplog.at_level(logging.ERROR, logger="mycode"):
+        load_tasks("parse")
+        load_tasks("shape")
+
+    msgs = [r.getMessage() for r in caplog.records if "[task_store]" in r.getMessage()]
+    assert len(msgs) == 2
+    for msg in msgs:
+        assert ".json" in msg and ".corrupt-" in msg      # 原路径与隔离路径都在
+    assert any("parse.json" in m for m in msgs)
+    assert any("shape.json" in m for m in msgs)
+    # 两类原因必须可区分，否则 operator 分不清是文件被截断还是写入方写错了形状
+    assert "shape" in msgs[1].lower()
+    assert "shape" not in msgs[0].lower()
 
 
 def _item(i: int, status: str) -> TaskItem:
