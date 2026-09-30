@@ -126,16 +126,28 @@ def load_tasks(session_id: str) -> TaskList:
     if not path.exists():
         return TaskList(session_id=session_id)
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         return TaskList.from_dict(data)
-    except Exception:
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        # 读失败不能退化成「空清单」：所有 mutating 调用方都是 load → mutate → save，
+        # 空清单会让下一次 save 直接覆盖掉整个文件，静默丢数据。把坏文件挪到一边
+        # 保留证据再返回空清单，工具仍可用。异常范围刻意收窄——意料之外的错误
+        # 应当抛出来，不该被当成「文件坏了」。
+        quarantine = path.with_name(f"{path.stem}.corrupt-{int(time.time())}.json")
+        try:
+            path.rename(quarantine)
+        except OSError:
+            pass
         return TaskList(session_id=session_id)
 
 
 def save_tasks(task_list: TaskList) -> None:
     tasks_dir = get_tasks_dir()
     path = tasks_dir / f"{task_list.session_id}.json"
-    path.write_text(json.dumps(task_list.to_dict(), indent=2, ensure_ascii=False))
+    path.write_text(
+        json.dumps(task_list.to_dict(), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 def add_task(

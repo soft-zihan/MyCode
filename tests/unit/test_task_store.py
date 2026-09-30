@@ -12,6 +12,7 @@ from agents.tools.task_store import (
     VALID_STATUSES,
     TaskItem,
     TaskList,
+    add_task,
     get_tasks_dir,
     load_tasks,
     save_tasks,
@@ -91,3 +92,31 @@ def test_legacy_json_file_loads_without_migration(ws):
 def test_storage_dir_name_is_still_todos(ws):
     # 刻意保留的契约：目录名不改，避免迁移
     assert get_tasks_dir().name == "todos"
+
+
+def test_save_writes_utf8_bytes_for_non_ascii_detail(ws):
+    add_task("s1", "重构装配逻辑", detail="改 _assemble_request，注意签名不要动")
+    raw = (get_tasks_dir() / "s1.json").read_bytes()
+    assert "重构装配逻辑".encode("utf-8") in raw  # ensure_ascii=False 且真的按 UTF-8 落盘
+    assert load_tasks("s1").tasks[0].detail == "改 _assemble_request，注意签名不要动"
+
+
+def test_corrupt_file_is_quarantined_not_silently_emptied(ws):
+    path = get_tasks_dir() / "s1.json"
+    path.write_text('{"session_id": "s1", "tasks": [ TRUNCATED', encoding="utf-8")
+
+    loaded = load_tasks("s1")
+    assert loaded.tasks == []            # 工具仍可用
+    assert not path.exists()             # 坏文件已被挪走
+    quarantined = list(get_tasks_dir().glob("s1.corrupt-*.json"))
+    assert len(quarantined) == 1
+    assert "TRUNCATED" in quarantined[0].read_text(encoding="utf-8")  # 证据保留
+
+
+def test_quarantine_then_save_does_not_lose_the_quarantined_copy(ws):
+    path = get_tasks_dir() / "s1.json"
+    path.write_text("NOT JSON AT ALL", encoding="utf-8")
+    load_tasks("s1")                     # 触发隔离
+    add_task("s1", "新任务")              # 随后正常写入
+    assert [t.content for t in load_tasks("s1").tasks] == ["新任务"]
+    assert len(list(get_tasks_dir().glob("s1.corrupt-*.json"))) == 1
