@@ -50,7 +50,7 @@ EMITTED_TYPES = {
     "session/meta", "session/plan_linked", "session/title", "session_folded",
     "stats", "step/end", "step/start", "steer/delivered", "steer/dropped",
     "steer/queued", "sub_agent/cancel", "sub_agent/end", "sub_agent/resume",
-    "sub_agent/start", "subagent/completed", "text", "thinking", "todo/updated",
+    "sub_agent/start", "subagent/completed", "task_list/updated", "text", "thinking",
     "tool_call", "tool_folded", "tool_result", "tool_result_msg", "turn/cancel",
     "turn/end", "turn/start", "user_message",
     "eval/task_metadata",
@@ -64,7 +64,7 @@ FRONTEND_CONSUMED_TYPES = {
     "session/created", "session/title", "session/plan_linked", "session/interrupted",
     "permission/request", "permission/mode_changed",
     "question/request", "question/resolved",
-    "todo/updated", "plan/updated",
+    "task_list/updated", "plan/updated",
     "sub_agent/start", "sub_agent/end", "subagent/completed",
 }
 

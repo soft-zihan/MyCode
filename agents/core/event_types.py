@@ -28,7 +28,7 @@ PUBLIC_EVENT_TYPES = frozenset({
     "permission/request", "permission/mode_changed",
     "question/request", "question/resolved",
     # 状态面板（useChat todo/plan 投影）
-    "todo/updated", "plan/updated",
+    "task_list/updated", "plan/updated",
     # 子代理（useChatNodes 子代理节点 + 后台任务面板 + 完成通知卡）
     "sub_agent/start", "sub_agent/end", "subagent/completed",
     # eval 家族中唯一经 session.append 落盘的会话级事件（其余 eval/* 走前缀放行）

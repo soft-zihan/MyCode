@@ -27,7 +27,7 @@ from agents.plan.plan_tool_executor import execute_plan_mode_tool
 from agents.skills.skills import discover_skills, execute_skill
 from agents.tools import execute_tool
 from agents.tools.question_tools import handle_ask_user
-from agents.tools.todo_tools import handle_todolist
+from agents.tools.task_tools import handle_todolist
 from agents.tools.wiki_tools import remember
 
 
@@ -186,11 +186,14 @@ class ToolDispatcher:
             return await execute_subagent_cancel_tool(self.agent, inp)
         if name == "ask_user":
             return await handle_ask_user(self.agent.session, inp, abort_fn=lambda: self.agent.abort_requested())
-        if name == "todolist":
+        if name == "task_list":
             if self.agent.permission_mode == "plan":
-                return "Error: todolist is disabled in plan mode. Use the plan system's tasks.md instead."
+                return (
+                    "Error: task_list is disabled in plan mode. Write the plan into "
+                    "tasks.md; approved tasks are materialized into task_list automatically."
+                )
             result = handle_todolist(self.agent.session.id, inp)
-            self.agent.session.append("todo/updated", {"session_id": self.agent.session.id})
+            self.agent.session.append("task_list/updated", {"session_id": self.agent.session.id})
             return result
         if name == "skill":
             return await self._execute_skill_tool(inp)

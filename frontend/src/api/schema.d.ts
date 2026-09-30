@@ -1695,7 +1695,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/todos/{session_id}": {
+    "/api/tasks/{session_id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -1703,10 +1703,10 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Api Get Todos
-         * @description 获取 session 的任务清单。
+         * Api Get Tasks
+         * @description 获取会话任务清单。
          */
-        get: operations["api_get_todos_api_todos__session_id__get"];
+        get: operations["api_get_tasks_api_tasks__session_id__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -5793,7 +5793,7 @@ export interface operations {
             };
         };
     };
-    api_get_todos_api_todos__session_id__get: {
+    api_get_tasks_api_tasks__session_id__get: {
         parameters: {
             query?: never;
             header?: never;

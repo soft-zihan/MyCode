@@ -236,8 +236,14 @@ def _check_reviewer_shell(
 
 def _check_plan_mode(tool_name: str, inp: dict, plan_dir: str | None) -> dict | None:
     """plan 模式下的工具裁决；返回 None 表示无特殊裁决，继续走通用流程。"""
-    if tool_name == "todolist":
-        return {"action": "deny", "message": "todolist is disabled in plan mode. Use the plan system's tasks.md instead."}
+    if tool_name == "task_list":
+        return {
+            "action": "deny",
+            "message": (
+                "task_list is disabled in plan mode. Write the plan into tasks.md; "
+                "approved tasks are materialized into task_list automatically."
+            ),
+        }
     if tool_name in EDIT_TOOLS:
         file_path = inp.get("file_path") or inp.get("path")
         # Plan 模式允许写 {plan_dir}/ 下任意文件

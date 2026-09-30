@@ -15,7 +15,7 @@ ToolDef = dict
 PermissionMode = str
 
 READ_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "web_search", "compact_context", "shell_status", "search_history", "list_session_notes", "plan_status", "plan_list", "plan_read_artifact", "plan_explore", "plan_continue", "plan_retry", "plan_recall", "plan_check_expired"}
-EDIT_TOOLS = {"write_file", "edit_file", "skill_create", "remember", "plan_propose", "plan_update", "plan_task_start", "plan_task_done", "plan_task_failed", "plan_complete", "plan_add_artifact", "plan_archive", "plan_save_explore", "plan_abandon", "plan_reopen", "plan_pause", "plan_resume", "plan_skip", "plan_redo", "plan_rollback", "ask_user", "todolist"}
+EDIT_TOOLS = {"write_file", "edit_file", "skill_create", "remember", "plan_propose", "plan_update", "plan_task_start", "plan_task_done", "plan_task_failed", "plan_complete", "plan_add_artifact", "plan_archive", "plan_save_explore", "plan_abandon", "plan_reopen", "plan_pause", "plan_resume", "plan_skip", "plan_redo", "plan_rollback", "ask_user", "task_list"}
 
 CONCURRENCY_SAFE_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "web_search", "shell_status"}
 
@@ -95,7 +95,7 @@ TOOL_EXECUTION_MODES: dict[str, str] = {
     "plan_redo": "sequential",
     "plan_rollback": "sequential",
     "ask_user": "sequential",
-    "todolist": "sequential",
+    "task_list": "sequential",
 }
 
 
@@ -368,7 +368,7 @@ tool_definitions: list[ToolDef] = [
         },
     },
     {
-        "name": "todolist",
+        "name": "task_list",
         "description": "管理任务清单。用于追踪多步任务的进度。Plan 模式下禁用。",
         "input_schema": {
             "type": "object",

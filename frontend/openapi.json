@@ -6042,10 +6042,10 @@
         ]
       }
     },
-    "/api/todos/{session_id}": {
+    "/api/tasks/{session_id}": {
       "get": {
-        "description": "获取 session 的任务清单。",
-        "operationId": "api_get_todos_api_todos__session_id__get",
+        "description": "获取会话任务清单。",
+        "operationId": "api_get_tasks_api_tasks__session_id__get",
         "parameters": [
           {
             "in": "path",
@@ -6077,7 +6077,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Api Get Todos",
+        "summary": "Api Get Tasks",
         "tags": [
           "events"
         ]

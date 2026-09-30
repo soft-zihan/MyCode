@@ -1,4 +1,4 @@
-"""todolist 工具 — Agent 任务追踪。
+"""task_list 工具 — Agent 任务追踪。
 
 Plan 模式下禁用。
 """
@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from agents.tools.todo_store import (
+from agents.tools.task_store import (
     add_todo,
     update_todo,
     remove_todo,
@@ -20,7 +20,7 @@ from agents.tools.todo_store import (
 
 
 TODOLIST_TOOL = {
-    "name": "todolist",
+    "name": "task_list",
     "description": "管理任务清单。用于追踪多步任务的进度。Plan 模式下禁用。",
     "input_schema": {
         "type": "object",
@@ -55,7 +55,7 @@ TODOLIST_TOOL = {
 
 
 def handle_todolist(session_id: str, inp: dict) -> str:
-    """处理 todolist 工具调用。"""
+    """处理 task_list 工具调用。"""
     operation = inp.get("operation", "")
     
     if operation == "add":

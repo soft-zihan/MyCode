@@ -55,10 +55,10 @@ async def api_respond_question(data: QuestionResponseData):
     return {"success": True}
 
 
-@router.get("/api/todos/{session_id}")
-async def api_get_todos(session_id: str):
-    """获取 session 的任务清单。"""
-    from agents.tools.todo_store import list_todos
-    
+@router.get("/api/tasks/{session_id}")
+async def api_get_tasks(session_id: str):
+    """获取会话任务清单。"""
+    from agents.tools.task_store import list_todos
+
     items = list_todos(session_id)
     return {"todos": [item.to_dict() for item in items]}
