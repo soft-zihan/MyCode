@@ -216,7 +216,7 @@ def update_task(
                 item.acceptance = acceptance
             if error is not None:
                 item.error = error
-            if after_id is not None:
+            if after_id is not None and after_id != task_id:
                 task_list.tasks = [t for t in task_list.tasks if t.id != task_id]
                 _insert_after(task_list.tasks, item, after_id)
             item.updated_at = _now_iso()

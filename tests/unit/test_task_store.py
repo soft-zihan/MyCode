@@ -168,6 +168,14 @@ def test_out_of_order_completion_leaves_focus_on_earliest_pending():
     assert find_focus(tasks).id == 1
 
 
+def test_focus_takes_first_in_progress_in_list_order():
+    assert find_focus([_item(1, "in_progress"), _item(2, "in_progress")]).id == 1
+
+
+def test_focus_takes_first_failed_in_list_order():
+    assert find_focus([_item(1, "failed"), _item(2, "failed")]).id == 1
+
+
 def test_add_appends_to_end_by_default(ws):
     add_task("s", "A")
     add_task("s", "B")
@@ -217,3 +225,38 @@ def test_add_ids_stay_monotonic_after_insert(ws):
     mid = add_task("s", "MID", after_id=a.id)
     assert mid.id == 3  # next_id 递增，与位置无关
     assert [t.id for t in list_tasks("s")] == [a.id, mid.id, b.id]
+
+
+def test_update_with_self_after_id_is_a_noop(ws):
+    a = add_task("s", "A")
+    b = add_task("s", "B")
+    add_task("s", "C")
+    update_task("s", b.id, after_id=b.id)
+    assert [t.content for t in list_tasks("s")] == ["A", "B", "C"]
+
+
+def test_update_with_after_id_zero_moves_to_front(ws):
+    a = add_task("s", "A")
+    b = add_task("s", "B")
+    c = add_task("s", "C")
+    update_task("s", c.id, after_id=0)
+    assert [t.content for t in list_tasks("s")] == ["C", "A", "B"]
+
+
+def test_update_with_unknown_after_id_appends(ws):
+    a = add_task("s", "A")
+    add_task("s", "B")
+    update_task("s", a.id, after_id=999)
+    assert [t.content for t in list_tasks("s")] == ["B", "A"]
+
+
+def test_update_combining_status_change_and_move_keeps_both(ws):
+    a = add_task("s", "A", detail="方案A", acceptance="pytest -k a")
+    add_task("s", "B")
+    c = add_task("s", "C")
+    update_task("s", a.id, status="in_progress", after_id=c.id)
+    got = list_tasks("s")
+    assert [t.content for t in got] == ["B", "C", "A"]
+    assert got[2].status == "in_progress"
+    assert got[2].detail == "方案A"
+    assert got[2].acceptance == "pytest -k a"
