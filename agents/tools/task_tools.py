@@ -232,6 +232,9 @@ def handle_task_list(session_id: str, inp: dict, current_seq: int | None = None)
             detail=inp.get("detail") or "",
             acceptance=inp.get("acceptance") or "",
             after_id=_coerce_id(inp.get("after_id")),
+            # 承载这次 tool_calls 的 assistant seq：add(detail=...) 不记账就会在
+            # 下一次模型调用时注入一份与 tool_calls 参数逐字相同的 detail（I1）。
+            current_seq=current_seq,
         )
         return _ok({"action": "added", "task": summary_dict(item)}, ignored)
 

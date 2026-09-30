@@ -190,7 +190,26 @@ def add_task(
     detail: str = "",
     acceptance: str = "",
     after_id: int | None = None,
+    current_seq: int | None = None,
 ) -> TaskItem:
+    # current_seq = 承载本次 tool_calls 的 assistant 事件 seq，由调用方传入
+    # （dispatcher → handle_task_list），理由同 update_task：store 不 import session。
+    #
+    # detail 非空且 current_seq 有值时记账 detail_origin_seq：模型自己写的 detail
+    # 正躺在那次 tool_calls 的参数里，折叠前一直可见，再注入一份是纯重复——与
+    # update(detail=...) 的重指向裁定对称（此前 add 没有归属人，于是
+    # add(detail=...) 每次都会造出设计 §五 点名要消灭的那次重复注入）。
+    #
+    # current_seq 为 None 时保持 None，needs_disclosure 于是无条件注入——这正是
+    # Plan 3 物化路径要的：物化调用 add_task **不传** current_seq，因为物化出来的
+    # detail 来自磁盘上的 tasks.md，不在模型自己的 tool_calls 里。
+    # _as_str 只是让这行对非 str 入参也保持 total（不新增一条 AttributeError 路径）；
+    # 类型校验本身在 task_tools 的模型边界，见 _check_string_fields。
+    origin_seq = (
+        current_seq
+        if current_seq is not None and _as_str(detail).strip()
+        else None
+    )
     task_list = load_tasks(session_id)
     now = _now_iso()
     item = TaskItem(
@@ -202,6 +221,7 @@ def add_task(
         updated_at=now,
         detail=detail,
         acceptance=acceptance,
+        detail_origin_seq=origin_seq,
     )
     task_list.next_id += 1
     _insert_after(task_list.tasks, item, after_id)

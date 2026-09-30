@@ -53,6 +53,43 @@ def test_injects_when_focus_detail_never_disclosed(ws):
     assert "<system-reminder>" in injected[0]["content"]
 
 
+def test_add_with_detail_and_seq_records_origin(ws):
+    """I1：`add(detail=...)` 必须记账 origin seq，否则造出的正是本设计要消灭的
+    那次纯重复注入。
+
+    模型自己写的 detail 正躺在承载这次 tool_calls 的 assistant 事件里，折叠前
+    一直可见；`add_task` 没有 current_seq 参数时 detail_origin_seq 停在 None，
+    而 needs_disclosure 对 None 无条件返回 True（实测：一条 assistant 消息里
+    add 三个带 detail 的任务、该消息仍可见，下一次调用注入了 465 字符与
+    tool_calls 参数逐字相同的内容）。与已被 bless 的 `update(detail=...)`
+    重指向裁定对称。
+    """
+    s = _session()
+    seq = s.append("assistant_message", {"content": "", "tool_calls": [
+        {"id": "c1", "type": "function",
+         "function": {"name": "task_list",
+                      "arguments": '{"operation":"add","detail":"方案A"}'}}]})["seq"]
+
+    add_task("s1", "A", detail="方案A", current_seq=seq)
+
+    assert list_tasks("s1")[0].detail_origin_seq == seq
+    assert ensure_focus_detail_visible(s) is False      # 承载事件仍可见 → 不注入
+
+
+def test_add_with_detail_and_no_seq_leaves_origin_none(ws):
+    """I1 的对照面 = Plan 3 物化路径：不传 current_seq 就保持 None、保持会注入。
+
+    物化出来的 detail 来自磁盘上的 tasks.md，**不在**模型自己的 tool_calls 里，
+    所以首条无条件注入正是它想要的。物化调用 add_task 时不传 current_seq，这条
+    测试钉住该调用形状不被上面的记账改动顺手改掉。
+    """
+    s = _session()
+    add_task("s1", "A", detail="物化方案")
+
+    assert list_tasks("s1")[0].detail_origin_seq is None
+    assert ensure_focus_detail_visible(s) is True
+
+
 def test_injection_records_origin_seq(ws):
     add_task("s1", "A", detail="方案A")
     s = _session()

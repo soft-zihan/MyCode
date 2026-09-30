@@ -303,6 +303,25 @@ def test_update_detail_repoints_origin_seq(ws):
     assert got.detail_origin_seq == 55   # 重指向承载这次编辑的事件，不是清空也不是不动
 
 
+def test_add_with_detail_threads_current_seq_into_origin(ws):
+    """I1 的接线半边：dispatcher 给 handler 的 current_seq 必须真的传进 add_task。
+
+    store 侧的行为由 test_task_disclosure.py 的两条测试钉住；这一条钉住生产路径
+    （dispatcher → handle_task_list → add_task）没有把它丢掉，否则 add(detail=...)
+    仍会造出一次与 tool_calls 参数逐字相同的纯重复注入。
+    """
+    _call({"operation": "add", "content": "A", "detail": "方案A"}, seq=55)
+    assert list_tasks("s")[0].detail_origin_seq == 55
+
+    # 不带 seq（物化路径的调用形状）仍是 None
+    _call({"operation": "add", "content": "B", "detail": "方案B"})
+    assert list_tasks("s")[1].detail_origin_seq is None
+
+    # 无 detail 时不记账：没有东西要披露，写个 seq 只会掩盖「detail 为空」这个事实
+    _call({"operation": "add", "content": "C"}, seq=77)
+    assert list_tasks("s")[2].detail_origin_seq is None
+
+
 def test_update_without_detail_leaves_origin_seq(ws):
     """义务 5 的对照面：未改 detail 就不动 detail_origin_seq。"""
     added = _call({"operation": "add", "content": "A", "detail": "方案A"})
