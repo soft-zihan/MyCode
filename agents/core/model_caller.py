@@ -20,7 +20,9 @@ from typing import TYPE_CHECKING, Any
 
 from agents.core.retry import ContentLevelError, with_retry
 from agents.core.text_sanitization import safe_utf8_text, sanitize_for_utf8
+from agents.logging import print_error
 from agents.tools.registry import get_active_tool_definitions
+from agents.tools.task_disclosure import ensure_focus_detail_visible
 from agents.wiki.citation import CitationStripper, strip_citations
 from agents.wiki.store import increment_usage
 from agents.core.subagent import get_available_agent_types
@@ -199,6 +201,13 @@ class ModelCaller:
 
             async def _attempt():
                 await a.check_and_compact()
+                # 焦点任务 detail 的条件披露。必须在 check_and_compact 之后（折叠可能
+                # 刚把上一次披露隐藏掉）、_assemble_request 之前（否则本次请求看不到）。
+                # 幂等，with_retry 的重试不会重复注入。
+                try:
+                    ensure_focus_detail_visible(a.session)
+                except Exception as e:
+                    print_error(f"[task_disclosure] injection failed: {e!r}")
                 create_params, raw_messages, metrics = self._assemble_request(span, tools_enabled, tool_choice)
                 metrics.update(self._compute_token_breakdown(raw_messages))
                 stream = await a.openai_client.chat.completions.create(**create_params)
