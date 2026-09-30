@@ -45,6 +45,14 @@ def ensure_focus_detail_visible(session: Any) -> bool:
     if not isinstance(seq, int):
         # 非 int seq 不能记账（写进 store 也会被 from_dict 的 isinstance 收窄回
         # None）。仍算注入成功：事件已落盘且默认可见，本轮模型看得到 detail。
+        # 但这条路不该走到——session.py 对非 SSE 事件总是写 int seq。静默的代价是
+        # 「不记账 → 下一次请求重注入最多 6000 字符」且不留任何痕迹，所以响一声：
+        # 不可能的情况发生了就该看得见（裁定 M10）。
+        print_error(
+            f"[task_disclosure] injected event carried non-int seq ({seq!r}); "
+            f"detail_origin_seq not recorded for task {focus.id}, "
+            "will re-inject on the next model call"
+        )
         return True
     try:
         mark_detail_disclosed(session.id, focus.id, seq)

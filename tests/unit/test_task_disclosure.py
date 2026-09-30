@@ -216,6 +216,32 @@ def test_injection_never_splits_tool_pair_and_reaches_the_request(ws):
     assert "方案A" in msgs[-1]["content"]    # 且真的进了本次请求
 
 
+def test_non_int_seq_is_reported_not_silent(ws, monkeypatch):
+    """M10：不可能发生的分支也要响一声。
+
+    session.py 对非 SSE 事件总是写 int seq，所以这条路到不了；但静默的代价是
+    「不记账 → 下次请求重注入最多 6000 字符」且不留任何痕迹。返回值仍是 True
+    ——注入确实发生了，本轮模型看得到 detail。
+    """
+    add_task("s1", "A", detail="方案A")
+    logged: list[str] = []
+    monkeypatch.setattr("agents.tools.task_disclosure.print_error", logged.append)
+
+    s = _session()
+    real_append = s.append
+
+    def _append_dropping_seq(event_type, data):
+        event = real_append(event_type, data)
+        return {k: v for k, v in event.items() if k != "seq"}
+
+    s.append = _append_dropping_seq
+
+    assert ensure_focus_detail_visible(s) is True           # 注入仍算成功
+    assert list_tasks("s1")[0].detail_origin_seq is None    # 确实没记账
+    assert len(logged) == 1
+    assert "seq" in logged[0]
+
+
 def test_bookkeeping_failure_rolls_back_the_injection(ws, monkeypatch):
     """记账失败必须回滚注入，否则事件留在可见集里而 detail_origin_seq 未记录，
     此后**每次**模型调用都重注入最多 6000 字符——本特性唯一一处无上界的浪费，
