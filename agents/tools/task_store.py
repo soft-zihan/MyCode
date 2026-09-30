@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field, asdict
@@ -188,12 +190,36 @@ def _quarantine(path: Path, session_id: str, reason: str) -> TaskList:
 
 
 def save_tasks(task_list: TaskList) -> None:
+    """原子写：同目录临时文件 + os.replace。
+
+    此前是 truncate-then-write（`path.write_text`），非原子且原地。**本分支改变了
+    一次撕裂写入的含义**：store 现在是每请求上下文层（S 与推式披露）的承重件、
+    读取翻倍、Plan 3 还要加并发 UI 写入方，所以撕裂写入意味着「模型静默失去它的
+    计划」，而不是「面板空了」；而 load_tasks 的隔离缓解对半截 JSON 也只是把数据
+    挪走。等并发写入方落地后再补原子性就不是几行了。
+
+    同目录是必需的：os.replace 只在同一文件系统上原子。临时名以 "." 开头且带
+    .tmp- 中缀，既不会被 `*.json` 的读取方撞上，也不会与真实 session 文件同名。
+    刻意不 fsync——威胁模型是并发/被打断的写入留下半截文件，不是掉电。
+    """
     tasks_dir = get_tasks_dir()
     path = tasks_dir / f"{task_list.session_id}.json"
-    path.write_text(
-        json.dumps(task_list.to_dict(), indent=2, ensure_ascii=False),
-        encoding="utf-8",
+    payload = json.dumps(task_list.to_dict(), indent=2, ensure_ascii=False)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{task_list.session_id}.json.tmp-", dir=tasks_dir
     )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(payload)
+        os.replace(tmp_name, path)
+    except BaseException:
+        # 写入或替换失败时不能把临时文件留在 store 目录里；目标文件因为还没被
+        # 碰过，仍是上一份完整内容（这正是原子性买到的东西）。
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def _insert_after(tasks: list[TaskItem], item: TaskItem, after_id: int | None) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 import pytest
 
@@ -109,6 +110,51 @@ def test_save_writes_utf8_bytes_for_non_ascii_detail(ws):
     raw = (get_tasks_dir() / "s1.json").read_bytes()
     assert "重构装配逻辑".encode("utf-8") in raw  # ensure_ascii=False 且真的按 UTF-8 落盘
     assert load_tasks("s1").tasks[0].detail == "改 _assemble_request，注意签名不要动"
+
+
+def test_save_leaves_no_temp_file_behind(ws):
+    """A1：save_tasks 此前是 truncate-then-write（非原子、原地）。
+
+    本分支改变了一次撕裂写入的含义：store 现在是每请求上下文层（S 与推式披露）
+    的承重件、读取翻倍、Plan 3 还要加并发 UI 写入方，所以撕裂写入意味着「模型
+    静默失去它的计划」而不是「面板空了」。改为同目录临时文件 + os.replace
+    （同目录才在同一文件系统上，replace 才原子）。
+    """
+    add_task("s1", "重构 X", detail="方案", acceptance="pytest -k x")
+    update_task("s1", 1, status="in_progress")
+
+    d = get_tasks_dir()
+    assert sorted(p.name for p in d.iterdir()) == ["s1.json"]   # 无任何残留
+    assert not list(d.glob("*.tmp*"))
+    assert not list(d.glob(".*"))
+
+    data = json.loads((d / "s1.json").read_text(encoding="utf-8"))
+    assert data["session_id"] == "s1"
+    assert [t["content"] for t in data["tasks"]] == ["重构 X"]
+    assert data["tasks"][0]["detail"] == "方案"
+    assert data["tasks"][0]["status"] == "in_progress"
+
+
+def test_failed_save_leaves_no_temp_file_and_keeps_previous_copy(ws, monkeypatch):
+    """写入本身失败时：临时文件不残留，且目标文件仍是上一份完整内容。
+
+    这条钉住的是原子性真正买到的东西——旧实现先把目标文件截断再写，失败就留下
+    一个空/半截文件，下一次 load 要么读到空清单（然后被 save 覆盖，静默丢数据），
+    要么读到坏 JSON 被隔离掉。
+    """
+    add_task("s1", "旧任务")
+
+    def _boom(src, dst):
+        raise OSError("simulated replace failure")
+
+    # 打在 os 模块本身上（task_store 用 `import os` + `os.replace`，所以这就是它
+    # 运行时查到的那个属性）；monkeypatch 会在测试结束时还原。
+    monkeypatch.setattr(os, "replace", _boom)
+    with pytest.raises(OSError):
+        add_task("s1", "新任务")            # 内部 save_tasks 失败
+
+    assert sorted(p.name for p in get_tasks_dir().iterdir()) == ["s1.json"]
+    assert [t.content for t in load_tasks("s1").tasks] == ["旧任务"]
 
 
 def test_corrupt_file_is_quarantined_not_silently_emptied(ws):
