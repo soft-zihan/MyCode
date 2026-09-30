@@ -55,8 +55,14 @@ class ToolDispatcher:
             return 30
         return 60
 
-    async def execute_tool_call(self, name: str, inp: dict) -> ToolExecutionResult:
-        """执行工具调用（带超时、结构化 outcome 和 trace）。"""
+    async def execute_tool_call(self, name: str, inp: dict,
+                                assistant_seq: int | None = None) -> ToolExecutionResult:
+        """执行工具调用（带超时、结构化 outcome 和 trace）。
+
+        assistant_seq: 承载本次 tool_calls 的 assistant 消息的 seq，由 agent_loop
+        在每个模型响应处捕获一次后沿工具执行链传入。只有需要事件 seq 记账的
+        工具（task_list）用它；其余工具忽略。
+        """
         from contextlib import nullcontext
 
 
@@ -82,7 +88,7 @@ class ToolDispatcher:
             try:
                 print_info(f"[DEBUG] execute_tool_call: calling asyncio.wait_for for {name}")
                 result = await asyncio.wait_for(
-                    self._execute_tool_call_inner(name, inp),
+                    self._execute_tool_call_inner(name, inp, assistant_seq),
                     timeout=timeout,
                 )
                 duration_s = round(time.time() - _tool_t0, 2)
@@ -162,7 +168,8 @@ class ToolDispatcher:
             metadata={"tool_name": name, "duration_s": duration_s, "timeout_s": timeout},
         )
 
-    async def _execute_tool_call_inner(self, name: str, inp: dict) -> str | ToolExecutionResult:
+    async def _execute_tool_call_inner(self, name: str, inp: dict,
+                                       assistant_seq: int | None = None) -> str | ToolExecutionResult:
         """工具执行内部路由。"""
         if name == "compact_context":
             return await self._execute_compact_context_tool(inp)
@@ -192,15 +199,31 @@ class ToolDispatcher:
                     "Error: task_list is disabled in plan mode. Write the plan into "
                     "tasks.md; approved tasks are materialized into task_list automatically."
                 )
-            # current_seq = 承载本次 tool_calls 的 assistant 消息的 seq。
-            # 不能用 session.seq - 1：assistant_message 落盘后 step/end 还会占一个
-            # seq（agent_loop.py:_run_step），且同批次先执行的工具的 tool_result_msg
-            # 也先落盘，handler 运行时「最后一个 seq」早已越过 assistant 消息。
-            # last_usage_seq 在 assistant_message 落盘时即被记录
-            # （agent_loop.py:95 mark_last_usage_position），工具执行期间不变，
-            # 恰好就是那条消息的 seq（重置只发生在 clear/compaction，均在模型
-            # 调用之前，不在工具执行窗口内）。
-            current_seq = self.agent.last_usage_seq
+            # current_seq = 承载本次 tool_calls 的 assistant 消息的 seq，由
+            # agent_loop 在每个模型响应处捕获一次（_run_step 落盘
+            # assistant_message 时），再沿 _handle_tool_calls →
+            # _execute_tool_batches → 并发批/顺序批 → execute_tool_call 传进来。
+            # 因为是「每次响应捕获一次的传值」，同一批次里先执行的工具动不了它。
+            #
+            # 刻意不读 self.agent.last_usage_seq：那个属性虽然也在这里被写成
+            # 同一个值，但它同时是 token 估算的可变状态，而 compact_context
+            # 是被广告出去的工具，折叠成功就会经 _compact_conversation →
+            # reset_context_token_estimate（agents/core/context.py:100）把它置回
+            # -1；compact_context 与 task_list 同为 sequential，模型一批
+            # [compact_context, task_list] 就会让 task_list 读到 -1。
+            #
+            # 也不能用 session.seq - 1：assistant_message 之后 step/end 还会占
+            # 一个 seq，同批次先行工具的 tool_result_msg 也先落盘。
+            #
+            # 负值夹成 None（防御层）：None 走已分析过的安全路径——started_seq
+            # 保持未写、后续状态流转仍能补上，detail_origin_seq=None 只多披露
+            # 一次；而 -1 会被 store 的 write-once 守卫永久钉住，Plan 2 的验收
+            # 闸门要靠 started_seq 界定事件扫描区间。
+            current_seq = (
+                assistant_seq
+                if assistant_seq is not None and assistant_seq >= 0
+                else None
+            )
             result = handle_task_list(self.agent.session.id, inp, current_seq=current_seq)
             self.agent.session.append("task_list/updated", {"session_id": self.agent.session.id})
             return result

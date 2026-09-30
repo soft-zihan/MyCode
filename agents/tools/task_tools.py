@@ -15,6 +15,7 @@ import json
 
 from agents.tools.task_store import (
     TASK_PRIORITY_MEDIUM,
+    TASK_STATUS_COMPLETED,
     VALID_PRIORITIES,
     VALID_STATUSES,
     TaskItem,
@@ -35,7 +36,7 @@ TASK_LIST_TOOL = {
         "把可验证的完成判据（通常一条命令）写进 acceptance。\n"
         "detail 只在该条成为焦点且已不在你上下文里时才自动注入，所以不必担心"
         "写长——但也不要为了写而写。\n"
-        "声明了 acceptance 的任务，标 completed 前应当真的跑过那条命令。\n\n"
+        "声明了 acceptance 的任务，标 completed 时需要事件日志里有通过的验证命令。\n\n"
         "状态流转：pending → in_progress → completed；跳过用 skipped；失败用 failed "
         "并填 error。同一时间只应有一条 in_progress。\n"
         "绝不要在实现不完整、有未解决报错、找不到必要文件时标 completed。\n\n"
@@ -69,7 +70,8 @@ TASK_LIST_TOOL = {
                 "type": "string",
                 "description": (
                     "可验证的完成判据，通常是一条命令（如 pytest tests/unit/test_x.py）。"
-                    "常驻在清单摘要里。声明了它的任务，标 completed 前需真的跑过。"
+                    "常驻在清单摘要里。声明了它的任务，标 completed 时需要事件日志里"
+                    "有通过的验证命令。"
                 ),
             },
             "status": {
@@ -99,8 +101,33 @@ TASK_LIST_TOOL = {
 }
 
 
+# 每个操作真正消费的入参（设计 §六 的操作表）。schema 是一个扁平属性袋，
+# 跨操作参数（update 带 priority、add 带 status）会被静默丢弃却仍回 ok:true。
+# add/update 不再回显 detail 之后，模型连「从回显里发现字段没生效」这条线索
+# 都没有了，所以把被忽略的键显式报回去。
+_KEYS_BY_OPERATION = {
+    "add": {"operation", "content", "detail", "acceptance", "priority", "after_id"},
+    "update": {"operation", "id", "content", "detail", "acceptance", "status",
+               "error", "after_id"},
+    "remove": {"operation", "id"},
+    "list": {"operation"},
+    "get": {"operation", "id"},
+}
+
+
 def summary_dict(item: TaskItem) -> dict:
-    """list 用的摘要视图 —— 刻意不含 detail。"""
+    """摘要视图 —— 刻意不含 detail。`list` 的每条、`add`/`update` 的回显都用它。
+
+    detail 只有一条工具出口：`get`（设计 §六）。若 add/update 也回显 detail，
+    每次状态流转（pending → in_progress → completed，10 条计划约 20 次）都会把
+    模型自己刚写的方案再拉回上下文一遍 —— 正是设计为 list 点名要防的「调一次
+    list 就把所有方案拉进上下文」，只是换成逐条到达。而且它换不来记账正确性：
+    回显落在 tool_result_msg 里，needs_disclosure 看的是 detail_origin_seq，
+    那条旧事件被折叠后披露路径照样重新注入。
+
+    error 不在设计 §六 的字段清单里，但设计另要求常驻摘要块带 failed 条的
+    error 首行，且 error 只在 failed 时非空 —— 刻意保留（控制器已裁定）。
+    """
     return {
         "id": item.id,
         "content": item.content,
@@ -112,20 +139,48 @@ def summary_dict(item: TaskItem) -> dict:
 
 
 def full_dict(item: TaskItem) -> dict:
-    """get 用的完整视图。"""
+    """get 用的完整视图 —— detail 进入上下文的唯一工具出口。"""
     return item.to_dict()
 
 
-def _ok(payload: dict) -> str:
-    return json.dumps({"ok": True, **payload}, ensure_ascii=False, indent=2)
+def _ok(payload: dict, ignored: list[str] | None = None) -> str:
+    body = {"ok": True, **payload}
+    if ignored:
+        body["ignored"] = ignored
+    return json.dumps(body, ensure_ascii=False, indent=2)
+
+
+def _ignored_keys(operation: str, inp: dict) -> list[str]:
+    """本次调用里对该操作无效的键（排序返回，输出确定）。"""
+    valid = _KEYS_BY_OPERATION.get(operation)
+    if not valid:
+        return []
+    return sorted(key for key in inp if key not in valid)
+
+
+def _coerce_id(value) -> int | None:
+    """id 类入参统一转 int；转不动返回 None，落到既有的 clean error 分支。
+
+    schema 声明 integer，但模型有时写字符串，所以必须转：不转的话「int
+    task_id + str after_id」会绕过 store 的自锚守卫 `after_id != task_id`，
+    重现「静默甩到列表末尾」。这里也不直接 int(value)：非数字（"abc"）会抛
+    ValueError，被 dispatcher 的宽 except 包成 "tool 'task_list' failed:
+    ValueError: ..."，模型看到的是噪声；而且行为会随清单空/非空而不同（空清单
+    在循环前就返回 not found）。返回 None 让两条路收敛到同一句 clean error。
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def handle_task_list(session_id: str, inp: dict, current_seq: int | None = None) -> str:
     """处理 task_list 工具调用。
 
     current_seq: 承载本次 tool_calls 的 assistant 消息的 seq，由 dispatcher
-    传入。store 不 import session（会引入循环依赖并破坏可测试性），所以 seq
-    只能由调用方给。
+    传入（dispatcher 拿的是 agent_loop 每个模型响应捕获一次、沿工具执行链
+    传下来的值，不是可变的 agent.last_usage_seq）。store 不 import session
+    （会引入循环依赖并破坏可测试性），所以 seq 只能由调用方给。
 
     所有成功路径只返回纯 JSON，不拼披露文本：披露的单一注入路径是
     ensure_focus_detail_visible（Task 9）。工具层拿不到自己那条
@@ -133,6 +188,7 @@ def handle_task_list(session_id: str, inp: dict, current_seq: int | None = None)
     无法记账 detail_origin_seq，下一轮会被重复注入。
     """
     operation = inp.get("operation", "")
+    ignored = _ignored_keys(operation, inp)
 
     if operation == "add":
         content = (inp.get("content") or "").strip()
@@ -141,67 +197,65 @@ def handle_task_list(session_id: str, inp: dict, current_seq: int | None = None)
         priority = inp.get("priority", TASK_PRIORITY_MEDIUM)
         if priority not in VALID_PRIORITIES:
             priority = TASK_PRIORITY_MEDIUM
-        after_id = inp.get("after_id")
         item = add_task(
             session_id,
             content,
             priority=priority,
             detail=inp.get("detail") or "",
             acceptance=inp.get("acceptance") or "",
-            after_id=int(after_id) if after_id is not None else None,
+            after_id=_coerce_id(inp.get("after_id")),
         )
-        return _ok({"action": "added", "task": full_dict(item)})
+        return _ok({"action": "added", "task": summary_dict(item)}, ignored)
 
     if operation == "update":
-        task_id = inp.get("id")
+        task_id = _coerce_id(inp.get("id"))
         if task_id is None:
             return "Error: id is required for update operation"
         status = inp.get("status")
         if status is not None and status not in VALID_STATUSES:
             return f"Error: invalid status '{status}'. Valid: {sorted(VALID_STATUSES)}"
-        after_id = inp.get("after_id")
         item = update_task(
             session_id,
-            int(task_id),
+            task_id,
             status=status,
             content=inp.get("content"),
             detail=inp.get("detail"),
             acceptance=inp.get("acceptance"),
             error=inp.get("error"),
-            after_id=int(after_id) if after_id is not None else None,
+            after_id=_coerce_id(inp.get("after_id")),
             current_seq=current_seq,
         )
         if item is None:
             return f"Error: task with id {task_id} not found"
-        return _ok({"action": "updated", "task": full_dict(item)})
+        return _ok({"action": "updated", "task": summary_dict(item)}, ignored)
 
     if operation == "remove":
-        task_id = inp.get("id")
+        task_id = _coerce_id(inp.get("id"))
         if task_id is None:
             return "Error: id is required for remove operation"
-        if not remove_task(session_id, int(task_id)):
+        if not remove_task(session_id, task_id):
             return f"Error: task with id {task_id} not found"
-        return _ok({"action": "removed", "id": int(task_id)})
+        return _ok({"action": "removed", "id": task_id}, ignored)
 
     if operation == "list":
         tasks = list_tasks(session_id)
         focus = find_focus(tasks)
-        done = sum(1 for t in tasks if t.status == "completed")
+        done = sum(1 for t in tasks if t.status == TASK_STATUS_COMPLETED)
         return _ok({
             "count": len(tasks),
             "completed": done,
             "focus_id": focus.id if focus else None,
             "tasks": [summary_dict(t) for t in tasks],
             "note": "摘要视图，不含 detail。用 get 取单条完整方案。",
-        })
+        }, ignored)
 
     if operation == "get":
-        task_id = inp.get("id")
+        task_id = _coerce_id(inp.get("id"))
         if task_id is None:
             return "Error: id is required for get operation"
         for item in list_tasks(session_id):
-            if item.id == int(task_id):
-                return _ok({"task": full_dict(item)})
+            if item.id == task_id:
+                return _ok({"task": full_dict(item)}, ignored)
         return f"Error: task with id {task_id} not found"
 
     return (

@@ -69,10 +69,17 @@ class AgentLoop:
         except Exception as exc:
             print_error(f"[bad_case] auto mark failed: {type(exc).__name__}: {exc}")
 
-    async def _run_step(self) -> Any:
+    async def _run_step(self) -> tuple[Any, int]:
         """单个模型调用步：step/start → 流式调用 → assistant_message 落盘 → step/end。
 
-        返回本步的 tool_calls（None 表示纯文本回复）。
+        返回 (本步的 tool_calls, 承载它的 assistant 消息的 seq)；tool_calls 为
+        None 表示纯文本回复。
+
+        seq 在 assistant_message 落盘的同一时刻捕获一次，之后沿工具执行链传到
+        execute_tool_call，供需要事件记账的工具使用（task_list 的 started_seq /
+        detail_origin_seq）。刻意不让工具去读 agent.last_usage_seq：那个属性
+        同时是 token 估算的可变状态，同批次先执行的 compact_context 会把它重置
+        回 -1（见 dispatcher 的 task_list 分支注释）。
         """
         self._agent.session.append("step/start", {
             "turn": self._agent._current_turn,
@@ -92,14 +99,15 @@ class AgentLoop:
             "content": message.get("content") or "",
             "tool_calls": message.get("tool_calls"),
         })
-        self._agent.mark_last_usage_position(int(assistant_event.get("seq", -1)))
+        assistant_seq = int(assistant_event.get("seq", -1))
+        self._agent.mark_last_usage_position(assistant_seq)
         self._update_token_stats(response)
 
         self._agent.session.append("step/end", {
             "turn": self._agent._current_turn,
             "step": self._agent._current_step,
         })
-        return message.get("tool_calls")
+        return message.get("tool_calls"), assistant_seq
 
     async def _finalize_turn_budget(self, budget: dict) -> None:
         """U5a：turn/cost 预算耗尽同样走收敛应答（旧实现直接 break，
@@ -140,7 +148,7 @@ class AgentLoop:
 
             await self._consume_wiki_prefetch()
 
-            tool_calls = await self._run_step()
+            tool_calls, assistant_seq = await self._run_step()
 
             if not tool_calls:
                 # U1：turn 收尾前 drain 双队列——steering/follow_up 尾到则同 run 内 continue
@@ -156,7 +164,7 @@ class AgentLoop:
                 await self._finalize_turn_budget(budget)
                 break
 
-            guard_stop = await self._handle_tool_calls(tool_calls)
+            guard_stop = await self._handle_tool_calls(tool_calls, assistant_seq)
             if guard_stop:
                 await self._drop_queued("loop_guard")
                 self._finalize_loop_guard_stop()
@@ -409,8 +417,13 @@ class AgentLoop:
             "reason": step_reason,
         })
 
-    async def _handle_tool_calls(self, tool_calls: list[dict]) -> bool:
-        """处理工具调用：权限检查、执行、结果收集。"""
+    async def _handle_tool_calls(self, tool_calls: list[dict],
+                                 assistant_seq: int | None = None) -> bool:
+        """处理工具调用：权限检查、执行、结果收集。
+
+        assistant_seq: 承载这批 tool_calls 的 assistant 消息的 seq（_run_step
+        捕获），一路透传到 execute_tool_call 供工具做事件记账。
+        """
 
         print_info(f"[DEBUG] _handle_tool_calls: start, {len(tool_calls)} tools")
         a = self._agent
@@ -468,12 +481,17 @@ class AgentLoop:
             oai_checked.append({"tc": tc, "fn": fn_name, "inp": inp, "allowed": True})
 
         print_info(f"[DEBUG] _handle_tool_calls: calling _execute_tool_batches with {len(oai_checked)} tools")
-        guard_stop = await self._execute_tool_batches(oai_checked)
+        guard_stop = await self._execute_tool_batches(oai_checked, assistant_seq)
         print_info(f"[DEBUG] _handle_tool_calls: done, guard_stop={guard_stop}")
         return guard_stop
 
-    async def _execute_tool_batches(self, oai_checked: list[dict]) -> bool:
-        """执行工具批次：并发安全工具并行执行，其他顺序执行。返回是否触发 loop guard stop。"""
+    async def _execute_tool_batches(self, oai_checked: list[dict],
+                                    assistant_seq: int | None = None) -> bool:
+        """执行工具批次：并发安全工具并行执行，其他顺序执行。返回是否触发 loop guard stop。
+
+        assistant_seq 同时传给并发批与顺序批两条路径——两者共用同一个
+        execute_tool_call 契约，只穿一条会留下一个静默的 None。
+        """
 
         print_info(f"[DEBUG] _execute_tool_batches: start, {len(oai_checked)} tools")
         a = self._agent
@@ -519,9 +537,11 @@ class AgentLoop:
                     break
 
                 if batch["concurrent"]:
-                    guard_stop, guard_reason = await self._execute_concurrent_batch(batch["items"])
+                    guard_stop, guard_reason = await self._execute_concurrent_batch(
+                        batch["items"], assistant_seq)
                 else:
-                    oai_context_break, guard_stop, guard_reason = await self._execute_sequential_batch(batch["items"])
+                    oai_context_break, guard_stop, guard_reason = await self._execute_sequential_batch(
+                        batch["items"], assistant_seq)
                 if guard_stop:
                     a._loop_guard_stop_reason = guard_reason or "tool_loop"
         finally:
@@ -601,7 +621,8 @@ class AgentLoop:
 
         return res, warning_result["force_stop"], stop_reason
 
-    async def _execute_concurrent_batch(self, items: list[dict]) -> tuple[bool, str | None]:
+    async def _execute_concurrent_batch(self, items: list[dict],
+                                        assistant_seq: int | None = None) -> tuple[bool, str | None]:
         """并发执行工具批次。"""
         a = self._agent
         allowed_items: list[dict] = []
@@ -629,7 +650,8 @@ class AgentLoop:
             if ct_item["fn"] in ("write_file", "edit_file"):
                 pre_snapshot = capture_file_snapshot(ct_item["inp"].get("file_path", ""))
             
-            result = await a.execute_tool_call(ct_item["fn"], ct_item["inp"])
+            result = await a.execute_tool_call(ct_item["fn"], ct_item["inp"],
+                                               assistant_seq=assistant_seq)
             raw = safe_utf8_text(result.text)
             res = a.persist_large_result(ct_item["fn"], raw)
             
@@ -681,7 +703,8 @@ class AgentLoop:
 
         return guard_stop, guard_reason
 
-    async def _execute_sequential_batch(self, items: list[dict]) -> tuple[bool, bool, str | None]:
+    async def _execute_sequential_batch(self, items: list[dict],
+                                        assistant_seq: int | None = None) -> tuple[bool, bool, str | None]:
         """顺序执行工具批次。返回 (是否触发上下文清理, 是否触发 loop guard, guard reason)。"""
 
         print_info(f"[DEBUG] _execute_sequential_batch: start, {len(items)} tools")
@@ -705,7 +728,8 @@ class AgentLoop:
                 guard_reason = guard_reason or decision.reason
                 break
 
-            context_break, tool_guard_stop, tool_guard_reason = await self._run_sequential_tool(ct)
+            context_break, tool_guard_stop, tool_guard_reason = await self._run_sequential_tool(
+                ct, assistant_seq)
             if tool_guard_stop:
                 guard_stop = True
                 guard_reason = guard_reason or tool_guard_reason
@@ -717,7 +741,8 @@ class AgentLoop:
 
         return context_break, guard_stop, guard_reason
 
-    async def _run_sequential_tool(self, ct: dict) -> tuple[bool, bool, str | None]:
+    async def _run_sequential_tool(self, ct: dict,
+                                   assistant_seq: int | None = None) -> tuple[bool, bool, str | None]:
         """单工具顺序执行：前后快照 → 调用 → 大结果落盘 → 事件 → 失败判定 → 警告检查。
 
         返回 (context_break, guard_stop, guard_reason)；context_break 时提前返回
@@ -734,7 +759,7 @@ class AgentLoop:
         if fn_name in ("write_file", "edit_file"):
             pre_snapshot = capture_file_snapshot(ct["inp"].get("file_path", ""))
 
-        result = await a.execute_tool_call(ct["fn"], ct["inp"])
+        result = await a.execute_tool_call(ct["fn"], ct["inp"], assistant_seq=assistant_seq)
         print_info(f"[DEBUG] _execute_sequential_batch: execute_tool_call done for {fn_name}, took {time.time()-t0:.2f}s")
         raw = safe_utf8_text(result.text)
         res = a.persist_large_result(ct["fn"], raw)

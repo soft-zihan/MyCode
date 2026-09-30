@@ -608,8 +608,8 @@ class Agent:
     def add_confirmed_path(self, path: str) -> None:
         self._confirmed_paths.add(path)
 
-    def execute_tool_call(self, name: str, inp: dict):
-        return self._tool_dispatcher.execute_tool_call(name, inp)
+    def execute_tool_call(self, name: str, inp: dict, assistant_seq: int | None = None):
+        return self._tool_dispatcher.execute_tool_call(name, inp, assistant_seq=assistant_seq)
 
     def persist_large_result(self, tool_name: str, result: str) -> str:
         return self._persist_large_result(tool_name, result)

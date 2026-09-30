@@ -142,7 +142,7 @@ async def test_execute_tool_call_returns_structured_timeout(monkeypatch):
         def get_tool_timeout(self, name: str) -> int:
             return 0
 
-        async def _execute_tool_call_inner(self, name: str, inp: dict) -> str:
+        async def _execute_tool_call_inner(self, name: str, inp: dict, assistant_seq=None) -> str:
             await asyncio.sleep(0.05)
             return "late"
 
@@ -313,7 +313,7 @@ async def test_concurrent_batch_blocks_near_duplicate_web_search_before_executio
     executed = []
     published = []
 
-    async def fake_execute_tool_call(name, args):
+    async def fake_execute_tool_call(name, args, assistant_seq=None):
         executed.append((name, args))
         return ToolExecutionResult(text="ok", status="ok", outcome="success")
 
@@ -411,7 +411,7 @@ async def test_agent_loop_breaks_after_loop_guard_force_stop():
     handled = []
     finalized = []
 
-    async def fake_handle_tool_calls(tool_calls):
+    async def fake_handle_tool_calls(tool_calls, assistant_seq=None):
         handled.append(tool_calls)
         return True
 
@@ -443,7 +443,7 @@ async def test_agent_loop_finalizes_tool_budget():
     handled = []
     finalized = []
 
-    async def fake_handle_tool_calls(tool_calls):
+    async def fake_handle_tool_calls(tool_calls, assistant_seq=None):
         handled.append(tool_calls)
         return False
 
@@ -590,7 +590,7 @@ async def test_sub_agent_tool_budget_returns_partial_result(monkeypatch):
 @pytest.mark.asyncio
 async def test_execute_tool_call_preserves_structured_result():
     class StructuredDispatcher(ToolDispatcher):
-        async def _execute_tool_call_inner(self, name: str, inp: dict):
+        async def _execute_tool_call_inner(self, name: str, inp: dict, assistant_seq=None):
             return ToolExecutionResult(
                 text="partial",
                 status="ok",

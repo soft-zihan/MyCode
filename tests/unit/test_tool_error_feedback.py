@@ -31,7 +31,7 @@ class FakeAgent:
 def test_dispatcher_generic_exception_returns_error_result(monkeypatch):
     dispatcher = ToolDispatcher(agent_ref=FakeAgent())
 
-    async def boom(name, inp):
+    async def boom(name, inp, assistant_seq=None):
         raise RuntimeError("injected failure")
 
     monkeypatch.setattr(dispatcher, "_execute_tool_call_inner", boom)
