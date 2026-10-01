@@ -44,8 +44,9 @@ _LEGACY_STATUS_ALIASES = {"cancelled": TASK_STATUS_SKIPPED}
 # 而 S 常驻之后模型没有理由调 list。把它变成 find_focus 的 tie-break 会贬低列表
 # 顺序（列表顺序正是自锚守卫存在的前提），在 S 里渲染它则是每请求付费去表达一个
 # 模型无法据此行动的东西。旧 JSON 里的 priority 键被 from_dict 自然忽略，无需迁移。
-# 注意与**计划级**的 Plan.priority（P0/P1/P2，agents/plan/plan_models.py）无关，
-# 那个字段有读者（plan_recall / plan_tools），保留。
+# 注意与**计划级**的 Plan.priority（P0/P1/P2，agents/plan/plan_models.py）无关：那是
+# plan 文档的元数据，由 create_plan 写进 _meta.md、经 REST 的 get_plan 端点读出，
+# 与 task_list 的字段集是两回事（Plan 3a Task 4 之后它已无 Python 侧读者）。
 
 
 def _normalize_status(value: str) -> str:

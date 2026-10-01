@@ -216,10 +216,6 @@ class Session:
         # Plan 系统关联
         self.plan_slug: str | None = None
         
-        # 策略快照（用于持久化 Plan 执行时的策略版本）
-        # 格式: {stage: {name, source, content_hash}}
-        self.plan_strategy_snapshot: dict[str, dict[str, str]] = {}
-    
     @property
     def seq(self) -> int:
         return self._next_seq

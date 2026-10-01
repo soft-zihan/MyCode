@@ -15,7 +15,6 @@ import time
 from typing import Any
 
 from agents.core.frontmatter import parse_frontmatter
-from agents.tools.registry import EDIT_TOOLS
 from agents.tools.result import ToolExecutionResult
 from agents.wiki.store import get_wiki_dir
 from agents.core.context_events import collect_hidden_seqs
@@ -263,18 +262,6 @@ class ToolDispatcher:
         print_info(f"[DEBUG] execute_tool_call_inner: calling execute_tool for {name}")
         result = await execute_tool(name, inp, self.agent._read_file_state)
         print_info(f"[DEBUG] execute_tool_call_inner: execute_tool done for {name}")
-
-        if (
-            name.startswith("plan_")
-            and name in EDIT_TOOLS
-            and isinstance(result, str)
-            and not result.startswith("Error")
-        ):
-            self.agent.session.append("plan/updated", {
-                "session_id": self.agent.session.id,
-                "tool": name,
-                "slug": inp.get("slug", ""),
-            })
 
         if (
             name in ("write_file", "edit_file")

@@ -204,17 +204,6 @@ def check_permission(
         return result
 
 
-def _check_plan_execution_guard(
-    tool_name: str, inp: dict, plan_execution_active: bool
-) -> dict | None:
-    """执行阶段禁止直接编辑 tasks.md（应走 mark_task_done/mark_task_failed）。"""
-    if plan_execution_active and tool_name in EDIT_TOOLS:
-        file_path = inp.get("file_path") or inp.get("path") or ""
-        if "tasks.md" in file_path and ".mycode/plans" in file_path:
-            return {"action": "deny", "message": "Direct editing of tasks.md is forbidden during plan execution. Use mark_task_done/mark_task_failed instead."}
-    return None
-
-
 def _check_reviewer_shell(
     tool_name: str,
     inp: dict,
@@ -306,11 +295,6 @@ def _check_permission_inner(
     """Internal permission check logic."""
     if mode == "bypassPermissions":
         return {"action": "allow"}
-
-    # 执行阶段禁止直接编辑 tasks.md
-    guard = _check_plan_execution_guard(tool_name, inp, plan_execution_active)
-    if guard:
-        return guard
 
     # Reviewer 子 Agent 的 run_shell 白名单验证
     reviewer = _check_reviewer_shell(tool_name, inp, sub_agent_type, allowed_commands)

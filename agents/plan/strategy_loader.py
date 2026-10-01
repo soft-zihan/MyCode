@@ -1,11 +1,16 @@
 """Strategy Loader — 策略查找、加载、硬编码回退。
 
-策略系统支持 5 个阶段：
-- grill-spec: 需求澄清 + spec 生成
-- tasks: 任务拆分
-- execute: 任务执行编排
-- review: 代码审查
-- converge: 差距分析
+配置面仍是 5 个阶段，但 Task 4 之后只有前两个真的会被加载：
+- grill-spec: 需求澄清 + spec 生成   ← build_plan_mode_prompt 加载
+- tasks: 任务拆分                    ← build_plan_mode_prompt 加载
+- execute / review / converge: 执行编排、代码审查、差距分析
+
+后三个的内置策略文件与它们唯一的消费者（PlanExecutor，注入的是已删除的
+`plan_task_*` 协议）都在 Task 4 一起删了；设计文档描述的 Review Loop / Converge
+本来也没有落成代码。键**留着**是因为 PlanStrategyConfig 经
+`/api/config/plan-strategies` 暴露给前端，收缩到两阶段会改 openapi.json，那是
+Plan 3b 的事。所以此时给 execute/review/converge 调 load_strategy 会抛
+FileNotFoundError——生产路径上没有调用方，测试也只打 grill-spec / tasks。
 
 策略存储位置（按优先级，高优先级覆盖低优先级）：
 1. 项目级：{workspace}/.mycode/plan-strategies/
@@ -181,47 +186,3 @@ def list_strategies(workspace: Path) -> dict[str, list[dict[str, Any]]]:
         result[stage] = strategies
 
     return result
-
-
-def get_strategy_snapshot(
-    workspace: Path,
-    strategy_config: dict[str, str] | None = None,
-) -> dict[str, dict[str, str]]:
-    """生成策略快照（用于 Session 持久化）。
-
-    Args:
-        workspace: 工作区路径
-        strategy_config: 策略配置 {stage: name}，None 则使用默认配置
-
-    Returns:
-        {stage: {name, source, content_hash}} 字典
-    """
-    import hashlib
-
-    config = strategy_config or DEFAULT_STRATEGIES.copy()
-    snapshot: dict[str, dict[str, str]] = {}
-
-    for stage, name in config.items():
-        if stage not in VALID_STAGES:
-            continue
-
-        path = find_strategy(stage, name, workspace)
-        if not path:
-            # 回退到默认
-            default_name = DEFAULT_STRATEGIES.get(stage, "simple")
-            path = find_strategy(stage, default_name, workspace)
-            if not path:
-                continue
-            name = default_name
-
-        content = path.read_text(encoding="utf-8")
-        content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
-        source = _detect_source(path, workspace)
-
-        snapshot[stage] = {
-            "name": name,
-            "source": source,
-            "content_hash": content_hash,
-        }
-
-    return snapshot

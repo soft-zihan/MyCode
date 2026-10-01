@@ -1,6 +1,17 @@
-"""Plan 基础设施 — CRUD、状态机、任务管理。
+"""Plan 基础设施 — CRUD 与任务解析。
 
 Plan 是主动的目标规划，存储在 .mycode/plans/ 下，跟随主项目仓库。
+
+Plan 3a Task 4 之后这里**不再有执行状态机**：mark_task_*、start_plan_execution、
+rollback_plan、complete_plan/reopen_plan、build_task_prompt/build_retry_prompt、
+list_plans 等已随 24 个 plan_* 工具一起删除，执行状态的唯一载体是 task_list
+（agents/tools/task_store.py）。留下来的两半是：
+- 计划文档的 CRUD（create_plan / add_artifact / read_artifact /
+  append_tasks_to_plan / get_plan / get_plan_context）——plan 批准时物化路径的上游；
+- 任务解析（parse_tasks_content 及其两个格式分支）——物化时把 tasks.md 文本变成
+  Task 列表；
+- 以及 frontend/server/routers/sessions.py 的 8 个 REST 端点仍在调的那几个状态
+  函数（pause/resume/skip/redo/abandon/read_ledger），它们归 Plan 3b 处理。
 """
 
 from __future__ import annotations
@@ -13,7 +24,6 @@ from pathlib import Path
 
 from agents.core.workspace import get_workspace
 from agents.core.frontmatter import parse_frontmatter, format_frontmatter
-from agents.plan.task_models import normalize_status, parse_tasks_from_markdown
 from agents.plan.plan_models import Plan, PlanStatus, PlanGranularity, Task
 
 
@@ -23,16 +33,28 @@ VALID_STATUSES = {s.value for s in PlanStatus}
 VALID_GRANULARITIES = {g.value for g in PlanGranularity}
 
 
+# tasks.md 里的 `**状态**:` 载荷归一化。原住在 agents/plan/task_models.py，那个模块
+# 随 Task 4 删除（StructuredTask 与 _parse_structured_tasks 重复、LedgerEntry 随
+# ledger 死），而本模块的 _parse_structured_tasks 仍需要它，于是搬到这里——它是任务
+# 解析器的一部分，本来就该和解析器同住。
+_STATUS_ALIASES = {
+    "completed": "done", "complete": "done", "finished": "done",
+    "in_progress": "in-progress", "inprogress": "in-progress", "progress": "in-progress",
+    "error": "failed", "skip": "skipped",
+}
+_VALID_TASK_STATUSES = {"pending", "in-progress", "done", "failed", "skipped"}
+
+
+def normalize_status(raw: str) -> str:
+    s = (raw or "").strip().lower()
+    s = _STATUS_ALIASES.get(s, s)
+    return s if s in _VALID_TASK_STATUSES else "pending"
+
+
 def get_plans_dir() -> Path:
     d = get_workspace() / ".mycode" / "plans"
     d.mkdir(parents=True, exist_ok=True)
     return d
-
-
-def _slugify(text: str) -> str:
-    s = re.sub(r"[^a-z0-9]+", "-", text.lower())
-    s = s.strip("-")
-    return s[:40] or "plan"
 
 
 def _now_iso() -> str:
@@ -120,24 +142,6 @@ def get_plan(slug: str) -> Plan | None:
     return _parse_plan_dir(plan_dir)
 
 
-def list_plans(include_archived: bool = False) -> list[Plan]:
-    plans_dir = get_plans_dir()
-    plans: list[Plan] = []
-
-    for plan_dir in plans_dir.iterdir():
-        if not plan_dir.is_dir() or plan_dir.name == "archive":
-            continue
-        plan = _parse_plan_dir(plan_dir)
-        if plan is None:
-            continue
-        if not include_archived and plan.status == PlanStatus.ARCHIVED:
-            continue
-        plans.append(plan)
-
-    plans.sort(key=lambda p: p.modified, reverse=True)
-    return plans
-
-
 def update_plan_status(slug: str, status: PlanStatus) -> bool:
     plans_dir = get_plans_dir()
     meta_path = plans_dir / slug / "_meta.md"
@@ -150,23 +154,6 @@ def update_plan_status(slug: str, status: PlanStatus) -> bool:
         result.meta["modified"] = _now_iso()
         meta_path.write_text(format_frontmatter(result.meta, result.body))
         _git_commit(f"plan: {slug} -> {status.value}")
-        return True
-    except Exception:
-        return False
-
-
-def update_plan_tags(slug: str, tags: list[str]) -> bool:
-    plans_dir = get_plans_dir()
-    meta_path = plans_dir / slug / "_meta.md"
-    if not meta_path.exists():
-        return False
-
-    try:
-        result = parse_frontmatter(meta_path.read_text())
-        result.meta["tags"] = tags
-        result.meta["modified"] = _now_iso()
-        meta_path.write_text(format_frontmatter(result.meta, result.body))
-        _git_commit(f"plan: update tags {slug}")
         return True
     except Exception:
         return False
@@ -192,42 +179,6 @@ def read_artifact(slug: str, filename: str) -> str | None:
     if not filepath.exists():
         return None
     return filepath.read_text()
-
-
-def archive_plan(slug: str) -> bool:
-    plans_dir = get_plans_dir()
-    plan_dir = plans_dir / slug
-    if not plan_dir.exists():
-        return False
-
-    now = datetime.now(timezone.utc)
-    archive_dir = plans_dir / "archive" / now.strftime("%Y-%m")
-    archive_dir.mkdir(parents=True, exist_ok=True)
-
-    target = archive_dir / slug
-    if target.exists():
-        return False
-
-    try:
-        plan_dir.rename(target)
-        update_plan_status_in_dir(target, PlanStatus.ARCHIVED)
-        _git_commit(f"plan: archive {slug}")
-        return True
-    except Exception:
-        return False
-
-
-def update_plan_status_in_dir(plan_dir: Path, status: PlanStatus) -> None:
-    meta_path = plan_dir / "_meta.md"
-    if not meta_path.exists():
-        return
-    try:
-        result = parse_frontmatter(meta_path.read_text())
-        result.meta["status"] = status.value
-        result.meta["modified"] = _now_iso()
-        meta_path.write_text(format_frontmatter(result.meta, result.body))
-    except Exception:
-        pass
 
 
 # ── Task 管理 ──
@@ -375,27 +326,6 @@ def _parse_structured_tasks(content: str) -> list[Task]:
     return tasks
 
 
-def get_next_task(slug: str) -> Task | None:
-    tasks = get_tasks(slug)
-    for task in tasks:
-        if task.status == "pending":
-            return task
-    return None
-
-
-def has_failed_tasks(slug: str) -> bool:
-    tasks = get_tasks(slug)
-    return any(t.status == "failed" for t in tasks)
-
-
-def _check_plan_completion(slug: str) -> None:
-    tasks = get_tasks(slug)
-    if not tasks:
-        return
-    if all(t.status == "done" for t in tasks):
-        update_plan_status(slug, PlanStatus.COMPLETED)
-
-
 def get_plan_context(slug: str) -> dict:
     plans_dir = get_plans_dir()
     plan_dir = plans_dir / slug
@@ -427,58 +357,6 @@ def get_plan_context(slug: str) -> dict:
     return context
 
 
-def build_task_prompt(slug: str, task: Task) -> str:
-    context = get_plan_context(slug)
-
-    parts = [f"# Plan: {slug}\n"]
-
-    if context.get("proposal"):
-        parts.append(f"## Proposal\n{context['proposal']}\n")
-
-    if context.get("design"):
-        parts.append(f"## Design\n{context['design']}\n")
-
-    done_tasks = [t for t in context.get("tasks", []) if t.status == "done"]
-    if done_tasks:
-        parts.append("## Completed Tasks")
-        for t in done_tasks:
-            parts.append(f"- [x] {t.id}. {t.description}")
-        parts.append("")
-
-    failed_tasks = [t for t in context.get("tasks", []) if t.status == "failed"]
-    if failed_tasks:
-        parts.append("## Failed Tasks")
-        for t in failed_tasks:
-            parts.append(f"- [!] {t.id}. {t.description}")
-            if t.error:
-                parts.append(f"  Error: {t.error}")
-        parts.append("")
-
-    parts.append(f"## Current Task\n{task.id}. {task.description}\n")
-    parts.append("请执行此任务。完成后调用 plan_task_done 标记完成。如果失败，调用 plan_task_failed 记录错误。")
-
-    return "\n".join(parts)
-
-
-def build_retry_prompt(slug: str, task: Task) -> str:
-    context = get_plan_context(slug)
-
-    parts = [f"# Plan: {slug} - Retry Task {task.id}\n"]
-
-    if context.get("proposal"):
-        parts.append(f"## Proposal\n{context['proposal']}\n")
-
-    parts.append(f"## Task\n{task.description}\n")
-
-    if task.error:
-        parts.append(f"## Previous Error\n{task.error}\n")
-
-    parts.append(f"Retry count: {task.retry_count}\n")
-    parts.append("请重新执行此任务，注意避免之前的错误。")
-
-    return "\n".join(parts)
-
-
 def abandon_plan(slug: str) -> bool:
     plan = get_plan(slug)
     if not plan:
@@ -486,52 +364,6 @@ def abandon_plan(slug: str) -> bool:
     if plan.status not in (PlanStatus.PROPOSED, PlanStatus.IN_PROGRESS):
         return False
     return update_plan_status(slug, PlanStatus.ABANDONED)
-
-
-def reopen_plan(slug: str) -> bool:
-    plan = get_plan(slug)
-    if not plan:
-        return False
-    if plan.status not in (PlanStatus.COMPLETED, PlanStatus.ABANDONED):
-        return False
-    new_status = PlanStatus.IN_PROGRESS if plan.status == PlanStatus.COMPLETED else PlanStatus.PROPOSED
-    return update_plan_status(slug, new_status)
-
-
-def check_expired_plans() -> list[dict]:
-    from datetime import datetime, timezone, timedelta
-
-    expired = []
-    now = datetime.now(timezone.utc)
-
-    for plan in list_plans(include_archived=False):
-        modified = plan.modified
-        if not modified:
-            continue
-
-        try:
-            modified_dt = datetime.fromisoformat(modified.replace("Z", "+00:00"))
-        except ValueError:
-            continue
-
-        days_since_modified = (now - modified_dt).days
-
-        if plan.status == PlanStatus.PROPOSED and days_since_modified > 30:
-            expired.append({
-                "slug": plan.slug,
-                "status": plan.status.value,
-                "days_inactive": days_since_modified,
-                "suggestion": "Consider continuing or abandoning this plan",
-            })
-        elif plan.status == PlanStatus.IN_PROGRESS and days_since_modified > 60:
-            expired.append({
-                "slug": plan.slug,
-                "status": plan.status.value,
-                "days_inactive": days_since_modified,
-                "suggestion": "Consider completing or abandoning this plan",
-            })
-
-    return expired
 
 
 # ── Git ──
@@ -577,22 +409,18 @@ def _get_ledger_path(slug: str) -> Path:
 
 
 def append_ledger(slug: str, entry: dict) -> None:
-    """追加 ledger 条目（原子写入，使用文件锁）。"""
+    """追加一条 ledger 记录（一行 JSON）。
+
+    不再有 `import fcntl`：那是 POSIX-only 的，Windows 上一调用就 ImportError，而
+    本函数是 skip_task / redo_task（frontend/server/routers/sessions.py 的 REST 端点
+    仍在调）的必经之路。原先那把排他锁也是多余的——以 "a" 模式打开即 O_APPEND，
+    单条小写入本身由内核保证原子，加锁只是把同一个保证又做了一遍。
+    """
     import json
-    import fcntl
-    
+
     ledger_path = _get_ledger_path(slug)
-    
-    # 使用文件锁确保原子写入
-    with open(ledger_path, "a") as f:
-        try:
-            # 获取排他锁
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-            f.flush()
-        finally:
-            # 释放锁
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    with open(ledger_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 def read_ledger(slug: str) -> list[dict]:
@@ -622,20 +450,6 @@ def get_last_task_commit(slug: str, task_id: int) -> str:
         if entry.get("task_id") == task_id and entry.get("status") == "done":
             return entry.get("commit", "")
     return ""
-
-
-# ── Structured Tasks (v2.0) ──
-
-def get_structured_tasks(slug: str) -> list:
-    """获取结构化任务列表。"""
-    
-    plan_dir = get_plans_dir() / slug
-    tasks_path = plan_dir / "tasks.md"
-    if not tasks_path.exists():
-        return []
-    
-    content = tasks_path.read_text()
-    return parse_tasks_from_markdown(content)
 
 
 def append_tasks_to_plan(slug: str, tasks_content: str) -> None:
@@ -712,110 +526,13 @@ def _update_task_status_in_file(slug: str, task_id: int, status: str) -> bool:
     return False
 
 
-# ── Plan State Management (v2.0) ──
-# 纯状态管理，零 LLM 调用。主 Agent 自己执行 task，调用这些函数更新状态。
-
-def start_plan_execution(slug: str) -> dict:
-    """标记 plan 开始执行，返回待执行 task 列表。
-    
-    纯状态管理，不包含任何 LLM 调用。
-    主 Agent 调用此函数后，自己逐个执行 task。
-    """
-    update_plan_status(slug, PlanStatus.IN_PROGRESS)
-    
-    tasks = get_tasks(slug)
-    pending_tasks = [t for t in tasks if t.status == "pending"]
-    
-    return {
-        "slug": slug,
-        "status": "in-progress",
-        "total_tasks": len(tasks),
-        "pending_tasks": len(pending_tasks),
-        "tasks": [
-            {
-                "id": t.id,
-                "title": t.description,
-                "file": t.file,
-                "acceptance": t.acceptance,
-                "status": t.status,
-            }
-            for t in pending_tasks
-        ],
-    }
-
-
-def mark_task_in_progress(slug: str, task_id: int) -> bool:
-    """标记 task 为执行中。主 Agent 开始执行 task 前调用。"""
-    return _update_task_status_in_file(slug, task_id, "in-progress")
-
-
-def mark_task_done(slug: str, task_id: int, commit: str = "", verification: dict | None = None) -> bool:
-    """标记 task 为完成。主 Agent 执行完 task 后调用。
-    
-    Args:
-        slug: Plan slug
-        task_id: Task ID
-        commit: 完成时的 git commit hash
-        verification: 验证结果 {"command": "...", "exit_code": N, "output_snippet": "..."}
-                      必须提供，否则拒绝标记完成。
-    
-    Returns:
-        bool: 是否成功标记
-    """
-    from datetime import datetime, timezone
-    
-    # 强制验证证据
-    if not verification:
-        return False
-    
-    # 验证必须包含 command 和 exit_code
-    if not verification.get("command"):
-        return False
-    if verification.get("exit_code") is None:
-        return False
-    
-    ledger_entry = {
-        "task_id": task_id,
-        "status": "done",
-        "started": "",
-        "finished": datetime.now(timezone.utc).isoformat(),
-        "commit": commit,
-        "review_rounds": 1,
-        "verification": verification,
-    }
-    append_ledger(slug, ledger_entry)
-    
-    ok = _update_task_status_in_file(slug, task_id, "done")
-    if ok:
-        _check_plan_completion(slug)
-    return ok
-
-
-def mark_task_failed(slug: str, task_id: int, reason: str = "") -> bool:
-    """标记 task 为失败。主 Agent 执行失败时调用。"""
-    from datetime import datetime, timezone
-    
-    ledger_entry = {
-        "task_id": task_id,
-        "status": "failed",
-        "started": "",
-        "finished": datetime.now(timezone.utc).isoformat(),
-        "commit": "",
-        "review_rounds": 1,
-        "verification": {},
-        "failure_reason": reason,
-    }
-    append_ledger(slug, ledger_entry)
-    
-    return _update_task_status_in_file(slug, task_id, "failed")
-
-
-def complete_plan(slug: str) -> bool:
-    """标记 plan 为完成（ready_to_archive）。主 Agent 所有 task 完成后调用。"""
-    return update_plan_status(slug, PlanStatus.READY_TO_ARCHIVE)
-
-
-# ── Complex Commands (v2.0) ──
+# ── 计划级状态（pause / resume / abandon / skip / redo）──
+#
+# 这一组不是执行状态机：状态机那半（start_plan_execution、mark_task_in_progress/
+# done/failed、complete_plan、rollback_plan、_check_plan_completion 的「全 done 自动
+# COMPLETED」）已随 Task 4 删除，逐条任务的执行状态现在只住在 task_list 里。留下的
+# 四个函数是 frontend/server/routers/sessions.py 的 REST 端点仍在调的计划级操作，
+# 归 Plan 3b 与那 8 个端点一起处理。
 
 def pause_plan(slug: str) -> bool:
     """暂停 plan 执行。"""
@@ -879,51 +596,3 @@ def redo_task(slug: str, task_id: int) -> bool:
         "verification": {},
     })
     return _update_task_status_in_file(slug, task_id, "pending")
-
-
-def rollback_plan(slug: str, to_task_id: int) -> dict:
-    """回滚到指定 task 完成时的状态。"""
-    import subprocess
-    
-    # 从 ledger 找到目标 task 的 commit
-    target_commit = ""
-    for entry in reversed(read_ledger(slug)):
-        if entry.get("task_id") == to_task_id and entry.get("status") == "done":
-            target_commit = entry.get("commit", "")
-            break
-    
-    if not target_commit:
-        return {"ok": False, "error": f"Task {to_task_id} not found in ledger or has no commit"}
-    
-    plans_dir = get_plans_dir()
-    plan_dir = plans_dir / slug
-    
-    # stash 当前状态（安全网）
-    try:
-        subprocess.run(
-            ["git", "stash", "push", "-m", f"pre-rollback-{slug}"],
-            cwd=plan_dir, capture_output=True, timeout=10,
-        )
-    except Exception:
-        pass
-    
-    # checkout 目标 commit 的文件（不移动 HEAD）
-    try:
-        subprocess.run(
-            ["git", "checkout", target_commit, "--", "."],
-            cwd=plan_dir, capture_output=True, timeout=10, check=True,
-        )
-    except subprocess.CalledProcessError as e:
-        return {"ok": False, "error": f"Git checkout failed: {e.stderr.decode() if e.stderr else str(e)}"}
-    
-    # 创建新 commit 记录回滚
-    _git_commit(f"plan({slug}): rollback to task {to_task_id} (commit {target_commit[:7]})")
-    
-    # 重置 ledger：标记 to_task_id 之后的 task 为 pending
-    # 这里简化处理，实际应该解析 tasks.md 并更新状态
-    
-    return {
-        "ok": True,
-        "target_commit": target_commit,
-        "message": f"Rolled back to task {to_task_id}",
-    }
