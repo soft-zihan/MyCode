@@ -98,6 +98,7 @@ def test_new_fields_do_not_break_message_derivation(session):
     assert [m["role"] for m in msgs] == ["system", "assistant", "tool"]
     assert msgs[-1]["tool_call_id"] == "c1"
     assert "outcome" not in msgs[-1]      # 事件字段不得泄漏进 LLM 消息
+    assert "tool_name" not in msgs[-1]    # 同上：派生只产 role/tool_call_id/content
 
 
 def test_new_fields_survive_persistence(session):

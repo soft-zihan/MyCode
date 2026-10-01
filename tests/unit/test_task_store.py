@@ -741,7 +741,21 @@ def test_first_line_appends_ellipsis_only_when_truncated():
 
 def test_first_line_takes_first_line_before_capping():
     from agents.tools.task_store import _first_line
-    assert _first_line("第一行\n第二行", 80) == "第一行"
+    # 丢掉后续行也是截断，所以首行同样带 `…`（见 test_first_line_marks_vertical_truncation）
+    assert _first_line("第一行\n第二行", 80) == "第一行…"
+
+
+def test_first_line_marks_vertical_truncation():
+    """丢行与超长是同一个事实的两种形状：「这里被切过」都必须可读。
+
+    多行 acceptance 此前渲染成光秃秃的首行、没有任何标记，而下一个任务上线的
+    验收闸门正是叫模型去**执行**它在 S 里读到的那条 acceptance——半条命令会被
+    当完整命令跑。tests/unit/test_task_store.py 里早就有这样的输入（三行
+    acceptance），所以这不是假想场景。
+    """
+    from agents.tools.task_store import _first_line
+    assert _first_line("pytest -k a\npytest -k b", 80) == "pytest -k a…"
+    assert _first_line("单行", 80) == "单行"          # 未截断仍逐字不变
 
 
 def test_s_block_marks_truncated_acceptance():
@@ -755,6 +769,15 @@ def test_s_block_leaves_short_acceptance_unmarked():
     item = TaskItem(id=1, content="跑测试", status="pending",
                     acceptance="pytest tests/unit -q")
     assert "…" not in format_task_list_block([item], item)
+
+
+def test_s_block_marks_multiline_acceptance():
+    """S 里一条多行 acceptance 不许渲染成「看起来完整」的单行命令。"""
+    item = TaskItem(id=1, content="跑测试", status="pending",
+                    acceptance="pytest -k a\npytest -k b\npytest -k c")
+    block = format_task_list_block([item], item)
+    assert "pytest -k a…" in block
+    assert "pytest -k b" not in block
 
 
 def test_disclosure_block_marks_truncated_content():

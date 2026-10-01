@@ -158,6 +158,23 @@ def test_task_list_guidance_absent_without_tool():
     assert "task_list" not in g
     assert "3 个以上独立步骤" not in g
     assert "in_progress" not in g
+    assert "以 `…` 结尾" not in g          # 截断纪律随 task_list 一起不注入
+
+
+def test_task_list_guidance_warns_about_truncated_acceptance():
+    """常驻摘要 S 里带 `…` 的 acceptance 是**半条命令**，指引必须禁止直接执行。
+
+    验收闸门叫模型去执行它在 S 里读到的那条 acceptance；`…` 让截断可见，但可见
+    不等于可执行——模型仍可能跑那条前缀，而 run_shell 成功了闸门就不响。所以指引
+    要给出出路（get 取全文）与禁令（不要跑前缀）。
+    """
+    from agents.core.prompt import build_tool_guidance
+
+    g = build_tool_guidance({"task_list", "read_file"})
+    assert "…" in g                       # 标记本身在指引里被点名
+    assert "以 `…` 结尾" in g
+    assert "get 取完整命令" in g            # 出路：拉全文
+    assert "不要跑这条前缀" in g            # 禁令：截断前缀不可执行
 
 
 def test_task_list_guidance_present_when_all_tools():

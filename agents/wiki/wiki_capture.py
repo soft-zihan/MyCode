@@ -175,8 +175,12 @@ def _fit_context_budget(content: str, cfg: dict) -> tuple[str, bool]:
 
 
 def _build_tool_name_index(events: list[dict]) -> dict[str, str]:
-    """B1 修复：tool_result_msg 事件不带 tool_name，
-    从同段 assistant_message 的 tool_calls 反查 call_id → tool_name。"""
+    """兜底（旧会话）：从同段 assistant_message 的 tool_calls 反查 call_id → tool_name。
+
+    tool_result_msg 事件自 4f0b5ac 起**自带** tool_name 一等字段（`_render_events_to_content`
+    优先读它），所以本函数如今只为那次提交之前落盘的历史会话服务——那些事件里
+    根本没有这个键。函数本体保留，删它会让旧会话的工具结果全部渲染成 unknown。
+    """
     tool_name_by_call_id: dict[str, str] = {}
     for event in events:
         for tc in event.get("tool_calls") or []:

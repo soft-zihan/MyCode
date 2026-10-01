@@ -411,17 +411,22 @@ def _first_line(value: Any, limit: int) -> str:
 
     被截断时末尾追加 `…`：静默截断会让模型把半条 acceptance 当完整命令去执行
     （验收闸门正是叫它执行读到的那条命令），所以「这里被切过」必须是块里可读的
-    事实。`…` 让返回值比 limit 多 1 个字符，这是刻意的——limit 约束的是**保留的
-    正文字符数**，标记不是正文（与 clip_detail 同一取舍，Plan 1 已裁定过）。
-    未截断时逐字不变，不给短字段凭空加噪。
+    事实。**两个轴都算截断**：横向（首行超过 limit）与纵向（首行之后的行被丢掉）
+    ——只标横向的话，一条三行的 acceptance 会渲染成光秃秃的 `pytest -k a`，看起来
+    正是一条完整命令，而这三个字段（content/acceptance/error）按约定都是单行的，
+    多行是意外不是意图，所以披露块同样不豁免。
+    `…` 让返回值比 limit 多 1 个字符，这是刻意的——limit 约束的是**保留的正文字符
+    数**，标记不是正文（与 clip_detail 同一取舍，Plan 1 已裁定过）。未截断时逐字
+    不变，不给短字段凭空加噪。
     """
     stripped = _as_str(value).strip()
     if not stripped:
         return ""
-    first = stripped.splitlines()[0].strip()
-    if len(first) <= limit:
-        return first
-    return first[:limit] + "…"
+    lines = stripped.splitlines()
+    first = lines[0].strip() if lines else ""
+    if len(lines) > 1 or len(first) > limit:
+        return first[:limit] + "…"
+    return first
 
 
 def clip_detail(detail: str) -> str:
