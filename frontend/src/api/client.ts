@@ -1,5 +1,5 @@
 // API client for MyCode backend
-import type { components } from './schema';
+import type { components, paths } from './schema';
 
 const API_BASE = '/api';
 
@@ -631,6 +631,98 @@ export async function respondToQuestion(sessionId: string, requestId: string, an
     body: JSON.stringify({ request_id: requestId, answer, session_id: sessionId }),
   });
   if (!res.ok) throw new Error('Failed to respond to question');
+}
+
+// ── Task List（task_list store 的 REST 读写面，Plan 3b B1）────────────────────
+//
+// **这四个方法照着生成的 `paths` 类型写**，与文件里其余「手写 fetch + 手写内联返回类型」
+// 的方法不同。理由：client.ts 此前只 import `components`，从不 import `paths`，于是
+// URL 或响应形状与后端漂移时 `tsc --noEmit` 一声不响——故障落在运行时（404，或字段名
+// 对不上导致静默解析成 undefined）。按 `paths[...]` 取类型把编译期耦合接回来了：后端改
+// 路由或改 pydantic 模型 → 重新生成契约 → 这里先编译不过，而不是先在浏览器里坏掉。
+// 既有方法不在本轮回改（那是另一件事）。
+
+type TasksGetOp = paths['/api/tasks/{session_id}']['get'];
+type TasksPostOp = paths['/api/tasks/{session_id}']['post'];
+type TaskPatchOp = paths['/api/tasks/{session_id}/{task_id}']['patch'];
+type TaskDeleteOp = paths['/api/tasks/{session_id}/{task_id}']['delete'];
+
+/** GET 的响应体 `{ tasks, focus_id }`。focus_id 由后端用 task_store.find_focus 算。 */
+export type TaskListResponse = TasksGetOp['responses'][200]['content']['application/json'];
+/** 单个 task（TaskOut）。含服务端自有的 detail_origin_seq / started_seq：读得到、写不了。 */
+export type Task = TaskListResponse['tasks'][number];
+/** POST 请求体。刻意不含 detail_origin_seq / started_seq —— 后端 schema 不接受。 */
+export type TaskCreateInput = TasksPostOp['requestBody']['content']['application/json'];
+/** PATCH 请求体。给了的字段才改。 */
+export type TaskUpdateInput = TaskPatchOp['requestBody']['content']['application/json'];
+/** DELETE 响应体。未知 id 是 `success: false`（200），不是 HTTP 错误。 */
+export type TaskDeleteResult = TaskDeleteOp['responses'][200]['content']['application/json'];
+/** 五值状态词表（后端 TaskStatus Literal 生成的联合类型）。 */
+export type TaskStatus = NonNullable<TaskUpdateInput['status']>;
+
+async function _taskError(res: Response, fallback: string): Promise<Error> {
+  const data = await res.json().catch(() => ({}));
+  const detail = data?.detail;
+  // 404 的 detail 是字符串；422 的是 pydantic 错误数组（含 msg 与合法词表），
+  // 展平成一行，面板才报得出「status 只能是这五个」而不是「422」。
+  const message = typeof detail === 'string'
+    ? detail
+    : Array.isArray(detail)
+      ? detail.map((d: any) => d?.msg).filter(Boolean).join('; ')
+      : '';
+  return new Error(message ? `${fallback}: ${message}` : `${fallback} (${res.status})`);
+}
+
+/** 读会话的任务清单 + 后端算出的焦点条 id（前端不自己推导焦点）。 */
+export async function fetchTasks(sessionId: string): Promise<TaskListResponse> {
+  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(sessionId)}`);
+  if (!res.ok) throw await _taskError(res, 'Failed to fetch tasks');
+  return res.json();
+}
+
+/** 新建一条任务。`after_id` 省略 = 追加末尾，0 = 插到最前。 */
+export async function createTask(sessionId: string, input: TaskCreateInput): Promise<Task> {
+  const res = await fetch(`${API_BASE}/tasks/${encodeURIComponent(sessionId)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw await _taskError(res, 'Failed to create task');
+  return res.json();
+}
+
+/**
+ * 改一条任务，返回改完的样子。
+ *
+ * 改 `detail` 时后端会清空该条的 `detail_origin_seq`，于是下一次模型调用会重新披露
+ * 新的 detail —— 这就是「UI 编辑回灌模型」的全部机制，前端不需要做任何额外的事
+ * （改 content/acceptance/status/顺序由常驻摘要 S 每请求现读自动反映）。
+ */
+export async function updateTask(
+  sessionId: string,
+  taskId: number,
+  input: TaskUpdateInput,
+): Promise<Task> {
+  const res = await fetch(
+    `${API_BASE}/tasks/${encodeURIComponent(sessionId)}/${encodeURIComponent(taskId)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    },
+  );
+  if (!res.ok) throw await _taskError(res, 'Failed to update task');
+  return res.json();
+}
+
+/** 删一条任务。未知 id → `success: false`（调用方要看返回值，不能只看有没有抛）。 */
+export async function deleteTask(sessionId: string, taskId: number): Promise<TaskDeleteResult> {
+  const res = await fetch(
+    `${API_BASE}/tasks/${encodeURIComponent(sessionId)}/${encodeURIComponent(taskId)}`,
+    { method: 'DELETE' },
+  );
+  if (!res.ok) throw await _taskError(res, 'Failed to delete task');
+  return res.json();
 }
 
 // ── 统一回退（对话 + 文件原子回退，三阶段 stage/commit/clear） ──
