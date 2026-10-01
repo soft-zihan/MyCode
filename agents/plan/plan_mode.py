@@ -20,6 +20,22 @@ from agents.plan.plan_manager import count_tasks, create_plan, get_plan, append_
 from agents.plan.plan_models import PlanGranularity
 
 
+# checkbox 任务行：捕获前导空白（缩进判定的基准）、状态标记、编号、描述。
+_CHECKBOX_TASK_RE = re.compile(r"^([ \t]*)- \[([ x!~-])\]\s*(\d+)\.\s*(.+)$")
+
+# 缩进子项（bullet）。只在「前导空白长于父任务行」时才算子项，见
+# checkbox_tasks_to_structured 的缩进判定。
+_CHECKBOX_SUBITEM_RE = re.compile(r"^[ \t]*[-*+][ \t]+(.+)$")
+
+# 子项里的验收键 → 解析器认得的 `**验收**:` 标记。全角冒号同样认（中文 plan 里
+# `验收：` 很常见，而 plan_manager._parse_structured_tasks 只认半角），英文键也认
+# （与 validate_plan_artifacts 同时接受「验收标准」与 "Acceptance" 一个口径）。
+# 刻意**只**特判验收：其余键值对原样留在块正文里，物化时整块进 TaskItem.detail，
+# 而「哪些键算结构化字段」是解析器的契约，转换器不该替它扩展。
+_ACCEPTANCE_SUBITEM_RE = re.compile(
+    r"^(验收|acceptance)\s*[:：]\s*(.+)$", re.IGNORECASE)
+
+
 class PlanModeManager:
     """Plan 模式逻辑管理器。"""
 
@@ -78,7 +94,16 @@ Plan mode is active. You MUST NOT make any edits (except files under {plan_dir})
 - `{plan_dir}/plan.md` — 必须包含以下小节：
   - `## 背景`（为什么做）
   - `## 方案`(怎么做)
-  - `## 任务清单`（checkbox 格式：`- [ ] 1. 任务描述`，每行一个，编号从 1 开始）
+  - `## 任务清单`（checkbox 格式，每行一个，编号从 1 开始）：
+    ```
+    - [ ] 1. 任务描述（一句话）
+      - 验收: 一条能证明完成的命令
+      - 改动: 涉及的文件/函数
+      - 注意: 容易踩的坑、必须守住的约束
+    ```
+    缩进子项会被物化进 task_list 的 detail 与 acceptance：`验收` 成为完成判据，
+    其余成为该任务的详细执行方案，在它成为焦点时自动注入上下文。
+    **explore 与 grill 都是可选的**——需求清楚就直接写，不清楚才用 ask_user 追问。
   - `## 验收`（如何验证整体完成）
 
 ### 重量轨（复杂任务显式升级）：三文档
@@ -131,18 +156,71 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
     @staticmethod
     def checkbox_tasks_to_structured(content: str) -> str:
-        """把 checkbox 任务清单转为结构化 tasks.md（执行状态机依赖结构化格式更新状态）。"""
+        """把 checkbox 任务清单转为结构化 tasks.md。
+
+        输出形状是三个下游的契约，改造时不得破坏：
+        - `plan_manager._parse_structured_tasks` 认 `### Task N:` 块与
+          `- **验收**:` / `- **状态**:` 标记；
+        - `plan_manager._update_task_status_in_file` 在块内替换首条 `**状态**:`；
+        - `handle_plan_system_integration` 用 `"### Task" in structured_tasks`
+          判定「轻量轨 plan.md 里确实有任务」。
+        `<!-- TASKS START/END -->` 包裹与五个状态标记的映射照旧保留。
+
+        **缩进子项不再丢弃**（Plan 3a Task 2）：此前只把 `- [ ] N. 描述` 转成
+        `### Task N: 描述` + 状态，缩进子项整段扔掉——而解析器其实早就支持
+        `**验收**:`。不补这个洞，轻量轨 plan 物化出来的 detail 与 acceptance 全是
+        空的，渐进式披露与验收闸门双双空转。现在 `验收:` 映射成解析器认得的
+        `- **验收**:`，其余键值对与无键 bullet 原样留在块正文里，物化时整块进
+        TaskItem.detail。
+
+        缩进判定是**相对的**（前导空白长于父任务行），不是固定两空格：四空格、
+        tab、以及嵌在别的列表里的任务清单都得认。同级或更浅的非空行结束当前块，
+        否则紧跟在任务清单后面的 `## 验收` 小节会被吸进最后一个任务。空行不打断
+        （清单里常见）；更深但不是 bullet 的行（续行说明）跳过且**不**关块，好让
+        它后面的子项仍能归位。
+        """
         status_map = {"x": "done", "!": "failed", "~": "in-progress", "-": "skipped"}
         icon_map = {"pending": "[ ]", "in-progress": "[~]", "done": "[x]", "failed": "[!]", "skipped": "[-]"}
-        out = ["<!-- TASKS START -->"]
-        for line in content.split("\n"):
-            m = re.match(r"\s*- \[([ x!~-])\]\s*(\d+)\.\s*(.+)", line)
-            if not m:
+
+        # [编号, 描述, 状态, 子项行]——用 list 而不是 tuple：子项要就地 append
+        blocks: list[list] = []
+        parent_indent = -1          # < 0 = 当前不在任何任务块里
+
+        for raw in content.split("\n"):
+            line = raw.rstrip("\r")  # 文件是 CRLF 时 split("\n") 会留下尾随 \r
+
+            m = _CHECKBOX_TASK_RE.match(line)
+            if m:
+                indent, marker, tid, desc = m.groups()
+                blocks.append([
+                    tid,
+                    desc.strip(),
+                    status_map.get(marker, "pending"),
+                    [],
+                ])
+                parent_indent = len(indent)
                 continue
-            marker, tid, desc = m.groups()
-            status = status_map.get(marker, "pending")
-            out.append(f"### Task {tid}: {desc.strip()}")
+
+            if parent_indent < 0 or not line.strip():
+                continue
+
+            if len(line) - len(line.lstrip(" \t")) <= parent_indent:
+                parent_indent = -1   # 同级或更浅的非空行：块结束
+                continue
+
+            sub = _CHECKBOX_SUBITEM_RE.match(line)
+            if not sub:
+                continue
+            text = sub.group(1).strip()
+            acc = _ACCEPTANCE_SUBITEM_RE.match(text)
+            blocks[-1][3].append(
+                f"- **验收**: {acc.group(2).strip()}" if acc else f"- {text}")
+
+        out = ["<!-- TASKS START -->"]
+        for tid, desc, status, subitems in blocks:
+            out.append(f"### Task {tid}: {desc}")
             out.append(f"- **状态**: {icon_map[status]} {status}")
+            out.extend(subitems)
             out.append("")
         out.append("<!-- TASKS END -->")
         return "\n".join(out) + "\n"

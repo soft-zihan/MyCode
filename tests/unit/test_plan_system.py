@@ -192,6 +192,107 @@ class TestDualTrack:
         assert "[x] done" in out
         assert pm.count_tasks(out) == 5
 
+    # ---- 轻量轨保留验收与缩进子项（Plan 3a Task 2）----
+    #
+    # 此前 checkbox_tasks_to_structured 只把 `- [ ] N. 描述` 转成 `### Task N: 描述`
+    # + 状态，缩进子项整段丢弃——而解析器（_parse_structured_tasks）其实早就支持
+    # `**验收**:`。不补这个洞，大多数 plan 物化出来的 detail 与 acceptance 都是空的，
+    # 渐进式披露与验收闸门双双空转。
+
+    def test_checkbox_with_acceptance_becomes_structured_acceptance(self):
+        src = "## 任务清单\n- [ ] 1. 实现解析器\n  - 验收: pytest tests/test_p.py -q\n"
+        out = PlanModeManager.checkbox_tasks_to_structured(src)
+        assert "### Task 1: 实现解析器" in out
+        assert "- **验收**: pytest tests/test_p.py -q" in out
+
+    def test_checkbox_nested_bullets_become_task_body(self):
+        src = (
+            "## 任务清单\n"
+            "- [ ] 1. 实现解析器\n"
+            "  - 验收: pytest tests/test_p.py -q\n"
+            "  - 改动: agents/parsers.py\n"
+            "  - 注意: 空输入要返回空 dict 而不是 None\n"
+        )
+        out = PlanModeManager.checkbox_tasks_to_structured(src)
+        assert "agents/parsers.py" in out
+        assert "空输入要返回空 dict" in out
+
+    def test_checkbox_without_subitems_still_converts(self):
+        """向后兼容：老格式的纯一行 checkbox 仍须能转。"""
+        out = PlanModeManager.checkbox_tasks_to_structured("- [ ] 1. 简单任务\n- [ ] 2. 另一个\n")
+        assert "### Task 1: 简单任务" in out
+        assert "### Task 2: 另一个" in out
+
+    def test_parsed_task_carries_acceptance_end_to_end(self):
+        """转换 → 解析的整条链路：验收必须活着走到 Task.acceptance。"""
+        src = "- [ ] 1. 实现解析器\n  - 验收: pytest tests/test_p.py -q\n"
+        structured = PlanModeManager.checkbox_tasks_to_structured(src)
+        tasks = pm._parse_structured_tasks(structured)
+        assert len(tasks) == 1
+        assert tasks[0].acceptance == "pytest tests/test_p.py -q"
+
+    def test_numbering_survives_non_contiguous_ids(self):
+        out = PlanModeManager.checkbox_tasks_to_structured("- [ ] 3. 第三个\n- [ ] 7. 第七个\n")
+        assert "### Task 3: 第三个" in out
+        assert "### Task 7: 第七个" in out
+
+    def test_wrapper_and_all_status_markers_survive(self):
+        """`### Task` 与 TASKS START/END 包裹是 handle_plan_system_integration 的
+        依赖（plan_mode.py 的 `if "### Task" not in structured_tasks: return None`），
+        五个状态标记的映射也不能在改造中丢掉。"""
+        out = PlanModeManager.checkbox_tasks_to_structured(SIMPLE_TASKS)
+        assert out.startswith("<!-- TASKS START -->")
+        assert "<!-- TASKS END -->" in out
+        assert "### Task" in out
+        assert "[ ] pending" in out
+        assert "[x] done" in out
+        assert "[~] in-progress" in out
+        assert "[!] failed" in out
+        assert "[-] skipped" in out
+        # 解析侧同样认得这五个状态（转换 → 解析全链路）
+        assert {t.id: t.status for t in pm._parse_structured_tasks(out)} == {
+            1: "pending", 2: "done", 3: "in-progress", 4: "failed", 5: "skipped",
+        }
+
+    def test_indent_detection_is_relative_not_hardcoded_two_spaces(self):
+        """缩进判定用「前导空白长于父行」，不是固定两空格。
+
+        四空格、制表符、以及父行本身就带缩进（任务清单嵌在别的列表里）都必须
+        照样认出子项；而同级或更浅的行——尤其是后面的 `## 验收` 小节——绝不能
+        被吸进最后一个任务块。
+        """
+        four = PlanModeManager.checkbox_tasks_to_structured(
+            "- [ ] 1. A\n    - 验收: pytest -k a\n")
+        assert "- **验收**: pytest -k a" in four
+
+        tabbed = PlanModeManager.checkbox_tasks_to_structured(
+            "- [ ] 1. A\n\t- 验收: pytest -k t\n")
+        assert "- **验收**: pytest -k t" in tabbed
+
+        nested = PlanModeManager.checkbox_tasks_to_structured(
+            "1. 外层\n   - [ ] 2. 内层任务\n     - 验收: pytest -k n\n")
+        assert "### Task 2: 内层任务" in nested
+        assert "- **验收**: pytest -k n" in nested
+
+        # 同级/更浅的行不进任务块：`## 验收` 小节属于整份 plan，不属于任务 1
+        sibling = PlanModeManager.checkbox_tasks_to_structured(
+            "- [ ] 1. A\n  - 验收: pytest -k a\n\n## 验收\n- 跑全套测试\n")
+        assert "- **验收**: pytest -k a" in sibling
+        assert "跑全套测试" not in sibling
+        assert pm.count_tasks(sibling) == 1
+
+    def test_subitem_without_key_is_kept_as_bare_bullet(self):
+        """无键的 bullet 也要进块正文（`- value` 形式），别只认 `key: value`。"""
+        out = PlanModeManager.checkbox_tasks_to_structured(
+            "- [ ] 1. A\n  - 先跑迁移再改模型\n")
+        assert "先跑迁移再改模型" in out
+
+    def test_value_containing_a_colon_is_not_misparsed_as_a_key(self):
+        """`- 见 https://x` 里的冒号不能被当成 key/value 分隔（key 含空格即非键）。"""
+        out = PlanModeManager.checkbox_tasks_to_structured(
+            "- [ ] 1. A\n  - 见 https://example.com/doc\n")
+        assert "见 https://example.com/doc" in out
+
 
 # ────────────────────────── 策略加载与插件引擎 ──────────────────────────
 
