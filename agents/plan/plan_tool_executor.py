@@ -99,6 +99,25 @@ _NEXT_HEADING_RE = re.compile(r"^\s{0,3}#{1,}")
 # 重新嵌回对话，撤销 conversation_plan 来自的那个修复。
 _CHECKLIST_ONLY_PLAN = "计划正文只有任务清单，已物化进 task_list。"
 
+# integration 失败时的结果文案。此前这里是 "Proceed with implementation."——与成功
+# 路径一字不差，读起来就是「一切正常」。而实际发生的是：plan 系统里没有条目、
+# session.plan_slug 没设、session/plan_linked 没发、**一条任务都没物化进 task_list**，
+# 于是清单摘要不会常驻上下文、焦点任务的详细方案也不会自动注入——整个特性的 payoff
+# 整份消失，唯一痕迹是 stderr 一行。
+#
+# 此时回滚不了：用户已经批准、permission_mode 已经切换、mode-changed 事件已经发出，
+# 这些都跑在这段文案之前。能做的只有不把「正常」说给模型和用户听，并告诉模型它得
+# 自己推进、自己跟踪步骤。
+#
+# 只用在「integration 试过但失败」的路径上。approval_fn 分支的 manual-execute 是
+# **刻意**不做 integration（见模块 docstring 的行为保留项），那不是失败，用同一句话
+# 会把这条信号淹进噪声里。
+_PLAN_NOT_RECORDED = (
+    "警告：计划未能记录进 plan 系统，任务也未能物化进 task_list——"
+    "清单摘要不会常驻你的上下文，焦点任务的详细方案也不会自动注入。\n"
+    "请手动推进实现，并自己用 task_list add/update 跟踪每一步。\n"
+)
+
 
 def _strip_task_checklist_section(plan_md: str) -> str:
     """删掉轻量轨 plan.md 里的 `## 任务清单` 小节：标题行 → 下一个任意级标题或文末。
@@ -259,10 +278,11 @@ def _clear_draft_dir(plan_dir: Any, slug: str) -> None:
         return
     draft = Path(plan_dir)
     try:
-        # 防御：草稿目录与 plan 系统目录同在 `.mycode/plans/` 下，而 slug 的兜底值恰好
-        # 就是 `plan-{session_id}`（plan_mode.py:327）——两者同名。那种情况下 create_plan
-        # 会因目录已存在而抛、integration 返回 None，所以正常走不到这里；但要删的是用户
-        # 的计划副本，把不变量写实比靠推理省事更安全。
+        # 防御：草稿目录与 plan 系统目录同在 `.mycode/plans/` 下。兜底 slug 曾是
+        # `plan-{session_id}`——与草稿目录逐字节同名，于是 create_plan 必抛、integration
+        # 必返回 None，批准在默认轨道上静默什么都不做（现已改成互斥的
+        # `approved-{session_id}`，见 plan_mode.py 兜底处的注释）。同名不再可能，但守卫
+        # 留着：要删的是用户那份计划的唯一副本，把不变量写实比靠推理省事更安全。
         # 这行守卫**也**在 try 里：resolve()/get_plans_dir() 抛的话自撞与否就是未知的，
         # 未知时保留草稿是唯一安全的那一边，所以直接落到 except 留痕返回、不 rmtree。
         if slug and draft.resolve() == (get_plans_dir() / slug).resolve():
@@ -282,7 +302,10 @@ def _finalize_plan_exit(agent: "Agent", mgr: Any, draft: _PlanDraft, choice: str
     execute = choice in ("clear-and-execute", "execute")
     # 行为保留：approval_fn 分支仅 execute/clear-and-execute 做 integration；
     # confirm 分支（含 manual-execute）始终做 integration。
-    if execute or mgr.plan_approval_fn is None:
+    # 这个布尔值在尾部还要用一次：plan_result 为假有两种完全不同的成因——「试过但
+    # 失败」必须在对话里响，「按设计跳过」不该响。
+    integration_attempted = execute or mgr.plan_approval_fn is None
+    if integration_attempted:
         plan_result: dict[str, Any] | None = mgr.handle_plan_system_integration(
             draft.spec, draft.design, draft.tasks, agent.session,
             granularity=draft.granularity, plan_md=draft.plan_md,
@@ -372,6 +395,20 @@ def _finalize_plan_exit(agent: "Agent", mgr: Any, draft: _PlanDraft, choice: str
                 "\n注意：物化中途中断，task_list 可能不完整，"
                 "开工前先用 task_list list 核对。"
             )
+    elif integration_attempted:
+        # plan_result 为假 = integration 试过但什么都没落地（handle_plan_system_
+        # integration 返回 None）。此前这里发的也是 "Proceed with implementation."，
+        # 与成功路径一字不差：整个特性的 payoff 静默消失，模型和用户都被告知一切正常。
+        # 缘由与不可回滚的理由见 _PLAN_NOT_RECORDED。
+        #
+        # 这里再留一行痕是必要的，不是重复：integration 有好几条 return None 的路径
+        # （plan_md 为空、转换不出 `### Task`、重量轨没有 tasks_content）**不打任何
+        # 日志**，只有这一行能让它们同样可观测。
+        print_error(
+            f"[plan] integration recorded nothing for session '{agent.session.id}' "
+            f"(choice={choice}); no task was materialized into task_list"
+        )
+        result_msg += _PLAN_NOT_RECORDED
     else:
         result_msg += "Proceed with implementation."
 

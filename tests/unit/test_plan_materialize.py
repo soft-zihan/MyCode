@@ -4,8 +4,16 @@ from __future__ import annotations
 import pytest
 
 from agents.core.workspace import reset_workspace, set_workspace
+from agents.plan import plan_mode as plan_mode_module
 from agents.plan import plan_tool_executor
-from agents.plan.plan_manager import add_artifact, append_tasks_to_plan, create_plan
+from agents.plan.plan_manager import (
+    add_artifact,
+    append_tasks_to_plan,
+    create_plan,
+    get_plan,
+    get_plans_dir,
+    get_tasks,
+)
 from agents.plan.plan_mode import PlanModeManager
 from agents.plan.plan_models import PlanGranularity
 from agents.plan.plan_tool_executor import _materialize_plan_into_task_list
@@ -628,19 +636,25 @@ def test_second_approval_reusing_draft_dir_does_not_duplicate(ws, tmp_path):
 def test_draft_dir_survives_when_integration_fails(ws, tmp_path):
     """收口 A 的反面：integration 失败时草稿是计划的**唯一**副本，删了就没了。
 
-    构造的是真会发生的 slug 碰撞，不是 monkeypatch 出来的假失败——plan.md 没有
-    `# 标题` 时 slug 兜底成 `plan-{session_id}`（plan_mode.py:327），与草稿目录
-    同名，create_plan 于是抛「already exists」，被 plan_mode.py:359-361 吞掉返回
-    None。所以「plan_result 为真」正是「计划已经另有落地副本」的判据。
+    构造的是真会发生的碰撞，不是 monkeypatch 出来的假失败——预建标题派生出的目标
+    目录，create_plan 于是抛「already exists」，被 plan_mode.py 的 blanket except
+    吞掉返回 None。所以「plan_result 为真」正是「计划已经另有落地副本」的判据。
+
+    （此前这条用例是靠「plan.md 不写 H1 → 兜底 slug `plan-{session_id}` 与草稿目录
+    同名」来造碰撞的——那正是被修掉的那个 Critical 缺陷本身，把 bug 钉成了预期行为。
+    现在兜底 slug 与草稿目录互斥，碰撞只能这样从外面造。）
     """
     session = _new_session()
     mgr = PlanModeManager(workspace=tmp_path, session_id="s1")
     plan_dir = mgr.generate_plan_dir()
-    (plan_dir / "plan.md").write_text("## 任务清单\n\n- [ ] 1. 做点什么\n", encoding="utf-8")
+    (plan_dir / "plan.md").write_text(
+        "# Fix Login Timeout\n\n## 任务清单\n\n- [ ] 1. 做点什么\n", encoding="utf-8")
     mgr.plan_dir = plan_dir
+    (get_plans_dir() / "fix-login-timeout").mkdir(parents=True)
 
     msg = _finalize(_FakeAgent(session), mgr)
-    assert "Proceed with implementation." in msg, msg
+    assert "Proceed with implementation." not in msg, msg
+    assert "计划未能记录进 plan 系统" in msg, msg
     assert not session.plan_slug
     assert (plan_dir / "plan.md").exists(), "integration 失败却把草稿删了——计划没了"
 
@@ -729,9 +743,10 @@ def _capture_errors(monkeypatch) -> list[str]:
 def test_clear_draft_dir_refuses_to_delete_the_plan_entry_itself(ws, monkeypatch):
     """自撞守卫钉在这里：草稿目录 resolve 后就是 plan 系统目录时**拒绝删除**并留痕。
 
-    不是纯理论边界——slug 的兜底值恰好是 `plan-{session_id}`（plan_mode.py:327），与
-    草稿目录同名。要删的是用户那份已批准计划的唯一副本，所以收口 F 把守卫挪进 try
-    之后，它不能被顺手弱化成「一律吞掉照删」：吞异常与拒绝删除是两件事。
+    兜底 slug 曾是 `plan-{session_id}`，与草稿目录逐字节同名，所以这不是纯理论边界
+    （那个碰撞本身已修：兜底改成互斥的 `approved-{session_id}`）。守卫照旧留着——
+    要删的是用户那份已批准计划的唯一副本，收口 F 把守卫挪进 try 之后，它不能被顺手
+    弱化成「一律吞掉照删」：吞异常与拒绝删除是两件事。
     """
     from agents.plan.plan_manager import get_plans_dir
     from agents.plan.plan_tool_executor import _clear_draft_dir
@@ -856,3 +871,302 @@ def test_standard_track_never_reports_the_checklist_gap(ws, tmp_path, monkeypatc
     assert "实现解析器" in draft.tasks                 # 任务照样解析出来了
     assert "## Tasks" not in draft.conversation_plan   # 重量轨的清单本来就省得掉
     assert logged == [] and traced == []
+
+
+# ──── Critical：兜底 slug 与草稿目录同名 → 批准落地在默认轨道上静默失效 ────
+#
+# 链条（每一环都在真机 smoke 上验过：plan 模式 → 写轻量 plan → 批准 → 执行，
+# 结果 session/plan_linked 没发、草稿目录没清、结果消息里既没有 `## Approved Plan`
+# 也没有物化文案，模型只好自己从零搭一份清单）：
+#
+# 1. `generate_plan_dir()`（plan_mode.py:57-61）返回
+#    `{workspace}/.mycode/plans/plan-{session_id}` 并**mkdir 它**——这就是草稿目录；
+# 2. 轻量轨的 slug 来自 `re.search(r"^#\s+(.+)", plan_md, re.M)`（plan_mode.py:318）
+#    ——这个正则**不认 `##` 标题**：第一个 `#` 后面是 `#`，不是空白；
+# 3. `build_plan_mode_prompt` 的轻量轨规定格式只有 `## 背景/方案/任务清单/验收`，
+#    **从不要求 H1**（实测：规定格式 → 无 title match；只有以 `# 某标题` 开头才匹配）；
+# 4. 于是 slug 兜底成 `f"plan-{self.session_id}"`（plan_mode.py:327）——与第 1 步的
+#    草稿目录名**逐字节相同**；
+# 5. `create_plan(slug)` 算出 `plans_dir / slug`，已存在就抛 ValueError
+#    （plan_manager.py:101-104）——它必然存在，因为是第 1 步 mkdir 的；
+# 6. `handle_plan_system_integration` 的 blanket `except Exception` 吞掉它、
+#    `print_error` 一声、返回 None（plan_mode.py:359-361）；
+# 7. `_finalize_plan_exit` 的 `if plan_result and plan_result.get("slug")` 于是为假：
+#    不物化、不清草稿、不发 session/plan_linked，消息里只剩
+#    "Proceed with implementation."——读起来像成功。
+#
+# 净效果：默认且占多数的轻量轨上，批准**静默什么都不做**，整个特性的 payoff 消失，
+# 唯一痕迹是一行 stderr。
+#
+# 为什么此前没有一个测试抓到：它们要么直接调 `_materialize_plan_into_task_list`，
+# 要么用 `create_plan` + `add_artifact` 手挑 slug 造计划（本文件的 `_make_plan`、
+# `_draft_mgr` 都是）——两者都绕过 slug 推导，也就绕过了碰撞。下面这组**走真路径**：
+# 真 PlanModeManager、真 generate_plan_dir()、真 read_draft_artifacts/validate、
+# 真 handle_plan_system_integration，slug 一律由代码自己推。
+
+# 规定的轻量轨格式，逐字照 `build_plan_mode_prompt` 写的：只有 `##` 小节，**没有 H1**。
+PRESCRIBED_MINIMAL_NO_H1 = """## 背景
+
+登录请求要等 30s 才超时，用户全程看不到任何提示。
+
+## 方案
+
+把超时收到 10s，并在前端弹一条提示。
+
+## 任务清单
+
+- [ ] 1. 收紧超时
+  - 验收: pytest tests/test_login.py -q
+  - 注意: 别动重试次数
+- [ ] 2. 加超时提示
+  - 验收: 前端能看到一条提示
+
+## 验收
+
+pytest tests/test_login.py -q 全绿。
+"""
+
+# 同一份 plan，只是补上 part 2 之后提示词要求的 H1 标题。
+PRESCRIBED_MINIMAL_WITH_H1 = "# Fix Login Timeout\n\n" + PRESCRIBED_MINIMAL_NO_H1
+
+
+def _run_real_minimal_approval(tmp_path, session, plan_md: str):
+    """跑真的轻量轨批准落地流程——不手挑 slug、不直接调 create_plan。
+
+    generate_plan_dir() → 写 plan.md → validate_plan_artifacts() →
+    read_draft_artifacts() → handle_plan_system_integration(granularity="minimal")。
+    tasks_content 的算法与 `_validate_and_load_draft`（plan_tool_executor.py:142-143）
+    一致，好让这里的结果与生产路径逐字可比。
+
+    Returns: (mgr, draft_dir, validation, result)
+    """
+    mgr = PlanModeManager(workspace=tmp_path, session_id=session.id)
+    draft_dir = mgr.generate_plan_dir()
+    assert draft_dir.exists(), "前置条件：草稿目录真的被 mkdir 出来了"
+    (draft_dir / "plan.md").write_text(plan_md, encoding="utf-8")
+    mgr.plan_dir = draft_dir
+
+    validation = mgr.validate_plan_artifacts()
+    assert validation["valid"], validation["errors"]
+    assert validation["granularity"] == "minimal"
+
+    draft = mgr.read_draft_artifacts()
+    assert draft["granularity"] == "minimal" and draft["plan"] == plan_md
+    tasks_content = draft["tasks"] or PlanModeManager.checkbox_tasks_to_structured(draft["plan"])
+
+    result = mgr.handle_plan_system_integration(
+        draft["spec"], draft["design"], tasks_content, session,
+        granularity="minimal", plan_md=draft["plan"],
+    )
+    return mgr, draft_dir, validation, result
+
+
+_COLLISION_HINT = (
+    "integration 返回 None：计划没落地、任务没物化、session/plan_linked 没发。"
+    "兜底 slug 与 generate_plan_dir() 的草稿目录同名 → create_plan 抛 already exists"
+    " → 被 blanket except 吞掉。"
+)
+
+
+def test_prescribed_minimal_format_records_the_plan(ws, tmp_path):
+    """主钉：规定格式（无 H1）的轻量轨 plan 批准后必须真的落地。"""
+    session = _new_session()
+    _mgr, draft_dir, _validation, result = _run_real_minimal_approval(
+        tmp_path, session, PRESCRIBED_MINIMAL_NO_H1)
+
+    assert result, _COLLISION_HINT
+    slug = result["slug"]
+    assert slug and get_plan(slug) is not None, f"get_plan({slug!r}) 找不到刚批准的计划"
+
+    plan_home = get_plans_dir() / slug
+    assert plan_home.resolve() != draft_dir.resolve(), "永久计划目录不许就是草稿目录"
+    assert plan_home.exists() and (plan_home / "plan.md").exists()
+
+    assert session.plan_slug == slug
+    linked = [e for e in session.events if e.get("type") == "session/plan_linked"]
+    assert linked, "session/plan_linked 事件没发"
+    assert linked[-1].get("plan_slug") == slug
+
+    # payoff 本身：任务与验收都活着走到物化的输入端
+    tasks = get_tasks(slug)
+    assert [t.description for t in tasks] == ["收紧超时", "加超时提示"]
+    assert tasks[0].acceptance == "pytest tests/test_login.py -q"
+
+
+def test_minimal_h1_title_derives_the_slug(ws, tmp_path):
+    """有 H1 时 slug 由标题派生（对照组：这条在修复前就是绿的）。"""
+    session = _new_session()
+    _mgr, draft_dir, _validation, result = _run_real_minimal_approval(
+        tmp_path, session, PRESCRIBED_MINIMAL_WITH_H1)
+
+    assert result, _COLLISION_HINT
+    assert result["slug"] == "fix-login-timeout"
+    assert (get_plans_dir() / result["slug"]).resolve() != draft_dir.resolve()
+    assert session.plan_slug == "fix-login-timeout"
+    assert get_plan("fix-login-timeout") is not None
+
+
+def test_fallback_slug_is_disjoint_from_the_draft_dir_name(ws, tmp_path):
+    """不变量：兜底 slug 不许是 `generate_plan_dir()` 能产出的名字。
+
+    草稿目录先被真 mkdir 出来（真流程就是这样），随后 integration 仍必须能在同一个
+    `.mycode/plans/` 下建出永久条目。两套命名一旦重合，默认轨道 100% 撞上——这正是
+    那种日后会被「简化」回碰撞的不变量，所以单独钉一条。
+    """
+    session = _new_session()
+    _mgr, draft_dir, _validation, result = _run_real_minimal_approval(
+        tmp_path, session, PRESCRIBED_MINIMAL_NO_H1)
+
+    assert result, _COLLISION_HINT
+    assert result["slug"] != draft_dir.name, "兜底 slug 与草稿目录同名"
+    assert not result["slug"].startswith("plan-"), (
+        f"兜底 slug {result['slug']!r} 落在了 generate_plan_dir() 的命名空间里"
+    )
+    assert (get_plans_dir() / result["slug"]).resolve() != draft_dir.resolve()
+
+
+def test_standard_track_fallback_slug_also_avoids_the_draft_dir(ws, tmp_path):
+    """重量轨同一条碰撞：slug 来自 `# Spec: <title>`，spec.md 没这个标题时同样兜底。
+
+    校验只要求 spec.md 含「验收标准」小节，**不**要求 `# Spec:` 标题（见
+    validate_plan_artifacts），所以这不是奇异输入。
+    """
+    session = _new_session()
+    mgr = PlanModeManager(workspace=tmp_path, session_id=session.id)
+    draft_dir = mgr.generate_plan_dir()
+    (draft_dir / "spec.md").write_text(
+        "## 需求\n\n收紧登录超时。\n\n## 验收标准\n\n- pytest 全绿\n", encoding="utf-8")
+    (draft_dir / "design.md").write_text(DESIGN_MD, encoding="utf-8")
+    (draft_dir / "tasks.md").write_text(STRUCTURED, encoding="utf-8")
+    mgr.plan_dir = draft_dir
+
+    validation = mgr.validate_plan_artifacts()
+    assert validation["valid"], validation["errors"]
+    assert validation["granularity"] == "standard"
+    draft = mgr.read_draft_artifacts()
+    assert draft["granularity"] == "standard"
+
+    result = mgr.handle_plan_system_integration(
+        draft["spec"], draft["design"], draft["tasks"], session,
+        granularity="standard", plan_md=draft["plan"])
+
+    assert result, "重量轨的兜底 slug 也撞上了草稿目录"
+    assert result["slug"] != draft_dir.name
+    assert (get_plans_dir() / result["slug"]).resolve() != draft_dir.resolve()
+    assert session.plan_slug == result["slug"]
+    assert get_plan(result["slug"]) is not None
+
+
+def test_integration_failure_logs_the_slug_and_the_cause(ws, tmp_path, monkeypatch):
+    """blanket `except Exception` 必须留下够诊断碰撞的信息：slug + 底层异常（含类型）。
+
+    修复前它打的是 `Failed to create plan: {e}`——slug 只是**顺带**出现在 ValueError
+    的文本里，异常类型丢了，也没有 `[plan]` 前缀能在真机 stderr 里被认出来。
+    """
+    logged: list[str] = []
+    monkeypatch.setattr(plan_mode_module, "print_error", logged.append)
+
+    session = _new_session()
+    mgr = PlanModeManager(workspace=tmp_path, session_id="s1")
+    draft_dir = mgr.generate_plan_dir()
+    (draft_dir / "plan.md").write_text(PRESCRIBED_MINIMAL_WITH_H1, encoding="utf-8")
+    mgr.plan_dir = draft_dir
+    # 真碰撞：标题派生出的 slug 已被占用（两个会话批准同标题的计划就会这样）
+    (get_plans_dir() / "fix-login-timeout").mkdir(parents=True)
+
+    draft = mgr.read_draft_artifacts()
+    result = mgr.handle_plan_system_integration(
+        "", "", "", session, granularity="minimal", plan_md=draft["plan"])
+
+    assert result is None
+    assert logged, "失败必须留痕：静默不是降级，是消失"
+    assert any(
+        "fix-login-timeout" in m and "ValueError" in m and "already exists" in m
+        for m in logged
+    ), logged
+
+
+def test_finalize_says_the_plan_was_not_recorded_when_integration_fails(ws, tmp_path):
+    """part 3：integration 失败必须在**对话里**响，不能只在 stderr。
+
+    此前 `_finalize_plan_exit` 在 plan_result 为假时发 "Proceed with implementation."
+    ——与成功路径一字不差的「像成功」。此时用户已经批准、permission_mode 已经切换，
+    回滚不了；能做的只有别把「一切正常」说给模型和用户听。
+
+    构造的是真会发生的碰撞（预建目标目录），不是 monkeypatch 出来的假失败。
+    """
+    session = _new_session()
+    mgr = PlanModeManager(workspace=tmp_path, session_id="s1")
+    draft_dir = mgr.generate_plan_dir()
+    (draft_dir / "plan.md").write_text(PRESCRIBED_MINIMAL_WITH_H1, encoding="utf-8")
+    mgr.plan_dir = draft_dir
+    (get_plans_dir() / "fix-login-timeout").mkdir(parents=True)
+
+    agent = _FakeAgent(session)
+    msg = _finalize(agent, mgr)
+
+    assert "Proceed with implementation." not in msg, msg
+    assert "计划未能记录进 plan 系统" in msg, msg
+    assert "任务也未能物化进 task_list" in msg, msg
+    assert "手动推进" in msg, msg
+    # 事实核对：确实什么都没落地
+    assert not session.plan_slug
+    assert list_tasks("s1") == []
+    assert not [e for e in session.events if e.get("type") == "session/plan_linked"]
+    assert (draft_dir / "plan.md").exists(), "integration 失败却把草稿删了——计划没了"
+    # 批准本身仍然生效：模式切了、事件发了，不许因为落地失败而回滚
+    assert agent.mode_events == 1
+    assert agent.permission_mode == "acceptEdits"
+
+
+def test_smoke_symptoms_are_gone_on_the_prescribed_minimal_format(ws, tmp_path):
+    """端到端复现真机 smoke 的那条路径，逐个断言它的三个症状都消失了。
+
+    smoke（plan 模式 → 写轻量 plan → 批准 → 执行）观测到的是：`session/plan_linked`
+    不在事件日志里、草稿目录没被清、结果消息里既没有 `## Approved Plan` 也没有物化
+    文案，模型只好自己从零搭一份清单。这里走真的 _validate_and_load_draft +
+    _finalize_plan_exit，plan.md 用规定格式（无 H1）。
+    """
+    session = _new_session()
+    mgr = PlanModeManager(workspace=tmp_path, session_id=session.id)
+    draft_dir = mgr.generate_plan_dir()
+    (draft_dir / "plan.md").write_text(PRESCRIBED_MINIMAL_NO_H1, encoding="utf-8")
+    mgr.plan_dir = draft_dir
+
+    agent = _FakeAgent(session)
+    msg = _finalize(agent, mgr)
+
+    assert "## Approved Plan" in msg, msg
+    assert "2 条任务已物化进 task_list" in msg, msg
+    assert "计划未能记录进 plan 系统" not in msg, msg
+    assert [t.content for t in list_tasks("s1")] == ["收紧超时", "加超时提示"]
+    assert list_tasks("s1")[0].acceptance == "pytest tests/test_login.py -q"
+    # detail_origin_seq 保持 None：首条方案在批准后第一次模型调用时被注入
+    assert all(t.detail_origin_seq is None for t in list_tasks("s1"))
+    assert [e for e in session.events if e.get("type") == "session/plan_linked"], (
+        "session/plan_linked 不在事件日志里"
+    )
+    assert session.plan_slug
+    assert not draft_dir.exists(), "草稿目录没被清"
+    assert (get_plans_dir() / session.plan_slug / "plan.md").exists()
+
+
+def test_manual_execute_skip_is_not_reported_as_a_failure(ws, tmp_path):
+    """反面：approval_fn 分支的 manual-execute **刻意**不做 integration（模块 docstring
+    的行为保留项），那不是失败，不该喊「未能记录」。响与不响分不开，这条信号立刻被
+    噪声淹掉，等于白埋。
+    """
+    from agents.plan.plan_tool_executor import _finalize_plan_exit, _validate_and_load_draft
+
+    session = _new_session()
+    mgr = _draft_mgr(tmp_path, spec_md=SPEC_MD, design_md=DESIGN_MD, tasks_md=STRUCTURED)
+    mgr.plan_approval_fn = object()          # 非 None 即走 approval_fn 分支；不会被调用
+    agent = _FakeAgent(session)
+
+    msg = _finalize_plan_exit(agent, mgr, _validate_and_load_draft(mgr), "manual-execute")
+
+    assert "Proceed with implementation." in msg, msg
+    assert "未能" not in msg, msg
+    assert not session.plan_slug
+    assert list_tasks("s1") == []
+    assert agent.mode_events == 1

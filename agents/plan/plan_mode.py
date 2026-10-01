@@ -55,7 +55,12 @@ class PlanModeManager:
         self._pre_plan_mode: str | None = None
 
     def generate_plan_dir(self) -> Path:
-        """生成 Plan 目录路径。"""
+        """生成 Plan 草稿目录路径。
+
+        这里的 `plan-` 前缀是**草稿**命名空间，必须与
+        handle_plan_system_integration 的兜底 slug（`approved-` 前缀）保持互斥，
+        理由见那处的注释。改动任一侧之前先读另一侧。
+        """
         d = self.workspace / ".mycode" / "plans" / f"plan-{self.session_id}"
         d.mkdir(parents=True, exist_ok=True)
         return d
@@ -91,7 +96,7 @@ Plan mode is active. You MUST NOT make any edits (except files under {plan_dir})
 
 ### 轻量轨（默认，适合大多数任务）：单一 plan.md
 分钟级~小时级、涉及文件较少的任务，只写一个文件：
-- `{plan_dir}/plan.md` — 必须包含以下小节：
+- `{plan_dir}/plan.md` — 首行必须是单行 `# <标题>`（它会被 slug 化，成为这份计划永久目录的名字），随后包含以下小节：
   - `## 背景`（为什么做）
   - `## 方案`(怎么做)
   - `## 任务清单`（checkbox 格式，每行一个，编号从 1 开始）：
@@ -301,6 +306,11 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
         granularity="minimal"：轻量轨，plan.md 为源文档，
         checkbox 任务清单转换为结构化 tasks.md（执行状态机依赖）。
+
+        返回 None 意味着**什么都没落地**：plan 系统里没有条目、session.plan_slug 没设、
+        session/plan_linked 没发，调用方因此也不会物化任务进 task_list。调用方必须把
+        这件事说给模型和用户听——批准此时已经生效、permission_mode 已经切换，回滚不了，
+        唯一能做的是别宣称一切正常（见 plan_tool_executor._PLAN_NOT_RECORDED）。
         """
 
         if granularity == "minimal":
@@ -324,7 +334,21 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                 slug = re.sub(r"[^a-z0-9]+", "-", title_match.group(1).strip().lower()).strip("-")[:40]
 
         if not slug:
-            slug = f"plan-{self.session_id}"
+            # 兜底 slug 必须与 generate_plan_dir() 的**草稿目录名**结构性不同名。
+            #
+            # 不变量：`approved-{session_id}` 与 `plan-{session_id}` 两套前缀互斥，
+            # 谁都不许改成对方。原因是这两半会在同一个 `.mycode/plans/` 下相遇，而
+            # create_plan 遇到已存在的目录直接抛 ValueError：
+            #   generate_plan_dir() 在 build_plan_mode_prompt 里就把草稿目录 mkdir
+            #   出来了 → 若兜底 slug 与之同名，create_plan **必然**抛 → 下面的
+            #   blanket except 吞掉它返回 None → _finalize_plan_exit 的
+            #   `if plan_result and plan_result.get("slug")` 为假 → 不物化、不清草稿、
+            #   不发 session/plan_linked，消息里只剩「像成功」的一句话。
+            # 兜底路径**不是**奇异情况：轻量轨的标题正则只认 H1（`^#\s+`，不匹配
+            # `##`），重量轨只认 `# Spec:`，两者都可能没写 → 每次都会走到这里。
+            # 曾经这里写的就是 `f"plan-{self.session_id}"`，于是默认轨道上的批准
+            # 100% 静默失效（一行 stderr 是唯一痕迹）。别把它「简化」回去。
+            slug = f"approved-{self.session_id}"
 
         if session.plan_slug:
             existing_plan = get_plan(session.plan_slug)
@@ -333,7 +357,11 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                     append_tasks_to_plan(session.plan_slug, tasks_content)
                     return {"slug": session.plan_slug, "action": "appended"}
                 except Exception as e:
-                    print_error(f"Failed to append tasks to plan: {e}")
+                    # slug 与异常类型都要在：调用方拿到 None 之后，这一行是唯一的现场。
+                    print_error(
+                        f"[plan] failed to append tasks to plan "
+                        f"'{session.plan_slug}': {e!r}"
+                    )
                     return None
 
         try:
@@ -357,7 +385,14 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
             return {"slug": slug, "action": "created", "plan_dir": str(plan_dir)}
         except Exception as e:
-            print_error(f"Failed to create plan: {e}")
+            # 这一行是 None 的唯一现场，必须够诊断：slug（碰撞时它就是答案）+ 异常
+            # 类型与消息（`{e}` 会丢掉类型，而 ValueError("already exists") 与
+            # OSError 的处置完全不同）+ 一句「什么都没落地」，免得读日志的人以为
+            # 只是少写了个 artifact。
+            print_error(
+                f"[plan] failed to create plan '{slug}' — nothing was recorded and no "
+                f"task was materialized into task_list: {e!r}"
+            )
             return None
 
     @property
