@@ -572,3 +572,146 @@ def test_detail_pinned_to_a_visible_seq_is_not_reinjected(ws):
     assert 7 in s.visible_seqs
     assert ensure_focus_detail_visible(s) is False
     assert [e for e in s.events if e.get("type") == "memory_injection"] == []
+
+
+# ────────────── 收口 A：批准落地后清掉草稿目录 ──────────────
+
+_MINIMAL_HEAD = "# Fix Login Timeout\n\n## 任务清单\n\n"
+
+
+def _approve_round(session, workspace, n: int, desc: str, subitems: str = ""):
+    """跑一轮真批准，草稿目录用 generate_plan_dir() 的真路径（两轮同路径）。
+
+    「追加模式」照提示词教的样子来（plan_mode.py:127-128：目录已存在就先 read_file、
+    在任务清单末尾追加）：plan.md 幸存就读出来追加，被清空了才从头写。所以第二轮的
+    plan.md 里到底有什么，完全由第一轮清没清干净决定——这正是本组要钉的因果，而不是
+    把结论写进 fixture。
+    """
+    mgr = PlanModeManager(workspace=workspace, session_id="s1")
+    plan_dir = mgr.generate_plan_dir()
+    p = plan_dir / "plan.md"
+    head = p.read_text(encoding="utf-8").rstrip("\n") + "\n" if p.exists() else _MINIMAL_HEAD
+    p.write_text(head + f"- [ ] {n}. {desc}\n" + subitems, encoding="utf-8")
+    mgr.plan_dir = plan_dir
+    return plan_dir, _finalize(_FakeAgent(session), mgr)
+
+
+def test_draft_dir_is_cleared_after_successful_approval(ws, tmp_path):
+    """草稿目录 `<workspace>/.mycode/plans/plan-<session_id>`（plan_mode.py:57-61）
+    此前**从不被清**：_finalize_plan_exit 只把属性置 None，那条路径上没有任何
+    rmtree/unlink。它于是跨轮幸存，成为二次批准重复物化的源头。
+    """
+    draft_dir, msg = _approve_round(_new_session(), tmp_path, 1, "收紧超时")
+    assert "1 条任务已物化" in msg, msg
+    assert not draft_dir.exists(), "批准落地后草稿目录必须清掉"
+
+
+def test_second_approval_reusing_draft_dir_does_not_duplicate(ws, tmp_path):
+    """收口 A 的后果级钉法：同一路径的草稿目录被第二轮复用。
+
+    轻量轨的转换器会把幸存 plan.md 里的**每个** checkbox 重新转一遍，于是第二轮
+    draft.tasks = 旧 + 新，上一轮已物化过的任务被再物化一遍（新 id + pending）。
+    """
+    session = _new_session()
+    dir1, msg1 = _approve_round(
+        session, tmp_path, 1, "收紧超时", "  - 验收: pytest tests/test_login.py -q\n")
+    assert "1 条任务已物化" in msg1, msg1
+    dir2, msg2 = _approve_round(session, tmp_path, 2, "加超时提示")
+    assert dir2 == dir1, "前置条件：两轮必须是同一个草稿目录，否则本条毫无判别力"
+    assert "1 条任务已物化" in msg2, msg2
+
+    contents = [t.content for t in list_tasks("s1")]
+    assert len(contents) == len(set(contents)), f"第二次批准把上一轮的任务又物化了一遍: {contents}"
+    assert contents == ["收紧超时", "加超时提示"], contents
+
+
+def test_draft_dir_survives_when_integration_fails(ws, tmp_path):
+    """收口 A 的反面：integration 失败时草稿是计划的**唯一**副本，删了就没了。
+
+    构造的是真会发生的 slug 碰撞，不是 monkeypatch 出来的假失败——plan.md 没有
+    `# 标题` 时 slug 兜底成 `plan-{session_id}`（plan_mode.py:327），与草稿目录
+    同名，create_plan 于是抛「already exists」，被 plan_mode.py:359-361 吞掉返回
+    None。所以「plan_result 为真」正是「计划已经另有落地副本」的判据。
+    """
+    session = _new_session()
+    mgr = PlanModeManager(workspace=tmp_path, session_id="s1")
+    plan_dir = mgr.generate_plan_dir()
+    (plan_dir / "plan.md").write_text("## 任务清单\n\n- [ ] 1. 做点什么\n", encoding="utf-8")
+    mgr.plan_dir = plan_dir
+
+    msg = _finalize(_FakeAgent(session), mgr)
+    assert "Proceed with implementation." in msg, msg
+    assert not session.plan_slug
+    assert (plan_dir / "plan.md").exists(), "integration 失败却把草稿删了——计划没了"
+
+
+def test_result_message_points_at_the_plan_entry_not_the_cleared_draft(ws, tmp_path):
+    """草稿目录清了以后，消息里再指它就是指一个不存在的路径。
+
+    「已批准的计划文档冻结在 X」与 clear-and-execute 分支的 "Plan directory: X"
+    都必须指向 plan 系统目录（add_artifact 真正落盘的地方），而不是已删的草稿目录。
+    """
+    from agents.plan.plan_manager import get_plans_dir
+    session = _new_session()
+    draft_dir, msg = _approve_round(session, tmp_path, 1, "收紧超时")
+    assert session.plan_slug
+    plan_home = get_plans_dir() / session.plan_slug
+    assert str(plan_home) in msg, msg
+    assert str(draft_dir) not in msg, f"消息仍指着已删的草稿目录: {msg}"
+    assert plan_home.exists() and (plan_home / "tasks.md").exists()
+
+
+# ────────────── 收口 B：截断提示要在 materialized==0 时也可见 ──────────────
+
+def test_zero_materialized_still_flags_truncation(ws, tmp_path, monkeypatch):
+    """`if not complete:` 那条提示此前嵌在 `if materialized:` 里面：读取/解析就抛
+    （complete=False, count=0）时模型只剩 "Proceed with implementation."，而错误
+    只进了 stderr——它于是会当没有计划、直接开工。
+    """
+    def boom(*a, **k):
+        raise OSError("tasks.md unreadable")
+
+    monkeypatch.setattr(plan_tool_executor, "get_tasks", boom)
+    mgr = _draft_mgr(tmp_path, spec_md=SPEC_MD, design_md=DESIGN_MD, tasks_md=STRUCTURED)
+    msg = _finalize(_FakeAgent(_new_session()), mgr)
+    assert "Proceed with implementation." in msg, msg
+    assert "可能不完整" in msg, msg
+
+
+# ────────────── 收口 C：小节边界要认 H1 ──────────────
+
+def test_strip_task_checklist_section_stops_at_following_h1():
+    """`_NEXT_HEADING_RE` 此前是 `#{2,}`：后随的 H1（`# …`）不算小节边界，于是从
+    `## 任务清单` 一直到文末全被切掉——H1 连同它后面整段散文都从对话版计划里消失。
+    """
+    from agents.plan.plan_tool_executor import _strip_task_checklist_section
+    text = (
+        "# 总标题\n\n## 背景\n\nB\n\n## 任务清单\n\n- [ ] 1. 做点什么\n\n"
+        "# 下一部分\n\n这段必须活下来\n"
+    )
+    out = _strip_task_checklist_section(text)
+    assert "- [ ]" not in out and "做点什么" not in out, out
+    assert "## 背景" in out and "B" in out, out
+    assert "# 下一部分" in out, out
+    assert "这段必须活下来" in out, out
+
+
+# ────────────── 收口 D：兜底文案不许说「计划是空的」 ──────────────
+
+def test_checklist_only_plan_does_not_say_empty(ws, tmp_path):
+    """plan.md 只有任务清单小节时 conversation_plan 为空，兜底文案此前是
+    "(empty plan)"——计划不是空的，空的是它的散文正文，清单已经物化进 task_list。
+
+    刻意**不**回退到 full_plan：那正是在「清单就是整份计划」这种情况下把清单重新
+    嵌回对话，撤销它来自的那个修复。
+    """
+    from agents.plan.plan_tool_executor import _validate_and_load_draft
+    mgr = _draft_mgr(tmp_path, plan_md="## 任务清单\n\n- [ ] 1. 做点什么\n")
+    draft = _validate_and_load_draft(mgr)
+    assert draft.granularity == "minimal"
+    assert "- [ ]" not in draft.conversation_plan
+    assert "做点什么" not in draft.conversation_plan, "不许回退到 full_plan"
+    assert "(empty plan)" not in draft.conversation_plan
+    assert "task_list" in draft.conversation_plan
+    # 给人看的那份一个字不减，清单还在
+    assert "- [ ] 1. 做点什么" in draft.full_plan

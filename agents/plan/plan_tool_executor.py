@@ -19,18 +19,22 @@ detail 走条件披露注入。tasks.md 在批准那一刻冻结为「已批准�
 
 同一 session 二次批准会走 handle_plan_system_integration 的 append 分支，盘上的
 tasks.md 于是成为「旧 + 新」的合并体；那条路径只物化 draft.tasks（本次新增的
-一块），否则 task_list 会整份翻倍。详见 _finalize_plan_exit。
+一块），否则 task_list 会整份翻倍。详见 _finalize_plan_exit。同一笔重复账还有上游
+的一半：草稿目录 plan-<session_id> 每轮同路径，批准落地后必须清掉，否则下一轮的
+plan.md 里还躺着上一轮的 checkbox、被转换器整个重转一遍。详见 _clear_draft_dir。
 """
 
 from __future__ import annotations
 
 import re
+import shutil
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agents.logging import print_error, print_info
 from agents.observability.trace import trace_event
-from agents.plan.plan_manager import get_tasks, parse_tasks_content
+from agents.plan.plan_manager import get_plans_dir, get_tasks, parse_tasks_content
 from agents.plan.plan_mode import PlanModeManager
 from agents.tools.task_store import add_task, find_focus, list_tasks, update_task
 
@@ -85,12 +89,19 @@ class _PlanDraft:
 # 正是 _enter_plan_mode / build_plan_mode_prompt 给模型的写法。Markdown 允许标题
 # 前最多 3 个空格缩进，一并容忍。
 _TASK_LIST_HEADING_RE = re.compile(r"^\s{0,3}#{2,}[ \t]*任务清单")
-# 下一个标题（同级或更深）= 小节结束。只认 `##` 前缀，所以 `###` 也能收尾。
-_NEXT_HEADING_RE = re.compile(r"^\s{0,3}#{2,}")
+# 下一个标题（任意级别）= 小节结束。`#{1,}` 而不是 `#{2,}`：后随的 H1（`# …`）
+# 同样是边界，漏掉它会让 H1 连同它后面整段散文一起被切出对话版计划。
+_NEXT_HEADING_RE = re.compile(r"^\s{0,3}#{1,}")
+
+# conversation_plan 的兜底文案。计划**不是**空的——空的是它的散文正文：轻量轨的
+# plan.md 可能只有 `## 任务清单` 一节，切掉清单后什么都不剩，而清单已经物化进
+# task_list。刻意不回退到 full_plan：那正是在「清单就是整份计划」这种情况下把清单
+# 重新嵌回对话，撤销 conversation_plan 来自的那个修复。
+_CHECKLIST_ONLY_PLAN = "计划正文只有任务清单，已物化进 task_list。"
 
 
 def _strip_task_checklist_section(plan_md: str) -> str:
-    """删掉轻量轨 plan.md 里的 `## 任务清单` 小节：标题行 → 下一个 `##` 标题或文末。
+    """删掉轻量轨 plan.md 里的 `## 任务清单` 小节：标题行 → 下一个任意级标题或文末。
 
     找不到该标题时**逐字原样返回**——不动重量轨（它没有这个标题，任务清单在独立的
     tasks.md 里，由 conversation_plan 的组装直接略过 `## Tasks` 段），也不动没写
@@ -151,7 +162,7 @@ def _validate_and_load_draft(mgr: Any) -> str | _PlanDraft:
             f"## Spec\n{spec_content}" if spec_content.strip() else "",
             f"## Design\n{plan_content}" if plan_content.strip() else "",
         ) if part
-    ) or "(empty plan)"
+    ) or _CHECKLIST_ONLY_PLAN
     return _PlanDraft(
         granularity, spec_content, plan_content, tasks_content, plan_md,
         full_plan, conversation_plan,
@@ -205,6 +216,40 @@ async def _exit_plan_mode(agent: "Agent") -> str:
     return _finalize_plan_exit(agent, mgr, draft, choice)
 
 
+def _clear_draft_dir(plan_dir: Any, slug: str) -> None:
+    """批准落地后清掉草稿目录 `<workspace>/.mycode/plans/plan-<session_id>`。
+
+    它此前**从不被清**——_finalize_plan_exit 只把 `mgr.plan_dir` 置 None，那条路径上
+    没有任何 rmtree/unlink。而这个路径由 session_id 决定，每轮进 plan 模式都回到同一
+    个目录；提示词又明教「追加模式」就地追加（plan_mode.py:127-128），轻量轨的转换器
+    会把幸存 plan.md 里的**每个** checkbox 重新转一遍——于是第二轮 draft.tasks 几乎
+    必然是「旧 + 新」，上一轮已物化过的任务被再物化一遍（新 id + pending）。
+
+    只在 integration 成功后调用：失败时（slug 碰撞被 plan_mode.py:359-361 吞掉返回
+    None）草稿是计划的唯一副本，删了就没了。
+
+    清理失败不能让一次已经生效的批准返回错误文本，所以吞掉异常、只留痕。
+    """
+    if not plan_dir:
+        return
+    draft = Path(plan_dir)
+    # 防御：草稿目录与 plan 系统目录同在 `.mycode/plans/` 下，而 slug 的兜底值恰好
+    # 就是 `plan-{session_id}`（plan_mode.py:327）——两者同名。那种情况下 create_plan
+    # 会因目录已存在而抛、integration 返回 None，所以正常走不到这里；但要删的是用户
+    # 的计划副本，把不变量写实比靠推理省事更安全。
+    if slug and draft.resolve() == (get_plans_dir() / slug).resolve():
+        print_error(f"[plan] draft dir IS the plan entry, refusing to clear: {draft}")
+        return
+    try:
+        shutil.rmtree(draft, ignore_errors=True)
+    except Exception as e:
+        print_error(f"[plan] failed to clear draft dir '{draft}': {e!r}")
+        return
+    if draft.exists():
+        # ignore_errors=True 不抛，所以只能事后核对：残留的草稿下一轮照样会被复读。
+        print_error(f"[plan] draft dir survived cleanup: {draft}")
+
+
 def _finalize_plan_exit(agent: "Agent", mgr: Any, draft: _PlanDraft, choice: str) -> str:
     """批准路径：integration 落地 + 模式切换 + trace 上报 + 结果消息组装。"""
 
@@ -218,9 +263,17 @@ def _finalize_plan_exit(agent: "Agent", mgr: Any, draft: _PlanDraft, choice: str
         )
     else:
         plan_result = None
-    target_mode = "acceptEdits" if execute else (mgr.pre_plan_mode or "default")
 
     saved_plan_dir = mgr.plan_dir
+    target_mode = "acceptEdits" if execute else (mgr.pre_plan_mode or "default")
+    # 「已批准的计划文档在哪」：integration 成功时是 plan 系统目录（add_artifact 真正
+    # 落盘的地方）。草稿目录随后就被清掉，消息里再指它就是指一个不存在的路径。
+    if plan_result and plan_result.get("slug"):
+        plan_home = get_plans_dir() / plan_result["slug"]
+        _clear_draft_dir(saved_plan_dir, plan_result["slug"])
+    else:
+        plan_home = saved_plan_dir
+
     agent.permission_mode = target_mode
     mgr.pre_plan_mode = None
     mgr.plan_dir = None
@@ -245,7 +298,7 @@ def _finalize_plan_exit(agent: "Agent", mgr: Any, draft: _PlanDraft, choice: str
         result_msg = f"User approved the plan. Context was cleared. Permission mode: {target_mode}\n\n"
         if plan_result:
             result_msg += f"Plan system entry created: {plan_result.get('slug', '')}\n\n"
-        result_msg += f"Plan directory: {saved_plan_dir}\n\n"
+        result_msg += f"Plan directory: {plan_home}\n\n"
     else:
         print_info(f"Plan approved. Executing in {target_mode} mode.")
         result_msg = f"User approved the plan. Permission mode: {target_mode}\n\n"
@@ -280,17 +333,19 @@ def _finalize_plan_exit(agent: "Agent", mgr: Any, draft: _PlanDraft, choice: str
                 f"{materialized} 条任务已物化进 task_list。\n"
                 "清单摘要常驻你的上下文尾部，无需调 list 查询进度。\n"
                 f"{_injection_line(agent.session.id)}"
-                f"已批准的计划文档冻结在 {saved_plan_dir}，此后活状态只在 task_list。"
+                f"已批准的计划文档冻结在 {plan_home}，此后活状态只在 task_list。"
             )
-            if not complete:
-                # 截断只对 stderr 说是不够的：模型读到「N 条任务已物化」会当成最终
-                # 结果，而 store 里可能只有前缀。
-                result_msg += (
-                    "\n注意：物化中途中断，task_list 可能不完整，"
-                    "开工前先用 task_list list 核对。"
-                )
         else:
             result_msg += "Proceed with implementation."
+        if not complete:
+            # 截断只对 stderr 说是不够的：模型读到「N 条任务已物化」会当成最终结果，
+            # 而 store 里可能只有前缀。刻意放在 `if materialized:` **外面**——读取/
+            # 解析就抛的那种截断是 complete=False 且 count=0，嵌在里面会被整个吞掉，
+            # 模型只剩 "Proceed with implementation."，于是当没有计划、直接开工。
+            result_msg += (
+                "\n注意：物化中途中断，task_list 可能不完整，"
+                "开工前先用 task_list list 核对。"
+            )
     else:
         result_msg += "Proceed with implementation."
 
