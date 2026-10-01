@@ -1544,15 +1544,43 @@ export interface paths {
         };
         /**
          * Api Get Tasks
-         * @description 获取会话任务清单。
+         * @description 获取会话任务清单 + 后端算出的焦点条 id。
          */
         get: operations["api_get_tasks_api_tasks__session_id__get"];
         put?: never;
-        post?: never;
+        /**
+         * Api Create Task
+         * @description 新建一条任务。
+         */
+        post: operations["api_create_task_api_tasks__session_id__post"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/tasks/{session_id}/{task_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Api Delete Task
+         * @description 删一条任务。
+         */
+        delete: operations["api_delete_task_api_tasks__session_id___task_id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Api Update Task
+         * @description 改一条任务，返回改完的样子。
+         */
+        patch: operations["api_update_task_api_tasks__session_id___task_id__patch"];
         trace?: never;
     };
     "/api/tools": {
@@ -2144,6 +2172,78 @@ export interface components {
             context_files?: string[] | null;
             /** Message */
             message: string;
+        };
+        /** TaskCreateRequest */
+        TaskCreateRequest: {
+            /**
+             * Acceptance
+             * @default
+             */
+            acceptance: string;
+            /** After Id */
+            after_id?: number | null;
+            /** Content */
+            content: string;
+            /**
+             * Detail
+             * @default
+             */
+            detail: string;
+        };
+        /** TaskDeleteResponse */
+        TaskDeleteResponse: {
+            /**
+             * Message
+             * @default
+             */
+            message: string;
+            /** Success */
+            success: boolean;
+        };
+        /** TaskListResponse */
+        TaskListResponse: {
+            /** Focus Id */
+            focus_id?: number | null;
+            /** Tasks */
+            tasks: components["schemas"]["TaskOut"][];
+        };
+        /** TaskOut */
+        TaskOut: {
+            /** Acceptance */
+            acceptance: string;
+            /** Content */
+            content: string;
+            /** Created At */
+            created_at: string;
+            /** Detail */
+            detail: string;
+            /** Detail Origin Seq */
+            detail_origin_seq?: number | null;
+            /** Error */
+            error: string;
+            /** Id */
+            id: number;
+            /** Started Seq */
+            started_seq?: number | null;
+            /** Status */
+            status: string;
+            /** Updated At */
+            updated_at: string;
+        };
+        /** TaskUpdateRequest */
+        TaskUpdateRequest: {
+            /** Acceptance */
+            acceptance?: string | null;
+            /** After Id */
+            after_id?: number | null;
+            /** Content */
+            content?: string | null;
+            /** Detail */
+            detail?: string | null;
+            /** Error */
+            error?: string | null;
+            /** Status */
+            status?: ("pending" | "in_progress" | "completed" | "skipped" | "failed") | null;
         };
         /**
          * ThumbsDownRequest
@@ -5360,7 +5460,110 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["TaskListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    api_create_task_api_tasks__session_id__post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TaskCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    api_delete_task_api_tasks__session_id___task_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+                task_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskDeleteResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    api_update_task_api_tasks__session_id___task_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+                task_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TaskUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskOut"];
                 };
             };
             /** @description Validation Error */

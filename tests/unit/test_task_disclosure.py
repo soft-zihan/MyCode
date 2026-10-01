@@ -302,8 +302,11 @@ class _WiringAgent:
     """ModelCaller.call/_attempt 真正读到的全部属性（照 model_caller.py 读出来的）。
 
     call 读 model / _current_turn / _current_step / is_sub_agent（trace_span 的
-    metadata），_attempt 读 check_and_compact 与 session。哨兵短路在装配处，所以
-    messages / openai_client / _system_prompt_breakdown 这些一概不需要。
+    metadata），_attempt 读 session（快照加载）与 check_and_compact。哨兵短路在装配
+    处，所以 messages / openai_client / _system_prompt_breakdown 这些一概不需要。
+
+    check_and_compact 的 tasks 形参是 Plan 3b Task B1 的每请求快照：_attempt 读一次、
+    显式传给三个消费者。这里记下来，好让下面的测试能断言它真的被传了。
     """
 
     def __init__(self, session, order: list):
@@ -313,13 +316,15 @@ class _WiringAgent:
         self._current_step = 0
         self.is_sub_agent = False
         self._order = order
+        self.snapshot = "__unset__"
 
-    async def check_and_compact(self):
+    async def check_and_compact(self, tasks=None):
+        self.snapshot = tasks
         self._order.append("check_and_compact")
 
 
 def _sentinel_assemble(order: list):
-    def _assemble(self, span, tools_enabled, tool_choice=None):
+    def _assemble(self, span, tools_enabled, tool_choice=None, tasks=None):
         order.append("assemble")
         raise RuntimeError("sentinel: 短路在装配处")
     return _assemble
@@ -337,21 +342,27 @@ async def test_disclosure_call_site_fires_before_request_assembly(
 ):
     order: list = []
     session = _session()
+    snapshots: list = []
 
-    def _recorder(sess):
+    def _recorder(sess, tasks=None):
         order.append("disclosure")
         assert sess is session        # 传的是 session 本体，不是 session.id
+        snapshots.append(tasks)
         return False
 
     monkeypatch.setattr(
         "agents.core.model_caller.ensure_focus_detail_visible", _recorder)
     monkeypatch.setattr(ModelCaller, "_assemble_request", _sentinel_assemble(order))
 
+    agent = _WiringAgent(session, order)
     with pytest.raises(RuntimeError, match="sentinel"):
-        await ModelCaller(_WiringAgent(session, order)).call()
+        await ModelCaller(agent).call()
 
     # check_and_compact 在前（折叠可能刚把上一次披露隐藏掉），装配在最后
     assert order == ["check_and_compact", "disclosure", "assemble"]
+    # 两个消费者拿到的是**同一个**快照对象（每请求只读一次的那一次读的产物）。
+    # 快照的完整语义（读次数、S 看到的内容、探针的惰性）在 test_task_snapshot.py。
+    assert snapshots == [agent.snapshot]
 
 
 async def test_disclosure_failure_does_not_block_the_model_call(
@@ -361,7 +372,7 @@ async def test_disclosure_failure_does_not_block_the_model_call(
     order: list = []
     session = _session()
 
-    def _boom(sess):
+    def _boom(sess, tasks=None):
         order.append("disclosure")
         raise AttributeError("'int' object has no attribute 'strip'")
 

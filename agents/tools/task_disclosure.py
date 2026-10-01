@@ -14,6 +14,7 @@ from typing import Any
 
 from agents.logging import print_error
 from agents.tools.task_store import (
+    TaskItem,
     find_focus,
     format_disclosure_block,
     list_tasks,
@@ -22,17 +23,28 @@ from agents.tools.task_store import (
 )
 
 
-def ensure_focus_detail_visible(session: Any) -> bool:
+def ensure_focus_detail_visible(
+    session: Any, tasks: list[TaskItem] | None = None
+) -> bool:
     """焦点条的 detail 若已不在可见上下文，注入一次 memory_injection 事件。
 
     幂等：注入后立刻把 detail_origin_seq 记为新事件 seq，而 `Session.append` 让新
     事件默认可见（events_hidden 类型除外），所以同一上下文状态下重复调用不会重复
     注入。被折叠隐藏后 needs_disclosure 再次为真，于是自愈式重注入。
 
+    Args:
+        session: 会话对象（要它的 id、visible_seqs 与 append）。
+        tasks: **每请求快照**（Plan 3b Task B1）。生产路径由 ModelCaller._attempt
+            读一次、显式传下来，与折叠门探针、常驻摘要 S 共用同一份清单——UI 是
+            task_list 的第二个写入方，三次独立读会让一次写入落在它们之间。None =
+            「没有快照」（直接调用方、既有测试，或快照加载失败），此时自己读一次，
+            失败方向不变（读不出来 → 无焦点 → 不注入）。注意区分 None 与 []：
+            [] 是「读到了，确实没有任务」，同样不注入，但不该再读一次。
+
     Returns:
         bool: 是否真的注入了（注入后被回滚也算没注入，返回 False）。
     """
-    focus = find_focus(list_tasks(session.id))
+    focus = find_focus(tasks if tasks is not None else list_tasks(session.id))
     if not needs_disclosure(focus, session.visible_seqs):
         return False
 

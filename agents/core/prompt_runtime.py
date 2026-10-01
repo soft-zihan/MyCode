@@ -21,18 +21,30 @@ from typing import TYPE_CHECKING
 from agents.core.prompt import build_system_prompt_with_breakdown
 from agents.core.workspace import set_workspace, reset_workspace
 from agents.logging import print_error
-from agents.tools.task_store import find_focus, format_task_list_block, list_tasks
+from agents.tools.task_store import (
+    TaskItem,
+    find_focus,
+    format_task_list_block,
+    list_tasks,
+)
 
 if TYPE_CHECKING:
     from agents.agent import Agent
 
 
-def build_tail_system_messages(agent: "Agent") -> list[str]:
+def build_tail_system_messages(
+    agent: "Agent", tasks: list[TaskItem] | None = None
+) -> list[str]:
     """请求尾部 ephemeral system messages（每请求重建，不进主 prompt）。
 
     顺序：plan 模式提示词在前（模式级约束），清单摘要 S 居中（任务变更时才变），
     fold guidance 在后（最易变——利用率百分比每请求都变）。更易变的放最后，
     前面的部分才能在多请求间尽量稳定。
+
+    Args:
+        tasks: **每请求快照**（Plan 3b Task B1）。生产路径由 ModelCaller._attempt
+            读一次并显式传下来，与折叠门探针、推式披露共用同一份清单。None = 没有
+            快照（直接调用方、既有测试，或快照加载失败）→ 自己读一次。
     """
     tails: list[str] = []
     if agent._custom_system_prompt is not None:
@@ -48,28 +60,31 @@ def build_tail_system_messages(agent: "Agent") -> list[str]:
     # 条目只报计数，所以 S 随计划推进而收缩。刻意不含 detail —— detail 走
     # task_disclosure 的条件注入，常驻块带上它就等于放弃渐进式披露。
     #
-    # 但这次读**不是**无副作用的纯查询，别按「读投影」的字面意思理解它：
-    # get_tasks_dir() 每次调用都 mkdir（幂等），load_tasks() 遇到坏文件会把它
-    # 改名成 {stem}.corrupt-{ts}.json 隔离掉再返回空清单。也就是说连从不使用
-    # 任务的 session 也会每请求发一次 mkdir 系统调用。两处行为都刻意保留
-    # （隔离是防「读失败退化成空清单→下次 save 覆盖全文件」的丢数据保护，
-    # mkdir 幂等且极便宜），此处只是不把副作用藏进一句轻描淡写的注释里。
+    # 这次读**默认不发生**：清单由 ModelCaller._attempt 每请求读一次、作为快照传进来
+    # （Plan 3b Task B1）。此前这里是每请求的第二次 store 读（另一次是
+    # ensure_focus_detail_visible → list_tasks），当时的裁定写的是「已评估并接受，
+    # 别再重新论证」，理由是共享一次加载要让 task_disclosure 与 prompt_runtime 跨
+    # 模块耦合，而两次读只花 ~0.22 ms。那条裁定成立的前提是**只有一个写入方**。
+    # UI 写端点落地后，一次写入可以落在折叠门探针、推式披露与 S 的三次独立读之间，
+    # 于是「折叠门认为没有任务在跑、模型眼前的 S 认为有」成了可读出来的状态——这正是
+    # Plan 2 同时写下的另一半裁定所要防的：「Plan 3 引入第二个写入方时，每请求只读
+    # 一次、把快照传给三个消费者」。这里就是那半个裁定的落点。
+    # 跨请求缓存仍然禁止（Plan 2 反对的是那件事：拿不可达的竞态换可达的陈旧 bug）；
+    # 请求作用域的快照没有失效逻辑，不在那条禁令里。
     #
-    # 这是每请求的第二次 store 读（另一次是 model_caller 里
-    # ensure_focus_detail_visible → list_tasks）。**已评估并接受，别再重新论证**：
-    # 两次读的是同一个小 JSON——实测 5 条清单 2 KB、11 条带长 detail 的清单
-    # 11.5 KB，单次 list_tasks ≈ 0.11 ms，两次 ≈ 0.22 ms，相对一次模型调用
-    # （秒级）是万分之一量级。共享一次加载要让 task_disclosure 与 prompt_runtime
-    # 跨模块耦合，省下的是测不出来的时间；mtime 缓存则是在没有实测证据前先引入
-    # 失效逻辑（推测性复杂度）。若将来真测出成本，落点应是一个带失效语义的
-    # store 读取层，而不是把这两个调用点缝在一起。
+    # tasks is None 的回退分支保留原来那次读，连带它的两个副作用：get_tasks_dir()
+    # 每次调用都 mkdir（幂等），load_tasks() 遇到坏文件会把它改名成
+    # {stem}.corrupt-{ts}.json 隔离掉再返回空清单。两处行为都刻意保留（隔离是防
+    # 「读失败退化成空清单 → 下次 save 覆盖全文件」的丢数据保护，mkdir 幂等且极便宜），
+    # 此处只是不把副作用藏进一句轻描淡写的注释里。走快照的生产路径上这两个副作用发生在
+    # try_list_tasks 那一次读里，每请求一次而不是三次。
     #
     # try/except：尾部组装绝不能抛——它每次模型调用都跑，store 读失败只应退化成
     # 「这次没有任务块」，不该阻断模型调用（与 model_caller 的披露调用点同一策略）。
     try:
-        tasks = list_tasks(agent.session.id)
-        if tasks:
-            task_block = format_task_list_block(tasks, find_focus(tasks))
+        items = tasks if tasks is not None else list_tasks(agent.session.id)
+        if items:
+            task_block = format_task_list_block(items, find_focus(items))
             if task_block:
                 tails.append(task_block)
     except Exception as e:

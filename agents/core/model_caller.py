@@ -24,6 +24,10 @@ from agents.core.text_sanitization import safe_utf8_text, sanitize_for_utf8
 from agents.logging import print_error
 from agents.tools.registry import get_active_tool_definitions
 from agents.tools.task_disclosure import ensure_focus_detail_visible
+# 模块级而非延迟 import：tests/unit/test_import_hygiene.py 冻结了「agents/ 内零函数级
+# agents import」。task_store 只依赖 workspace 与 logging，不构成环（上一行的
+# task_disclosure 已经依赖它）。
+from agents.tools.task_store import TaskItem, try_list_tasks
 from agents.wiki.citation import CitationStripper, strip_citations
 from agents.wiki.store import increment_usage
 from agents.core.subagent import get_available_agent_types
@@ -201,19 +205,35 @@ class ModelCaller:
         ) as span:
 
             async def _attempt():
-                await a.check_and_compact()
+                # 每请求一次的任务清单快照（Plan 2 裁定的兑现，Plan 3b Task B1）。
+                #
+                # 三个消费者都在这条调用链上：折叠门探针（check_and_compact →
+                # run_pipeline → _resolve_defer_fold）、推式披露
+                # （ensure_focus_detail_visible）、常驻摘要 S（_assemble_request →
+                # build_tail_system_messages）。此前它们各读一次盘，而 UI 写端点让
+                # task_list 有了第二个写入方：一次写入落在三次读之间，折叠门就可能
+                # 在任务中途判定「没有任务在跑」并折叠，而模型眼前的 S 说的是另一回事。
+                # 在这里读一次、显式传下去，三者看同一份清单。
+                #
+                # 请求作用域、无失效逻辑，所以不违反 Plan 2「不加缓存」那条裁定
+                # （那条反对的是跨请求缓存：拿不可达的竞态换可达的陈旧 bug）。
+                # None = 读不出来（try_list_tasks 已留痕），各消费者随后自行回退到
+                # 自己那次读与自己的失败方向。
+                task_snapshot = try_list_tasks(a.session.id)
+                await a.check_and_compact(task_snapshot)
                 # 焦点任务 detail 的条件披露。必须在 check_and_compact 之后（折叠可能
                 # 刚把上一次披露隐藏掉）、_assemble_request 之前（否则本次请求看不到）。
                 # 幂等，with_retry 的重试不会重复注入。
                 try:
-                    ensure_focus_detail_visible(a.session)
+                    ensure_focus_detail_visible(a.session, task_snapshot)
                 except Exception as e:
                     # 带 traceback：披露路径里的编程错误不该只以一个裸 repr 现身。
                     # 仍然吞掉——披露绝不能阻断模型调用。
                     print_error(
                         f"[task_disclosure] injection failed: {e!r}\n{traceback.format_exc()}"
                     )
-                create_params, raw_messages, metrics = self._assemble_request(span, tools_enabled, tool_choice)
+                create_params, raw_messages, metrics = self._assemble_request(
+                    span, tools_enabled, tool_choice, task_snapshot)
                 metrics.update(self._compute_token_breakdown(raw_messages))
                 stream = await a.openai_client.chat.completions.create(**create_params)
                 consumed = await self._consume_stream(stream)
@@ -257,8 +277,18 @@ class ModelCaller:
                 span.record_error(e)
                 raise
 
-    def _assemble_request(self, span, tools_enabled: bool, tool_choice: str | None = None) -> tuple[dict, list[dict], dict]:
-        """组装 create 参数 + 上报 trace input，返回 (params, raw_messages, 组装指标)。"""
+    def _assemble_request(
+        self,
+        span,
+        tools_enabled: bool,
+        tool_choice: str | None = None,
+        tasks: list[TaskItem] | None = None,
+    ) -> tuple[dict, list[dict], dict]:
+        """组装 create 参数 + 上报 trace input，返回 (params, raw_messages, 组装指标)。
+
+        tasks = 每请求的任务清单快照，由 _attempt 读一次传下来（Plan 3b Task B1），
+        转交给 build_tail_system_messages 渲染常驻摘要 S。
+        """
         a = self._agent
         _asm_t0 = time.perf_counter()
 
@@ -277,7 +307,7 @@ class ModelCaller:
         # 尾部 ephemeral system messages 注入（U5a：plan 提示词 + 运行时易变状态；
         # prefix cache 保护——主 system prompt 会话内真冻结，尾部消息每步变化
         # 不影响其前全部历史的缓存命中）
-        for _tail in a.build_tail_system_messages():
+        for _tail in a.build_tail_system_messages(tasks):
             sanitized_messages.append({"role": "system", "content": _tail})
 
         create_params = {

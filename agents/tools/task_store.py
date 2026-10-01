@@ -368,6 +368,27 @@ def list_tasks(session_id: str) -> list[TaskItem]:
     return task_list.tasks
 
 
+def try_list_tasks(session_id: str) -> list[TaskItem] | None:
+    """容错读一次清单，作为**每请求快照**的加载点；读不出来返回 None。
+
+    快照的存在理由：Plan 3b 的写端点让 UI 成为第二个写入方，于是一次写入可以落在
+    同一请求内三个消费者（折叠门探针 / 推式披露 / 常驻摘要 S）的三次独立读之间——
+    折叠门可能在任务中途决定折叠，而模型眼前的 S 说的是另一回事。加载点上移到
+    ModelCaller._attempt，读一次、显式传下去（Plan 2 裁定的兑现；请求作用域、无
+    失效逻辑，所以不违反「不加跨请求缓存」那条）。
+
+    None 的语义是「这次没有快照」，**不是**「清单是空的」：消费者拿到 None 就自己
+    再读一次，于是各自落进它们既有的失败方向（折叠门 False、不披露、S 缺席）；拿到
+    [] 则是「读到了，确实没有任务」。两者混成一个 [] 最终行为相同，但会把「store
+    读不出来」这件事从三个消费者的日志里抹掉，所以刻意分开。
+    """
+    try:
+        return list_tasks(session_id)
+    except Exception as e:
+        print_error(f"[task_store] request snapshot load failed: {e!r}")
+        return None
+
+
 _FOCUS_STATUS_ORDER = (
     TASK_STATUS_IN_PROGRESS,
     TASK_STATUS_FAILED,

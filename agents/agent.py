@@ -456,8 +456,10 @@ class Agent:
             event_data["sub_agent_id"] = self._current_sub_agent_id
         self.session.append("text", event_data)
 
-    def build_tail_system_messages(self) -> list[str]:
-        return prompt_runtime.build_tail_system_messages(self)
+    def build_tail_system_messages(
+        self, tasks: list[task_store.TaskItem] | None = None) -> list[str]:
+        # tasks = 每请求快照，由 ModelCaller._assemble_request 传下来（Plan 3b B1）。
+        return prompt_runtime.build_tail_system_messages(self, tasks)
 
     def _refresh_runtime_system_prompt(self, force: bool = False) -> None:
         prompt_runtime.refresh_runtime_system_prompt(self, force=force)
@@ -636,35 +638,49 @@ class Agent:
     def refresh_runtime_system_prompt(self, force: bool = False) -> None:
         self._refresh_runtime_system_prompt(force=force)
 
-    def _has_in_progress_task(self) -> bool:
-        """有没有任务正在执行 —— 折叠任务边界门的探针（零参 callable）。
+    def _has_in_progress_task(
+        self, tasks: list[task_store.TaskItem] | None = None) -> bool:
+        """有没有任务正在执行 —— 折叠任务边界门的探针。
 
         读不出来一律返回 False：绝不能因为任务清单读不出来就不压缩，那会撑爆
         上下文窗口。失败方向刻意选在「照常折叠」这一侧，且**裁定权留在本方法里**
-        （context_compressor 不 import task_store，只认一个返回 bool 的 callable）。
+        （context_compressor 不 import task_store，只认一个返回 bool 的零参 callable）。
 
-        调用方刻意把**方法本身**交下去而不是它的返回值：见 check_and_compact。
+        交给压缩器的仍然是**零参** callable：见 check_and_compact。
+
+        tasks = 每请求快照（Plan 3b Task B1）。有快照就读快照、一次盘都不碰；None
+        表示「没有快照」（Agent._check_and_compact 那条不经 _attempt 的路径、直接
+        调用它的测试、或快照本身加载失败），此时自己读一次并保留上面那条失败方向。
+        刻意用 `is None` 而不是 falsy 判断：[] 是「读到了，确实没有任务」这个**答案**，
+        把它当成「没有快照」会白读一次盘，还会把「store 读不出来」与「没有任务」
+        两种状态混成一件事。
         """
         try:
-            return any(t.status == task_store.TASK_STATUS_IN_PROGRESS
-                       for t in task_store.list_tasks(self.session.id))
+            items = tasks if tasks is not None else task_store.list_tasks(self.session.id)
+            return any(t.status == task_store.TASK_STATUS_IN_PROGRESS for t in items)
         except Exception as e:
             print_error(f"[fold_gate] task probe failed, folding normally: {e!r}")
             return False
 
-    def check_and_compact(self):
+    def check_and_compact(self, tasks: list[task_store.TaskItem] | None = None):
         # 折叠任务边界门（Plan 2 Task 4）：任务执行中途，工具结果/文件内容/报错
         # 是模型正在推理的活工作集，折叠它们不是省钱而是破坏当前任务。这里把门
         # 的探针一路传到 ContextCompressor._should_compress（经 context.py 纯中转），
         # 硬顶 min(threshold+0.10, 0.95) 是安全阀。
         #
-        # 刻意交**方法对象**而不是 self._has_in_progress_task() 的返回值：探针要
-        # 读一次任务清单，而 check_and_compact 每次模型调用都跑，绝大多数时候
-        # 利用率离任何触发点都很远、这一轮根本不做折叠决定。交值等于把它变成每
-        # 请求第三次读同一个几 KB 文件（推式披露与常驻摘要各读一次）。解析发生在
-        # ContextCompressor._resolve_defer_fold，只在逼近触发点时。
-        return self._context_manager._check_and_compact(
-            defer_fold=self._has_in_progress_task)
+        # 刻意交**零参 callable**而不是探针的返回值：check_and_compact 每次模型调用
+        # 都跑，绝大多数时候利用率离任何触发点都很远、这一轮根本不做折叠决定，交值
+        # 等于把那次判断变成无条件发生。解析发生在 ContextCompressor._resolve_defer_fold，
+        # 只在逼近触发点时——这条惰性性质在加快照之后**不变**，变的只是探针读什么。
+        #
+        # 有快照时交一个闭包捕获快照的 lambda（仍然零参、仍然惰性），于是「逼近触发点
+        # 才读盘」升级成「压根不读盘」：那一次读已经在 ModelCaller._attempt 顶部为
+        # 三个消费者付过了。没有快照时交绑定方法本身，行为与加快照之前逐字相同。
+        # `tasks is None` 而不是 falsy：[] 是一个真答案（没有任务 → 门不开），
+        # 不该退化成一次多余的磁盘读。
+        probe = (self._has_in_progress_task if tasks is None
+                 else lambda: self._has_in_progress_task(tasks))
+        return self._context_manager._check_and_compact(defer_fold=probe)
 
     def emit_text(self, text: str) -> None:
         self._emit_text(text)
