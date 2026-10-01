@@ -699,7 +699,10 @@ class AgentLoop:
             if force_stop:
                 guard_stop = True
                 guard_reason = guard_reason or stop_reason
-            a.append_tool_message(ct_item["tc"]["id"], res, ct_item["fn"])
+            # outcome 与上面 publish_tool_result_event / check_tool_warnings 用的是
+            # 同一个局部值：tool_result 是只推不持久化的流式事件，验收闸门事后只能
+            # 从落盘的 tool_result_msg 取事实，所以这里必须一并落盘（逐字，不归一化）。
+            a.append_tool_message(ct_item["tc"]["id"], res, ct_item["fn"], outcome)
 
         return guard_stop, guard_reason
 
@@ -718,6 +721,10 @@ class AgentLoop:
             fn_name = ct["fn"]
             print_info(f"[DEBUG] _execute_sequential_batch: tool {i+1}/{len(items)}: {fn_name}")
             if not ct["allowed"]:
+                # 权限拒绝路径没有 ToolExecutionResult：ct["result"] 是 _handle_tool_calls
+                # 预生成的拒绝文案，那条 publish_tool_result_event 也只给 status="denied"
+                # 而不给 outcome。所以这里 outcome 落空串（参数默认值），不就地编一个
+                # 词表值——被拒绝的调用本来就不可能是闸门要找的「成功的验收命令」。
                 a.append_tool_message(ct["tc"]["id"], ct["result"], ct["fn"])
                 continue
 
@@ -809,7 +816,8 @@ class AgentLoop:
         )
         res, force_stop, stop_reason = self._apply_warning_result(ct, res, warning_result)
 
-        a.append_tool_message(ct["tc"]["id"], res, ct["fn"])
+        # 同并发路径：outcome 逐字落盘，验收闸门的事实来源（见 _execute_concurrent_batch）
+        a.append_tool_message(ct["tc"]["id"], res, ct["fn"], outcome)
         return False, bool(force_stop), (stop_reason if force_stop else None)
 
     def _cancel_remaining_tools(self, items: list[dict], from_index: int,

@@ -521,8 +521,14 @@ class Agent:
     def append_memory_injection(self, content: str) -> None:
         self._context_manager.append_memory_injection(content)
 
-    def append_tool_message(self, tool_call_id: str, content: str, tool_name: str = "") -> None:
-        self._context_manager.append_tool_message(tool_call_id, content, tool_name)
+    def append_tool_message(
+        self,
+        tool_call_id: str,
+        content: str,
+        tool_name: str = "",
+        outcome: str = "",
+    ) -> None:
+        self._context_manager.append_tool_message(tool_call_id, content, tool_name, outcome)
         # 记录每个工具的结果字符数
         if tool_name:
             self._tool_result_chars[tool_name] = self._tool_result_chars.get(tool_name, 0) + len(content)

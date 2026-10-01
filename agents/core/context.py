@@ -38,10 +38,30 @@ class ContextManager:
         """追加记忆/Wiki 注入到事件日志。"""
         self.agent.session.append("memory_injection", {"content": content})
 
-    def append_tool_message(self, tool_call_id: str, content: str, tool_name: str = "") -> None:
-        """追加工具结果消息到事件日志。"""
+    def append_tool_message(
+        self,
+        tool_call_id: str,
+        content: str,
+        tool_name: str = "",
+        outcome: str = "",
+    ) -> None:
+        """追加工具结果消息到事件日志。
+
+        outcome / tool_name 一并落盘：验收闸门需要事后回答「这条任务在做的时候
+        有没有跑过成功的 shell 命令」，而工具名此前只能从 <tool_result tool="...">
+        的包裹文本里解析，脆弱。取消/中止路径不传这两个参数，落空串。
+
+        outcome 逐字存，不归一化：词表来自 agents/tools/result.py 的 ToolOutcome
+        （success/error/timeout/cancelled/blocked/budget_exceeded），闸门按
+        == "success" 精确比较，这里任何"顺手规整"都会让事实源失去可追溯性。
+        """
         wrapped = f"<tool_result tool=\"{tool_name}\">\n{content}\n</tool_result>"
-        self.agent.session.append("tool_result_msg", {"call_id": tool_call_id, "content": wrapped})
+        self.agent.session.append("tool_result_msg", {
+            "call_id": tool_call_id,
+            "content": wrapped,
+            "tool_name": tool_name,
+            "outcome": outcome,
+        })
 
     def clear_history(self) -> None:
         """清空历史记录。"""
