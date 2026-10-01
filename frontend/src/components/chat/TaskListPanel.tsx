@@ -25,8 +25,11 @@ interface TaskListPanelProps {
   focusId?: number | null;
   sessionId?: string;
   /** 写成功之后重新 GET 一次。写端点刻意不广播 `task_list/updated`（那条 WS 分支只服务
-   *  Agent 侧的工具调用），HTTP 写的发起方就是面板自己，所以刷新得由面板触发。 */
-  onChanged?: () => void | Promise<void>;
+   *  Agent 侧的工具调用），HTTP 写的发起方就是面板自己，所以刷新得由面板触发。
+   *  返回 `false` = **写成功但刷新失败**（I-3），面板必须把它显示出来；返回 void/
+   *  undefined（只读用法、没有当前会话）不算失败。刻意用返回值而不是抛异常：上层的
+   *  `fetchTasks` 还被 WS 事件处理器与挂载 effect 以 fire-and-forget 方式调用。 */
+  onChanged?: () => boolean | Promise<boolean> | void;
 }
 
 /** 后端五值状态词表（与 `TaskStatus` 同源）。 */
@@ -356,6 +359,21 @@ export const TaskListPanel = memo(function TaskListPanel({
     }
   };
 
+  /** 写成功之后的回灌 + 它自己的失败可见性（I-3）。
+   *  此前各写路径直接 `await onChanged?.()`：刷新失败被上层 `fetchTasks` 吞进
+   *  console.error，`runWrite` 看到的是 resolved，于是 F7 的 lastError 不亮、草稿已经
+   *  丢掉、textarea 弹回编辑前的值——用户的编辑看起来凭空消失，而改动其实**已经在
+   *  服务端了**。「写失败才报错」是这条缺陷的全部成因，所以这里显式区分两种失败。
+   *  用返回值而不是异常穿透：`fetchTasks` 还被 WS 事件处理器与挂载 effect 以
+   *  fire-and-forget 方式调用，抛出去会变成 unhandled rejection。
+   *  只有 `=== false` 算失败：onChanged 缺席（只读用法）或返回 void/undefined 都不算。 */
+  const refreshAfterWrite = async () => {
+    const ok = await onChanged?.();
+    if (ok === false) {
+      setLastError('写入已保存，但刷新清单失败：这里显示的可能不是服务端的最新状态（详见控制台）');
+    }
+  };
+
   const toggle = (id: number) => {
     setExpanded(prev => {
       const next = new Set(prev);
@@ -422,7 +440,7 @@ export const TaskListPanel = memo(function TaskListPanel({
     void runWrite(opKey, async () => {
       await updateTask(sid, task.id, payload);
       discardDraft(task.id, field);
-      await onChanged?.();
+      await refreshAfterWrite();
     });
   };
 
@@ -433,7 +451,7 @@ export const TaskListPanel = memo(function TaskListPanel({
     if (busy.has(opKey)) return; // F2
     void runWrite(opKey, async () => {
       await updateTask(sid, task.id, { status: next as TaskStatus });
-      await onChanged?.();
+      await refreshAfterWrite();
     });
   };
 
@@ -461,7 +479,7 @@ export const TaskListPanel = memo(function TaskListPanel({
     }
     void runWrite(opKey, async () => {
       await updateTask(sid, task.id, { after_id: afterId });
-      await onChanged?.();
+      await refreshAfterWrite();
     });
   };
 
@@ -478,7 +496,7 @@ export const TaskListPanel = memo(function TaskListPanel({
         setLastError(`删除失败：${res.message || '未知原因'}`);
         return;
       }
-      await onChanged?.();
+      await refreshAfterWrite();
     });
   };
 
@@ -499,7 +517,7 @@ export const TaskListPanel = memo(function TaskListPanel({
           : { content, detail: draft.detail, acceptance: draft.acceptance, after_id: afterId },
       );
       closeInsert(slot);
-      await onChanged?.();
+      await refreshAfterWrite();
     });
   };
 

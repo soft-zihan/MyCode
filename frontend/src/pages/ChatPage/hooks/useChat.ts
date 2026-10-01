@@ -868,7 +868,7 @@ export function useChat() {
     }
   }, [pendingPermission, currentSessionId]);
 
-  const fetchTasks = useCallback(async (sessionId: string) => {
+  const fetchTasks = useCallback(async (sessionId: string): Promise<boolean> => {
     try {
       // 走 client.ts 那个照生成契约写的方法（类型来自 paths[...]），不再手写 fetch + 手解 JSON。
       const data = await fetchTasksApi(sessionId);
@@ -877,6 +877,7 @@ export function useChat() {
       // 原样保留**，面板把它渲染成「未知状态」。悄悄映射成 pending 会让后端加第六种状态时
       // 前端一声不响地显示错的东西。
       sessionStore.setTasks(sessionId, (data.tasks ?? []) as TaskItem[], data.focus_id ?? null);
+      return true;
     } catch (err) {
       // 失败**不清空**已有清单：保留旧数据 + 可观测，好过面板静默变空白。
       // 状态码必须进日志——`_taskError` 在有 detail 时消息里不带状态码，
@@ -886,13 +887,20 @@ export function useChat() {
         `[TASK] fetchTasks failed (${status != null ? `HTTP ${status}` : 'network error'}), 保留现有清单:`,
         err,
       );
+      // **返回 false 而不是抛**（I-3）：本函数还被 WS 事件处理器与挂载 effect 以
+      // fire-and-forget 方式调用，抛出去会变成 unhandled rejection。而面板的写路径
+      // 需要知道「写成功了但刷新失败」：那时 textarea 会弹回编辑前的值，看起来像
+      // 用户的编辑凭空消失，而改动其实已经在服务端了——必须在面板上说出来。
+      return false;
     }
   }, []);
 
   /** 面板写成功之后的回灌入口（R3：写端点不广播 task_list/updated，发起方就是面板自己）。
    *  必须走后端 GET 而不是本地乐观拼接——`focus_id` 只有后端 `find_focus` 算得准。
    *  **返回那个 promise**（F6）：面板 `await onChanged?.()` 之后才清 busy，返回 void 的话
-   *  await 立刻结束，行解禁时显示的还是旧快照。 */
+   *  await 立刻结束，行解禁时显示的还是旧快照。
+   *  布尔值原样透传（I-3）：面板靠它区分「写成功 + 刷新成功」与「写成功 + 刷新失败」，
+   *  后者必须在面板上可见。没有当前会话时返回 undefined（不是 false，即不算失败）。 */
   const refreshTasks = useCallback(() => {
     if (!currentSessionId) return;
     return fetchTasks(currentSessionId);

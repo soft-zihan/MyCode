@@ -51,6 +51,11 @@ def ensure_focus_detail_visible(
     block = format_disclosure_block(focus)
     if not block:
         return False
+    # 本次真正注入的那段 detail 文本（I-1）。记账必须拿**它**去比，而不是事后重读盘：
+    # 一次 `PATCH {detail:...}` 若落在「渲染快照」与「记账」之间，重读盘会把没披露过的
+    # 新 detail 盖成已披露（needs_disclosure 变 False）→ 新文本永远到不了模型、HTTP 200、
+    # 无日志。比较失配时 store 不盖章（只多披露一次，安全方向），见 mark_detail_disclosed。
+    injected_detail = focus.detail
 
     event = session.append("memory_injection", {"content": block})
     seq = event.get("seq")
@@ -67,7 +72,7 @@ def ensure_focus_detail_visible(
         )
         return True
     try:
-        mark_detail_disclosed(session.id, focus.id, seq)
+        mark_detail_disclosed(session.id, focus.id, seq, injected_detail)
     except Exception as e:
         # 记账失败必须回滚注入：否则事件留在可见集里而 detail_origin_seq 未记录，
         # 此后每次模型调用都会重注入最多 6000 字符——本特性唯一一处无上界的浪费。

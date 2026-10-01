@@ -8,6 +8,10 @@ task_list 的四个端点（GET/POST/PATCH/DELETE）让 UI 成为 task_list 的*
 成立，否则 HTTP 面就成了它们的后门。四条被 tests/unit/test_task_endpoints.py 钉住的
 性质，理由写在各自的模型/端点注释里：请求体不接受服务端自有的记账字段、PATCH 改
 detail 时清空 detail_origin_seq、after_id 以 int 抵达 store、非法 status 回 4xx。
+
+四个端点一律用 `with workspace_scope(resolve_session_workspace(session_id)):` 包住
+函数体，理由写在 api_get_tasks 里（store 是工作区作用域的，而 HTTP 请求不在任何会话
+的 scope 里）。
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from agents.core.workspace import workspace_scope
 from agents.tools.task_store import (
     TaskItem,
     add_task,
@@ -25,6 +30,8 @@ from agents.tools.task_store import (
     remove_task,
     update_task,
 )
+
+from .sessions import resolve_session_workspace
 
 router = APIRouter(tags=["events"])
 
@@ -147,12 +154,27 @@ async def api_respond_question(data: QuestionResponseData):
 @router.get("/api/tasks/{session_id}", response_model=TaskListResponse)
 async def api_get_tasks(session_id: str) -> TaskListResponse:
     """获取会话任务清单 + 后端算出的焦点条 id。"""
-    items = list_tasks(session_id)
-    focus = find_focus(items)
-    return TaskListResponse(
-        tasks=[TaskOut.from_item(item) for item in items],
-        focus_id=focus.id if focus is not None else None,
-    )
+    # 为什么四个 /api/tasks 端点都必须包 workspace_scope：
+    # task store 是**工作区作用域**的（task_store.get_tasks_dir =
+    # get_workspace()/".mycode"/"todos"），而 get_workspace() 读一个 ContextVar、
+    # 未设置时回退进程 CWD。Agent 跑会话时在 workspace_scope(agent.workspace) 里，
+    # 于是任务落在 <会话 cwd>/.mycode/todos/<sid>.json；而前端服务器只在**启动时**
+    # 把 ContextVar 设成 project_root（main.py:50-52），HTTP 请求里再没按会话设过。
+    # 不包这一层，端点就去 <project_root>/.mycode/todos/<sid>.json 找——会话 cwd ≠
+    # project_root 时那个文件不存在：GET 恒返回 200 + 空清单（面板永久空白、控制台
+    # 零输出），三个写端点更糟，PATCH 回 200 而写进一个 Agent 永远不读的幽灵文件
+    # ——「用户以为改了计划、其实什么都没发生、还没有任何报错」。
+    # 样板是 sessions.py 的 api_plan_draft_artifacts（:907）与
+    # api_plan_draft_artifact_update（:921）：同一个 helper、同一种包法。
+    # resolve_session_workspace 的兜底是 Path.cwd()（无活 agent 且无 projcache 时），
+    # 与 CLI/单进程场景一致，由 test_task_endpoints.py 的反向对照钉住。
+    with workspace_scope(resolve_session_workspace(session_id)):
+        items = list_tasks(session_id)
+        focus = find_focus(items)
+        return TaskListResponse(
+            tasks=[TaskOut.from_item(item) for item in items],
+            focus_id=focus.id if focus is not None else None,
+        )
 
 
 # POST/PATCH/DELETE 的说明刻意放在装饰器**外面**：FastAPI 会把函数 docstring 整个
@@ -170,17 +192,20 @@ async def api_get_tasks(session_id: str) -> TaskListResponse:
 @router.post("/api/tasks/{session_id}", response_model=TaskOut)
 async def api_create_task(session_id: str, data: TaskCreateRequest) -> TaskOut:
     """新建一条任务。"""
-    content = data.content.strip()
-    if not content:
-        raise HTTPException(status_code=422, detail="content is required")
-    item = add_task(
-        session_id,
-        content,
-        detail=data.detail,
-        acceptance=data.acceptance,
-        after_id=data.after_id,
-    )
-    return TaskOut.from_item(item)
+    # workspace_scope 的理由见 api_get_tasks（store 是工作区作用域的，HTTP 请求不在
+    # 任何会话的 scope 里）。写端点比读端点更严重：不包就是 200 + 写进幽灵文件。
+    with workspace_scope(resolve_session_workspace(session_id)):
+        content = data.content.strip()
+        if not content:
+            raise HTTPException(status_code=422, detail="content is required")
+        item = add_task(
+            session_id,
+            content,
+            detail=data.detail,
+            acceptance=data.acceptance,
+            after_id=data.after_id,
+        )
+        return TaskOut.from_item(item)
 
 
 # PATCH：改一条任务，返回改完的样子。
@@ -207,21 +232,23 @@ async def api_update_task(
     session_id: str, task_id: int, data: TaskUpdateRequest
 ) -> TaskOut:
     """改一条任务，返回改完的样子。"""
-    if data.content is not None and not data.content.strip():
-        raise HTTPException(status_code=422, detail="content cannot be blank")
-    item = update_task(
-        session_id,
-        task_id,
-        status=data.status,
-        content=data.content,
-        detail=data.detail,
-        acceptance=data.acceptance,
-        error=data.error,
-        after_id=data.after_id,
-    )
-    if item is None:
-        raise HTTPException(status_code=404, detail="Task not found")
-    return TaskOut.from_item(item)
+    # workspace_scope 的理由见 api_get_tasks。
+    with workspace_scope(resolve_session_workspace(session_id)):
+        if data.content is not None and not data.content.strip():
+            raise HTTPException(status_code=422, detail="content cannot be blank")
+        item = update_task(
+            session_id,
+            task_id,
+            status=data.status,
+            content=data.content,
+            detail=data.detail,
+            acceptance=data.acceptance,
+            error=data.error,
+            after_id=data.after_id,
+        )
+        if item is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return TaskOut.from_item(item)
 
 
 # DELETE：删一条任务。
@@ -235,6 +262,8 @@ async def api_delete_task(
     session_id: str, task_id: int
 ) -> TaskDeleteResponse:
     """删一条任务。"""
-    if not remove_task(session_id, task_id):
-        return TaskDeleteResponse(success=False, message="Task not found")
-    return TaskDeleteResponse(success=True)
+    # workspace_scope 的理由见 api_get_tasks。
+    with workspace_scope(resolve_session_workspace(session_id)):
+        if not remove_task(session_id, task_id):
+            return TaskDeleteResponse(success=False, message="Task not found")
+        return TaskDeleteResponse(success=True)

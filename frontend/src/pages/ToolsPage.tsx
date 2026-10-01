@@ -323,7 +323,7 @@ export default function ToolsPage() {
                   inputSchema: tool.input_schema,
                   source: 'native',
                 };
-                const isPlanTool = tool.name.startsWith('plan_') || tool.name === 'enter_plan_mode' || tool.name === 'exit_plan_mode';
+                const isPlanTool = tool.name === 'enter_plan_mode' || tool.name === 'exit_plan_mode';
                 return (
                   <div
                     key={tool.name}

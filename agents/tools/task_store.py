@@ -326,8 +326,10 @@ def update_task(
     # - detail_origin_seq：detail 被编辑时重指向 current_seq。既不清空（模型
     #   自己刚写的 detail 正躺在那次 tool_calls 参数里，清空会导致一次纯重复
     #   注入）也不保持不动（指向旧事件会在旧事件被折叠而新编辑仍可见时多注入
-    #   一次）。current_seq 为 None 时记为 None，代价是之后多披露一次——安全
-    #   方向，不做特判。
+    #   一次）。current_seq 为 None（HTTP 写端点 / plan 物化）时：只有文本**真的
+    #   变了**才清空标记，没变就不动——两个面的正确行为不同，判别式就是
+    #   current_seq 有没有（见下面的分支注释与 tests/unit/test_task_store.py
+    #   的 I-2 三条）。
     task_list = load_tasks(session_id)
     for item in task_list.tasks:
         if item.id == task_id:
@@ -338,8 +340,14 @@ def update_task(
             if content is not None:
                 item.content = content
             if detail is not None:
+                changed = detail != item.detail
                 item.detail = detail
-                item.detail_origin_seq = current_seq
+                # current_seq 非空 = 模型自己刚写的（文本正躺在本次 tool_calls 里）→ 无条件重指向，
+                # 即使文本没变：否则旧标记指向的事件被折叠后会重注入一次模型刚写过的内容。
+                # current_seq 为空 = HTTP/物化（模型从没见过这段文本）→ 只在真的变了才清空标记，
+                # 文本没变就别浪费一次最多 6000 字符的重注入。
+                if current_seq is not None or changed:
+                    item.detail_origin_seq = current_seq
             if acceptance is not None:
                 item.acceptance = acceptance
             if error is not None:
@@ -489,14 +497,45 @@ def needs_disclosure(item: TaskItem | None, visible_seqs: Sequence[int]) -> bool
     return item.detail_origin_seq not in visible_seqs
 
 
-def mark_detail_disclosed(session_id: str, task_id: int, seq: int) -> None:
-    """记录 detail 已进入上下文的承载事件 seq，作为下次判定的依据。"""
+def mark_detail_disclosed(
+    session_id: str, task_id: int, seq: int, injected_detail: str
+) -> None:
+    """记录 detail 已进入上下文的承载事件 seq，作为下次判定的依据。
+
+    `injected_detail` = **本次真正注入的那段 detail 文本**（调用方从渲染披露块用的
+    那份快照里取：task_disclosure 传 focus.detail）。比较后再写：store 里的 detail
+    与注入时的不一致，说明一次 `PATCH {detail:...}` 落在了「渲染快照」
+    （model_caller._attempt 顶部读一次）与「事后记账」之间。此时盖章会把**从未
+    披露过的新 detail** 标成已披露 → needs_disclosure 变 False → 新文本永远到不了
+    模型，无日志、HTTP 200。这是本项目最严重那个历史缺陷（C1）的同构形状：静默、
+    黏性、对模型不可见。
+
+    不盖章的代价只是下一次请求重新披露一次（安全方向），所以失配时**不写**并响一声。
+    只有一个调用方，签名直接改，不留兼容默认值——留一个 `injected_detail=""` 的
+    默认值等于把这条比较悄悄关掉。
+    """
     task_list = load_tasks(session_id)
     for item in task_list.tasks:
         if item.id == task_id:
+            if _as_str(item.detail) != _as_str(injected_detail):
+                print_error(
+                    f"[task_store] detail of task {task_id} changed between render and "
+                    f"bookkeeping (injected {len(_as_str(injected_detail))} chars, "
+                    f"store has {len(_as_str(item.detail))}); seq {seq} NOT recorded, "
+                    "the new text will be disclosed on the next model call"
+                )
+                return
             item.detail_origin_seq = seq
             save_tasks(task_list)
             return
+    else:
+        # M-1：找不到那一行此前既无 else、无日志、也无返回值，而调用方
+        # ensure_focus_detail_visible 仍然返回 True——「报告成功、什么都没做、
+        # 什么都不说」。按裁定 M10：不可能的情况发生了就该看得见。
+        print_error(
+            f"[task_store] mark_detail_disclosed: task {task_id} is not in session "
+            f"{session_id}'s list; seq {seq} not recorded"
+        )
 
 
 def format_disclosure_block(item: TaskItem) -> str:

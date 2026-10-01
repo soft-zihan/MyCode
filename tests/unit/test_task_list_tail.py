@@ -76,6 +76,47 @@ def test_task_block_comes_before_fold_guidance(ws):
     assert task_idx < fold_idx
 
 
+def test_s_block_is_appended_after_the_conversation_history(ws):
+    """上一条钉不到的另一半：S 相对**对话历史**的位置。
+
+    `build_tail_system_messages` 只返回一个 list，「它落在哪儿」由调用方决定：
+    model_caller._assemble_request 在 `a.messages`（历史）之后 append（:310-311）。
+    若改成插到历史之前/中间，主 system prompt 之后那段前缀就每请求都变、prefix
+    cache 整段失效——常驻块该付的成本形态（「只让自己那部分无法命中」）会变成
+    「每请求把全部历史重新计费」。这是 task-list-context-analysis §6 那条成本
+    不变量的一半，此前只有散文守着。
+    """
+    from agents.core.model_caller import ModelCaller
+
+    add_task("s1", "重构 X", acceptance="pytest -k x")
+    stub = _agent()                       # 真渲染 S 的那份桩，不是替身字符串
+    history = [
+        {"role": "system", "content": "SYS"},
+        {"role": "user", "content": "干活"},
+        {"role": "assistant", "content": "好"},
+    ]
+    agent = SimpleNamespace(
+        tools=[],
+        messages=list(history),
+        model="test-model",
+        thinking=None,
+        build_tail_system_messages=lambda tasks=None: build_tail_system_messages(stub, tasks),
+    )
+    span = SimpleNamespace(update=lambda **_kw: None)
+
+    params, _raw, _metrics = ModelCaller(agent)._assemble_request(
+        span, tools_enabled=False)
+
+    msgs = params["messages"]
+    assert [m["content"] for m in msgs[:len(history)]] == ["SYS", "干活", "好"]
+    tail_idx = [i for i, m in enumerate(msgs) if "Task List" in str(m.get("content", ""))]
+    assert tail_idx, "S 没被渲染出来，这条测试就什么都没钉住"
+    # 全部尾部块（含 S）都在历史之后：把 append 改成 insert(0, ...) 或插到 system
+    # 之后，这里就红。
+    assert min(tail_idx) >= len(history)
+    assert all(m["role"] == "system" for m in msgs[len(history):])
+
+
 def test_completed_items_drop_out_of_block(ws):
     a = add_task("s1", "A")
     add_task("s1", "B")

@@ -17,6 +17,7 @@ from agents.tools.task_store import (
     VALID_STATUSES,
     list_tasks,
     mark_detail_disclosed,
+    needs_disclosure,
 )
 from agents.tools.task_tools import TASK_LIST_TOOL, handle_task_list
 
@@ -381,12 +382,72 @@ def test_invalid_status_returns_error_not_ok(ws):
 def test_update_detail_repoints_origin_seq(ws):
     """义务 5：update(detail=...) 把 detail_origin_seq 重指向承载这次编辑的事件。"""
     added = _call({"operation": "add", "content": "A", "detail": "旧方案"})
-    mark_detail_disclosed("s", added["task"]["id"], 10)
+    mark_detail_disclosed("s", added["task"]["id"], 10, "旧方案")
     _call({"operation": "update", "id": added["task"]["id"],
            "detail": "人改过的新方案"}, seq=55)
     got = list_tasks("s")[0]
     assert got.detail == "人改过的新方案"
     assert got.detail_origin_seq == 55   # 重指向承载这次编辑的事件，不是清空也不是不动
+
+
+def test_update_same_detail_with_seq_repoints_origin_seq(ws):
+    """I-2 (a)：工具层传**相同**的 detail + 有 current_seq → 标记被重指向。
+
+    与 HTTP 面**相反**的期望（那边相同文本时标记一动不动：
+    tests/unit/test_task_endpoints.py::test_patch_same_detail_without_seq_keeps_origin_seq）。
+    判别式就是 current_seq 有没有：模型自己刚写的 detail 正躺在本次 tool_calls 的参数里，
+    重指向一个**可见的** seq 才能避免「旧标记指向的事件被折叠后重注入一次模型刚写过的
+    内容」。评审建议的 `detail != item.detail` 一行改法对 HTTP 面是对的，但会把这条改坏。
+    """
+    added = _call({"operation": "add", "content": "A", "detail": "方案"})
+    task_id = added["task"]["id"]
+    mark_detail_disclosed("s", task_id, 10, "方案")
+    assert list_tasks("s")[0].detail_origin_seq == 10
+
+    _call({"operation": "update", "id": task_id, "detail": "方案"}, seq=55)
+
+    got = list_tasks("s")[0]
+    assert got.detail == "方案"
+    assert got.detail_origin_seq == 55       # 文本没变也重指向
+    assert needs_disclosure(got, [55]) is False
+
+
+def test_disarmed_acceptance_gate_leaves_a_trace_only_on_the_completed_transition(ws, monkeypatch):
+    """M-2：闸门**解除武装**时留痕，于是「整场没触发」与「从没被装上过」可区分。
+
+    只钉 update→completed 这条真流转（每个任务最多走一次）：不流转、没声明
+    acceptance、或闸门其实装着的时候都必须零痕迹，否则这条 trace 就成了噪声，而
+    噪声正是训练人忽略它的东西。
+    """
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        task_tools, "trace_event", lambda kind, **kw: seen.append((kind, kw)))
+
+    added = _call({"operation": "add", "content": "A", "acceptance": "pytest"})
+    tid = added["task"]["id"]
+
+    handle_task_list("s", {"operation": "update", "id": tid, "status": "completed"},
+                     gate_disarmed=True)
+    assert [kind for kind, _ in seen] == ["task_list.acceptance_gate_disarmed"]
+    assert seen[0][1]["metadata"]["task_id"] == tid
+
+    # 同一条再标一次 completed：不是真流转 → 不再留痕
+    handle_task_list("s", {"operation": "update", "id": tid, "status": "completed"},
+                     gate_disarmed=True)
+    assert len(seen) == 1
+
+    # 对照：闸门装着（gate_disarmed 缺席/False）→ 这条路上零痕迹。没有这半边，
+    # 「任何 update→completed 都留痕」的坏实现也会绿。
+    other = _call({"operation": "add", "content": "B", "acceptance": "pytest"})
+    handle_task_list("s", {"operation": "update", "id": other["task"]["id"],
+                           "status": "completed"})
+    assert len(seen) == 1
+
+    # 没声明 acceptance 的任务本来就不受闸门约束 → 也零痕迹
+    plain = _call({"operation": "add", "content": "C"})
+    handle_task_list("s", {"operation": "update", "id": plain["task"]["id"],
+                           "status": "completed"}, gate_disarmed=True)
+    assert len(seen) == 1
 
 
 def test_add_with_detail_threads_current_seq_into_origin(ws):
@@ -411,7 +472,7 @@ def test_add_with_detail_threads_current_seq_into_origin(ws):
 def test_update_without_detail_leaves_origin_seq(ws):
     """义务 5 的对照面：未改 detail 就不动 detail_origin_seq。"""
     added = _call({"operation": "add", "content": "A", "detail": "方案A"})
-    mark_detail_disclosed("s", added["task"]["id"], 10)
+    mark_detail_disclosed("s", added["task"]["id"], 10, "方案A")
     _call({"operation": "update", "id": added["task"]["id"],
            "status": "in_progress"}, seq=55)
     assert list_tasks("s")[0].detail_origin_seq == 10  # 未改 detail 就不动 seq

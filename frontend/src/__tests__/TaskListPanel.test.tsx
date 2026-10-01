@@ -456,4 +456,42 @@ describe('TaskListPanel', () => {
       expect(el!.textContent).toContain('task not found');
     });
   });
+
+  it('I-3：写成功但刷新失败 → 头部出现错误（不是只有写失败才报错）', async () => {
+    // onChanged 返回 false = 上层的 fetchTasks 失败了。它刻意返回布尔值而不是抛：
+    // 同一个函数还被 WS 事件处理器与挂载 effect 以 fire-and-forget 方式调用，抛出去
+    // 会变成 unhandled rejection。未修时 runWrite 看到的是 resolved，于是 lastError
+    // 不亮、草稿已丢、textarea 弹回编辑前的值——用户的编辑看起来凭空消失，而改动
+    // 其实**已经在服务端了**。
+    onChanged.mockResolvedValue(false);
+    const tasks = [makeTask({ id: 1, detail: '旧详情' })];
+    const { container } = renderPanel(tasks);
+    const r = rowOf(container, 1);
+    fireEvent.click(within(r).getByLabelText('展开任务'));
+    const box = within(r).getByLabelText('详情') as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: '新详情' } });
+    fireEvent.blur(box);
+
+    await waitFor(() => expect(updateTask).toHaveBeenCalledTimes(1));
+    await waitFor(() => {
+      const el = container.querySelector('[data-task-error]');
+      expect(el).not.toBeNull();
+      expect(el!.textContent).toContain('刷新');
+      // 写其实成功了：文案不得说成「写入失败」，否则用户会把同一次编辑再提交一遍
+      expect(el!.textContent).not.toContain('写入失败');
+    });
+
+    // 对照：刷新成功（返回 true）时不亮错误。没有这半边，「任何写之后都亮错误」的
+    // 坏实现也会绿。
+    onChanged.mockResolvedValue(true);
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+    await flush();
+    const box2 = within(rowOf(container, 1)).getByLabelText('详情') as HTMLTextAreaElement;
+    fireEvent.change(box2, { target: { value: '再改一次' } });
+    fireEvent.blur(box2);
+    await waitFor(() => expect(updateTask).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(2));
+    await flush();
+    expect(container.querySelector('[data-task-error]')).toBeNull();
+  });
 });

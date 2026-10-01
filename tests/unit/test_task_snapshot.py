@@ -243,7 +243,7 @@ async def test_probe_handed_to_the_compressor_closes_over_the_snapshot(ws, monke
 
 
 async def test_check_and_compact_without_a_snapshot_still_probes_the_store(ws, monkeypatch):
-    """没有快照的调用方（Agent._check_and_compact、既有测试）行为不变。"""
+    """没有快照的调用方（不经 _attempt 的直接调用，例如本测试）行为不变。"""
     _in_progress_task()
     agent = _agent()
     seen: dict = {}

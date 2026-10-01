@@ -873,8 +873,15 @@ async def api_fork_session(session_id: str, data: Optional[ForkRequest] = None) 
     }
 
 
-def _session_workspace(session_id: str) -> Path:
-    """解析会话的 workspace：活跃会话取 agent.workspace，否则读 projcache 的 cwd。"""
+def resolve_session_workspace(session_id: str) -> Path:
+    """解析会话的 workspace：活跃会话取 agent.workspace，否则读 projcache 的 cwd。
+
+    公开名（原来叫 `_session_workspace`）：现在有两个模块的消费者——本文件的
+    plan-draft 端点与 routers/events.py 的四个 /api/tasks 端点。它们要的是同一件
+    事：HTTP 请求不在任何会话的 `workspace_scope` 里（服务器只在启动时把 ContextVar
+    设成 project_root，main.py:50-52），而工作区作用域的落盘路径必须按**会话**解析，
+    否则读到的是 project_root 下的幽灵文件、写进去的也是。
+    """
     agent = _get_live_agent(session_id)
     if agent is not None:
         return Path(agent.workspace)
@@ -906,7 +913,7 @@ def _plan_draft_dir(session_id: str) -> Path:
 @router.get("/api/sessions/{session_id}/plan-draft/artifacts")
 async def api_plan_draft_artifacts(session_id: str) -> dict[str, Any]:
     """读取规划草稿目录（plan-{session_id}）中的 artifacts。"""
-    with workspace_scope(_session_workspace(session_id)):
+    with workspace_scope(resolve_session_workspace(session_id)):
         draft_dir = _plan_draft_dir(session_id)
         if not draft_dir.exists():
             return {"success": False, "message": "No plan draft found"}
@@ -923,7 +930,7 @@ async def api_plan_draft_artifact_update(session_id: str, data: DraftArtifactReq
     """编辑规划草稿 artifact（仅允许白名单文件名，限定草稿目录内）。"""
     if data.filename not in _DRAFT_ARTIFACT_NAMES:
         return {"success": False, "message": f"Invalid artifact filename: {data.filename}"}
-    with workspace_scope(_session_workspace(session_id)):
+    with workspace_scope(resolve_session_workspace(session_id)):
         draft_dir = _plan_draft_dir(session_id).resolve()
         target = (draft_dir / data.filename).resolve()
         if not target.is_relative_to(draft_dir):

@@ -15,6 +15,7 @@ import json
 from typing import Callable
 
 from agents.logging import print_error
+from agents.observability.trace import trace_event
 from agents.tools.task_gate import build_acceptance_warning
 from agents.tools.task_store import (
     TASK_STATUS_COMPLETED,
@@ -305,6 +306,7 @@ def handle_task_list(
     inp: dict,
     current_seq: int | None = None,
     evidence_fn: Callable[[int | None], bool] | None = None,
+    gate_disarmed: bool = False,
 ) -> str:
     """处理 task_list 工具调用。
 
@@ -322,6 +324,13 @@ def handle_task_list(
     的 agent 永远满足不了判据，对它上膛就是一台保证假阳性的机器。
     探针抛异常时的失败方向是「跳过警告」而不是「当成没有证据」——内部故障不能
     翻译成对模型的假指控（见 update 分支里的 try/except）。
+
+    gate_disarmed: dispatcher 判定**本次工具集里没有能产出证据的工具**
+    （task_gate.can_produce_evidence 为 False，于是 evidence_fn 刻意是 None）。
+    与「调用方没给 evidence_fn」刻意区分：后者是直接调用/测试，前者是一条真实的
+    生产配置，而它让闸门整场不可能触发。M-2：这个事实此前零痕迹，于是「闸门整场
+    没触发」与「闸门从没被装上过」在观测里长得一样。默认 False，直接调用方与既有
+    测试不受影响。
 
     所有成功路径只返回纯 JSON，不拼披露文本：披露的单一注入路径是
     ensure_focus_detail_visible（Task 9）。工具层拿不到自己那条
@@ -457,6 +466,26 @@ def handle_task_list(
             else:
                 if not has_evidence:
                     warning = build_acceptance_warning(item)
+        # M-2：闸门被 dispatcher **解除武装**（本次工具集里没有能产出证据的工具）时
+        # 留一条 trace。此前这里零痕迹，于是「闸门整场没触发」与「闸门从没被装上过」
+        # 在观测里长得一样，而后者是一条需要被人看见的配置事实（裁定 M10）。
+        # 刻意只在这条**真流转**（update→completed 且旧状态不是 completed）上补，且
+        # 要求声明了 acceptance（没声明判据的任务本来就不受闸门约束）：每个任务最多
+        # 走一次，不会噪。
+        if (
+            gate_disarmed
+            and status == TASK_STATUS_COMPLETED
+            and prev_status != TASK_STATUS_COMPLETED
+            and item.acceptance.strip()
+        ):
+            trace_event(
+                "task_list.acceptance_gate_disarmed",
+                metadata={
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "reason": "no evidence-producing tool in this agent's tool set",
+                },
+            )
         payload = {"action": "updated", "task": summary_dict(item)}
         if warning:
             payload["warning"] = warning

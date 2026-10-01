@@ -465,22 +465,62 @@ def test_clip_detail_boundary_at_exactly_limit_and_one_over():
 def test_mark_detail_disclosed_persists_seq(ws):
     item = add_task("s", "A", detail="方案A")
     assert item.detail_origin_seq is None
-    mark_detail_disclosed("s", item.id, 99)
+    mark_detail_disclosed("s", item.id, 99, "方案A")
     assert list_tasks("s")[0].detail_origin_seq == 99
 
 
 def test_mark_detail_disclosed_preserves_detail_text(ws):
     item = add_task("s", "A", detail="方案A", acceptance="pytest")
-    mark_detail_disclosed("s", item.id, 99)
+    mark_detail_disclosed("s", item.id, 99, "方案A")
     got = list_tasks("s")[0]
     assert got.detail == "方案A"
     assert got.acceptance == "pytest"
 
 
-def test_mark_detail_disclosed_unknown_id_is_noop(ws):
+def test_mark_detail_disclosed_unknown_id_is_noop(ws, monkeypatch):
+    """M-1：找不到那一行不得「报告成功、什么都没做、什么都不说」。"""
+    logged: list[str] = []
+    monkeypatch.setattr("agents.tools.task_store.print_error", logged.append)
+
     add_task("s", "A")
-    mark_detail_disclosed("s", 999, 1)  # 不抛异常
+    mark_detail_disclosed("s", 999, 1, "")  # 不抛异常
     assert list_tasks("s")[0].detail_origin_seq is None
+    # 未修时这里一条日志都没有：调用方 ensure_focus_detail_visible 仍然返回 True，
+    # 于是「记账没落到任何条目上」这件事在整个系统里零痕迹。
+    assert len(logged) == 1
+    assert "999" in logged[0]
+
+
+def test_mark_detail_disclosed_refuses_to_stamp_a_changed_detail(ws, monkeypatch):
+    """I-1 靶心：比较后再写。
+
+    注入的块是用**本次请求的快照**渲染的（model_caller._attempt 顶部读一次），而
+    记账发生在那之后。一次 `PATCH {detail:...}` 若落在这两点之间，重读盘盖章就会把
+    **从未披露过的新 detail** 标成已披露 → needs_disclosure 变 False → 新文本永远
+    到不了模型，无日志、HTTP 200（与 C1 同构：静默、黏性、对模型不可见）。
+    """
+    logged: list[str] = []
+    monkeypatch.setattr("agents.tools.task_store.print_error", logged.append)
+
+    add_task("s", "A", detail="旧方案")
+    # 快照渲染之后、记账之前，UI 改了 detail
+    update_task("s", 1, detail="人改过的新方案")
+
+    mark_detail_disclosed("s", 1, 77, "旧方案")
+
+    stored = list_tasks("s")[0]
+    assert stored.detail_origin_seq is None          # 不盖章
+    assert needs_disclosure(stored, [77]) is True    # 下一次请求会披露新文本
+    assert len(logged) == 1                          # 且响一声
+
+
+def test_mark_detail_disclosed_stamps_when_the_text_still_matches(ws):
+    """I-1 的对照面：文本一致就照常盖章（否则披露会每轮重来，是无上界的浪费）。"""
+    add_task("s", "A", detail="方案A")
+    mark_detail_disclosed("s", 1, 77, "方案A")
+    stored = list_tasks("s")[0]
+    assert stored.detail_origin_seq == 77
+    assert needs_disclosure(stored, [77]) is False
 
 
 def test_disclosure_block_contains_id_content_acceptance_and_detail():
@@ -670,7 +710,7 @@ def test_string_id_does_not_receive_detail_disclosure_bookkeeping(ws):
 
     item = load_tasks("s").tasks[0]
     assert item.id == 0
-    mark_detail_disclosed("s", item.id, 99)
+    mark_detail_disclosed("s", item.id, 99, "方案A")
     # 收窄后 id 恒为 int，记账命中同一条目，不会「每次都重注入」
     assert load_tasks("s").tasks[0].detail_origin_seq == 99
 

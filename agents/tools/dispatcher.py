@@ -240,9 +240,10 @@ class ToolDispatcher:
             # agent.tools 是当前生效的工具集（agent.py:110 装配，turn_runner 追加
             # MCP，prompt_runtime.refresh_runtime_system_prompt 用同一个来源）。
             active_tools = {t.get("name") for t in self.agent.tools if t.get("name")}
+            gate_armed = can_produce_evidence(active_tools)
             evidence_fn = (
                 (lambda since: has_successful_shell_since(self.agent.session, since))
-                if can_produce_evidence(active_tools)
+                if gate_armed
                 else None            # 闸门静默不启用（handler 对 None 的既定行为）
             )
             result = handle_task_list(
@@ -250,6 +251,11 @@ class ToolDispatcher:
                 inp,
                 current_seq=current_seq,
                 evidence_fn=evidence_fn,
+                # M-2：把「解除武装」这个事实也交给 handler。此前它零痕迹，于是
+                # 「闸门整场没触发」与「闸门从没被装上过」在观测里不可区分。handler
+                # 只在 update→completed 那条真流转上留一条 trace（每个任务最多走一次，
+                # 不会噪）。
+                gate_disarmed=not gate_armed,
             )
             # 只在 handler 真的写了东西时才通知前端 refetch。判据照抄下面草稿目录
             # 写入那一支的 plan/updated（`isinstance(result, str) and not

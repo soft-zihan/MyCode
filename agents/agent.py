@@ -649,8 +649,9 @@ class Agent:
         交给压缩器的仍然是**零参** callable：见 check_and_compact。
 
         tasks = 每请求快照（Plan 3b Task B1）。有快照就读快照、一次盘都不碰；None
-        表示「没有快照」（Agent._check_and_compact 那条不经 _attempt 的路径、直接
-        调用它的测试、或快照本身加载失败），此时自己读一次并保留上面那条失败方向。
+        表示「没有快照」（不经 ModelCaller._attempt 的直接调用方，例如直接调
+        check_and_compact 的测试，或快照本身加载失败），此时自己读一次并保留上面
+        那条失败方向。
         刻意用 `is None` 而不是 falsy 判断：[] 是「读到了，确实没有任务」这个**答案**，
         把它当成「没有快照」会白读一次盘，还会把「store 读不出来」与「没有任务」
         两种状态混成一件事。
@@ -761,13 +762,6 @@ class Agent:
 
     def _get_message_count(self) -> int:
         return self._context_manager._get_message_count()
-
-    async def _check_and_compact(self)->None:
-        # 与公开的 check_and_compact 同一条门：留一条不传 defer_fold 的路径，
-        # 就等于给折叠门留了一个静默旁路。同样交探针本身（零参 callable）而不是
-        # 它的返回值——理由见 check_and_compact。
-        await self._context_manager._check_and_compact(
-            defer_fold=self._has_in_progress_task)
 
     async def _compact_conversation(self, *, trigger: str = "manual")->bool:
         return await self._context_manager._compact_conversation(trigger=trigger)

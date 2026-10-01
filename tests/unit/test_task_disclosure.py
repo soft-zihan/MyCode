@@ -113,6 +113,39 @@ def test_second_call_is_idempotent(ws):
     assert len(injected) == 1
 
 
+def test_stale_snapshot_detail_is_not_stamped_as_disclosed(ws):
+    """I-1 靶心：注入用的是快照，记账比对的就必须是**快照里的那段文本**。
+
+    一次 `PATCH {detail:...}`（UI 写端点）落在「渲染快照」与「记账」之间时，事后
+    重读盘盖章会把**从未披露过的新 detail** 标成已披露 → needs_disclosure 变 False
+    → 新文本永远到不了模型，无日志、HTTP 200。与 C1 同构：静默、黏性、对模型不可见。
+    """
+    add_task("s1", "A", detail="旧方案")
+    s = _session()
+    stale = list_tasks("s1")                     # 本次请求顶部读到的那一份快照
+
+    update_task("s1", 1, detail="人改过的新方案")   # PATCH 落在渲染与记账之间
+
+    # 注入的是快照里的旧文本——「实际注入了什么」的定义就是这一段
+    assert ensure_focus_detail_visible(s, stale) is True
+    injected = [e for e in s.events if e.get("type") == "memory_injection"]
+    assert len(injected) == 1
+    assert "旧方案" in injected[0]["content"]
+    assert "人改过的新方案" not in injected[0]["content"]
+
+    # 但不得把没披露过的新 detail 盖成已披露
+    stored = list_tasks("s1")[0]
+    assert stored.detail == "人改过的新方案"
+    assert stored.detail_origin_seq is None
+
+    # 于是下一次请求（快照已刷新）照常披露新文本：失败方向是「多披露一次」
+    assert ensure_focus_detail_visible(s) is True
+    injected = [e for e in s.events if e.get("type") == "memory_injection"]
+    assert len(injected) == 2
+    assert "人改过的新方案" in injected[1]["content"]
+    assert list_tasks("s1")[0].detail_origin_seq == injected[1]["seq"]
+
+
 def test_reinjects_after_origin_event_is_folded_away(ws):
     add_task("s1", "A", detail="方案A")
     s = _session()
@@ -252,13 +285,13 @@ def test_bookkeeping_failure_rolls_back_the_injection(ws, monkeypatch):
 
     calls = {"n": 0}
 
-    def _flaky_mark(session_id, task_id, seq):
+    def _flaky_mark(session_id, task_id, seq, injected_detail):
         # 只让第一次记账失败（模拟 save_tasks 的 path.write_text 抛错），
         # 之后转调真实现，以便顺带验证回滚不会把特性卡死。
         calls["n"] += 1
         if calls["n"] == 1:
             raise OSError("save_tasks: simulated write failure")
-        return mark_detail_disclosed(session_id, task_id, seq)
+        return mark_detail_disclosed(session_id, task_id, seq, injected_detail)
 
     # task_disclosure 用 `from ... import mark_detail_disclosed` 绑了本地名，
     # 所以要打在 task_disclosure 的命名空间上，打 task_store 的没用。
