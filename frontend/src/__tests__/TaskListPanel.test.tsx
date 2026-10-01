@@ -5,6 +5,9 @@
  * M7 摘要口径、焦点不由前端推导、PATCH 只带被改的字段、值没变不发请求、
  * 移动的 after_id 是 number 且边界 disabled、delete 的 200+success:false 不算成功、
  * 渐进披露（detail 只在展开态出现且有滚动上限）。
+ * 修复轮补的：空白 content 不发 PATCH、写路径的 in-flight 守卫、过期草稿被丢弃、
+ * 插入草稿不住在锚点行里、上移的通用分支、content/acceptance 的 body 形状、
+ * 进度条的分母、写失败在面板上可见。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
@@ -48,8 +51,12 @@ const flush = () => new Promise(resolve => setTimeout(resolve, 0));
 
 let onChanged: ReturnType<typeof vi.fn>;
 
+const panelEl = (tasks: TaskItem[], focusId: number | null = null) => (
+  <TaskListPanel tasks={tasks} focusId={focusId} sessionId="s1" onChanged={onChanged} />
+);
+
 const renderPanel = (tasks: TaskItem[], focusId: number | null = null) =>
-  render(<TaskListPanel tasks={tasks} focusId={focusId} sessionId="s1" onChanged={onChanged} />);
+  render(panelEl(tasks, focusId));
 
 describe('TaskListPanel', () => {
   beforeEach(() => {
@@ -228,9 +235,9 @@ describe('TaskListPanel', () => {
         after_id: 1,
       }),
     );
-    expect(onChanged).toHaveBeenCalledTimes(2);
+    // F10：收尾断言挪进 waitFor——放在外面时对微任务顺序敏感，是 flake 源
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(2));
   });
-
   it('状态下拉：五值词表，PATCH 只带 status', async () => {
     const tasks = [makeTask({ id: 1 }), makeTask({ id: 2, status: 'pending' })];
     const { container } = renderPanel(tasks);
@@ -244,5 +251,209 @@ describe('TaskListPanel', () => {
   it('空清单不渲染（保留原行为）', () => {
     const { container } = renderPanel([]);
     expect(container.querySelector('[data-task-summary]')).toBeNull();
+  });
+
+  // ─────────────── 修复轮：F1 / F2 / F3 / F4 / F5 / F7 ───────────────
+
+  it('F1：清空 content 后失焦 → 不发 PATCH、丢草稿、记警告', async () => {
+    const tasks = [makeTask({ id: 1, content: '原来的一行摘要' })];
+    const { container } = renderPanel(tasks);
+    const r = rowOf(container, 1);
+    fireEvent.click(within(r).getByLabelText('展开任务'));
+    const box = within(r).getByLabelText('内容') as HTMLTextAreaElement;
+
+    // 「全选内容 → 失焦」这个常见误操作此前会 PATCH {content:""} → 200，
+    // 于是常驻摘要渲染成一行空任务、披露块标题变成 `## 当前任务的执行方案（#1 ）`
+    fireEvent.change(box, { target: { value: '   ' } });
+    fireEvent.blur(box);
+    await flush();
+    expect(updateTask).not.toHaveBeenCalled();
+    expect(onChanged).not.toHaveBeenCalled();
+    expect(String(vi.mocked(console.warn).mock.calls)).toContain('空白 content');
+    expect(box.value).toBe('原来的一行摘要'); // 草稿被丢掉，回到服务端的值
+
+    // 对照：非空 content 照常提交，而且是 trim 过的（与 InsertForm 同一口径）
+    fireEvent.change(box, { target: { value: '  改过的摘要  ' } });
+    fireEvent.blur(box);
+    await waitFor(() => expect(updateTask).toHaveBeenCalledWith('s1', 1, { content: '改过的摘要' }));
+  });
+
+  it('F1：detail / acceptance 允许清空（清空验收条件是合法操作）', async () => {
+    const tasks = [makeTask({ id: 1, acceptance: '旧验收', detail: '旧详情' })];
+    const { container } = renderPanel(tasks);
+    const r = rowOf(container, 1);
+    fireEvent.click(within(r).getByLabelText('展开任务'));
+
+    const abox = within(r).getByLabelText('验收') as HTMLTextAreaElement;
+    fireEvent.change(abox, { target: { value: '' } });
+    fireEvent.blur(abox);
+    await waitFor(() => expect(updateTask).toHaveBeenCalledWith('s1', 1, { acceptance: '' }));
+
+    const dbox = within(r).getByLabelText('详情') as HTMLTextAreaElement;
+    fireEvent.change(dbox, { target: { value: '' } });
+    fireEvent.blur(dbox);
+    await waitFor(() => expect(updateTask).toHaveBeenLastCalledWith('s1', 1, { detail: '' }));
+  });
+
+  it('F2：写在途时的第二次提交被守卫挡住，同一个 PATCH 不会发两遍', async () => {
+    // 永不 resolve 的写：把「在途」这个窗口拉成无限长
+    vi.mocked(updateTask).mockReturnValue(new Promise(() => {}) as never);
+    const tasks = [makeTask({ id: 1, detail: '旧详情' })];
+    const { container } = renderPanel(tasks);
+    const r = rowOf(container, 1);
+    fireEvent.click(within(r).getByLabelText('展开任务'));
+    const box = within(r).getByLabelText('详情') as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: '新详情' } });
+
+    fireEvent.keyDown(box, { key: 'Enter', ctrlKey: true });
+    fireEvent.keyDown(box, { key: 'Enter', ctrlKey: true });
+    fireEvent.blur(box);
+    await flush();
+    // 没有守卫的话这里是 3 次 → detail_origin_seq 被清 3 次 → 模型把同一段 detail
+    // 重新注入 3 轮，正是本设计要防的那个成本
+    expect(updateTask).toHaveBeenCalledTimes(1);
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it('F3：服务端改了同一个字段 → 过期草稿被丢弃，textarea 立刻显示新值', async () => {
+    const tasks = [makeTask({ id: 1, detail: '用户开始编辑时的基线' })];
+    const { container, rerender } = renderPanel(tasks);
+    const r = rowOf(container, 1);
+    fireEvent.click(within(r).getByLabelText('展开任务'));
+    const box = within(r).getByLabelText('详情') as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: '用户正在打的更旧的草稿' } });
+    expect(box.value).toBe('用户正在打的更旧的草稿');
+
+    // Agent 通过工具改了同一条的 detail → WS task_list/updated → 上层重取 → 新 props
+    rerender(panelEl([makeTask({ id: 1, detail: 'Agent 刚写的新值' })]));
+    const box2 = within(rowOf(container, 1)).getByLabelText('详情') as HTMLTextAreaElement;
+    expect(box2.value).toBe('Agent 刚写的新值');
+    expect(String(vi.mocked(console.warn).mock.calls)).toContain('过期草稿');
+
+    // 失焦不得把新值覆盖回更旧的草稿
+    fireEvent.blur(box2);
+    fireEvent.keyDown(box2, { key: 'Enter', ctrlKey: true });
+    await flush();
+    expect(updateTask).not.toHaveBeenCalled();
+  });
+
+  it('F3：编辑没被打断时草稿照常活着（base 一致就不丢）', async () => {
+    const tasks = [makeTask({ id: 1, detail: '基线' })];
+    const { container, rerender } = renderPanel(tasks);
+    const r = rowOf(container, 1);
+    fireEvent.click(within(r).getByLabelText('展开任务'));
+    fireEvent.change(within(r).getByLabelText('详情'), { target: { value: '打到一半' } });
+
+    // 无关的 re-GET（别的条目变了）不得顺手丢掉用户正在打的字
+    rerender(panelEl([makeTask({ id: 1, detail: '基线' }), makeTask({ id: 2, detail: '新来的' })]));
+    const box = within(rowOf(container, 1)).getByLabelText('详情') as HTMLTextAreaElement;
+    expect(box.value).toBe('打到一半');
+    fireEvent.blur(box);
+    await waitFor(() => expect(updateTask).toHaveBeenCalledWith('s1', 1, { detail: '打到一半' }));
+  });
+
+  it('F4：锚点行消失 → 不崩、不静默发请求，插入草稿挪到末尾槽位还在', async () => {
+    const tasks = [makeTask({ id: 1 }), makeTask({ id: 2 })];
+    const { container, rerender } = renderPanel(tasks);
+    fireEvent.click(within(rowOf(container, 2)).getByLabelText('在此条后插入'));
+    fireEvent.change(screen.getByLabelText('新任务内容'), { target: { value: '新活' } });
+    fireEvent.change(screen.getByLabelText('新任务详情'), { target: { value: '已经敲了一半的方案' } });
+
+    // 锚点那条被 Agent 删掉了 → 重取回来的清单里没有它
+    rerender(panelEl([makeTask({ id: 1 })]));
+    expect(createTask).not.toHaveBeenCalled();
+    // 表单此前渲染在锚点行内部，会跟着那行一起 unmount、把用户敲的 detail 无声丢掉
+    expect((screen.getByLabelText('新任务详情') as HTMLTextAreaElement).value).toBe(
+      '已经敲了一半的方案',
+    );
+    fireEvent.click(screen.getByLabelText('确认插入'));
+    // 挪到末尾槽位之后就是「追加末尾」：省略 after_id，不会写一个已不存在的锚
+    await waitFor(() =>
+      expect(createTask).toHaveBeenCalledWith('s1', {
+        content: '新活',
+        detail: '已经敲了一半的方案',
+        acceptance: '',
+      }),
+    );
+  });
+
+  it('F5：上移的通用分支——第 3 行上移锚到第 1 行（不是第 2 行）', async () => {
+    const tasks = [makeTask({ id: 1 }), makeTask({ id: 2 }), makeTask({ id: 3 })];
+    const { container } = renderPanel(tasks);
+    fireEvent.click(within(rowOf(container, 3)).getByLabelText('上移'));
+    await waitFor(() => expect(updateTask).toHaveBeenCalledTimes(1));
+    // 写成 tasks[index-1].id 会得到 2 = 自锚 → 每次上移都静默变成 no-op
+    expect(updateTask).toHaveBeenCalledWith('s1', 3, { after_id: 1 });
+  });
+
+  it('F5：content / acceptance 的提交 body 恰好只含自己那个字段，不含 detail', async () => {
+    const tasks = [makeTask({ id: 1, content: '旧摘要', acceptance: '旧验收' })];
+    const { container } = renderPanel(tasks);
+    const r = rowOf(container, 1);
+    fireEvent.click(within(r).getByLabelText('展开任务'));
+
+    const cbox = within(r).getByLabelText('内容') as HTMLTextAreaElement;
+    fireEvent.change(cbox, { target: { value: '新摘要' } });
+    fireEvent.blur(cbox);
+    await waitFor(() => expect(updateTask).toHaveBeenCalledTimes(1));
+    expect(updateTask).toHaveBeenCalledWith('s1', 1, { content: '新摘要' });
+    // 把 content 编辑发成 {detail: next} 的话，这里会红——而且那会顺手清掉
+    // detail_origin_seq，是后果最重的那个字段
+    expect(Object.keys(vi.mocked(updateTask).mock.calls[0][2])).toEqual(['content']);
+
+    const abox = within(r).getByLabelText('验收') as HTMLTextAreaElement;
+    fireEvent.change(abox, { target: { value: '新验收' } });
+    fireEvent.blur(abox);
+    await waitFor(() => expect(updateTask).toHaveBeenCalledTimes(2));
+    expect(updateTask).toHaveBeenLastCalledWith('s1', 1, { acceptance: '新验收' });
+    expect(Object.keys(vi.mocked(updateTask).mock.calls[1][2])).toEqual(['acceptance']);
+  });
+
+  it('F5：进度条分母 = 总数 − skipped（不是 tasks.length）', () => {
+    const tasks = [
+      makeTask({ id: 1, status: 'completed' }),
+      makeTask({ id: 2, status: 'completed' }),
+      makeTask({ id: 3, status: 'skipped' }),
+      makeTask({ id: 4, status: 'pending' }),
+    ];
+    const { container } = renderPanel(tasks);
+    const bar = container.querySelector('[data-task-progress]');
+    expect(bar).not.toBeNull();
+    // 2/3 = 66.67%；用 completed / tasks.length 的实现会得到 50%
+    expect(parseFloat((bar as HTMLElement).style.width)).toBeCloseTo(200 / 3, 3);
+  });
+
+  it('F7：写失败在面板头部可见（受控下拉弹回原值时不能看起来像「点了没反应」）', async () => {
+    vi.mocked(updateTask).mockRejectedValue(
+      Object.assign(new Error('Failed to update task: content cannot be blank'), { status: 422 }),
+    );
+    const tasks = [makeTask({ id: 1 })];
+    const { container } = renderPanel(tasks);
+    expect(container.querySelector('[data-task-error]')).toBeNull();
+
+    fireEvent.change(within(rowOf(container, 1)).getByLabelText('状态'), {
+      target: { value: 'in_progress' },
+    });
+    await waitFor(() => {
+      const el = container.querySelector('[data-task-error]');
+      expect(el).not.toBeNull();
+      expect(el!.textContent).toContain('422'); // 状态码进文案，不只是 console
+      expect(el!.textContent).toContain('content cannot be blank');
+    });
+    // 状态没有被乐观改掉：store 里还是上一次 GET 的真相
+    expect((within(rowOf(container, 1)).getByLabelText('状态') as HTMLSelectElement).value).toBe(
+      'pending',
+    );
+  });
+
+  it('F7：delete 的 200 + success:false 也算失败，同样在面板上可见', async () => {
+    vi.mocked(deleteTask).mockResolvedValue({ success: false, message: 'task not found' });
+    const { container } = renderPanel([makeTask({ id: 1 })]);
+    fireEvent.click(within(rowOf(container, 1)).getByLabelText('删除'));
+    await waitFor(() => {
+      const el = container.querySelector('[data-task-error]');
+      expect(el).not.toBeNull();
+      expect(el!.textContent).toContain('task not found');
+    });
   });
 });

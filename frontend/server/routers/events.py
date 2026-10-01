@@ -198,11 +198,17 @@ async def api_create_task(session_id: str, data: TaskCreateRequest) -> TaskOut:
 #   未知 task_id → 404。成功响应体是一个 task，没有 success 信封可放失败，所以这条走
 #   HTTPException（与 sessions.py 的 "Session not found" 同一约定），而不是本文件那两
 #   个权限端点的 200 + {"success": false} 形状。
+#   content 给了但 strip 后为空 → 422，与工具层 update 分支同一条（HTTP 面绕过工具层，
+#   那边界校验必须在这里重新成立）。`null`/缺席 = 「不改这个字段」，照旧放行。
+#   这条**不改 openapi.json**：字段类型仍是 Optional[str]，而 POST 那条同形状的 422
+#   本来也没有在 `responses=` 里声明过（见 :170-175）。
 @router.patch("/api/tasks/{session_id}/{task_id}", response_model=TaskOut)
 async def api_update_task(
     session_id: str, task_id: int, data: TaskUpdateRequest
 ) -> TaskOut:
     """改一条任务，返回改完的样子。"""
+    if data.content is not None and not data.content.strip():
+        raise HTTPException(status_code=422, detail="content cannot be blank")
     item = update_task(
         session_id,
         task_id,

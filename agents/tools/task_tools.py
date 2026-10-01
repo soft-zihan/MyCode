@@ -379,6 +379,15 @@ def handle_task_list(
         type_error = _check_string_fields(inp)
         if type_error:
             return type_error
+        # content 与 add 分支同一条（:351）：给了但 strip 后为空 → 拒绝。
+        # 必须区分「没给」与「给了空的」：键缺席/为 null 时 `inp.get` 是 None，语义是
+        # 「不改这个字段」，得放行；`""`/`"   "` 才是把一条任务的一行摘要抹掉——那会让
+        # 常驻摘要渲染成一行空任务、披露块标题变成 `## 当前任务的执行方案（#5 ）`，
+        # 而且全程零报错。刻意**不在 store 里**补这道守卫：`update_task(content=None)`
+        # 就是「不改」，而 store 的 `TaskItem | None` 返回无法区分「没找到」与「值非法」。
+        content = inp.get("content")
+        if content is not None and not content.strip():
+            return "Error: content cannot be blank"
         status = inp.get("status")
         if status is not None and status not in VALID_STATUSES:
             return f"Error: invalid status '{status}'. Valid: {sorted(VALID_STATUSES)}"
@@ -393,7 +402,7 @@ def handle_task_list(
             session_id,
             task_id,
             status=status,
-            content=inp.get("content"),
+            content=content,
             detail=inp.get("detail"),
             acceptance=inp.get("acceptance"),
             error=inp.get("error"),

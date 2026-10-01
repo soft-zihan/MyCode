@@ -116,6 +116,54 @@ def test_update_rejects_non_string_content(ws):
     assert got.detail == "方案A"
 
 
+def test_update_rejects_blank_content(ws):
+    """update 侧的空白 content 与 add 同罪（F1）：不得把一行摘要抹成空。
+
+    常驻摘要 S 与披露块标题都用 content，空白条在两个视图里都不可读
+    （`  #5   [pending]` / `## 当前任务的执行方案（#5 ）`），而此前全程零报错：
+    UI 的「全选内容 → 失焦」就能造出 POST 专门防的那个状态。
+    """
+    added = _call({"operation": "add", "content": "A", "detail": "方案A"})
+    task_id = added["task"]["id"]
+    for blank in ("", "   "):
+        raw = handle_task_list(
+            "s", {"operation": "update", "id": task_id, "content": blank})
+        assert raw.startswith("Error"), raw
+        assert "content" in raw
+    got = list_tasks("s")[0]
+    assert got.content == "A"             # 原值未被改写
+    assert got.detail == "方案A"
+
+
+def test_update_without_content_key_still_updates_other_fields(ws):
+    """「没给 content」≠「给了空的」：键缺席或为 null 表示不改这个字段，必须放行。
+
+    守卫若写成 add 分支那句 `not (inp.get("content") or "").strip()`，这条会红
+    ——那种写法把「只改 status」「只改 detail」也一起拒了，而 update 最常见的形状
+    恰恰就是不带 content。
+    """
+    added = _call({"operation": "add", "content": "A", "detail": "方案A"})
+    task_id = added["task"]["id"]
+
+    out = _call({"operation": "update", "id": task_id, "status": "in_progress"})
+    assert out["ok"] is True
+    assert list_tasks("s")[0].status == "in_progress"
+
+    out = _call({"operation": "update", "id": task_id, "acceptance": "pytest -k a"})
+    assert out["ok"] is True
+    got = list_tasks("s")[0]
+    assert got.content == "A"             # 没给 content → 原值不动
+    assert got.acceptance == "pytest -k a"
+
+    # 显式 null 与键缺席同义（update_task 的 content=None 语义）
+    out = _call({"operation": "update", "id": task_id, "content": None,
+                 "detail": "新方案"})
+    assert out["ok"] is True
+    got = list_tasks("s")[0]
+    assert got.content == "A"
+    assert got.detail == "新方案"
+
+
 def test_add_with_after_id_inserts_in_middle(ws):
     a = _call({"operation": "add", "content": "A"})["task"]
     _call({"operation": "add", "content": "C"})

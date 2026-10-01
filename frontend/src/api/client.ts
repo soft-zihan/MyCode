@@ -660,6 +660,11 @@ export type TaskDeleteResult = TaskDeleteOp['responses'][200]['content']['applic
 /** 五值状态词表（后端 TaskStatus Literal 生成的联合类型）。 */
 export type TaskStatus = NonNullable<TaskUpdateInput['status']>;
 
+/** 任务端点的失败：`_taskError` 把 HTTP 状态码挂在 Error 上（带 detail 时消息里没有码）。
+ *  导出给调用方（useChat 的日志、TaskListPanel 的错误行）用同一个形状，
+ *  免得每处各写一遍 `err as Error & { status?: number }`（F11）。 */
+export type TaskApiError = Error & { status?: number };
+
 async function _taskError(res: Response, fallback: string): Promise<Error> {
   const data = await res.json().catch(() => ({}));
   const detail = data?.detail;
@@ -670,10 +675,10 @@ async function _taskError(res: Response, fallback: string): Promise<Error> {
     : Array.isArray(detail)
       ? detail.map((d: any) => d?.msg).filter(Boolean).join('; ')
       : '';
-  const err = new Error(message ? `${fallback}: ${message}` : `${fallback} (${res.status})`);
+  const err = new Error(message ? `${fallback}: ${message}` : `${fallback} (${res.status})`) as TaskApiError;
   // 带 detail 时消息里**没有**状态码，调用方就没法把「路由 500（形状损坏）」与「404/422」
   // 区分开——两种故障在控制台里长得一模一样。把 status 挂在 Error 上，日志才报得出状态码。
-  (err as Error & { status?: number }).status = res.status;
+  err.status = res.status;
   return err;
 }
 

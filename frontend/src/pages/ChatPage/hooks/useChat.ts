@@ -9,7 +9,7 @@ import {
   fetchTasks as fetchTasksApi,
   DEFAULT_CONTEXT_WINDOW,
 } from '../../../api/client';
-import type { RewindPlan } from '../../../api/client';
+import type { RewindPlan, TaskApiError } from '../../../api/client';
 import { useChatNodes } from '../../../components/chat/nodes';
 import type { UserNode } from '../../../components/chat/nodes/types';
 import { sessionStore, wsManager, eventRouter, useSessionStore } from '../../../store';
@@ -881,7 +881,7 @@ export function useChat() {
       // 失败**不清空**已有清单：保留旧数据 + 可观测，好过面板静默变空白。
       // 状态码必须进日志——`_taskError` 在有 detail 时消息里不带状态码，
       // 于是「路由 500（响应形状损坏）」与「404/422」在控制台里长得一样，互相遮掩。
-      const status = (err as Error & { status?: number })?.status;
+      const status = (err as TaskApiError)?.status;
       console.error(
         `[TASK] fetchTasks failed (${status != null ? `HTTP ${status}` : 'network error'}), 保留现有清单:`,
         err,
@@ -890,10 +890,12 @@ export function useChat() {
   }, []);
 
   /** 面板写成功之后的回灌入口（R3：写端点不广播 task_list/updated，发起方就是面板自己）。
-   *  必须走后端 GET 而不是本地乐观拼接——`focus_id` 只有后端 `find_focus` 算得准。 */
+   *  必须走后端 GET 而不是本地乐观拼接——`focus_id` 只有后端 `find_focus` 算得准。
+   *  **返回那个 promise**（F6）：面板 `await onChanged?.()` 之后才清 busy，返回 void 的话
+   *  await 立刻结束，行解禁时显示的还是旧快照。 */
   const refreshTasks = useCallback(() => {
     if (!currentSessionId) return;
-    void fetchTasks(currentSessionId);
+    return fetchTasks(currentSessionId);
   }, [currentSessionId, fetchTasks]);
 
   useEffect(() => {

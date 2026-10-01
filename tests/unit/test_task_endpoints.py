@@ -215,6 +215,43 @@ def test_patch_updates_fields_and_returns_the_task(ws, api):
     assert stored.acceptance == "pytest -k b"
 
 
+def test_patch_rejects_blank_content(ws, api):
+    """与工具层 update 分支同一条（F1）：HTTP 面绕过工具层，那道校验必须在这里重新成立。
+
+    未修时 UI 的「全选内容 → 失焦」→ `PATCH {content:""}` → 200，于是常驻摘要 S
+    渲染出一行空任务、披露块标题变成 `## 当前任务的执行方案（#5 ）`——UI 造出了
+    POST 那条 422 专门防的状态，且全程零报错。
+    """
+    a = add_task(SID, "A", detail="方案A")
+    mark_detail_disclosed(SID, a.id, 42)
+    for blank in ("", "   "):
+        r = _patch(api, a.id, content=blank)
+        assert r.status_code == 422, r.text
+        assert r.json()["detail"] == "content cannot be blank"
+    stored = list_tasks(SID)[0]
+    assert stored.content == "A"
+    assert stored.detail_origin_seq == 42      # 被拒的请求不得有任何副作用
+
+
+def test_patch_without_content_key_updates_the_other_fields(ws, api):
+    """「没给 content」≠「给了空的」：缺席与 null 都是「不改这个字段」，必须放行。
+
+    守卫若写成 `not (data.content or "").strip()`，这条会红——那种写法把最常见的
+    「只改 detail」「只改 status」也一起拒了。
+    """
+    a = add_task(SID, "A", detail="旧方案")
+    r = _patch(api, a.id, detail="新方案")
+    assert r.status_code == 200, r.text
+    assert r.json()["content"] == "A"          # 没给 content → 原值不动
+    assert r.json()["detail"] == "新方案"
+    assert r.json()["detail_origin_seq"] is None   # detail 改了 → 下一轮重新披露
+
+    r = _patch(api, a.id, content=None, acceptance="pytest -k a")
+    assert r.status_code == 200, r.text
+    assert r.json()["content"] == "A"
+    assert r.json()["acceptance"] == "pytest -k a"
+
+
 def test_patch_detail_clears_detail_origin_seq(ws, api):
     """硬要求 2：这是「UI 改 detail → 模型下一轮看得到」的全部机制。"""
     a = add_task(SID, "A", detail="旧方案")
