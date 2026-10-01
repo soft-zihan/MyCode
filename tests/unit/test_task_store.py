@@ -331,9 +331,15 @@ def test_add_with_after_id_zero_inserts_at_front(ws):
 
 
 def test_add_with_unknown_after_id_falls_back_to_append(ws):
+    """M11：两条以上才有判别力。
+
+    单条列表里「追加到末尾」与「插到第一条之后」是同一个结果，于是一个退化成
+    `tasks.insert(1, item)` 的实现也能过这条断言。
+    """
     add_task("s", "A")
+    add_task("s", "B")
     add_task("s", "Z", after_id=999)
-    assert [t.content for t in list_tasks("s")] == ["A", "Z"]
+    assert [t.content for t in list_tasks("s")] == ["A", "B", "Z"]
 
 
 def test_update_with_after_id_moves_item(ws):

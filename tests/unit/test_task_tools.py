@@ -845,3 +845,132 @@ async def test_dispatcher_with_run_shell_still_warns(ws):
     assert out["task"]["status"] == "completed"
     assert "pytest -q" in out["warning"]
 
+
+
+# ────────────── Task 5 收口：M1 / M2 / M5 / _start_hint 转移守卫 ──────────────
+
+
+def test_plan_mode_denial_message_is_one_shared_constant(ws):
+    """M1：plan 模式拒绝文案此前在 dispatcher 与 permissions 里逐字重复、只差
+    `Error: ` 前缀。收敛成一个模块级常量、两处引用——否则改一处忘另一处，模型在
+    两条路径上会读到两种说法，而这两条路径本该是同一件事。
+
+    dispatcher 那份很可能是不可达的纵深防御（权限门先拒），但**不删**：证明它不可达
+    需要穷举所有调用路径，超出本次范围；收敛文案已经消除了「两处不同步」这个真问题。
+    """
+    from agents.tools import dispatcher as dispatcher_mod
+    from agents.tools.permissions import PLAN_MODE_TASK_LIST_DENIAL, _check_plan_mode
+
+    assert dispatcher_mod.PLAN_MODE_TASK_LIST_DENIAL is PLAN_MODE_TASK_LIST_DENIAL
+    denied = _check_plan_mode("task_list", {}, None)
+    assert denied["action"] == "deny"
+    assert denied["message"] == PLAN_MODE_TASK_LIST_DENIAL
+    # 文案本身仍要说清「批准后会自动物化」，否则模型不知道该怎么改
+    assert "materialized into task_list automatically" in PLAN_MODE_TASK_LIST_DENIAL
+
+
+async def test_dispatcher_plan_mode_denial_uses_the_same_constant(ws):
+    """dispatcher 那一侧只是多了 `Error: ` 前缀，正文必须逐字相同。"""
+    from agents.tools.permissions import PLAN_MODE_TASK_LIST_DENIAL
+
+    agent = _SeqStubAgent()
+    agent.permission_mode = "plan"
+    res = await ToolDispatcher(agent_ref=agent).execute_tool_call(
+        "task_list", {"operation": "list"}, assistant_seq=1)
+    assert res.text == f"Error: {PLAN_MODE_TASK_LIST_DENIAL}"
+
+
+async def test_task_list_updated_not_emitted_when_handler_errors(ws):
+    """M2：handler 返回 `Error:` 时此前照样发 `task_list/updated`，于是每次被拒的
+    调用都触发一次前端 refetch——而 store 根本没变。
+
+    刻意走 handler 级的错误（未知 operation）而不是 plan 模式拒绝：后者在 dispatcher
+    里 append 之前就 return 了，压根到不了发射点，用它测等于什么都没测。
+
+    照抄 `plan/updated` 分支的既有写法（那里就有 `not result.startswith("Error")`），
+    不另发明一套判据。
+    """
+    agent = _SeqStubAgent()
+    dispatcher = ToolDispatcher(agent_ref=agent)
+    res = await dispatcher.execute_tool_call(
+        "task_list", {"operation": "frobnicate"}, assistant_seq=1)
+    assert res.text.startswith("Error"), res.text
+    emitted = [e for e in agent.session.events if e.get("type") == "task_list/updated"]
+    assert emitted == [], f"被拒的调用不该触发前端 refetch: {emitted}"
+
+
+async def test_task_list_updated_still_emitted_on_success(ws):
+    """对照组：没有这条，上一条可以靠「把事件整个不发」trivially 通过。"""
+    agent = _SeqStubAgent()
+    dispatcher = ToolDispatcher(agent_ref=agent)
+    res = await dispatcher.execute_tool_call(
+        "task_list", {"operation": "add", "content": "A"}, assistant_seq=1)
+    assert not res.text.startswith("Error"), res.text
+    emitted = [e for e in agent.session.events if e.get("type") == "task_list/updated"]
+    assert len(emitted) == 1
+
+
+def test_add_with_unparseable_after_id_errors_explicitly(ws):
+    """M5：`after_id="abc"` 此前被 _coerce_id 静默变成 None，于是一次被请求的插入
+    悄悄变成「追加到末尾」、回 ok:true，而且**不进 ignored**（after_id 对 add/update
+    都是合法键，_unknown_keys 认得它）。模型以为放对了位置，实际没有。
+    """
+    _call({"operation": "add", "content": "A"})
+    _call({"operation": "add", "content": "B"})
+    raw = handle_task_list("s", {"operation": "add", "content": "Z", "after_id": "abc"})
+    assert raw.startswith("Error"), raw
+    assert "after_id must be an integer" in raw, raw
+    # 关键：那次插入**没有**悄悄发生
+    assert [t.content for t in list_tasks("s")] == ["A", "B"]
+
+
+def test_update_with_unparseable_after_id_errors_explicitly(ws):
+    """M5 的 update 一侧：一次被请求的移动此前同样静默不发生。"""
+    a = _call({"operation": "add", "content": "A"})["task"]
+    _call({"operation": "add", "content": "B"})
+    _call({"operation": "add", "content": "C"})
+    raw = handle_task_list("s", {"operation": "update", "id": a["id"], "after_id": "abc"})
+    assert raw.startswith("Error"), raw
+    assert "after_id must be an integer" in raw, raw
+    assert [t.content for t in list_tasks("s")] == ["A", "B", "C"]   # 没动
+
+
+def test_unparseable_id_says_must_be_integer_not_required(ws):
+    """M5 的 id 一侧：模型**确实发了** id，回它「id is required」/「not found」都是
+    与事实矛盾的说法，模型于是会去补一个它已经给了的东西。
+    """
+    _call({"operation": "add", "content": "A"})
+    for op in ("get", "update", "remove"):
+        raw = handle_task_list("s", {"operation": op, "id": "abc"})
+        assert raw.startswith("Error"), op
+        assert "id must be an integer" in raw, (op, raw)
+        assert "is required" not in raw and "not found" not in raw, (op, raw)
+
+
+def test_absent_id_still_says_required(ws):
+    """对照组：id **缺席**时仍该说 "required"——那才是事实。没有这条，上一条可以靠
+    「把所有 id 错误都改说 must be an integer」trivially 通过。
+    """
+    _call({"operation": "add", "content": "A"})
+    raw = handle_task_list("s", {"operation": "get"})
+    assert "id is required" in raw, raw
+
+
+def test_repeated_in_progress_does_not_re_hint(ws):
+    """`_start_hint` 在重复 `status:"in_progress"` 上重复提醒 —— 与 Plan 2 给验收
+    闸门修掉的是同一类噪声：警告在不该响时响，会训练模型忽略这个机制。最可能的重复
+    场景恰恰最伤——模型读到提醒、去改别的字段、原样再发一次 status:"in_progress"，
+    于是收到逐字相同的提醒。给它加上闸门那套 prev_status 转移守卫。
+    """
+    tid = _call({"operation": "add", "content": "A"})["task"]["id"]
+    out1 = _call({"operation": "update", "id": tid, "status": "in_progress"}, seq=10)
+    assert "hint" in out1, out1                       # 首次流转：提醒
+
+    out2 = _call({"operation": "update", "id": tid, "status": "in_progress"}, seq=11)
+    assert out2["ok"] is True and out2["task"]["status"] == "in_progress"
+    assert "hint" not in out2, f"重复流转不该再提醒: {out2}"
+
+    # 重开（回到 pending）后再转入是全新的时刻，提醒照常
+    _call({"operation": "update", "id": tid, "status": "pending"}, seq=12)
+    out3 = _call({"operation": "update", "id": tid, "status": "in_progress"}, seq=13)
+    assert "hint" in out3, out3

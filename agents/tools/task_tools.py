@@ -178,6 +178,27 @@ def _coerce_id(value) -> int | None:
         return None
 
 
+def _id_error(inp: dict, key: str) -> str | None:
+    """key **提供了**却解析不成整数 → clean error；未提供或能解析 → None。
+
+    _coerce_id 把 "abc" 静默收窄成 None，于是「提供了但坏掉」与「压根没提供」合流到
+    同一个语义上，两处都因此说谎：
+    - `after_id`：一次被请求的插入/移动悄悄不发生，回 ok:true，而且**不进 ignored**
+      （after_id 对 add/update 都是合法键，_unknown_keys 认得它）。模型以为放对了
+      位置，实际没有，且没有任何信号告诉它——静默失败比报错贵得多。
+    - `id`：落到「id is required」，而模型确实发了 id；文案与事实矛盾，它于是会去补
+      一个自己已经给了的东西。
+    """
+    raw = inp.get(key)
+    if raw is None:
+        return None
+    try:
+        int(raw)
+    except (TypeError, ValueError):
+        return f"Error: {key} must be an integer"
+    return None
+
+
 # 四个字符串字段（设计 §四）。schema 已声明 type: string，但网关不强制，所以
 # 边界必须自己校验——这是 C1 的第一道防线，第二道是 task_store._as_str。
 _STRING_FIELDS = ("content", "detail", "acceptance", "error")
@@ -318,6 +339,9 @@ def handle_task_list(
         type_error = _check_string_fields(inp)
         if type_error:
             return type_error
+        id_error = _id_error(inp, "after_id")
+        if id_error:
+            return id_error
         content = (inp.get("content") or "").strip()
         if not content:
             return "Error: content is required for add operation"
@@ -337,6 +361,12 @@ def handle_task_list(
                    hint=_add_hint(item))
 
     if operation == "update":
+        # 先于「id is required」判：模型发了 id 只是发坏了，回它「required」是与事实
+        # 矛盾的说法。after_id 同理——坏掉的 after_id 此前会让一次被请求的移动静默不
+        # 发生，还回 ok:true。
+        id_error = _id_error(inp, "id") or _id_error(inp, "after_id")
+        if id_error:
+            return id_error
         task_id = _coerce_id(inp.get("id"))
         if task_id is None:
             return "Error: id is required for update operation"
@@ -346,11 +376,11 @@ def handle_task_list(
         status = inp.get("status")
         if status is not None and status not in VALID_STATUSES:
             return f"Error: invalid status '{status}'. Valid: {sorted(VALID_STATUSES)}"
-        # 闸门要的是**真的发生了** X → completed 这次流转，所以先读一眼旧状态。
-        # 只在本次请求写 completed 时才读：多出来的这次 store 读落在 update 分支上，
-        # 不在每请求路径上（推式披露与常驻摘要已经各读一次了）。
+        # 闸门与 _start_hint 要的都是「**真的发生了**这次流转」，所以两个目标状态都
+        # 先读一眼旧状态。只在本次请求写这两个状态时才读：多出来的这次 store 读落在
+        # update 分支上，不在每请求路径上（推式披露与常驻摘要已经各读一次了）。
         prev_status = None
-        if status == TASK_STATUS_COMPLETED:
+        if status in (TASK_STATUS_COMPLETED, TASK_STATUS_IN_PROGRESS):
             prev_status = next(
                 (t.status for t in list_tasks(session_id) if t.id == task_id), None)
         item = update_task(
@@ -366,10 +396,20 @@ def handle_task_list(
         )
         if item is None:
             return f"Error: task with id {task_id} not found"
-        # 条件是**本次请求的新状态**，不是 item.status：一条已经 in_progress 的任务
-        # 后续每次改 content/after_id 都念一遍，提醒就成了每调用必现的噪声。
-        # 「一次流转一次提醒」= 只在真的发生 pending → in_progress 这次调用上提醒。
-        hint = _start_hint(item) if status == TASK_STATUS_IN_PROGRESS else None
+        # 「一次流转一次提醒」需要**两个**条件，此前只有第一个：
+        # - 本次请求写的新状态是 in_progress（不是 item.status）——否则一条已经
+        #   in_progress 的任务后续每次改 content/after_id 都会被念一遍；
+        # - 且这确实是一次流转（旧状态不是 in_progress）——否则模型读到提醒、去改别的
+        #   字段、原样再发一次 status:"in_progress"，就收到逐字相同的提醒。
+        # 第二条与下面验收闸门的 `prev_status != TASK_STATUS_COMPLETED` 同源同理由：
+        # 重复的噪声正是训练模型忽略这个机制的东西。重开（in_progress → pending →
+        # in_progress）后再转入是全新的时刻，那时照常提醒。
+        hint = (
+            _start_hint(item)
+            if status == TASK_STATUS_IN_PROGRESS
+            and prev_status != TASK_STATUS_IN_PROGRESS
+            else None
+        )
         # 软验收闸门（Plan 2 Task 3）：警告，不拒绝——状态照常变成 completed。
         # 上膛要四条同时成立：本次请求把状态改成 completed、**且这确实是一次流转**
         # （旧状态不是 completed）、这条声明了 acceptance（自缩放：没声明判据的任务
@@ -408,6 +448,9 @@ def handle_task_list(
         return _ok(payload, ignored, hint=hint)
 
     if operation == "remove":
+        id_error = _id_error(inp, "id")
+        if id_error:
+            return id_error
         task_id = _coerce_id(inp.get("id"))
         if task_id is None:
             return "Error: id is required for remove operation"
@@ -428,6 +471,9 @@ def handle_task_list(
         }, ignored)
 
     if operation == "get":
+        id_error = _id_error(inp, "id")
+        if id_error:
+            return id_error
         task_id = _coerce_id(inp.get("id"))
         if task_id is None:
             return "Error: id is required for get operation"

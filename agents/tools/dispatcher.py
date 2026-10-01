@@ -30,6 +30,8 @@ from agents.tools.question_tools import handle_ask_user
 # 零函数级 agents import」（M4 依赖治理，豁免表当前为空）。task_gate 只依赖
 # task_store，与本文件既有的 task_tools 同向，不构成环。
 from agents.tools.task_gate import can_produce_evidence, has_successful_shell_since
+# 文案单一来源在 permissions（权限门是正常路径上先拒的那个），这里只加 `Error: ` 前缀。
+from agents.tools.permissions import PLAN_MODE_TASK_LIST_DENIAL
 from agents.tools.task_tools import handle_task_list
 from agents.tools.wiki_tools import remember
 
@@ -198,10 +200,7 @@ class ToolDispatcher:
             return await handle_ask_user(self.agent.session, inp, abort_fn=lambda: self.agent.abort_requested())
         if name == "task_list":
             if self.agent.permission_mode == "plan":
-                return (
-                    "Error: task_list is disabled in plan mode. Write the plan into "
-                    "tasks.md; approved tasks are materialized into task_list automatically."
-                )
+                return f"Error: {PLAN_MODE_TASK_LIST_DENIAL}"
             # current_seq = 承载本次 tool_calls 的 assistant 消息的 seq，由
             # agent_loop 在每个模型响应处捕获一次（_run_step 落盘
             # assistant_message 时），再沿 _handle_tool_calls →
@@ -252,7 +251,13 @@ class ToolDispatcher:
                 current_seq=current_seq,
                 evidence_fn=evidence_fn,
             )
-            self.agent.session.append("task_list/updated", {"session_id": self.agent.session.id})
+            # 只在 handler 真的写了东西时才通知前端 refetch。判据照抄下面草稿目录
+            # 写入那一支的 plan/updated（`isinstance(result, str) and not
+            # result.startswith("Error")`），不另发明一套：此前无论成败都发一次事件，
+            # 于是每次被拒的调用都触发一次前端 refetch，而 store 根本没变。
+            if isinstance(result, str) and not result.startswith("Error"):
+                self.agent.session.append(
+                    "task_list/updated", {"session_id": self.agent.session.id})
             return result
         if name == "skill":
             return await self._execute_skill_tool(inp)
