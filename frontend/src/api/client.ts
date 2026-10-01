@@ -670,7 +670,11 @@ async function _taskError(res: Response, fallback: string): Promise<Error> {
     : Array.isArray(detail)
       ? detail.map((d: any) => d?.msg).filter(Boolean).join('; ')
       : '';
-  return new Error(message ? `${fallback}: ${message}` : `${fallback} (${res.status})`);
+  const err = new Error(message ? `${fallback}: ${message}` : `${fallback} (${res.status})`);
+  // 带 detail 时消息里**没有**状态码，调用方就没法把「路由 500（形状损坏）」与「404/422」
+  // 区分开——两种故障在控制台里长得一模一样。把 status 挂在 Error 上，日志才报得出状态码。
+  (err as Error & { status?: number }).status = res.status;
+  return err;
 }
 
 /** 读会话的任务清单 + 后端算出的焦点条 id（前端不自己推导焦点）。 */

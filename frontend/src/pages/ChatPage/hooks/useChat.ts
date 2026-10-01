@@ -6,6 +6,7 @@ import {
   forkSession, respondToPermission, respondToQuestion,
   stageRewind, commitRewind,
   fetchSessionSummary, steerSession,
+  fetchTasks as fetchTasksApi,
   DEFAULT_CONTEXT_WINDOW,
 } from '../../../api/client';
 import type { RewindPlan } from '../../../api/client';
@@ -123,6 +124,7 @@ export function useChat() {
   const pendingPermission = useSessionStore(() => sessionId ? sessionStore.getPendingPermission(sessionId) : undefined);
   const pendingQuestion = useSessionStore(() => sessionId ? sessionStore.getPendingQuestion(sessionId) : undefined);
   const tasks = useSessionStore(() => sessionId ? sessionStore.getTasks(sessionId) : EMPTY_TASKS);
+  const taskFocusId = useSessionStore(() => sessionId ? sessionStore.getTaskFocus(sessionId) : null);
   const planSlug = useSessionStore(() => sessionId ? sessionStore.getPlanSlug(sessionId) : undefined);
   const fileSnapshots = useSessionStore(() => sessionId ? sessionStore.getFileSnapshots(sessionId) : EMPTY_FILE_SNAPSHOTS);
   const contextUsed = useSessionStore(() => sessionId ? sessionStore.getContextUsed(sessionId) : 0);
@@ -868,16 +870,31 @@ export function useChat() {
 
   const fetchTasks = useCallback(async (sessionId: string) => {
     try {
-      const apiBase = (window as any).__MYCODE_API_BASE__ || '/api';
-      const res = await fetch(`${apiBase}/tasks/${sessionId}`);
-      if (res.ok) {
-        const data = await res.json();
-        sessionStore.setTasks(sessionId, data.tasks || []);
-      }
+      // 走 client.ts 那个照生成契约写的方法（类型来自 paths[...]），不再手写 fetch + 手解 JSON。
+      const data = await fetchTasksApi(sessionId);
+      // 后端读端点的 `status` 刻意是宽松的 `str`（校验失败会把整个面板打成 500），
+      // 生成类型因此是 `string`。这里显式收窄成面板要的 `TaskStatus`：**不在五值词表里的
+      // 原样保留**，面板把它渲染成「未知状态」。悄悄映射成 pending 会让后端加第六种状态时
+      // 前端一声不响地显示错的东西。
+      sessionStore.setTasks(sessionId, (data.tasks ?? []) as TaskItem[], data.focus_id ?? null);
     } catch (err) {
-      console.error('Failed to fetch tasks:', err);
+      // 失败**不清空**已有清单：保留旧数据 + 可观测，好过面板静默变空白。
+      // 状态码必须进日志——`_taskError` 在有 detail 时消息里不带状态码，
+      // 于是「路由 500（响应形状损坏）」与「404/422」在控制台里长得一样，互相遮掩。
+      const status = (err as Error & { status?: number })?.status;
+      console.error(
+        `[TASK] fetchTasks failed (${status != null ? `HTTP ${status}` : 'network error'}), 保留现有清单:`,
+        err,
+      );
     }
   }, []);
+
+  /** 面板写成功之后的回灌入口（R3：写端点不广播 task_list/updated，发起方就是面板自己）。
+   *  必须走后端 GET 而不是本地乐观拼接——`focus_id` 只有后端 `find_focus` 算得准。 */
+  const refreshTasks = useCallback(() => {
+    if (!currentSessionId) return;
+    void fetchTasks(currentSessionId);
+  }, [currentSessionId, fetchTasks]);
 
   useEffect(() => {
     if (currentSessionId) {
@@ -969,6 +986,7 @@ export function useChat() {
     pendingPermission,
     pendingQuestion,
     tasks,
+    taskFocusId,
     sessionRefreshTrigger,
     chatSnapshot,
     pendingSteerMessages,
@@ -995,6 +1013,7 @@ export function useChat() {
     handlePermissionApprove,
     handlePermissionDeny,
     handleQuestionRespond,
+    refreshTasks,
     handleAcceptFile,
     handleRejectFile,
     handleAcceptAll,

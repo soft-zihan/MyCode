@@ -1,6 +1,7 @@
 import { useSyncExternalStore, useCallback, useRef } from 'react';
 import type { ChatSnapshot } from '../components/chat/nodes/types';
 import { DEFAULT_CONTEXT_WINDOW } from '../api/client';
+import type { Task, TaskStatus } from '../api/client';
 
 export interface PermissionRequest {
   rpc_id: string;
@@ -18,17 +19,17 @@ export interface QuestionRequest {
   context?: string;
 }
 
-export interface TaskItem {
-  id: number;
-  content: string;
-  status: 'pending' | 'in_progress' | 'completed' | 'skipped' | 'failed';
-  priority: 'high' | 'medium' | 'low';
-  created_at: string;
-  updated_at: string;
-  detail: string;
-  acceptance: string;
-  error: string;
-}
+/**
+ * 面板与 store 共用的单条任务。**单一来源是 `client.ts` 从生成契约取出的 `Task`（M6）**：
+ * 面板此前自己另声明过一份字段逐一相同的接口，两份并存时只改一份仍然编译通过、
+ * 面板静默读不到新字段——所以这里 import 而不是复制。
+ *
+ * `status` 单独收窄成 `TaskStatus`（R2）：后端 `TaskOut.status` 刻意声明成 `str`
+ * （读端点上 `response_model` 校验失败会变成 500、把整个面板打空，宁可放宽），
+ * 于是生成类型里它是 `string`；直接沿用会让状态下拉失去穷尽性。代价面是运行时仍可能
+ * 收到第六种状态，面板必须能把它显示成「未知」而不是悄悄并进 skipped/failed。
+ */
+export type TaskItem = Omit<Task, 'status'> & { status: TaskStatus };
 
 export interface FileSnapshot {
   file_path: string;
@@ -59,6 +60,8 @@ export interface SessionState {
   pendingPermission?: PermissionRequest;
   pendingQuestion?: QuestionRequest;
   tasks?: TaskItem[];
+  /** 后端 `find_focus` 算出的焦点条 id（R3：前端不自己推导焦点）。 */
+  taskFocusId?: number | null;
   fileSnapshots: FileSnapshot[];
   contextUsed: number;
   contextTotal: number;
@@ -293,10 +296,20 @@ class SessionStore {
     return this.sessions.get(sessionId)?.tasks ?? EMPTY_TASK_ARRAY;
   }
 
-  setTasks(sessionId: string, tasks: TaskItem[]): void {
+  /**
+   * 写入清单 + 后端算出的焦点条 id。
+   * 焦点默认值用 `null` 这个原始值而不是新建对象/数组——与 `getTasks` 返回模块级
+   * `EMPTY_TASK_ARRAY` 同一个用意：`useSyncExternalStore` 靠引用比较，别每次给新引用。
+   */
+  setTasks(sessionId: string, tasks: TaskItem[], focusId: number | null = null): void {
     const state = this.getOrCreate(sessionId);
     state.tasks = tasks;
+    state.taskFocusId = focusId;
     this.notify();
+  }
+
+  getTaskFocus(sessionId: string): number | null {
+    return this.sessions.get(sessionId)?.taskFocusId ?? null;
   }
 
   getPlanSlug(sessionId: string): string | undefined {

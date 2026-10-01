@@ -107,6 +107,7 @@ export default function ChatPage() {
     pendingPermission,
     pendingQuestion,
     tasks,
+    taskFocusId,
     chatSnapshot,
     pendingSteerMessages,
     setPendingSteerMessages,
@@ -127,6 +128,7 @@ export default function ChatPage() {
     handlePermissionApprove,
     handlePermissionDeny,
     handleQuestionRespond,
+    refreshTasks,
     handleAcceptFile,
     handleRejectFile,
     handleAcceptAll,
@@ -330,10 +332,14 @@ export default function ChatPage() {
             />
           )}
 
-          {/* TaskList Panel */}
-          {tasks && tasks.length > 0 && (
-            <TaskListPanel tasks={tasks} />
-          )}
+          {/* TaskList Panel：plan 的执行界面（可展开可编辑）。空清单时面板自己返回 null。
+              focusId 来自后端 find_focus；onChanged = 重新 GET（写端点不广播，见 R3）。 */}
+          <TaskListPanel
+            tasks={tasks}
+            focusId={taskFocusId}
+            sessionId={currentSessionId ?? undefined}
+            onChanged={refreshTasks}
+          />
 
           {/* U3a: Background Tasks Panel */}
           <BackgroundTasksPanel tasks={backgroundTasks} sessionId={currentSessionId ?? undefined} />
