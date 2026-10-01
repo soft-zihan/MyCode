@@ -14,7 +14,6 @@ from agents.tools.registry import tool_definitions
 from agents.tools.result import ToolExecutionResult
 from agents.tools import task_tools
 from agents.tools.task_store import (
-    VALID_PRIORITIES,
     VALID_STATUSES,
     list_tasks,
     mark_detail_disclosed,
@@ -133,7 +132,9 @@ def test_list_omits_detail(ws):
     # 精确字段集，不只是 "detail" not in entry：summary_dict 现在是整个
     # 渐进式披露前提的唯一守卫，任何人往摘要里加字段都必须先改这条断言。
     # error 刻意保留（设计另要求常驻摘要块带 failed 条的 error 首行）。
-    assert set(entry) == {"id", "content", "status", "priority", "acceptance", "error"}
+    # priority 已删除（Plan 3a Task 1）：它没有任何读者——S 不渲染它、find_focus
+    # 不用它做 tie-break，而把它变成 tie-break 会贬低列表顺序（自锚守卫存在的理由）。
+    assert set(entry) == {"id", "content", "status", "acceptance", "error"}
     assert entry["acceptance"] == "pytest"
     assert entry["content"] == "A"
 
@@ -227,10 +228,39 @@ def test_list_never_leaks_detail(ws):
 
 
 def test_schema_enums_match_store_vocabulary():
-    """义务 2：schema 与 store 词表一致的唯一门禁，防止再次悄悄分叉。"""
+    """义务 2：schema 与 store 词表一致的唯一门禁，防止再次悄悄分叉。
+
+    priority 属性已随字段一起删除（Plan 3a Task 1），status 是 schema 里唯一
+    一个由 store 词表背书的 enum。
+    """
     props = TASK_LIST_TOOL["input_schema"]["properties"]
     assert set(props["status"]["enum"]) == VALID_STATUSES
-    assert set(props["priority"]["enum"]) == VALID_PRIORITIES
+
+
+def test_schema_no_longer_advertises_priority():
+    """删字段必须连广告一起删：schema 里留着 priority 会让模型继续发它。"""
+    assert "priority" not in TASK_LIST_TOOL["input_schema"]["properties"]
+    assert "priority" not in json.dumps(TASK_LIST_TOOL, ensure_ascii=False)
+
+
+def test_summary_dict_has_no_priority(ws):
+    out = _call({"operation": "add", "content": "A"})
+    assert "priority" not in out["task"]
+    listed = _call({"operation": "list"})["tasks"][0]
+    assert set(listed) == {"id", "content", "status", "acceptance", "error"}
+
+
+def test_priority_is_reported_as_ignored_not_silently_dropped(ws):
+    """模型仍按旧 schema 发 priority 时，必须得到明确回显而不是静默丢弃。
+
+    `_KEYS_BY_OPERATION["add"]` 去掉 "priority" 正是为了让它落进 ignored 机制
+    ——留在集合里就是「收下然后扔掉」，模型收到的仍是干净的 ok:true。
+    """
+    out = _call({"operation": "add", "content": "A", "priority": "high"})
+    assert out["ok"] is True
+    assert "priority" in out.get("ignored", [])
+    assert len(list_tasks("s")) == 1                 # 任务照旧建出来了
+    assert not hasattr(list_tasks("s")[0], "priority")
 
 
 def test_schema_declares_id_and_after_id_as_integer():
@@ -401,10 +431,15 @@ def test_cross_operation_params_are_reported_as_ignored(ws):
     assert list_tasks("s")[0].status == "pending"     # 丢弃是事实，但现在有告知
 
     task_id = out["task"]["id"]
+    # update 半边：priority 已从 TaskItem 删除，所以模型按旧 schema 发过来的它
+    # 现在对**每个**操作都是无效键，走同一条 ignored 路径。原来这里断言的
+    # `list_tasks("s")[0].priority == "medium"`（丢弃后保持默认值）随字段一起
+    # 消失，换成「同一次调用里的合法键照常生效」——强度不降：ignored 仍是精确
+    # 相等而非子集，且多钉了一条「无效键不会连带毁掉有效键」。
     out2 = _call({"operation": "update", "id": task_id,
                   "status": "in_progress", "priority": "high"})
     assert out2["ok"] is True and out2["ignored"] == ["priority"]
-    assert list_tasks("s")[0].priority == "medium"
+    assert list_tasks("s")[0].status == "in_progress"
 
     # 没有跨操作参数时不带这个键（保持输出干净）
     assert "ignored" not in _call({"operation": "list"})

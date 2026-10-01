@@ -39,11 +39,13 @@ VALID_STATUSES = {
 # 旧 JSON 里的 cancelled 归一化为 skipped，不做文件迁移
 _LEGACY_STATUS_ALIASES = {"cancelled": TASK_STATUS_SKIPPED}
 
-TASK_PRIORITY_HIGH = "high"
-TASK_PRIORITY_MEDIUM = "medium"
-TASK_PRIORITY_LOW = "low"
-
-VALID_PRIORITIES = {TASK_PRIORITY_HIGH, TASK_PRIORITY_MEDIUM, TASK_PRIORITY_LOW}
+# 刻意**没有**任务级优先级：Plan 3a 删除了 TaskItem.priority。它没有任何读者——
+# format_task_list_block 不渲染它、find_focus 不用它做 tie-break，只有 list 返回它，
+# 而 S 常驻之后模型没有理由调 list。把它变成 find_focus 的 tie-break 会贬低列表
+# 顺序（列表顺序正是自锚守卫存在的前提），在 S 里渲染它则是每请求付费去表达一个
+# 模型无法据此行动的东西。旧 JSON 里的 priority 键被 from_dict 自然忽略，无需迁移。
+# 注意与**计划级**的 Plan.priority（P0/P1/P2，agents/plan/plan_models.py）无关，
+# 那个字段有读者（plan_recall / plan_tools），保留。
 
 
 def _normalize_status(value: str) -> str:
@@ -62,6 +64,21 @@ def _as_str(value: Any) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _as_int(value: Any) -> int:
+    """把任意 JSON 值收窄为 int；非整数一律 0。
+
+    与 _as_str 同一理由：Plan 3b 的 UI 写端点会让 id 从 JSON 请求体进来。
+    一个字符串 id 会静默让 mark_detail_disclosed 的 item.id == task_id 匹配失败，
+    于是每次调用都重注入最多 6000 字符——与 C1 同类的静默黏性缺陷。
+
+    bool 必须显式排除：它是 int 的子类，`isinstance(True, int)` 为真，不排除的话
+    `{"id": true}` 会变成 1 并匹配到 id=1 的真实任务——比失配更糟，那是**错配**。
+    """
+    if isinstance(value, bool):        # bool 是 int 的子类，必须排除
+        return 0
+    return value if isinstance(value, int) else 0
+
+
 def get_tasks_dir() -> Path:
     # 目录名刻意保留 "todos"：非模型可见契约，改名需迁移回退路径而收益为零
     d = get_workspace() / ".mycode" / "todos"
@@ -74,7 +91,6 @@ class TaskItem:
     id: int
     content: str
     status: str = TASK_STATUS_PENDING
-    priority: str = TASK_PRIORITY_MEDIUM
     created_at: str = ""
     updated_at: str = ""
     detail: str = ""
@@ -97,11 +113,14 @@ class TaskItem:
         # .strip() 在每模型请求的路径上抛 AttributeError，而那两处宽 except 会把它
         # 吞成「推式层与常驻层永久静默关闭」。在 from_dict 收窄对任何写入方、任何
         # 消费方都生效。
+        # id 同理过 _as_int：字符串 id 会让 mark_detail_disclosed 的等值比较静默
+        # 失配，披露于是每轮重来（见 _as_int 的 docstring）。
+        # 旧文件里的 priority 键在这里被自然忽略——from_dict 按字段名取值，
+        # 多余的键根本不读，所以删字段不需要迁移脚本。
         return cls(
-            id=data.get("id", 0),
+            id=_as_int(data.get("id")),
             content=_as_str(data.get("content")),
             status=_normalize_status(data.get("status", TASK_STATUS_PENDING)),
-            priority=data.get("priority", TASK_PRIORITY_MEDIUM),
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", ""),
             detail=_as_str(data.get("detail")),
@@ -248,7 +267,6 @@ def _insert_after(tasks: list[TaskItem], item: TaskItem, after_id: int | None) -
 def add_task(
     session_id: str,
     content: str,
-    priority: str = TASK_PRIORITY_MEDIUM,
     detail: str = "",
     acceptance: str = "",
     after_id: int | None = None,
@@ -278,7 +296,6 @@ def add_task(
         id=task_list.next_id,
         content=content,
         status=TASK_STATUS_PENDING,
-        priority=priority if priority in VALID_PRIORITIES else TASK_PRIORITY_MEDIUM,
         created_at=now,
         updated_at=now,
         detail=detail,

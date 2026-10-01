@@ -17,10 +17,8 @@ from typing import Callable
 from agents.logging import print_error
 from agents.tools.task_gate import build_acceptance_warning
 from agents.tools.task_store import (
-    TASK_PRIORITY_MEDIUM,
     TASK_STATUS_COMPLETED,
     TASK_STATUS_IN_PROGRESS,
-    VALID_PRIORITIES,
     VALID_STATUSES,
     TaskItem,
     add_task,
@@ -87,11 +85,6 @@ TASK_LIST_TOOL = {
                 "type": "string",
                 "description": "失败原因（status=failed 时填）",
             },
-            "priority": {
-                "type": "string",
-                "enum": ["high", "medium", "low"],
-                "description": "优先级（add 时可选，默认 medium）",
-            },
             "after_id": {
                 "type": "integer",
                 "description": (
@@ -106,11 +99,13 @@ TASK_LIST_TOOL = {
 
 
 # 每个操作真正消费的入参（设计 §六 的操作表）。schema 是一个扁平属性袋，
-# 跨操作参数（update 带 priority、add 带 status）会被静默丢弃却仍回 ok:true。
-# add/update 不再回显 detail 之后，模型连「从回显里发现字段没生效」这条线索
-# 都没有了，所以把被忽略的键显式报回去。
+# 跨操作参数（add 带 status）与**已从 schema 删掉的旧字段**（priority，Plan 3a
+# Task 1 删除）会被静默丢弃却仍回 ok:true。add/update 不再回显 detail 之后，
+# 模型连「从回显里发现字段没生效」这条线索都没有了，所以把被忽略的键显式报回去。
+# 把 "priority" 从 add 的集合里去掉正是这个机制的用途：模型按旧 schema 发过来的
+# priority 会拿到一条 "ignored": ["priority"] 回显，而不是无声消失。
 _KEYS_BY_OPERATION = {
-    "add": {"operation", "content", "detail", "acceptance", "priority", "after_id"},
+    "add": {"operation", "content", "detail", "acceptance", "after_id"},
     "update": {"operation", "id", "content", "detail", "acceptance", "status",
                "error", "after_id"},
     "remove": {"operation", "id"},
@@ -131,12 +126,14 @@ def summary_dict(item: TaskItem) -> dict:
 
     error 不在设计 §六 的字段清单里，但设计另要求常驻摘要块带 failed 条的
     error 首行，且 error 只在 failed 时非空 —— 刻意保留（控制器已裁定）。
+
+    priority 已删除（Plan 3a Task 1）：它没有任何读者，而摘要视图是每请求付费的
+    常驻成本的近亲，不该为一个模型无法据此行动的字段留位置。
     """
     return {
         "id": item.id,
         "content": item.content,
         "status": item.status,
-        "priority": item.priority,
         "acceptance": item.acceptance,
         "error": item.error,
     }
@@ -324,13 +321,9 @@ def handle_task_list(
         content = (inp.get("content") or "").strip()
         if not content:
             return "Error: content is required for add operation"
-        priority = inp.get("priority", TASK_PRIORITY_MEDIUM)
-        if priority not in VALID_PRIORITIES:
-            priority = TASK_PRIORITY_MEDIUM
         item = add_task(
             session_id,
             content,
-            priority=priority,
             detail=inp.get("detail") or "",
             acceptance=inp.get("acceptance") or "",
             after_id=_coerce_id(inp.get("after_id")),

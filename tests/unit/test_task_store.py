@@ -89,6 +89,8 @@ def test_legacy_json_file_loads_without_migration(ws):
     path = get_tasks_dir() / "legacy.json"
     path.write_text(json.dumps({
         "session_id": "legacy",
+        # "todos" 是旧顶层键、"cancelled" 是旧状态词、"priority" 是已删字段的旧键
+        # ——三者都靠 from_dict 的按名取值/归一化被吸收，无需迁移脚本。
         "todos": [{"id": 1, "content": "旧任务", "status": "cancelled",
                    "priority": "medium", "created_at": "", "updated_at": ""}],
         "next_id": 2,
@@ -98,6 +100,26 @@ def test_legacy_json_file_loads_without_migration(ws):
     assert len(loaded.tasks) == 1
     assert loaded.tasks[0].status == TASK_STATUS_SKIPPED
     assert loaded.tasks[0].detail == ""
+
+
+def test_legacy_json_with_priority_key_still_loads(ws):
+    """旧 store 文件带 priority 键，删字段后必须仍能加载（免迁移）。
+
+    `from_dict` 按字段名取值，多余的键根本不读；`to_dict` 用 `asdict`，字段删了
+    就不再输出——所以一次 re-save 后旧键自然消失，不需要迁移脚本，也不需要在
+    `from_dict` 里留一条兼容分支。
+    """
+    path = get_tasks_dir() / "legacy.json"
+    path.write_text(json.dumps({
+        "session_id": "legacy",
+        "tasks": [{"id": 1, "content": "旧任务", "status": "pending",
+                   "priority": "high", "created_at": "", "updated_at": ""}],
+        "next_id": 2,
+    }), encoding="utf-8")
+    loaded = load_tasks("legacy")
+    assert len(loaded.tasks) == 1
+    assert loaded.tasks[0].content == "旧任务"
+    assert not hasattr(loaded.tasks[0], "priority")
 
 
 def test_storage_dir_name_is_still_todos(ws):
@@ -602,6 +624,49 @@ def test_from_dict_coerces_non_string_fields_to_empty(ws):
         assert item.detail == "", bad
         assert item.acceptance == "", bad
         assert item.error == "", bad
+
+
+# --- id 的整数收窄（_as_int）-------------------------------------------------
+#
+# from_dict 此前收窄了四个字符串字段（_as_str）却把 id 原样透传。Plan 3b 会加 UI
+# 写端点，届时 id 可能从 JSON 请求体进来；一个字符串 id 会静默让
+# mark_detail_disclosed 的 `item.id == task_id` 匹配失败，于是每次调用都重注入
+# 最多 6000 字符——与 C1 同一类「静默、黏性、对模型不可见」的缺陷。
+
+
+def test_from_dict_coerces_non_int_id_to_zero(ws):
+    item = TaskItem.from_dict({"id": "7", "content": "x"})
+    assert item.id == 0            # 不是 7，也不是 "7"
+
+
+def test_from_dict_coerces_bool_id_to_zero(ws):
+    # bool 是 int 的子类；不排除的话 True 会变成 1 从而匹配到 id=1 的真实任务
+    assert TaskItem.from_dict({"id": True, "content": "x"}).id == 0
+    assert TaskItem.from_dict({"id": False, "content": "x"}).id == 0
+
+
+def test_from_dict_keeps_valid_int_id(ws):
+    assert TaskItem.from_dict({"id": 7, "content": "x"}).id == 7
+
+
+def test_from_dict_coerces_missing_and_null_id_to_zero(ws):
+    assert TaskItem.from_dict({"content": "x"}).id == 0
+    assert TaskItem.from_dict({"id": None, "content": "x"}).id == 0
+
+
+def test_string_id_does_not_receive_detail_disclosure_bookkeeping(ws):
+    """靶心：字符串 id 让 mark_detail_disclosed 静默失配，披露于是每次都重来。"""
+    add_task("s", "A", detail="方案A")
+    path = get_tasks_dir() / "s.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["tasks"][0]["id"] = "1"          # 模拟 UI 写端点/旧文件送来的字符串 id
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    item = load_tasks("s").tasks[0]
+    assert item.id == 0
+    mark_detail_disclosed("s", item.id, 99)
+    # 收窄后 id 恒为 int，记账命中同一条目，不会「每次都重注入」
+    assert load_tasks("s").tasks[0].detail_origin_seq == 99
 
 
 # --- 清单摘要块 S（常驻尾部通道内容）---------------------------------------
