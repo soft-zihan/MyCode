@@ -68,10 +68,6 @@ class Plan:
     granularity: PlanGranularity
     plan_dir: str
 
-    @property
-    def is_active(self) -> bool:
-        return self.status in (PlanStatus.PROPOSED, PlanStatus.IN_PROGRESS)
-
 
 @dataclass
 class Task:

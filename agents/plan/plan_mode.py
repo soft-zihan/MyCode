@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from typing import Callable, Awaitable, Any
 
-from agents.plan.strategy_loader import load_strategy, VALID_STAGES, strategy_config_from_app_config
+from agents.plan.strategy_loader import load_strategy, strategy_config_from_app_config
 from agents.logging import print_error
 from agents.plan.plan_manager import count_tasks, create_plan, get_plan, append_tasks_to_plan, add_artifact
 from agents.plan.plan_models import PlanGranularity

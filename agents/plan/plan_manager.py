@@ -18,12 +18,16 @@ Plan 是主动的目标规划，存储在 .mycode/plans/ 下，跟随主项目�
 
 执行状态的唯一载体是 task_list（agents/tools/task_store.py）。留下来的是：
 
-- 计划文档的 CRUD（create_plan / add_artifact / append_tasks_to_plan / get_plan /
-  get_plan_context）——plan 批准时物化路径的上游；
+- 计划文档的 CRUD（create_plan / add_artifact / append_tasks_to_plan / get_plan）
+  ——plan 批准时物化路径的上游；
 - 任务解析（parse_tasks_content 及其两个格式分支）——物化时把 tasks.md 文本变成
   Task 列表；
 - _git_commit——create_plan / add_artifact / append_tasks_to_plan 都要它，所以
   物化路径的上游一并依赖它，**不是**孤儿。
+
+Plan 3b Task B1 又清掉四个零调用方的孤儿：get_plan_context（不在物化路径上，
+repo-wide 零命中）、_get_current_commit、VALID_STATUSES、VALID_GRANULARITIES
+（注意 agents/tools/task_store.py 里的同名符号是**另一个模块**的东西，与此无关）。
 """
 
 from __future__ import annotations
@@ -40,9 +44,6 @@ from agents.plan.plan_models import Plan, PlanStatus, PlanGranularity, Task
 
 
 logger = logging.getLogger(__name__)
-
-VALID_STATUSES = {s.value for s in PlanStatus}
-VALID_GRANULARITIES = {g.value for g in PlanGranularity}
 
 
 # tasks.md 里的 `**状态**:` 载荷归一化。原住在 agents/plan/task_models.py，那个模块
@@ -313,37 +314,6 @@ def _parse_structured_tasks(content: str) -> list[Task]:
     return tasks
 
 
-def get_plan_context(slug: str) -> dict:
-    plans_dir = get_plans_dir()
-    plan_dir = plans_dir / slug
-    if not plan_dir.exists():
-        return {}
-
-    context = {
-        "slug": slug,
-        "meta": {},
-        "proposal": "",
-        "design": "",
-        "tasks": [],
-    }
-
-    meta_path = plan_dir / "_meta.md"
-    if meta_path.exists():
-        result = parse_frontmatter(meta_path.read_text())
-        context["meta"] = result.meta
-
-    proposal_path = plan_dir / "proposal.md"
-    if proposal_path.exists():
-        context["proposal"] = proposal_path.read_text()
-
-    design_path = plan_dir / "design.md"
-    if design_path.exists():
-        context["design"] = design_path.read_text()
-
-    context["tasks"] = get_tasks(slug)
-    return context
-
-
 # ── Git ──
 
 def _git_commit(message: str) -> None:
@@ -389,20 +359,3 @@ def append_tasks_to_plan(slug: str, tasks_content: str) -> None:
     tasks_path.write_text(new_content)
     
     _git_commit(f"plan({slug}): append tasks")
-
-
-
-def _get_current_commit(plan_dir: Path) -> str:
-    """获取当前 HEAD commit hash。"""
-    import subprocess
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=plan_dir,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        return result.stdout.strip()
-    except Exception:
-        return ""

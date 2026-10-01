@@ -17,8 +17,9 @@ from pathlib import Path
 
 import pytest
 
+from agents.core.frontmatter import format_frontmatter
 from agents.plan import plan_manager as pm
-from agents.plan.plan_models import PlanGranularity
+from agents.plan.plan_models import PlanGranularity, PlanStatus
 from agents.plan.plan_mode import PlanModeManager
 from agents.plan.strategy_loader import (
     DEFAULT_STRATEGIES,
@@ -48,12 +49,6 @@ SIMPLE_TASKS = """## 任务清单
 - [!] 4. 失败任务
 - [-] 5. 跳过任务
 """
-
-
-@pytest.fixture()
-def plans_ws():
-    """当前 workspace（isolated_home 已把 cwd 指向 tmp workdir）。"""
-    return Path.cwd()
 
 
 def _make_standard_plan(slug: str, tasks_content: str = STRUCTURED_TASKS) -> None:
@@ -335,3 +330,73 @@ class TestGitCommitScope:
             ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True,
         ).stdout.strip()
         assert before == after
+
+
+# ────────────────────── PlanStatus 反序列化面 ──────────────────────
+
+class TestPlanStatusDeserialization:
+    """PlanStatus 是「盘上已有 plan 目录」的反序列化面，7 个成员一个都不能少。
+
+    _parse_plan_dir 用 `PlanStatus(meta.get("status", "proposed"))`，外面裹着一个
+    blanket `except Exception: return None`（plan_manager.py）。少一个成员的后果是
+    静默的：ValueError 被吞 → get_plan 返回 None → 那份计划在面板上凭空消失，且
+    一条错误都不报。而 paused / ready_to_archive / completed / archived / abandoned
+    这几个值**曾经真的被写过盘**（pause_plan、plan_complete 等已删除的写入方），
+    所以「现在没有写入方」不等于「盘上没有」。
+
+    此前 tests/ 里没有任何一处钉住非 proposed 的成员（grep PlanStatus / paused /
+    ready_to_archive 零命中），删掉一个成员全套照旧绿。
+    """
+
+    @pytest.mark.parametrize("member", list(PlanStatus), ids=lambda m: m.value)
+    def test_every_status_on_disk_round_trips(self, member, tmp_path, monkeypatch):
+        plans_dir = tmp_path / ".mycode" / "plans"
+        slug = f"st-{member.value.replace('_', '-')}"
+        plan_dir = plans_dir / slug
+        plan_dir.mkdir(parents=True)
+        (plan_dir / "_meta.md").write_text(format_frontmatter({
+            "slug": slug,
+            "status": member.value,
+            "priority": "P2",
+            "created": "2026-01-01T00:00:00+00:00",
+            "modified": "2026-01-01T00:00:00+00:00",
+            "tags": [],
+            "granularity": PlanGranularity.MINIMAL.value,
+        }, ""), encoding="utf-8")
+        monkeypatch.setattr(pm, "get_plans_dir", lambda: plans_dir)
+
+        plan = pm.get_plan(slug)
+
+        assert plan is not None, (
+            f"status={member.value!r} 让整份 plan 从 get_plan 消失（blanket except "
+            "把 ValueError 吞成了 None）——面板上会凭空少一份计划且零诊断"
+        )
+        assert plan.status is member
+        assert plan.status.value == member.value
+        assert plan.slug == slug
+
+    def test_vocabulary_is_exactly_the_seven_members(self):
+        """枚举本身也被钉住：加成员要过这里，删成员要过上面那条参数化测试。"""
+        assert {m.value for m in PlanStatus} == {
+            "proposed", "in-progress", "paused", "completed",
+            "ready_to_archive", "archived", "abandoned",
+        }
+
+    def test_unknown_status_on_disk_still_vanishes_silently(self):
+        """已记入 later plan 的遗留缺陷：这里只钉住**当前**行为，不是为它背书。
+
+        真正的修法（未知 status 降级为可见哨兵值而不是 None + 记日志）不在本计划范围。
+        这条测试存在是为了让那次修法必须**主动**改掉它，而不是悄悄发生。
+        """
+        plans_dir = Path.cwd() / ".mycode" / "plans"
+        plan_dir = plans_dir / "st-unknown"
+        plan_dir.mkdir(parents=True, exist_ok=True)
+        (plan_dir / "_meta.md").write_text(format_frontmatter({
+            "slug": "st-unknown",
+            "status": "not-a-real-status",
+            "priority": "P2",
+            "created": "", "modified": "", "tags": [],
+            "granularity": PlanGranularity.MINIMAL.value,
+        }, ""), encoding="utf-8")
+
+        assert pm.get_plan("st-unknown") is None

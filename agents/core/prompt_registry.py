@@ -151,12 +151,14 @@ def _collect_hidden_agent_prompts() -> list[PromptInfo]:
     return prompts
 
 
+# 键集必须与 agents/plan/strategies/ 下真实存在的目录一致：下面的
+# _collect_plan_strategy_prompts 是按目录枚举的，多出来的键永远不会被查到
+# （execute / review / converge 的目录随 Plan 3a Task 4 一起删了，Plan 3b Task B1
+# 把这三个残留键清掉）。少一个键则退化成 .get(category, category)，即描述变成
+# 目录名本身——所以两边都要对齐。
 _PLAN_STRATEGY_DESCRIPTIONS = {
     "grill-spec": "需求澄清策略",
     "tasks": "任务拆分策略",
-    "execute": "执行策略",
-    "review": "审查策略",
-    "converge": "收敛策略",
 }
 
 

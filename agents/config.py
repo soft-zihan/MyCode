@@ -100,13 +100,6 @@ class PlanStrategyConfig:
             tasks=data.get("tasks", "structured"),
         )
 
-    def to_stage_dict(self) -> dict[str, str]:
-        """转换为 {stage: name} 格式"""
-        return {
-            "grill-spec": self.grill_spec,
-            "tasks": self.tasks,
-        }
-
 
 @dataclass
 class AppConfig:

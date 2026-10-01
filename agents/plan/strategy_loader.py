@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
 from agents.config import load_config
 
 logger = logging.getLogger(__name__)
@@ -144,38 +143,3 @@ def _detect_source(path: Path | None, workspace: Path) -> str:
         pass
 
     return "unknown"
-
-
-def list_strategies(workspace: Path) -> dict[str, list[dict[str, Any]]]:
-    """列出所有可用的策略。
-
-    Returns:
-        {stage: [{name, path, source}, ...]} 字典
-    """
-    result: dict[str, list[dict[str, Any]]] = {}
-
-    for stage in VALID_STAGES:
-        strategies: list[dict[str, Any]] = []
-        seen_names: set[str] = set()
-
-        for dir_path in _strategy_dirs(workspace):
-            stage_dir = dir_path / stage
-            if not stage_dir.exists():
-                continue
-
-            for md_file in stage_dir.glob("*.md"):
-                name = md_file.stem
-                if name in seen_names:
-                    continue
-                seen_names.add(name)
-
-                source = _detect_source(md_file, workspace)
-                strategies.append({
-                    "name": name,
-                    "path": str(md_file),
-                    "source": source,
-                })
-
-        result[stage] = strategies
-
-    return result
