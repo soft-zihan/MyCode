@@ -113,3 +113,58 @@ def test_tool_guidance_empty_and_interaction_rules():
     tpl = _load_system_prompt_template()
     for removed in ("<tool_result>", "system-reminder", "REPL 命令"):
         assert removed not in tpl
+
+
+def test_task_list_guidance_present_with_tool():
+    """Smoke fix：持有 task_list 时注入实质性任务管理指引。
+
+    断言钉的是行为性内容（触发阈值 / 反过度工程条款 / 不轮询 list /
+    detail 与 acceptance 字段写法 / 状态纪律 / after_id / 自动披露），
+    只提一句工具名的水化实现过不了。
+    """
+    from agents.core.prompt import build_tool_guidance
+
+    g = build_tool_guidance({"task_list", "read_file"})
+    # 触发条件具体化：3 步阈值、多个待办、跨多文件，且在动手之前建清单
+    assert "3 个以上独立步骤" in g
+    assert "跨多个文件" in g
+    assert "动手之前" in g
+    assert "不是可选仪式" in g
+    # 反过度工程条款：建清单/维护清单是任务执行的一部分
+    assert "任务执行的一部分" in g
+    # 摘要常驻上下文尾部 → 禁止轮询 list；get 只用于按需取单条完整方案
+    assert "不要调用 list 检查进度" in g
+    assert "get 仅用于按需取单条任务的完整方案" in g
+    # 字段写法：acceptance 是一条可验证命令；detail 按读者无其他上下文写
+    assert "一条能证明完成的可验证命令" in g
+    assert "按读者没有任何其他上下文来写" in g
+    # 状态纪律：单一 in_progress、failed 填 error
+    assert "同一时间只有一条 in_progress" in g
+    assert "failed 并填写 error" in g
+    # 清单可编辑（after_id）+ detail 自动注入（不需要主动拉）
+    assert "after_id" in g
+    assert "自动注入" in g
+
+
+def test_task_list_guidance_absent_without_tool():
+    """Smoke fix：未持有 task_list（子代理场景）→ 整段不注入。
+
+    task_list 在 subagent 的 _sub_agent_excluded 里，若指引下沉到内核
+    会告诉子代理去用一个它没有的工具。
+    """
+    from agents.core.prompt import build_tool_guidance
+
+    g = build_tool_guidance({"read_file"})
+    assert "task_list" not in g
+    assert "3 个以上独立步骤" not in g
+    assert "in_progress" not in g
+
+
+def test_task_list_guidance_present_when_all_tools():
+    """Smoke fix：active_tools=None（全量注入语义）→ 任务管理指引在场。"""
+    from agents.core.prompt import build_tool_guidance
+
+    g = build_tool_guidance(None)
+    assert "3 个以上独立步骤" in g
+    assert "不要调用 list 检查进度" in g
+    assert "一条能证明完成的可验证命令" in g
