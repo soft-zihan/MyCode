@@ -408,11 +408,20 @@ def _first_line(value: Any, limit: int) -> str:
     归一成 ""，但 TaskItem 也可以被直接构造（例如未来的写端点绕过 from_dict）。
     S 每请求都渲染且外层包着 try/except，一个 None（或一个 int）字段会把整个常驻
     层吞掉，所以这里对所有插值字段一次性免疫，而不是逐个调用点去防。
+
+    被截断时末尾追加 `…`：静默截断会让模型把半条 acceptance 当完整命令去执行
+    （验收闸门正是叫它执行读到的那条命令），所以「这里被切过」必须是块里可读的
+    事实。`…` 让返回值比 limit 多 1 个字符，这是刻意的——limit 约束的是**保留的
+    正文字符数**，标记不是正文（与 clip_detail 同一取舍，Plan 1 已裁定过）。
+    未截断时逐字不变，不给短字段凭空加噪。
     """
     stripped = _as_str(value).strip()
     if not stripped:
         return ""
-    return stripped.splitlines()[0].strip()[:limit]
+    first = stripped.splitlines()[0].strip()
+    if len(first) <= limit:
+        return first
+    return first[:limit] + "…"
 
 
 def clip_detail(detail: str) -> str:

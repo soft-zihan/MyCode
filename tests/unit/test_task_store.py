@@ -719,3 +719,46 @@ def test_s_block_all_skipped_footer_does_not_claim_all_complete():
     done_block = format_task_list_block(done_tasks, None)
     assert "(2/2 done)" in done_block
     assert "（全部完成）" in done_block
+
+
+# --- 截断标记（_first_line）--------------------------------------------------
+#
+# 静默截断在验收闸门上线之前必须先变成可见事实：闸门会告诉模型去**执行**它读到
+# 的那条 acceptance，而一条超过上限的 acceptance 此前被从中间切断且毫无提示——
+# 模型会把半条命令当完整命令跑。标记让「这里被切过」成为块里可读的事实。
+#
+# `…` 会让返回值比 limit 多 1 个字符，这是刻意的：limit 约束的是**保留的正文字符
+# 数**，标记不是正文（与 clip_detail 同一取舍）。所以下面各条既有边界断言
+# （"A"*160 in / "A"*161 not in）仍然成立——`…` 不是 A/E/C。
+
+
+def test_first_line_appends_ellipsis_only_when_truncated():
+    from agents.tools.task_store import _first_line
+    assert _first_line("短命令", 80) == "短命令"          # 未截断：逐字不变、无标记
+    assert _first_line("x" * 80, 80) == "x" * 80          # 恰好等于上限：不截断
+    assert _first_line("x" * 81, 80) == "x" * 80 + "…"    # 超一个字符：截断并标记
+
+
+def test_first_line_takes_first_line_before_capping():
+    from agents.tools.task_store import _first_line
+    assert _first_line("第一行\n第二行", 80) == "第一行"
+
+
+def test_s_block_marks_truncated_acceptance():
+    item = TaskItem(id=1, content="跑测试", status="pending", acceptance="A" * 300)
+    block = format_task_list_block([item], item)
+    assert "…" in block
+    assert "A" * 160 in block and "A" * 161 not in block
+
+
+def test_s_block_leaves_short_acceptance_unmarked():
+    item = TaskItem(id=1, content="跑测试", status="pending",
+                    acceptance="pytest tests/unit -q")
+    assert "…" not in format_task_list_block([item], item)
+
+
+def test_disclosure_block_marks_truncated_content():
+    item = TaskItem(id=1, content="C" * 300, detail="方案")
+    header = next(line for line in format_disclosure_block(item).splitlines() if "#1" in line)
+    assert "…" in header
+    assert "C" * 80 in header and "C" * 81 not in header
