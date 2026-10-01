@@ -12,6 +12,7 @@ from agents.core.workspace import reset_workspace, set_workspace
 from agents.tools.dispatcher import ToolDispatcher
 from agents.tools.registry import tool_definitions
 from agents.tools.result import ToolExecutionResult
+from agents.tools import task_tools
 from agents.tools.task_store import (
     VALID_PRIORITIES,
     VALID_STATUSES,
@@ -428,7 +429,7 @@ def test_non_numeric_id_returns_clean_error_not_a_traceback(ws):
 class _SeqStubAgent:
     """最小 agent 替身：last_usage_seq 已被同批次的 compact_context 重置成 -1。"""
 
-    def __init__(self):
+    def __init__(self, tools=None):
         # origin="sub_agent" 落进 DERIVED_SESSION_ORIGINS（session.py），会话不进
         # 用户会话列表/清理/最近会话投影。Global Constraints 要求测试会话一律用它，
         # 不用 origin="test"（不是派生 origin，会污染用户会话列表）。
@@ -437,6 +438,9 @@ class _SeqStubAgent:
         self.current_sub_agent_id = None
         self.permission_mode = "default"
         self.last_usage_seq = -1
+        # 生产 Agent 无条件有这个属性（agent.py:110），dispatcher 的验收闸门按它
+        # 判断「这个 agent 有没有可能产出证据」。默认给全量工具集 = 主智能体的形状。
+        self.tools = tool_definitions if tools is None else tools
 
     def abort_requested(self) -> bool:
         return False
@@ -697,3 +701,112 @@ def test_warning_is_inside_the_json_not_appended(ws):
                                  "status": "completed"},
                            current_seq=20, evidence_fn=lambda _s: False)
     json.loads(raw)      # 不抛即证明是纯 JSON
+
+
+# ---- 复核轮：闸门只在**真的流转**上警告，且绝不因内部错误假指控 ----
+
+
+def test_repeated_completed_update_does_not_warn_again(ws):
+    """一次流转一次警告 —— 与 _start_hint 的口径同源。
+
+    最可能的重复场景恰恰是最伤的那种：模型读到警告、认定自己确实验证过、原样再
+    发一次 `status: "completed"`，于是收到逐字相同的警告。重复的噪声正是训练模型
+    忽略这个机制的东西，而「误报/噪声比没有闸门更糟」是整套设计的裁定。
+    """
+    added = _call({"operation": "add", "content": "跑测试", "acceptance": "pytest -q"})
+    tid = added["task"]["id"]
+    _call({"operation": "update", "id": tid, "status": "in_progress"}, seq=10)
+
+    first = _call({"operation": "update", "id": tid, "status": "completed"},
+                  seq=20, evidence=lambda _since: False)
+    assert first["task"]["status"] == "completed"
+    assert "pytest -q" in first["warning"]              # 真的流转：警告
+
+    second = _call({"operation": "update", "id": tid, "status": "completed"},
+                   seq=21, evidence=lambda _since: False)
+    assert second["ok"] is True
+    assert second["task"]["status"] == "completed"
+    assert "warning" not in second                      # 重复：不再念
+
+
+def test_reopened_then_completed_again_warns_again(ws):
+    """completed → in_progress → completed 是**又一次**真流转，闸门要重新上膛。
+
+    钉住「不重复警告」没有被实现成一次性闩锁：重开一条任务再标完成是全新的验收
+    时刻，那时同样可能没有证据。
+    """
+    added = _call({"operation": "add", "content": "跑测试", "acceptance": "pytest -q"})
+    tid = added["task"]["id"]
+    _call({"operation": "update", "id": tid, "status": "completed"}, seq=10,
+          evidence=lambda _s: False)
+    _call({"operation": "update", "id": tid, "status": "in_progress"}, seq=20)
+    out = _call({"operation": "update", "id": tid, "status": "completed"}, seq=30,
+                evidence=lambda _s: False)
+    assert "warning" in out
+
+
+def test_evidence_fn_that_raises_leaves_the_update_clean(ws, monkeypatch):
+    """探针抛异常 → 更新照样成功、payload 无 warning、异常不外逃。
+
+    失败方向是关键：**绝不能**把内部错误当成「没有证据」——那会把一次探针故障
+    翻译成对模型的假指控，而假指控正是这套设计唯一禁止的结果。异常也不能外逃：
+    写入发生在探针之前，外逃会让 dispatcher 的宽 except 给模型一个「其实已经
+    成功了」的报错。
+    """
+    logged: list[str] = []
+    monkeypatch.setattr(task_tools, "print_error", logged.append)
+    added = _call({"operation": "add", "content": "跑测试", "acceptance": "pytest -q"})
+
+    def boom(_since):
+        raise RuntimeError("probe exploded")
+
+    out = _call({"operation": "update", "id": added["task"]["id"],
+                 "status": "completed"}, seq=20, evidence=boom)
+    assert out["ok"] is True
+    assert out["task"]["status"] == "completed"
+    assert list_tasks("s")[0].status == "completed"      # 写入确实落盘了
+    assert "warning" not in out                          # 不当成「没有证据」
+    assert logged and "probe exploded" in logged[0]      # 但留痕，不静默吞
+
+
+# ---- 复核轮：闸门只对**有可能产出证据**的 agent 上膛（dispatcher 层）----
+
+
+async def _dispatcher_complete(tools):
+    """经真 dispatcher 走一遍 add → completed（事件日志里没有任何 run_shell）。"""
+    dispatcher = ToolDispatcher(agent_ref=_SeqStubAgent(tools=tools))
+    await dispatcher.execute_tool_call(
+        "task_list",
+        {"operation": "add", "content": "跑测试", "acceptance": "pytest -q"},
+        assistant_seq=7)
+    res = await dispatcher.execute_tool_call(
+        "task_list", {"operation": "update", "id": 1, "status": "completed"},
+        assistant_seq=8)
+    return json.loads(res.text)
+
+
+async def test_dispatcher_without_run_shell_never_warns(ws):
+    """拿不到 run_shell 的 agent 永远满足不了判据，闸门对它必须静默。
+
+    可达路径：Plan 1 把 task_list 加进了 subagent 的 _sub_agent_excluded，但显式
+    声明 `allowed-tools: task_list` 的自定义 agent 走白名单分支，而那条分支不与
+    _sub_agent_excluded 求交。照样上膛就是一台保证假阳性的机器。
+    刻意不按 is_sub_agent 判：有 run_shell 的子 agent，闭包绑的是它自己的 session、
+    list_tasks 按 session.id 取键、子 agent 事件也落盘，闸门语义完全成立。判据是
+    「能不能产出证据」，不是「它是什么」。
+    """
+    out = await _dispatcher_complete([TASK_LIST_TOOL])
+    assert out["task"]["status"] == "completed"
+    assert "warning" not in out
+
+
+async def test_dispatcher_with_run_shell_still_warns(ws):
+    """对照组：工具集里有 run_shell 而事件日志里没证据 → 闸门照常上膛。
+
+    没有这条，上一条可以靠「把闸门整个关掉」trivially 通过。
+    """
+    shell = next(t for t in tool_definitions if t["name"] == "run_shell")
+    out = await _dispatcher_complete([TASK_LIST_TOOL, shell])
+    assert out["task"]["status"] == "completed"
+    assert "pytest -q" in out["warning"]
+

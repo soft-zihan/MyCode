@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from typing import Callable
 
+from agents.logging import print_error
 from agents.tools.task_gate import build_acceptance_warning
 from agents.tools.task_store import (
     TASK_PRIORITY_MEDIUM,
@@ -292,7 +293,11 @@ def handle_task_list(
     刻意是 callable 而不是 session：闸门要读事件日志，而 task_tools / task_store
     都不能 import session（循环依赖 + 可测试性），所以由 dispatcher 传一个对
     `agent.session` 的闭包进来（agents/tools/task_gate.has_successful_shell_since）。
-    None = 闸门静默不启用（子智能体与任何旧调用方的形状），不报错也不警告。
+    None = 闸门静默不启用，不报错也不警告。dispatcher 只在**这个 agent 有可能产出
+    证据**时才给闭包（task_gate.can_produce_evidence，按工具集判）：拿不到证据工具
+    的 agent 永远满足不了判据，对它上膛就是一台保证假阳性的机器。
+    探针抛异常时的失败方向是「跳过警告」而不是「当成没有证据」——内部故障不能
+    翻译成对模型的假指控（见 update 分支里的 try/except）。
 
     所有成功路径只返回纯 JSON，不拼披露文本：披露的单一注入路径是
     ensure_focus_detail_visible（Task 9）。工具层拿不到自己那条
@@ -348,6 +353,13 @@ def handle_task_list(
         status = inp.get("status")
         if status is not None and status not in VALID_STATUSES:
             return f"Error: invalid status '{status}'. Valid: {sorted(VALID_STATUSES)}"
+        # 闸门要的是**真的发生了** X → completed 这次流转，所以先读一眼旧状态。
+        # 只在本次请求写 completed 时才读：多出来的这次 store 读落在 update 分支上，
+        # 不在每请求路径上（推式披露与常驻摘要已经各读一次了）。
+        prev_status = None
+        if status == TASK_STATUS_COMPLETED:
+            prev_status = next(
+                (t.status for t in list_tasks(session_id) if t.id == task_id), None)
         item = update_task(
             session_id,
             task_id,
@@ -366,19 +378,37 @@ def handle_task_list(
         # 「一次流转一次提醒」= 只在真的发生 pending → in_progress 这次调用上提醒。
         hint = _start_hint(item) if status == TASK_STATUS_IN_PROGRESS else None
         # 软验收闸门（Plan 2 Task 3）：警告，不拒绝——状态照常变成 completed。
-        # 上膛要三条同时成立：本次请求把状态改成 completed、这条声明了 acceptance
-        # （自缩放：没声明判据的任务不受约束）、调用方给了 evidence_fn（None =
-        # 子智能体/旧调用方，闸门静默不启用）。
+        # 上膛要四条同时成立：本次请求把状态改成 completed、**且这确实是一次流转**
+        # （旧状态不是 completed）、这条声明了 acceptance（自缩放：没声明判据的任务
+        # 不受约束）、调用方给了 evidence_fn（None = 闸门静默不启用）。
+        # 「确实是一次流转」与上面 hint 的口径同源，理由也同一条：最可能的重复场景
+        # 恰恰最伤——模型读到警告、认定自己确实验证过、原样再发一次
+        # status:"completed"，于是收到逐字相同的警告。重复的噪声正是训练模型忽略
+        # 这个机制的东西。重开（completed → in_progress）后再标完成是全新的验收
+        # 时刻，那时闸门照常上膛。
         # 证据来自事件日志而不是模型自报；区间起点是 started_seq，为 None（跳过
         # in_progress 直接标 completed）时退化为全量扫描——宽松方向，宁漏勿误。
         warning = ""
         if (
             status == TASK_STATUS_COMPLETED
+            and prev_status != TASK_STATUS_COMPLETED
             and item.acceptance.strip()
             and evidence_fn is not None
-            and not evidence_fn(item.started_seq)
         ):
-            warning = build_acceptance_warning(item)
+            try:
+                has_evidence = bool(evidence_fn(item.started_seq))
+            except Exception as exc:
+                # 失败方向刻意**不是**「没有证据」：那会把一次内部故障翻译成对模型
+                # 的假指控，而假指控是这套设计唯一禁止的结果（误报训练模型忽略警告）。
+                # 也不让异常外逃——写入在探针之前就已落盘，外逃会让 dispatcher 的宽
+                # except 给模型一个「其实已经成功了」的报错。于是「警告，绝不拒绝」
+                # 在这里是结构性保证，不靠 evidence_fn 恰好不抛。留痕，不静默吞。
+                print_error(
+                    f"[acceptance_gate] evidence probe failed, "
+                    f"skipping warning for task {task_id}: {exc!r}")
+            else:
+                if not has_evidence:
+                    warning = build_acceptance_warning(item)
         payload = {"action": "updated", "task": summary_dict(item)}
         if warning:
             payload["warning"] = warning

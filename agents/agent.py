@@ -637,10 +637,13 @@ class Agent:
         self._refresh_runtime_system_prompt(force=force)
 
     def _has_in_progress_task(self) -> bool:
-        """有没有任务正在执行 —— 折叠任务边界门的输入。
+        """有没有任务正在执行 —— 折叠任务边界门的探针（零参 callable）。
 
         读不出来一律返回 False：绝不能因为任务清单读不出来就不压缩，那会撑爆
-        上下文窗口。失败方向刻意选在「照常折叠」这一侧。
+        上下文窗口。失败方向刻意选在「照常折叠」这一侧，且**裁定权留在本方法里**
+        （context_compressor 不 import task_store，只认一个返回 bool 的 callable）。
+
+        调用方刻意把**方法本身**交下去而不是它的返回值：见 check_and_compact。
         """
         try:
             return any(t.status == task_store.TASK_STATUS_IN_PROGRESS
@@ -652,10 +655,16 @@ class Agent:
     def check_and_compact(self):
         # 折叠任务边界门（Plan 2 Task 4）：任务执行中途，工具结果/文件内容/报错
         # 是模型正在推理的活工作集，折叠它们不是省钱而是破坏当前任务。这里把门
-        # 的输入一路传到 ContextCompressor._should_compress（经 context.py 中转），
+        # 的探针一路传到 ContextCompressor._should_compress（经 context.py 纯中转），
         # 硬顶 min(threshold+0.10, 0.95) 是安全阀。
+        #
+        # 刻意交**方法对象**而不是 self._has_in_progress_task() 的返回值：探针要
+        # 读一次任务清单，而 check_and_compact 每次模型调用都跑，绝大多数时候
+        # 利用率离任何触发点都很远、这一轮根本不做折叠决定。交值等于把它变成每
+        # 请求第三次读同一个几 KB 文件（推式披露与常驻摘要各读一次）。解析发生在
+        # ContextCompressor._resolve_defer_fold，只在逼近触发点时。
         return self._context_manager._check_and_compact(
-            defer_fold=self._has_in_progress_task())
+            defer_fold=self._has_in_progress_task)
 
     def emit_text(self, text: str) -> None:
         self._emit_text(text)
@@ -739,9 +748,10 @@ class Agent:
 
     async def _check_and_compact(self)->None:
         # 与公开的 check_and_compact 同一条门：留一条不传 defer_fold 的路径，
-        # 就等于给折叠门留了一个静默旁路。
+        # 就等于给折叠门留了一个静默旁路。同样交探针本身（零参 callable）而不是
+        # 它的返回值——理由见 check_and_compact。
         await self._context_manager._check_and_compact(
-            defer_fold=self._has_in_progress_task())
+            defer_fold=self._has_in_progress_task)
 
     async def _compact_conversation(self, *, trigger: str = "manual")->bool:
         return await self._context_manager._compact_conversation(trigger=trigger)

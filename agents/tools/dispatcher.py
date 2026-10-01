@@ -30,7 +30,7 @@ from agents.tools.question_tools import handle_ask_user
 # 模块级而非延迟 import：tests/unit/test_import_hygiene.py 冻结了「agents/ 内
 # 零函数级 agents import」（M4 依赖治理，豁免表当前为空）。task_gate 只依赖
 # task_store，与本文件既有的 task_tools 同向，不构成环。
-from agents.tools.task_gate import has_successful_shell_since
+from agents.tools.task_gate import can_produce_evidence, has_successful_shell_since
 from agents.tools.task_tools import handle_task_list
 from agents.tools.wiki_tools import remember
 
@@ -232,12 +232,26 @@ class ToolDispatcher:
             # task_tools / task_store 都不 import session（循环依赖 + 可测试性），
             # 所以「有没有成功的 run_shell」这个事实只能由 dispatcher 在这一层
             # 绑到当前 session 上。
+            #
+            # 但只对**有可能产出证据**的 agent 上膛（can_produce_evidence）：工具集
+            # 里没有证据工具的 agent 永远满足不了判据，于是每次标 completed 都会被
+            # 警告——一台保证假阳性的机器，而误报正是训练模型忽略警告的那种失败。
+            # 判据刻意是「能不能产出证据」而不是「是不是子 agent」：有 run_shell 的
+            # 子 agent 闭包绑的是它自己的 session、list_tasks 按 session.id 取键、
+            # 子 agent 事件也落盘，闸门语义完全成立，按身份一刀切会白白关掉它。
+            # agent.tools 是当前生效的工具集（agent.py:110 装配，turn_runner 追加
+            # MCP，prompt_runtime.refresh_runtime_system_prompt 用同一个来源）。
+            active_tools = {t.get("name") for t in self.agent.tools if t.get("name")}
+            evidence_fn = (
+                (lambda since: has_successful_shell_since(self.agent.session, since))
+                if can_produce_evidence(active_tools)
+                else None            # 闸门静默不启用（handler 对 None 的既定行为）
+            )
             result = handle_task_list(
                 self.agent.session.id,
                 inp,
                 current_seq=current_seq,
-                evidence_fn=lambda since: has_successful_shell_since(
-                    self.agent.session, since),
+                evidence_fn=evidence_fn,
             )
             self.agent.session.append("task_list/updated", {"session_id": self.agent.session.id})
             return result

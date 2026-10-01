@@ -170,8 +170,56 @@ class ContextCompressor:
         self._truncation_count: int = 0
         self._background_tasks: set[asyncio.Task[Any]] = set()
 
+    def _defer_ceiling(self) -> float:
+        """任务边界门的硬顶 = min(阈值 + OFFSET, MAX)。
+
+        MAX 那一半是「绝不让上下文贴到窗口边缘」的安全属性：阈值配到 0.85 以上时
+        阈值 + OFFSET 会超过 0.95，此时以 MAX 为准。公式刻意只在这一处出现，
+        _should_compress 与 _fold_trigger_in_reach 共用它，免得两处漂移。
+        """
+        return min(self.tool_fold_threshold + FOLD_DEFER_CEILING_OFFSET,
+                   FOLD_DEFER_CEILING_MAX)
+
+    def _fold_trigger_in_reach(self, utilization: float, idle_seconds: float) -> bool:
+        """利用率/空闲时间是否逼近**任何**一个触发点（含硬顶）。
+
+        只服务一个问题：门探针值不值得解析（解析 = 一次任务清单磁盘读）。它不决定
+        折叠。三条并列覆盖全部触发线：阈值、硬顶（阈值 ≥ MAX 的退化配置下硬顶比
+        阈值低，硬顶自己就是一条触发线）、full 臂的空闲超时。三条都不成立时，
+        _should_compress 无论门开门关都返回 False —— 所以那里不必读任务清单。
+        """
+        return (
+            utilization > self.tool_fold_threshold
+            or utilization > self._defer_ceiling()
+            or (self.arm == "full" and idle_seconds > self.idle_timeout_seconds)
+        )
+
+    def _resolve_defer_fold(
+        self,
+        utilization: float,
+        idle_seconds: float,
+        defer_fold: bool | Callable[[], bool] | None,
+    ) -> bool:
+        """把门输入解析成 bool；**只在真的逼近触发点时才调探针**。
+
+        生产路径传下来的是零参 callable（Agent._has_in_progress_task 本身，不是它
+        的返回值）：探针要读一次任务清单，而 check_and_compact 每次模型调用都跑，
+        绝大多数时候利用率离任何触发点都很远、这一轮根本不做折叠决定。把解析放在
+        这里，那次磁盘读就只发生在唯一用得着它的分支上（热路径上推式披露与常驻
+        摘要已各读一次，不该无条件再加第三次）。
+
+        本模块不 import task_store、也不给这个 callable 加任何语义：失败方向的裁定
+        权在 Agent._has_in_progress_task 里（读不出来 → False → 照常折叠）。这里
+        只认「一个返回 bool 的零参 callable，或者一个 bool」。
+        """
+        if not defer_fold:
+            return False
+        if not self._fold_trigger_in_reach(utilization, idle_seconds):
+            return False
+        return bool(defer_fold() if callable(defer_fold) else defer_fold)
+
     def _should_compress(self, utilization: float, idle_seconds: float,
-                         defer_fold: bool = False) -> bool:
+                         defer_fold: bool | Callable[[], bool] = False) -> bool:
         """full 臂额外看空闲超时；其余臂只按利用率触发。
 
         defer_fold=True（有任务正在执行）时只认硬顶：任务执行中途，那些工具结果、
@@ -179,14 +227,17 @@ class ContextCompressor:
         任务。空闲触发同样被压制——空闲折叠恰恰最容易落在任务中途。
         硬顶是安全阀：真的快撑爆窗口时，宁可破坏当前任务也不能让请求失败。
 
+        defer_fold 也接受零参 callable（直接驱动本方法的调用方可以传探针本身）；
+        经 run_pipeline 进来的一律已是解析好的 bool，见 _resolve_defer_fold。
+
         成本侧的理由见 deliverables/task-list-context-analysis.md §5 的实测：一次
         折叠使 87% 的旧消息需要重新预热，所以折叠次数越少越好，而「每任务最多
         一次」比「按阈值随机触发」少得多。
         """
+        if callable(defer_fold):
+            defer_fold = defer_fold()
         if defer_fold:
-            ceiling = min(self.tool_fold_threshold + FOLD_DEFER_CEILING_OFFSET,
-                          FOLD_DEFER_CEILING_MAX)
-            return utilization > ceiling
+            return utilization > self._defer_ceiling()
         if self.arm == "full":
             return (
                 utilization > self.tool_fold_threshold
@@ -271,23 +322,29 @@ class ContextCompressor:
         last_api_call_time: float,
         side_query: SideQueryFn | None,
         session_id: str,
-        defer_fold: bool = False,
+        defer_fold: bool | Callable[[], bool] | None = False,
     ) -> bool:
-        """defer_fold: 任务边界折叠门（Plan 2 Task 4）。
+        """defer_fold: 任务边界折叠门（Plan 2 Task 4）的输入。
 
-        由 Agent.check_and_compact 经 ContextManager._check_and_compact 传下来，
-        值来自 Agent._has_in_progress_task()——有任务正在执行时只认硬顶。
-        默认 False 保住既有调用方（含直接驱动压缩器的测试）的行为不变。
+        由 Agent.check_and_compact 经 ContextManager._check_and_compact 传下来。
+        生产路径上是 **Agent._has_in_progress_task 这个零参 callable 本身**，不是
+        已经读好的 bool：探针要读一次任务清单，而 check_and_compact 每次模型调用
+        都跑，所以解析推迟到 _resolve_defer_fold，只在逼近触发点时发生。也接受
+        bool（直接驱动本方法的调用方与测试）。默认 False 保住既有调用方
+        （含 test_compression_arms.py 的 5 个位置参数调用）的行为不变。
         """
         current_token_count = max(0, int(current_token_count))
         utilization = current_token_count / self.effective_window if self.effective_window else 0
         idle_seconds = time.time() - last_api_call_time if last_api_call_time else 0
 
-        should_compress = self._should_compress(utilization, idle_seconds, defer_fold)
+        # 先解析成 bool 再往下走：print 与 trace metadata 都要可读的值，把 callable
+        # 原样塞进去，事后只会看到一个 <bound method ...>，什么也判断不了。
+        deferred = self._resolve_defer_fold(utilization, idle_seconds, defer_fold)
+        should_compress = self._should_compress(utilization, idle_seconds, deferred)
 
         print(
             f"[compressor] check: arm={self.arm}, tokens={current_token_count}, utilization={utilization:.2%}, "
-            f"idle={idle_seconds:.0f}s, threshold={self.tool_fold_threshold:.0%}, defer={defer_fold}, "
+            f"idle={idle_seconds:.0f}s, threshold={self.tool_fold_threshold:.0%}, defer={deferred}, "
             f"should_compress={should_compress}"
         )
 
@@ -305,8 +362,10 @@ class ContextCompressor:
                 "idle_seconds": round(idle_seconds, 1),
                 "tool_fold_threshold": self.tool_fold_threshold,
                 "session_fold_threshold": self.session_fold_threshold,
-                # 事后能从 trace 里看出这次折叠发生时门是开还是关（Plan 2 Task 4）
-                "defer_fold": defer_fold,
+                # 事后能从 trace 里看出这次折叠发生时门是开还是关（Plan 2 Task 4）。
+                # 记的是已解析的 bool；span 只在真的要折叠时创建，而折叠必然意味着
+                # 触发点已在射程内，所以这里的值一定是探针的真实答案。
+                "defer_fold": deferred,
             },
         ) as span:
             return await self._execute_compaction(

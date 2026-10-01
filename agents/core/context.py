@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 from agents.logging import print_info
 
 
@@ -96,12 +96,17 @@ class ContextManager:
             print_info("Nothing to compact yet.")
         return compacted
 
-    async def _check_and_compact(self, defer_fold: bool = False) -> None:
+    async def _check_and_compact(
+        self, defer_fold: Callable[[], bool] | bool | None = None) -> None:
         """自动检查并压缩。
 
-        defer_fold: 折叠任务边界门（Plan 2 Task 4）的输入，由 Agent.check_and_compact
-        从 Agent._has_in_progress_task() 算好后透传给 run_pipeline。这一跳是纯中转：
-        不在这里探测任务清单（失败方向的裁定权属于 Agent），也不给参数加任何语义。
+        defer_fold: 折叠任务边界门（Plan 2 Task 4）的输入。生产路径上是
+        Agent._has_in_progress_task **这个零参 callable 本身**（不是它的返回值）：
+        探针要读一次任务清单，而那次读只在压缩器真的逼近触发点时才值得发生，所以
+        解析权在 ContextCompressor._resolve_defer_fold。
+
+        这一跳是纯中转：不在这里调用探针、不在这里探测任务清单（失败方向的裁定权
+        属于 Agent），也不给参数加任何语义。
         """
         folded = await self.agent._compressor.run_pipeline(
             self.agent.session,

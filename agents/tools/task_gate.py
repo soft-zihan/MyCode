@@ -20,12 +20,32 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Iterable
 
 from agents.tools.task_store import TaskItem
 
 _EVIDENCE_TOOLS = frozenset({"run_shell"})
 _SUCCESS_OUTCOME = "success"
+
+
+def can_produce_evidence(tool_names: Iterable[str]) -> bool:
+    """这个 agent 有没有可能产出闸门认的证据 —— dispatcher 上膛前的判据。
+
+    刻意按**工具集**判，而不是按「是不是子 agent」判：
+    - 有 run_shell 的子 agent，闭包绑的是它自己的 session、list_tasks 按
+      session.id 取键、子 agent 事件也照样落盘，闸门语义完全成立。按 subagent
+      身份一刀切会白白关掉一个正确的检查。
+    - 反过来，一个被授予 task_list 却没有证据工具的 agent **永远**满足不了判据，
+      于是每次标 completed 都会被警告 —— 一台保证假阳性的机器，而误报正是训练
+      模型忽略警告的那种失败。这条路可达：Plan 1 把 task_list 加进了
+      subagent._sub_agent_excluded，但显式声明 `allowed-tools: task_list` 的
+      自定义 agent 走白名单分支，而那条分支不与 _sub_agent_excluded 求交。
+
+    与 _EVIDENCE_TOOLS 同源，不复制字面量 "run_shell"：将来扩白名单（设计选择 4）
+    时这里自动跟着放宽，不会出现「闸门认新工具、上膛条件还只认 run_shell」的静默
+    偏差 —— 那种偏差的表现形式正是误报。
+    """
+    return bool(_EVIDENCE_TOOLS.intersection(tool_names))
 
 
 def has_successful_shell_since(session: Any, since_seq: int | None) -> bool:
