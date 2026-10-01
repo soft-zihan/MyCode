@@ -57,6 +57,11 @@ KEEP_RECENT_TRAJECTORY_TOOL_ROUNDS = 5
 CHECKPOINT_TAIL_TOKEN_BUDGET = 15_000
 CHECKPOINT_TAIL_WINDOW_RATIO = 0.35
 IDLE_TIMEOUT_S = 5 * 60
+# 任务边界折叠门：有 in_progress 任务时把折叠推迟到硬顶。
+# 硬顶 = min(阈值 + OFFSET, MAX)。MAX 的存在是为了绝不让上下文贴到窗口边缘。
+# 取值待 A/B 校准（spec §十五），本处只落机制。
+FOLD_DEFER_CEILING_OFFSET = 0.10
+FOLD_DEFER_CEILING_MAX = 0.95
 TOOL_ABSTRACT_CHAR_LIMIT = 1200
 TOOL_ABSTRACT_INPUT_CHAR_LIMIT = 8000
 TOOL_ABSTRACT_BATCH_CHAR_LIMIT = 50000
@@ -165,8 +170,23 @@ class ContextCompressor:
         self._truncation_count: int = 0
         self._background_tasks: set[asyncio.Task[Any]] = set()
 
-    def _should_compress(self, utilization: float, idle_seconds: float) -> bool:
-        """full 臂额外看空闲超时；其余臂只按利用率触发。"""
+    def _should_compress(self, utilization: float, idle_seconds: float,
+                         defer_fold: bool = False) -> bool:
+        """full 臂额外看空闲超时；其余臂只按利用率触发。
+
+        defer_fold=True（有任务正在执行）时只认硬顶：任务执行中途，那些工具结果、
+        文件内容、报错是模型正在推理的活工作集，折叠掉它们不是省钱而是破坏当前
+        任务。空闲触发同样被压制——空闲折叠恰恰最容易落在任务中途。
+        硬顶是安全阀：真的快撑爆窗口时，宁可破坏当前任务也不能让请求失败。
+
+        成本侧的理由见 deliverables/task-list-context-analysis.md §5 的实测：一次
+        折叠使 87% 的旧消息需要重新预热，所以折叠次数越少越好，而「每任务最多
+        一次」比「按阈值随机触发」少得多。
+        """
+        if defer_fold:
+            ceiling = min(self.tool_fold_threshold + FOLD_DEFER_CEILING_OFFSET,
+                          FOLD_DEFER_CEILING_MAX)
+            return utilization > ceiling
         if self.arm == "full":
             return (
                 utilization > self.tool_fold_threshold
@@ -251,16 +271,24 @@ class ContextCompressor:
         last_api_call_time: float,
         side_query: SideQueryFn | None,
         session_id: str,
+        defer_fold: bool = False,
     ) -> bool:
+        """defer_fold: 任务边界折叠门（Plan 2 Task 4）。
+
+        由 Agent.check_and_compact 经 ContextManager._check_and_compact 传下来，
+        值来自 Agent._has_in_progress_task()——有任务正在执行时只认硬顶。
+        默认 False 保住既有调用方（含直接驱动压缩器的测试）的行为不变。
+        """
         current_token_count = max(0, int(current_token_count))
         utilization = current_token_count / self.effective_window if self.effective_window else 0
         idle_seconds = time.time() - last_api_call_time if last_api_call_time else 0
 
-        should_compress = self._should_compress(utilization, idle_seconds)
+        should_compress = self._should_compress(utilization, idle_seconds, defer_fold)
 
         print(
             f"[compressor] check: arm={self.arm}, tokens={current_token_count}, utilization={utilization:.2%}, "
-            f"idle={idle_seconds:.0f}s, threshold={self.tool_fold_threshold:.0%}, should_compress={should_compress}"
+            f"idle={idle_seconds:.0f}s, threshold={self.tool_fold_threshold:.0%}, defer={defer_fold}, "
+            f"should_compress={should_compress}"
         )
 
         if not should_compress:
@@ -277,6 +305,8 @@ class ContextCompressor:
                 "idle_seconds": round(idle_seconds, 1),
                 "tool_fold_threshold": self.tool_fold_threshold,
                 "session_fold_threshold": self.session_fold_threshold,
+                # 事后能从 trace 里看出这次折叠发生时门是开还是关（Plan 2 Task 4）
+                "defer_fold": defer_fold,
             },
         ) as span:
             return await self._execute_compaction(

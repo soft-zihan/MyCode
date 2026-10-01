@@ -96,14 +96,20 @@ class ContextManager:
             print_info("Nothing to compact yet.")
         return compacted
 
-    async def _check_and_compact(self) -> None:
-        """自动检查并压缩。"""
+    async def _check_and_compact(self, defer_fold: bool = False) -> None:
+        """自动检查并压缩。
+
+        defer_fold: 折叠任务边界门（Plan 2 Task 4）的输入，由 Agent.check_and_compact
+        从 Agent._has_in_progress_task() 算好后透传给 run_pipeline。这一跳是纯中转：
+        不在这里探测任务清单（失败方向的裁定权属于 Agent），也不给参数加任何语义。
+        """
         folded = await self.agent._compressor.run_pipeline(
             self.agent.session,
             self.agent.estimated_context_tokens,
             self.agent.last_api_call_time,
             self.agent._build_side_query(max_tokens=6000),
             self.agent.session_id,
+            defer_fold=defer_fold,
         )
         if folded:
             self.agent.reset_context_token_estimate()

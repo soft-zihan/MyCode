@@ -28,6 +28,13 @@ from agents.core.text_sanitization import safe_utf8_text
 from agents.core.turn_runner import TurnRunner
 from agents.core.session import Session
 from agents.tools import ToolDef, tool_definitions
+# 模块级而非延迟 import：tests/unit/test_import_hygiene.py 冻结了「agents/ 内零
+# 函数级 agents import」（M4 依赖治理，豁免表为空），其自身指引是解环而不是延迟。
+# 依赖方向早已存在（上一行 from agents.tools import ...，agents/core/prompt_runtime.py
+# 也模块级读 task_store）；task_store 只依赖 workspace 与 logging，不构成环。
+# 刻意绑模块而不是 `from ... import list_tasks`：折叠门要能被测试替换掉
+# list_tasks 来验证「读不出来就照常折叠」这条失败方向。
+from agents.tools import task_store
 from agents.logging import print_info, print_assistant_text, print_error
 from agents.plan.plan_mode import PlanModeManager
 from agents.tools.dispatcher import ToolDispatcher
@@ -629,8 +636,26 @@ class Agent:
     def refresh_runtime_system_prompt(self, force: bool = False) -> None:
         self._refresh_runtime_system_prompt(force=force)
 
+    def _has_in_progress_task(self) -> bool:
+        """有没有任务正在执行 —— 折叠任务边界门的输入。
+
+        读不出来一律返回 False：绝不能因为任务清单读不出来就不压缩，那会撑爆
+        上下文窗口。失败方向刻意选在「照常折叠」这一侧。
+        """
+        try:
+            return any(t.status == task_store.TASK_STATUS_IN_PROGRESS
+                       for t in task_store.list_tasks(self.session.id))
+        except Exception as e:
+            print_error(f"[fold_gate] task probe failed, folding normally: {e!r}")
+            return False
+
     def check_and_compact(self):
-        return self._context_manager._check_and_compact()
+        # 折叠任务边界门（Plan 2 Task 4）：任务执行中途，工具结果/文件内容/报错
+        # 是模型正在推理的活工作集，折叠它们不是省钱而是破坏当前任务。这里把门
+        # 的输入一路传到 ContextCompressor._should_compress（经 context.py 中转），
+        # 硬顶 min(threshold+0.10, 0.95) 是安全阀。
+        return self._context_manager._check_and_compact(
+            defer_fold=self._has_in_progress_task())
 
     def emit_text(self, text: str) -> None:
         self._emit_text(text)
@@ -713,7 +738,10 @@ class Agent:
         return self._context_manager._get_message_count()
 
     async def _check_and_compact(self)->None:
-        await self._context_manager._check_and_compact()
+        # 与公开的 check_and_compact 同一条门：留一条不传 defer_fold 的路径，
+        # 就等于给折叠门留了一个静默旁路。
+        await self._context_manager._check_and_compact(
+            defer_fold=self._has_in_progress_task())
 
     async def _compact_conversation(self, *, trigger: str = "manual")->bool:
         return await self._context_manager._compact_conversation(trigger=trigger)
