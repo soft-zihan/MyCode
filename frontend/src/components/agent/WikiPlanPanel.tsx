@@ -1,66 +1,22 @@
-import { useState } from 'react';
-import { BookOpen, Target } from 'lucide-react';
 import { WikiPanel } from './WikiPanel';
-import { PlanControlPanel } from './PlanControlPanel';
 
 interface WikiPlanPanelProps {
   cwd: string | null;
-  sessionId: string;
-  planSlug: string;
-  permissionMode?: string;
   onFileSelect: (path: string) => void;
   selectedFile: string | null;
 }
 
-type SubTab = 'wiki' | 'plan';
-
-function PlanCombinedPanel({ sessionId, planSlug, permissionMode }: {
-  sessionId: string;
-  planSlug: string;
-  permissionMode?: string;
-  cwd: string | null;
-  onFileSelect: (path: string) => void;
-}) {
+// 这里曾经有两个子标签：Wiki 与 Plan。Plan 子标签挂的是 PlanControlPanel——
+// plan 系统的执行仪表盘（进度条、skip/redo、pause/resume/abandon、产物查看、
+// ledger 日志、策略选择器）。执行状态的唯一载体已经是 task_list（由
+// components/chat/TaskListPanel.tsx 呈现），那 8 个 REST 端点与 PlanControlPanel
+// 一起删掉了，Plan 子标签因此再无内容，连标签栏一并去掉。
+// 组件名保留 WikiPlanPanel 未改：改名会波及 ChatPage 的挂载点，属于另一件事。
+export function WikiPlanPanel({ cwd, onFileSelect, selectedFile }: WikiPlanPanelProps) {
   return (
     <div className="flex flex-col h-full">
-      <PlanControlPanel sessionId={sessionId} planSlug={planSlug} permissionMode={permissionMode} />
-    </div>
-  );
-}
-
-export function WikiPlanPanel({ cwd, sessionId, planSlug, permissionMode, onFileSelect, selectedFile }: WikiPlanPanelProps) {
-  const [subTab, setSubTab] = useState<SubTab>('wiki');
-
-  return (
-    <div className="flex flex-col h-full">
-      <div className="flex border-b border-gray-200 bg-gray-50">
-        <button
-          onClick={() => setSubTab('wiki')}
-          className={`flex-1 px-2 py-1.5 text-xs font-medium transition-colors ${
-            subTab === 'wiki' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-white' : 'text-gray-500 hover:text-gray-700'
-          }`}
-        >
-          <BookOpen className="w-3 h-3 inline mr-1" />
-          Wiki
-        </button>
-        <button
-          onClick={() => setSubTab('plan')}
-          className={`flex-1 px-2 py-1.5 text-xs font-medium transition-colors ${
-            subTab === 'plan' ? 'text-indigo-600 border-b-2 border-indigo-600 bg-white' : 'text-gray-500 hover:text-gray-700'
-          }`}
-        >
-          <Target className="w-3 h-3 inline mr-1" />
-          Plan
-        </button>
-      </div>
-
       <div className="flex-1 overflow-auto">
-        {subTab === 'wiki' && (
-          <WikiPanel cwd={cwd} onFileSelect={onFileSelect} selectedFile={selectedFile} />
-        )}
-        {subTab === 'plan' && (
-          <PlanCombinedPanel sessionId={sessionId} planSlug={planSlug || ''} permissionMode={permissionMode} cwd={cwd} onFileSelect={onFileSelect} />
-        )}
+        <WikiPanel cwd={cwd} onFileSelect={onFileSelect} selectedFile={selectedFile} />
       </div>
     </div>
   );

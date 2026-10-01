@@ -1,10 +1,14 @@
-"""Plan 系统单元测试：双轨分层、任务状态落盘、格式契约、策略插件引擎。
+"""Plan 系统单元测试：双轨分层、格式契约、策略插件引擎、git 提交范围。
 
-Plan 3a Task 4 之后这里只剩「SDD 骨架」的覆盖面：执行状态机（mark_task_*、
-start_plan_execution、PlanExecutor 的策略注入）已随 24 个 plan_* 工具一起删除，
-执行状态的唯一载体是 task_list。留在这里的是仍被前端 REST 端点调用的那几个函数
-（skip_task / redo_task / read_ledger / _update_task_status_in_file / _git_commit）
-与物化路径的上游（create_plan / add_artifact / 任务解析 / 双轨校验 / 策略加载）。
+Plan 3a Task 4 删掉了执行状态机（mark_task_*、start_plan_execution、PlanExecutor
+的策略注入），Plan 3b Task A1 又删掉了 frontend/server/routers/sessions.py 的 8 个
+plan REST 端点与它们专属的后端函数（pause/resume/skip/redo/abandon 与整条 ledger
+链）。执行状态的唯一载体是 task_list，所以那些函数连同它们的测试一起消失了
+（原 TestTaskStatusFile / TestLedger）。
+
+留在这里的是物化路径的上游（create_plan / add_artifact / 任务解析 / 双轨校验 /
+策略加载）与 _git_commit 的提交范围——create_plan / add_artifact /
+append_tasks_to_plan 仍然调它，而它们正是 plan 批准时物化路径的上游。
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from agents.plan import plan_manager as pm
-from agents.plan.plan_models import PlanGranularity, PlanStatus
+from agents.plan.plan_models import PlanGranularity
 from agents.plan.plan_mode import PlanModeManager
 from agents.plan.strategy_loader import (
     DEFAULT_STRATEGIES,
@@ -78,74 +82,6 @@ class TestParsing:
         _make_standard_plan("parse-simple", SIMPLE_TASKS)
         statuses = {t.id: t.status for t in pm.get_tasks("parse-simple")}
         assert statuses == {1: "pending", 2: "done", 3: "in-progress", 4: "failed", 5: "skipped"}
-
-
-# ────────────────── 任务状态落盘（skip/redo 仍被前端 REST 调用）──────────────────
-
-class TestTaskStatusFile:
-    """`_update_task_status_in_file` 与它的两个仍存活的调用方。
-
-    状态机那半（mark_task_in_progress/done/failed、全 done 自动 COMPLETED）已随
-    Task 4 删除；skip_task / redo_task 因为 frontend/server/routers/sessions.py
-    仍在调而保留（Plan 3b 处理），所以它们依赖的块内替换语义留在这里钉住。
-    """
-
-    def test_skip_redo_preconditions(self):
-        _make_standard_plan("flow-pre", "### Task 1: A\n- **状态**: [ ] pending\n")
-        assert not pm.redo_task("flow-pre", 1)  # pending 不可 redo
-        assert pm.skip_task("flow-pre", 1)
-        assert not pm.skip_task("flow-pre", 1)  # skipped 不可再 skip
-        assert pm.redo_task("flow-pre", 1)
-
-    def test_update_status_does_not_leak_across_blocks(self):
-        _make_standard_plan("flow-block")
-        assert pm.skip_task("flow-block", 1)
-        content = pm.read_artifact("flow-block", "tasks.md")
-        assert "[-] skipped" in content
-        # Task 2 不受影响：块内替换不跨块
-        assert pm.get_tasks("flow-block")[1].status == "pending"
-
-    def test_simple_task_status_update_in_file(self):
-        """checkbox 简单格式走的是另一条替换分支（没有 `### Task N:` 可定位）。"""
-        _make_standard_plan("flow-simple", SIMPLE_TASKS)
-        assert pm.skip_task("flow-simple", 1)
-        content = pm.read_artifact("flow-simple", "tasks.md")
-        assert "- [-] 1. 第一个任务" in content
-
-    def test_pause_resume_abandon_round_trip(self):
-        """pause/resume/abandon 保留 → `PlanStatus.PAUSED` 必须留在枚举里。
-
-        Task 4 的裁剪清单要把 PlanStatus 收缩掉 PAUSED，但 pause_plan/resume_plan
-        是前端仍在调的保留函数、两者都以 PAUSED 为前置/目标状态；删掉成员会让它们
-        直接 AttributeError。这条把「保留函数依赖被保留的枚举成员」钉住。
-        """
-        _make_standard_plan("flow-pause")
-        slug = "flow-pause"
-        assert pm.get_plan(slug).status == PlanStatus.PROPOSED
-        assert not pm.pause_plan(slug)                       # PROPOSED 不可暂停
-        assert pm.update_plan_status(slug, PlanStatus.IN_PROGRESS)
-        assert pm.pause_plan(slug)
-        assert pm.get_plan(slug).status == PlanStatus.PAUSED
-        assert not pm.pause_plan(slug)                       # 已暂停不可再暂停
-        assert pm.resume_plan(slug)
-        assert pm.get_plan(slug).status == PlanStatus.IN_PROGRESS
-        assert pm.abandon_plan(slug)
-        assert pm.get_plan(slug).status == PlanStatus.ABANDONED
-        assert not pm.resume_plan(slug)                      # 已放弃不可恢复
-
-
-# ────────────────────────── Ledger ──────────────────────────
-
-class TestLedger:
-
-    def test_ledger_records_lifecycle(self):
-        _make_standard_plan("ledger-1", "### Task 1: A\n- **状态**: [x] done\n")
-        pm.redo_task("ledger-1", 1)
-        pm.skip_task("ledger-1", 1)
-        # ledger 记录终态事件（in-progress 过渡不落账）
-        events = [e.get("status") for e in pm.read_ledger("ledger-1")]
-        for expected in ("redo", "skipped"):
-            assert expected in events, events
 
 
 # ────────────────────────── 双轨校验 ──────────────────────────
@@ -309,11 +245,13 @@ class TestStrategies:
     """策略加载器。
 
     三个用例原本打在 `execute` 阶段上，而 `strategies/execute|review|converge/`
-    随 `plan_task_*` 协议一起在 Task 4 删除了（它们的唯一消费者 PlanExecutor 也没了），
-    所以改打仍存活的 `grill-spec`——那才是 build_plan_mode_prompt 真正加载的两个
-    阶段之一。strategy_loader 本身与 DEFAULT_STRATEGIES 的五键**不动**：
-    PlanStrategyConfig 经 `/api/config/plan-strategies` 暴露给前端，收缩到两阶段是
-    Plan 3b 的事（会改 openapi.json）。
+    随 `plan_task_*` 协议一起在 Plan 3a Task 4 删除了（它们的唯一消费者
+    PlanExecutor 也没了），所以改打仍存活的 `grill-spec`——那是
+    build_plan_mode_prompt 真正加载的两个阶段之一。
+
+    Plan 3b Task A1 又把配置面从五键收缩到两键：`PlanStrategyConfig` 经
+    `/api/config/plan-strategies` 暴露给前端，那三个键的唯一意义就是喂一个已经
+    没有任何消费者的阶段。test_app_config_key_translation 钉住收缩后的键集。
     """
 
     def test_load_builtin_default(self):
@@ -342,6 +280,9 @@ class TestStrategies:
     def test_app_config_key_translation(self):
         cfg = strategy_config_from_app_config()
         assert set(cfg.keys()) == set(DEFAULT_STRATEGIES.keys())
+        # Plan 3b Task A1 把配置面收缩到两阶段：execute/review/converge 的内置策略
+        # 文件与唯一消费者（PlanExecutor）都已在 Plan 3a Task 4 删除。
+        assert set(cfg.keys()) == {"grill-spec", "tasks"}
 
 
 # ────────────────────────── Git 提交范围 ──────────────────────────

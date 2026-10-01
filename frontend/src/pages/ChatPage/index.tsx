@@ -110,7 +110,6 @@ export default function ChatPage() {
     chatSnapshot,
     pendingSteerMessages,
     setPendingSteerMessages,
-    planSlug,
     handleAddToChat,
     handleRemoveContext,
     handleSessionSelect,
@@ -520,7 +519,7 @@ export default function ChatPage() {
                       }`}
                     >
                       <BookOpen className="w-3 h-3 inline mr-1" />
-                      Wiki & Plan
+                      Wiki
                     </button>
                   </div>
                   {/* Sub-tab content */}
@@ -530,9 +529,6 @@ export default function ChatPage() {
                     ) : (
                       <WikiPlanPanel
                         cwd={currentCwd}
-                        sessionId={currentSessionId || ''}
-                        planSlug={planSlug || ''}
-                        permissionMode={permissionMode}
                         onFileSelect={setSelectedFile}
                         selectedFile={selectedFile}
                       />

@@ -163,13 +163,17 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
     def checkbox_tasks_to_structured(content: str) -> str:
         """把 checkbox 任务清单转为结构化 tasks.md。
 
-        输出形状是三个下游的契约，改造时不得破坏：
+        输出形状是两个下游的契约，改造时不得破坏：
         - `plan_manager._parse_structured_tasks` 认 `### Task N:` 块与
           `- **验收**:` / `- **状态**:` 标记；
-        - `plan_manager._update_task_status_in_file` 在块内替换首条 `**状态**:`；
         - `handle_plan_system_integration` 用 `"### Task" in structured_tasks`
           判定「轻量轨 plan.md 里确实有任务」。
         `<!-- TASKS START/END -->` 包裹与五个状态标记的映射照旧保留。
+
+        （曾经还有第三个下游：`plan_manager._update_task_status_in_file`，在块内
+        替换首条 `**状态**:`。它随 Plan 3b Task A1 删掉的 8 个 plan REST 端点
+        一起消失了——逐条任务的执行状态现在只住在 task_list 里，不再回写
+        tasks.md。）
 
         **缩进子项不再丢弃**（Plan 3a Task 2）：此前只把 `- [ ] N. 描述` 转成
         `### Task N: 描述` + 状态，缩进子项整段扔掉——而解析器其实早就支持

@@ -76,12 +76,19 @@ class EmbeddingConfig:
 
 @dataclass
 class PlanStrategyConfig:
-    """Plan 策略配置"""
+    """Plan 策略配置。
+
+    只剩两个阶段：`execute`/`review`/`converge` 的内置策略文件与它们唯一的消费者
+    （PlanExecutor，注入的是已删除的 `plan_task_*` 协议）都在 Plan 3a Task 4 一起
+    删了，设计文档描述的 Review Loop / Converge 本来也没有落成代码。那三个键此前
+    仅仅因为本 dataclass 经 `/api/config/plan-strategies` 暴露给前端而留着，Plan 3b
+    Task A1 收缩到两阶段。
+
+    旧配置文件里残留的 `execute`/`review`/`converge` 键会被 from_dict 静默忽略——
+    它只 get 认识的键、不做严格校验，所以盘上的老 config.json 不需要迁移。
+    """
     grill_spec: str = "simple"
     tasks: str = "structured"
-    execute: str = "direct"
-    review: str = "none"
-    converge: str = "none"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -91,9 +98,6 @@ class PlanStrategyConfig:
         return cls(
             grill_spec=data.get("grill_spec", "simple"),
             tasks=data.get("tasks", "structured"),
-            execute=data.get("execute", "direct"),
-            review=data.get("review", "none"),
-            converge=data.get("converge", "none"),
         )
 
     def to_stage_dict(self) -> dict[str, str]:
@@ -101,9 +105,6 @@ class PlanStrategyConfig:
         return {
             "grill-spec": self.grill_spec,
             "tasks": self.tasks,
-            "execute": self.execute,
-            "review": self.review,
-            "converge": self.converge,
         }
 
 

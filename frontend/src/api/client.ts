@@ -429,9 +429,6 @@ export async function saveConfig(config: AppConfig): Promise<void> {
 export interface PlanStrategies {
   grill_spec: string;
   tasks: string;
-  execute: string;
-  review: string;
-  converge: string;
 }
 
 export async function fetchPlanStrategies(): Promise<PlanStrategies> {
@@ -839,58 +836,6 @@ export async function fetchChampion(skillName: string): Promise<ChampionData> {
 export async function fetchSkillProvenance(skillName: string): Promise<any[]> {
   const res = await fetch(`${API_BASE}/skill-evolution/provenance/${skillName}`);
   if (!res.ok) throw new Error('Failed to fetch skill provenance');
-  return res.json();
-}
-
-// Plan APIs
-export async function getPlanStatus(sessionId: string, slug: string): Promise<{ success: boolean; data?: any; message?: string }> {
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan/${slug}/status`);
-  if (!res.ok) return { success: false, message: 'Failed to fetch plan status' };
-  return res.json();
-}
-
-export async function planPause(sessionId: string, slug: string): Promise<{ success: boolean }> {
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan/${slug}/pause`, { method: 'POST' });
-  return res.json();
-}
-
-export async function planResume(sessionId: string, slug: string): Promise<{ success: boolean }> {
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan/${slug}/resume`, { method: 'POST' });
-  return res.json();
-}
-
-export async function planSkipTask(sessionId: string, slug: string, taskId: number): Promise<{ success: boolean }> {
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan/${slug}/skip-task`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ task_id: taskId }),
-  });
-  return res.json();
-}
-
-export async function planRedoTask(sessionId: string, slug: string, taskId: number): Promise<{ success: boolean }> {
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan/${slug}/redo-task`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ task_id: taskId }),
-  });
-  return res.json();
-}
-
-export async function planAbandon(sessionId: string, slug: string): Promise<{ success: boolean }> {
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan/${slug}/abandon`, { method: 'POST' });
-  return res.json();
-}
-
-export async function getPlanArtifacts(sessionId: string, slug: string): Promise<{ success: boolean; data?: Record<string, string>; message?: string }> {
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan/${slug}/artifacts`);
-  if (!res.ok) return { success: false, message: 'Failed to fetch plan artifacts' };
-  return res.json();
-}
-
-export async function getPlanLedger(sessionId: string, slug: string): Promise<{ success: boolean; data?: any[]; message?: string }> {
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/plan/${slug}/ledger`);
-  if (!res.ok) return { success: false, message: 'Failed to fetch plan ledger' };
   return res.json();
 }
 

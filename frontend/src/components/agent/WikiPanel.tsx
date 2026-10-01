@@ -73,8 +73,10 @@ const MEMORY_CATEGORIES = [
   },
 ];
 
-// Category 3: Plans (shown in Plan tab, not here)
-// Plans are managed separately in PlanControlPanel
+// Category 3: Plans — 刻意不在这里列出。
+// plan 文档住在 .mycode/plans/（草稿态由 PlanApprovalDialog 呈现），而执行状态
+// 的唯一载体已经是 task_list，由 components/chat/TaskListPanel.tsx 呈现。
+// 曾经的 PlanControlPanel 执行仪表盘随它的 8 个 REST 端点一起删除了。
 
 // Config categories (not wiki content, but project configuration)
 const CONFIG_CATEGORIES = [

@@ -1,16 +1,15 @@
 """Strategy Loader — 策略查找、加载、硬编码回退。
 
-配置面仍是 5 个阶段，但 Task 4 之后只有前两个真的会被加载：
+配置面只有两个阶段，两者都真的会被加载：
+
 - grill-spec: 需求澄清 + spec 生成   ← build_plan_mode_prompt 加载
 - tasks: 任务拆分                    ← build_plan_mode_prompt 加载
-- execute / review / converge: 执行编排、代码审查、差距分析
 
-后三个的内置策略文件与它们唯一的消费者（PlanExecutor，注入的是已删除的
-`plan_task_*` 协议）都在 Task 4 一起删了；设计文档描述的 Review Loop / Converge
-本来也没有落成代码。键**留着**是因为 PlanStrategyConfig 经
-`/api/config/plan-strategies` 暴露给前端，收缩到两阶段会改 openapi.json，那是
-Plan 3b 的事。所以此时给 execute/review/converge 调 load_strategy 会抛
-FileNotFoundError——生产路径上没有调用方，测试也只打 grill-spec / tasks。
+`execute` / `review` / `converge` 已在 Plan 3b Task A1 从配置面移除：它们的内置
+策略文件与唯一的消费者（PlanExecutor，注入的是已删除的 `plan_task_*` 协议）在
+Plan 3a Task 4 就一起删了，设计文档描述的 Review Loop / Converge 本来也没有落成
+代码。那三个键此前仅仅因为 PlanStrategyConfig 经 `/api/config/plan-strategies`
+暴露给前端、收缩会改 openapi.json 而留着；Plan 3b 就是做这件事的那一轮。
 
 策略存储位置（按优先级，高优先级覆盖低优先级）：
 1. 项目级：{workspace}/.mycode/plan-strategies/
@@ -31,9 +30,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_STRATEGIES: dict[str, str] = {
     "grill-spec": "simple",
     "tasks": "structured",
-    "execute": "direct",
-    "review": "none",
-    "converge": "none",
 }
 
 
@@ -41,15 +37,12 @@ VALID_STAGES = frozenset(DEFAULT_STRATEGIES.keys())
 
 
 def strategy_config_from_app_config() -> dict[str, str]:
-    """从全局应用配置读取五阶段策略选择（键名转为连字符阶段名）。"""
+    """从全局应用配置读取两阶段策略选择（键名转为连字符阶段名）。"""
 
     c = load_config().plan_strategies
     return {
         "grill-spec": c.grill_spec,
         "tasks": c.tasks,
-        "execute": c.execute,
-        "review": c.review,
-        "converge": c.converge,
     }
 
 
@@ -66,8 +59,8 @@ def find_strategy(stage: str, name: str, workspace: Path) -> Path | None:
     """查找策略文件路径。
 
     Args:
-        stage: 阶段名（grill-spec/tasks/execute/review/converge）
-        name: 策略名（simple/structured/direct 等）
+        stage: 阶段名（grill-spec/tasks）
+        name: 策略名（simple/structured 等）
         workspace: 工作区路径
 
     Returns:

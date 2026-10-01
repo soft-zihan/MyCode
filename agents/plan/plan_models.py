@@ -18,20 +18,26 @@ class PlanStatus(str, Enum):
     真正的脆弱点是那个 blanket except（它把「读不回的旧数据」与「目录不存在」压成同一个
     None），不是这个枚举——已记入 later plan 跟踪，此处刻意不动。
 
-    Task 4 删掉了执行状态机，裁剪清单本要把这里收缩成五个成员。实际只删了
+    Plan 3a Task 4 删掉了执行状态机，裁剪清单本要把这里收缩成五个成员。实际只删了
     CONVERGE_EXHAUSTED，判据是「这个值有没有可能已经躺在用户盘上的 `_meta.md` 里」：
 
     - CONVERGE_EXHAUSTED 从没被任何代码写过（Converge 阶段根本没实现过），盘上不可能
       有它，删掉是纯收益。
-    - PAUSED 仍被**保留**的 pause_plan / resume_plan 读写（frontend/server/routers/
-      sessions.py 的两个 REST 端点在调），删了它们当场 AttributeError。
     - READY_TO_ARCHIVE 曾由已发布的 plan_complete 工具经 update_plan_status 写盘。
       _parse_plan_dir 用 `PlanStatus(meta["status"])` 反序列化，成员一旦消失就抛
       ValueError → 被 except 吞成 None → get_plan 返回 None，那份计划在面板上凭空
       不见。COMPLETED / ARCHIVED 在 Task 4 之后同样没有任何写入方，裁剪清单却保留了
       它们——可见这个枚举本来就承担「读得回旧数据」的职责，READY_TO_ARCHIVE 属于同一类。
 
-    等 Plan 3b 把 pause/resume/abandon 那 8 个端点一起删掉时，可以连 PAUSED 重新评估。
+    Plan 3b Task A1 删掉了 pause/resume/abandon 那 8 个 REST 端点，连带
+    pause_plan / resume_plan / abandon_plan / update_plan_status 一起消失，并按上面
+    那条约定「重新评估 PAUSED」。结论是**保留**：pause_plan 在它还活着的那些版本里
+    经 update_plan_status 往 `_meta.md` 写过 `paused`，所以用户盘上真的可能躺着这个
+    值——它与 READY_TO_ARCHIVE 是同一类（写入方已死、但历史数据还在），删掉成员的
+    后果同样是静默的（get_plan 返回 None，计划凭空不见）。
+
+    于是本枚举现在**没有任何写入方**，纯粹是反序列化兼容面。真正该修的还是上面那个
+    blanket except：把「读不回的旧数据」与「目录不存在」压成同一个 None。
     """
     PROPOSED = "proposed"
     IN_PROGRESS = "in-progress"
