@@ -242,13 +242,25 @@ def get_tasks(slug: str) -> list[Task]:
     if not tasks_path.exists():
         return []
 
-    content = tasks_path.read_text()
-    
+    return parse_tasks_content(tasks_path.read_text())
+
+
+def parse_tasks_content(content: str) -> list[Task]:
+    """get_tasks 的解析半段：tasks.md **文本** → list[Task]，不碰磁盘。
+
+    两种格式都认（结构化 `### Task N:` 优先，回退 checkbox 简单格式），与
+    get_tasks 走的是同一份逻辑，所以重量轨与轻量轨两条都对。
+
+    单独暴露出来是给 plan 物化的追加路径用的：同一 session 第二次批准时，
+    handle_plan_system_integration 走 append_tasks_to_plan，盘上的 tasks.md 已经
+    是「旧 + 新」的合并体，而只有本次新增的那一块（调用方手里就有那段文本）该被
+    物化进 task_list。按 slug 读会把上一轮已物化过的任务再物化一遍。
+    """
     # 先尝试解析结构化格式
     structured = _parse_structured_tasks(content)
     if structured:
         return structured
-    
+
     # 回退到简单格式
     return _parse_simple_tasks(content)
 
