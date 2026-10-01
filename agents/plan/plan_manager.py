@@ -297,6 +297,33 @@ def _parse_simple_tasks(content: str) -> list[Task]:
     return tasks
 
 
+# 任务块里不进 body 的行（Plan 3a Task 3）：
+# - `### Task N:` 标题行——已进 description；
+# - 七个已知标记——各自进对应字段；**验收** 刻意不重复进 body，它是单独字段，
+#   抄一遍只会浪费常驻 S 与注入预算。标记判定与上方解析用的 re.search 同口径
+#   （不要求行首），凡被解析器消费过的行都不该再出现在 body 里；
+# - `<!-- TASKS START/END -->` 包裹注释——格式脚手架，不是任务内容。
+_BODY_SKIP_LINE_RE = re.compile(
+    r"^\s*###\s*Task\s+\d+:"
+    r"|\*\*(?:文件|函数|接口|验收|状态|错误|重试次数)\*\*:"
+    r"|^\s*<!--\s*TASKS\s+(?:START|END)\s*-->"
+)
+
+
+def _collect_task_body(task_block: str) -> str:
+    """收集任务块里未被已知标记消费的行，作为块正文（body）。
+
+    其余内容——散文段落、checkbox_tasks_to_structured 保留下来的 `- 改动:`/
+    `- 注意:` 缩进子项——逐行原样保留（含内部空行，两端 strip），物化时与
+    file/function/interface 一起组合进 TaskItem.detail。
+    """
+    kept = [
+        line for line in task_block.split("\n")
+        if not _BODY_SKIP_LINE_RE.search(line)
+    ]
+    return "\n".join(kept).strip()
+
+
 def _parse_structured_tasks(content: str) -> list[Task]:
     """解析结构化格式: ### Task 1: title ..."""
     tasks: list[Task] = []
@@ -329,6 +356,7 @@ def _parse_structured_tasks(content: str) -> list[Task]:
             status=normalize_status(status_match.group(1)) if status_match else "pending",
             error=error_match.group(1).strip() if error_match else "",
             retry_count=int(retry_match.group(1)) if retry_match else 0,
+            body=_collect_task_body(task_block),
         )
         tasks.append(task)
     

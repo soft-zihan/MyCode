@@ -4,8 +4,14 @@ Agent 只留调度：dispatcher 直接调用本模块。行为与原实现逐项
 两条审批分支（plan_approval_fn / confirm_dangerous 回退）的重复尾部
 收敛为单一流程；已核对的原分支差异全部保留：
 - approval_fn 分支 manual-execute：不做 plan system integration（plan_result=None）
-- confirm 分支 manual-execute：做 integration 且 slug 存在时照常 start_plan_execution
+- confirm 分支 manual-execute：做 integration 且 slug 存在时照常物化进 task_list
 - trace metadata：confirm 分支原多带 "choice" 字段，统一后两分支都带（仅 trace 元数据）
+
+批准后不再启动 plan 执行状态机、也不再向对话注入全量任务清单（两者的注入点
+Plan 3a Task 3 已删）：tasks.md 解析出的任务物化进 task_list
+（_materialize_plan_into_task_list），清单摘要 S 常驻上下文尾部，焦点任务的
+detail 走条件披露注入。tasks.md 在批准那一刻冻结为「已批准的计划」文档，
+此后活状态只在 task_list。
 """
 
 from __future__ import annotations
@@ -13,57 +19,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from agents.logging import print_info
+from agents.logging import print_error, print_info
 from agents.observability.trace import trace_event
-from agents.plan.plan_executor import PlanExecutor
-from agents.plan.plan_manager import start_plan_execution
+from agents.plan.plan_manager import get_tasks
 from agents.plan.plan_mode import PlanModeManager
+from agents.tools.task_store import add_task, update_task
 
 if TYPE_CHECKING:
     from agents.agent import Agent
-
-
-def format_plan_tasks_block(exec_result: dict) -> str:
-    """把 start_plan_execution 结果格式化为注入对话的任务清单+执行指令（含策略插件）。"""
-    msg = "\n\n## Plan Tasks Ready\n"
-    msg += f"Status: {exec_result.get('status', 'unknown')}\n"
-    msg += f"Total tasks: {exec_result.get('total_tasks', 0)}\n"
-    msg += f"Pending tasks: {exec_result.get('pending_tasks', 0)}\n\n"
-
-    tasks = exec_result.get("tasks", [])
-    if not tasks:
-        return msg + "No pending tasks found."
-
-    msg += "## Task List\n\n"
-    for task in tasks:
-        msg += f"### Task {task['id']}: {task['title']}\n"
-        msg += f"- **File**: `{task.get('file', 'N/A')}`\n"
-        msg += f"- **Acceptance**: {task.get('acceptance', 'N/A')}\n"
-        msg += f"- **Status**: {task['status']}\n\n"
-
-    msg += "\n## Instructions\n\n"
-    msg += "Please execute these tasks one by one. For each task:\n"
-    msg += "1. Call `plan_task_start(slug, task_id)` before starting\n"
-    msg += "2. Implement the task (write code, create files, etc.)\n"
-    msg += "3. Verify the implementation (run the acceptance command, check output)\n"
-    msg += "4. Call `plan_task_done(slug, task_id, commit, verification)` after success — verification is REQUIRED: a JSON object with the verify `command` and its `exit_code`\n"
-    msg += "5. If failed, call `plan_task_failed(slug, task_id, error)`\n"
-    msg += "6. After all tasks are done, call `plan_complete(slug)`\n"
-
-    slug = exec_result.get("slug", "")
-    if slug:
-        try:
-            executor = PlanExecutor.for_plan(slug)
-            execute_guide = executor.build_execute_instructions()
-            if execute_guide:
-                msg += f"\n## Execution Strategy: {executor.strategy_config.get('execute', 'direct')}\n\n{execute_guide}\n"
-            converge_guide = executor.build_converge_guidance()
-            if converge_guide:
-                msg += f"\n## Pre-Completion Converge Check（调用 plan_complete 前必须完成）\n\n{converge_guide}\n"
-        except Exception as e:
-            print(f"[WARN] plan strategy injection failed: {e!r}")
-
-    return msg
 
 
 async def execute_plan_mode_tool(agent: "Agent", name: str) -> str:
@@ -224,11 +187,82 @@ def _finalize_plan_exit(agent: "Agent", mgr: Any, draft: _PlanDraft, choice: str
 
     if plan_result and plan_result.get("slug"):
         plan_slug = plan_result["slug"]
-        print_info(f"Starting plan execution: {plan_slug}")
-
-        exec_result = start_plan_execution(plan_slug)
-        result_msg += format_plan_tasks_block(exec_result)
+        materialized = _materialize_plan_into_task_list(agent.session.id, plan_slug)
+        print_info(f"Plan approved: materialized {materialized} tasks into task_list ({plan_slug})")
+        if materialized:
+            result_msg += (
+                f"{materialized} 条任务已物化进 task_list。\n"
+                "清单摘要常驻你的上下文尾部，无需调 list 查询进度。\n"
+                "第 1 条的详细执行方案会在下一次模型调用时自动注入。\n"
+                f"已批准的计划文档冻结在 {saved_plan_dir}，此后活状态只在 task_list。"
+            )
+        else:
+            result_msg += "Proceed with implementation."
     else:
         result_msg += "Proceed with implementation."
 
     return result_msg
+
+
+# ── plan → task_list 物化（Plan 3a Task 3，spec §九）──
+
+def _compose_detail(task: Any) -> str:
+    """把 Task 的结构化字段与任务块正文组合成散文 detail。
+
+    acceptance 不进来——它是单独字段，重复一遍只会浪费常驻与注入预算。
+    """
+    parts: list[str] = []
+    if getattr(task, "file", ""):
+        parts.append(f"涉及文件: {task.file}")
+    if getattr(task, "function", ""):
+        parts.append(f"涉及函数: {task.function}")
+    if getattr(task, "interface", ""):
+        parts.append(f"接口: {task.interface}")
+    body = (getattr(task, "body", "") or "").strip()
+    if body:
+        parts.append(body)
+    return "\n".join(parts)
+
+
+_PLAN_TO_TASK_STATUS = {
+    "pending": "pending",
+    "in-progress": "in_progress",
+    "done": "completed",
+    "skipped": "skipped",
+    "failed": "failed",
+}
+
+
+def _materialize_plan_into_task_list(session_id: str, slug: str) -> int:
+    """把已批准 plan 的任务物化进 task_list。返回物化条数。
+
+    刻意不传 current_seq：detail 来自磁盘上的 tasks.md，从不在模型自己的
+    tool_calls 里，所以 detail_origin_seq 必须保持 None，好让首条方案在批准后
+    第一次模型调用时被 ensure_focus_detail_visible 注入。传了 current_seq 反而
+    会让它被判为「已在上下文里」而永不注入。
+
+    追加而不清空：session 可能已有清单（add_task 默认追加，after_id 显式串起
+    物化顺序与 tasks.md 一致）。物化失败不能让已批准的 plan 中止——用户已经
+    批过了，_finalize_plan_exit 必须走完：解析失败退化为「物化 0 条，照常进入
+    实现」，中途 store 写失败退化为已成功的前缀条数，都留痕。
+    """
+    count = 0
+    previous_id: int | None = None
+    try:
+        for task in get_tasks(slug):
+            status = _PLAN_TO_TASK_STATUS.get(getattr(task, "status", "pending"), "pending")
+            item = add_task(
+                session_id,
+                content=getattr(task, "description", "") or f"Task {getattr(task, 'id', count + 1)}",
+                detail=_compose_detail(task),
+                acceptance=getattr(task, "acceptance", "") or "",
+                after_id=previous_id,
+            )
+            previous_id = item.id
+            if status != "pending":
+                update_task(session_id, item.id, status=status,
+                            error=getattr(task, "error", "") or "")
+            count += 1
+    except Exception as e:
+        print_error(f"[plan] materialize failed for '{slug}' after {count} task(s): {e!r}")
+    return count

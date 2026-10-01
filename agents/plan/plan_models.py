@@ -56,6 +56,12 @@ class Task:
     interface: str = ""
     acceptance: str = ""
     duration_s: int = 0
+    # 任务块里未被已知标记（**文件**/**函数**/**接口**/**验收**/**状态**/**错误**/
+    # **重试次数**）识别的其余行，由 _parse_structured_tasks 收集（Plan 3a Task 3）。
+    # 轻量轨的 `- 改动:`/`- 注意:` 缩进子项经 checkbox_tasks_to_structured 转换后
+    # 就落在这里，物化时与结构化字段一起组合进 TaskItem.detail。
+    # _parse_simple_tasks（checkbox 格式）没有块结构可收集，body 保持空。
+    body: str = ""
 
 
 @dataclass
