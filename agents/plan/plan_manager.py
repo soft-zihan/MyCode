@@ -424,13 +424,18 @@ def append_ledger(slug: str, entry: dict) -> None:
 
 
 def read_ledger(slug: str) -> list[dict]:
-    """读取所有 ledger 条目。"""
+    """读取所有 ledger 条目。
+
+    encoding 必须与 append_ledger 的写端一致：写端显式 utf-8，读端跟着裸 read_text()
+    就是 locale 默认编码，在非 UTF-8 的 Windows locale 上，条目一旦带中文即
+    UnicodeDecodeError——而那正是写端加显式 encoding 的原因。
+    """
     import json
     ledger_path = _get_ledger_path(slug)
     if not ledger_path.exists():
         return []
     entries = []
-    for line in ledger_path.read_text().strip().split("\n"):
+    for line in ledger_path.read_text(encoding="utf-8").strip().split("\n"):
         if line:
             try:
                 entries.append(json.loads(line))

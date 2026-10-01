@@ -10,6 +10,14 @@ from typing import Literal
 class PlanStatus(str, Enum):
     """计划的生命周期状态。
 
+    **这是「盘上已有 plan 目录」的反序列化面，不是「当前代码写过哪些状态」的清单。**
+    裁剪任何一个成员都必须配一次迁移（把盘上 `_meta.md` 里的旧值改写掉），否则
+    后果是静默的：_parse_plan_dir 的 `PlanStatus(meta.get("status", "proposed"))` 抛
+    ValueError → 被它那个 blanket `except Exception: return None`（plan_manager.py:90-91）
+    吞掉 → get_plan 返回 None → 那份计划在面板上凭空不见，且一条错误都不报。
+    真正的脆弱点是那个 blanket except（它把「读不回的旧数据」与「目录不存在」压成同一个
+    None），不是这个枚举——已记入 later plan 跟踪，此处刻意不动。
+
     Task 4 删掉了执行状态机，裁剪清单本要把这里收缩成五个成员。实际只删了
     CONVERGE_EXHAUSTED，判据是「这个值有没有可能已经躺在用户盘上的 `_meta.md` 里」：
 

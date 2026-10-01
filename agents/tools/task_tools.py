@@ -163,14 +163,20 @@ def _ignored_keys(operation: str, inp: dict) -> list[str]:
 
 
 def _coerce_id(value) -> int | None:
-    """id 类入参统一转 int；转不动返回 None，落到既有的 clean error 分支。
+    """id 类入参统一转 int；转不动返回 None。
 
-    schema 声明 integer，但模型有时写字符串，所以必须转：不转的话「int
+    返回 None 现在**只**表示「没提供」：present-but-unparseable 的值在每个调用点都被
+    `_id_error` 先截住，直接回 `Error: {key} must be an integer`，压根走不到这里。所以
+    None 落到的是既有的**缺席**分支——`id` 缺席 → "id is required"，`after_id` 缺席 →
+    不锚定（追加到末尾）。下面那个 except 因此只是防御性兜底（本函数被别处直接调用时
+    也不至于抛 ValueError），不再是「坏值」的主路径。
+
+    为什么必须转：schema 声明 integer，但模型有时写字符串，不转的话「int
     task_id + str after_id」会绕过 store 的自锚守卫 `after_id != task_id`，
-    重现「静默甩到列表末尾」。这里也不直接 int(value)：非数字（"abc"）会抛
+    重现「静默甩到列表末尾」。也不直接 int(value)：非数字（"abc"）会抛
     ValueError，被 dispatcher 的宽 except 包成 "tool 'task_list' failed:
     ValueError: ..."，模型看到的是噪声；而且行为会随清单空/非空而不同（空清单
-    在循环前就返回 not found）。返回 None 让两条路收敛到同一句 clean error。
+    在循环前就返回 not found）。
     """
     try:
         return int(value)

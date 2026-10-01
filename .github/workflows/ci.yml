@@ -71,7 +71,7 @@ jobs:
       - name: Reject CRLF in bash-interpreted files
         run: |
           bad=0
-          for f in $(git ls-files '*.sh' mycode mycode-web 'agents/plan/scripts/*'); do
+          for f in $(git ls-files '*.sh' mycode mycode-web); do
             [ -f "$f" ] || continue
             if grep -qU $'\r' "$f"; then
               echo "::error file=$f::contains CRLF line endings"
@@ -82,7 +82,7 @@ jobs:
 
       - name: bash -n syntax check
         run: |
-          for f in $(git ls-files '*.sh' mycode mycode-web 'agents/plan/scripts/*'); do
+          for f in $(git ls-files '*.sh' mycode mycode-web); do
             [ -f "$f" ] || continue
             bash -n "$f" || exit 1
           done

@@ -715,3 +715,144 @@ def test_checklist_only_plan_does_not_say_empty(ws, tmp_path):
     assert "task_list" in draft.conversation_plan
     # 给人看的那份一个字不减，清单还在
     assert "- [ ] 1. 做点什么" in draft.full_plan
+
+
+# ────────────── 收口 E：_clear_draft_dir 的守卫不许逃出 try ──────────────
+
+def _capture_errors(monkeypatch) -> list[str]:
+    """收住本模块的 print_error（它走 logger.error，capsys 抓不到）。"""
+    logged: list[str] = []
+    monkeypatch.setattr(plan_tool_executor, "print_error", logged.append)
+    return logged
+
+
+def test_clear_draft_dir_refuses_to_delete_the_plan_entry_itself(ws, monkeypatch):
+    """自撞守卫钉在这里：草稿目录 resolve 后就是 plan 系统目录时**拒绝删除**并留痕。
+
+    不是纯理论边界——slug 的兜底值恰好是 `plan-{session_id}`（plan_mode.py:327），与
+    草稿目录同名。要删的是用户那份已批准计划的唯一副本，所以收口 F 把守卫挪进 try
+    之后，它不能被顺手弱化成「一律吞掉照删」：吞异常与拒绝删除是两件事。
+    """
+    from agents.plan.plan_manager import get_plans_dir
+    from agents.plan.plan_tool_executor import _clear_draft_dir
+
+    logged = _capture_errors(monkeypatch)
+    create_plan(slug=SLUG, granularity=PlanGranularity.STANDARD)
+    plan_home = get_plans_dir() / SLUG
+    (plan_home / "tasks.md").write_text("approved plan", encoding="utf-8")
+
+    _clear_draft_dir(plan_home, SLUG)
+
+    assert plan_home.exists(), "自撞时把用户唯一那份已批准计划删了"
+    assert (plan_home / "tasks.md").read_text(encoding="utf-8") == "approved plan"
+    assert any("refusing to clear" in m for m in logged), logged
+
+
+def test_clear_draft_dir_swallows_a_failure_in_its_own_guard(ws, tmp_path, monkeypatch):
+    """守卫那一行（draft.resolve() / get_plans_dir()）此前站在 try **外面**，而它下面的
+    rmtree 在 try 里面。函数自陈的不变量「清理失败不能让一次已经生效的批准返回错误
+    文本」于是只覆盖了后半截。调用点（plan_tool_executor.py:273）跑在
+    `agent.permission_mode = target_mode`、`mgr.plan_dir = None`、
+    `_emit_permission_mode_event()` 之前，守卫抛一下就把批准拦腰打断：模式没切、事件
+    没发、结果消息没回。
+
+    降级必须是三件事一起：不抛、留痕、**不删**——守卫没跑完就等于自撞与否未知，未知时
+    保留草稿是唯一安全的那一边。
+    """
+    from agents.plan.plan_tool_executor import _clear_draft_dir
+
+    logged = _capture_errors(monkeypatch)
+
+    def boom():
+        raise OSError("plans dir unavailable")
+
+    monkeypatch.setattr(plan_tool_executor, "get_plans_dir", boom)
+    draft_dir = tmp_path / "draft"
+    draft_dir.mkdir()
+    (draft_dir / "plan.md").write_text("## 任务清单\n\n- [ ] 1. 做点什么\n", encoding="utf-8")
+
+    _clear_draft_dir(draft_dir, SLUG)          # 不得抛
+
+    assert logged, "守卫失败必须留痕：静默不是降级，是消失"
+    assert draft_dir.exists(), "自撞与否未知时不许删"
+    assert (draft_dir / "plan.md").exists()
+
+
+# ────────────── 收口 F：标题名缺口要可观测，不许静默 ──────────────
+
+def _plan_md_with_checklist(heading: str) -> str:
+    """轻量轨 plan.md：checkbox 清单在 `heading` 下（heading 为空 = 压根没写标题）。"""
+    head = f"{heading}\n\n" if heading else ""
+    return (
+        "# Fix Login Timeout\n\n## 背景\n\n登录请求要等 30s 才超时。\n\n"
+        f"{head}- [ ] 1. 收紧超时\n- [ ] 2. 加超时提示\n\n## 验收\n\npytest 全绿。\n"
+    )
+
+
+@pytest.mark.parametrize("heading", ["## Tasks", "## 任务", ""],
+                         ids=["tasks-en", "renwu", "no-heading"])
+def test_unrecognized_checklist_heading_is_reported(ws, tmp_path, monkeypatch, heading):
+    """strip 只认 `## 任务清单`。模型写成别的名字（或不写标题）时它逐字原样返回，于是
+    conversation_plan == full_plan：整份 checkbox 清单重新进对话，正是这套设计要消掉的
+    那笔重复账，而且此前**无声无息**地发生。
+
+    刻意**不**加标题名启发式：猜 `## Tasks` / `## 任务` / 全角空格，猜错就会切掉一段
+    合法散文。这里只把缺口变成一条可观测的诊断，好让 later plan 拿到「到底需不需要
+    名字变体规则」的真数据，而不是靠想象。
+    """
+    from agents.plan.plan_tool_executor import _validate_and_load_draft
+
+    logged = _capture_errors(monkeypatch)
+    traced: list[str] = []
+    monkeypatch.setattr(plan_tool_executor, "trace_event",
+                        lambda kind, **kw: traced.append(kind))
+
+    mgr = _draft_mgr(tmp_path, plan_md=_plan_md_with_checklist(heading))
+    draft = _validate_and_load_draft(mgr)
+
+    # 前置条件：清单确实解析出来了，而 strip 什么都没切掉——缺口本身，不是 fixture 造的
+    assert draft.granularity == "minimal"
+    assert "收紧超时" in draft.tasks
+    assert "- [ ] 1. 收紧超时" in draft.conversation_plan, "前置条件：清单回到对话里了"
+    assert draft.conversation_plan == draft.full_plan, "前置条件：这就是那笔重复账"
+
+    assert any("任务清单" in m for m in logged), logged
+    assert traced == ["plan_mode.checklist_section_unrecognized"], traced
+
+
+def test_prescribed_checklist_heading_reports_nothing(ws, tmp_path, monkeypatch):
+    """反面：规定写法下 strip 生效，一条诊断都不许发。这条信号一旦被噪声淹掉，later
+    plan 拿到的数据就没有判别力，等于白埋。"""
+    from agents.plan.plan_tool_executor import _validate_and_load_draft
+
+    logged = _capture_errors(monkeypatch)
+    traced: list[str] = []
+    monkeypatch.setattr(plan_tool_executor, "trace_event",
+                        lambda kind, **kw: traced.append(kind))
+
+    mgr = _draft_mgr(tmp_path, plan_md=MINIMAL_PLAN_MD)
+    draft = _validate_and_load_draft(mgr)
+
+    assert "- [ ]" not in draft.conversation_plan      # strip 生效了
+    assert logged == [] and traced == []
+
+
+def test_standard_track_never_reports_the_checklist_gap(ws, tmp_path, monkeypatch):
+    """重量轨没有 `## 任务清单` 可切（清单在独立的 tasks.md 里，conversation_plan 的
+    组装直接略过 `## Tasks` 段），诊断条件里的 `granularity == "minimal"` 就是为此。
+    漏了这个限定，重量轨的 plan_md 是空串、`_strip("") == ""` 恒成立，于是**每次**重量轨
+    批准都会喊一次假警报。"""
+    from agents.plan.plan_tool_executor import _validate_and_load_draft
+
+    logged = _capture_errors(monkeypatch)
+    traced: list[str] = []
+    monkeypatch.setattr(plan_tool_executor, "trace_event",
+                        lambda kind, **kw: traced.append(kind))
+
+    mgr = _draft_mgr(tmp_path, spec_md=SPEC_MD, design_md=DESIGN_MD, tasks_md=STRUCTURED)
+    draft = _validate_and_load_draft(mgr)
+
+    assert draft.granularity == "standard"
+    assert "实现解析器" in draft.tasks                 # 任务照样解析出来了
+    assert "## Tasks" not in draft.conversation_plan   # 重量轨的清单本来就省得掉
+    assert logged == [] and traced == []

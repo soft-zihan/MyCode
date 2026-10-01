@@ -10,5 +10,3 @@
 *.sh text eol=lf
 mycode text eol=lf
 mycode-web text eol=lf
-agents/plan/scripts/task-brief text eol=lf
-agents/plan/scripts/review-package text eol=lf

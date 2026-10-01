@@ -41,6 +41,7 @@ SPAN_TYPES: dict[str, str] = {
     "plan_mode.enter": "event",
     "plan_mode.approved": "event",
     "plan_mode.rejected": "event",
+    "plan_mode.checklist_section_unrecognized": "event",
     "model_call": "generation",
     "side_query": "generation",
     "tool_call": "tool",

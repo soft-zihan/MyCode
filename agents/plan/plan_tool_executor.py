@@ -142,6 +142,28 @@ def _validate_and_load_draft(mgr: Any) -> str | _PlanDraft:
     if granularity == "minimal" and not tasks_content:
         tasks_content = PlanModeManager.checkbox_tasks_to_structured(plan_md)
 
+    # 轻量轨的任务清单是 plan.md 里的 `## 任务清单` 一段，只能按标题切出来。切不动时
+    # （模型把标题写成 `## Tasks`、`## 任务`，或者压根不写标题）_strip_task_checklist_
+    # section 逐字原样返回，于是 conversation_plan == full_plan：整份 checkbox 清单重新
+    # 进对话，正是 conversation_plan 这个设计要消掉的那笔重复账。
+    # 刻意**不**加标题名启发式——猜名字猜错就会切掉一段合法散文，代价比重复一遍清单更
+    # 高。这里只把缺口变成一条可观测的诊断：无声的重复没人会去修，可测量的重复才有
+    # 「到底需不需要名字变体规则」的真数据。
+    stripped_plan_md = _strip_task_checklist_section(plan_md)
+    if granularity == "minimal" and tasks_content.strip() and stripped_plan_md == plan_md:
+        print_error(
+            "[plan] plan.md has a checkbox checklist but no recognized `## 任务清单` "
+            "heading, so the conversation copy of the plan still contains the full list"
+        )
+        trace_event(
+            "plan_mode.checklist_section_unrecognized",
+            metadata={
+                "granularity": granularity,
+                "plan_md_chars": len(plan_md),
+                "task_blocks": tasks_content.count("### Task"),
+            },
+        )
+
     full_plan = "\n\n".join(
         part for part in (
             plan_md.strip() if granularity == "minimal" and plan_md.strip() else "",
@@ -157,7 +179,7 @@ def _validate_and_load_draft(mgr: Any) -> str | _PlanDraft:
     #   的「修复」在这条轨上静默无效，必须按标题把那段切出来。
     conversation_plan = "\n\n".join(
         part for part in (
-            _strip_task_checklist_section(plan_md).strip()
+            stripped_plan_md.strip()
             if granularity == "minimal" and plan_md.strip() else "",
             f"## Spec\n{spec_content}" if spec_content.strip() else "",
             f"## Design\n{plan_content}" if plan_content.strip() else "",
@@ -228,26 +250,30 @@ def _clear_draft_dir(plan_dir: Any, slug: str) -> None:
     只在 integration 成功后调用：失败时（slug 碰撞被 plan_mode.py:359-361 吞掉返回
     None）草稿是计划的唯一副本，删了就没了。
 
-    清理失败不能让一次已经生效的批准返回错误文本，所以吞掉异常、只留痕。
+    清理失败不能让一次已经生效的批准返回错误文本，所以**整个函数体**都在 try 里、
+    一律吞掉异常只留痕。调用点跑在 `agent.permission_mode = target_mode`、
+    `mgr.plan_dir = None` 与 `_emit_permission_mode_event()` 之前，本函数里任何一行
+    抛出去都会把批准拦腰打断（模式没切、事件没发、结果消息没回）。
     """
     if not plan_dir:
         return
     draft = Path(plan_dir)
-    # 防御：草稿目录与 plan 系统目录同在 `.mycode/plans/` 下，而 slug 的兜底值恰好
-    # 就是 `plan-{session_id}`（plan_mode.py:327）——两者同名。那种情况下 create_plan
-    # 会因目录已存在而抛、integration 返回 None，所以正常走不到这里；但要删的是用户
-    # 的计划副本，把不变量写实比靠推理省事更安全。
-    if slug and draft.resolve() == (get_plans_dir() / slug).resolve():
-        print_error(f"[plan] draft dir IS the plan entry, refusing to clear: {draft}")
-        return
     try:
+        # 防御：草稿目录与 plan 系统目录同在 `.mycode/plans/` 下，而 slug 的兜底值恰好
+        # 就是 `plan-{session_id}`（plan_mode.py:327）——两者同名。那种情况下 create_plan
+        # 会因目录已存在而抛、integration 返回 None，所以正常走不到这里；但要删的是用户
+        # 的计划副本，把不变量写实比靠推理省事更安全。
+        # 这行守卫**也**在 try 里：resolve()/get_plans_dir() 抛的话自撞与否就是未知的，
+        # 未知时保留草稿是唯一安全的那一边，所以直接落到 except 留痕返回、不 rmtree。
+        if slug and draft.resolve() == (get_plans_dir() / slug).resolve():
+            print_error(f"[plan] draft dir IS the plan entry, refusing to clear: {draft}")
+            return
         shutil.rmtree(draft, ignore_errors=True)
+        if draft.exists():
+            # ignore_errors=True 不抛，所以只能事后核对：残留的草稿下一轮照样会被复读。
+            print_error(f"[plan] draft dir survived cleanup: {draft}")
     except Exception as e:
         print_error(f"[plan] failed to clear draft dir '{draft}': {e!r}")
-        return
-    if draft.exists():
-        # ignore_errors=True 不抛，所以只能事后核对：残留的草稿下一轮照样会被复读。
-        print_error(f"[plan] draft dir survived cleanup: {draft}")
 
 
 def _finalize_plan_exit(agent: "Agent", mgr: Any, draft: _PlanDraft, choice: str) -> str:
