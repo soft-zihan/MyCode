@@ -16,6 +16,7 @@ import json
 from agents.tools.task_store import (
     TASK_PRIORITY_MEDIUM,
     TASK_STATUS_COMPLETED,
+    TASK_STATUS_IN_PROGRESS,
     VALID_PRIORITIES,
     VALID_STATUSES,
     TaskItem,
@@ -143,10 +144,13 @@ def full_dict(item: TaskItem) -> dict:
     return item.to_dict()
 
 
-def _ok(payload: dict, ignored: list[str] | None = None) -> str:
+def _ok(payload: dict, ignored: list[str] | None = None,
+        hint: str | None = None) -> str:
     body = {"ok": True, **payload}
     if ignored:
         body["ignored"] = ignored
+    if hint:
+        body["hint"] = hint
     return json.dumps(body, ensure_ascii=False, indent=2)
 
 
@@ -199,6 +203,76 @@ def _check_string_fields(inp: dict) -> str | None:
     return None
 
 
+# ---- detail / acceptance 空字段的软提醒 ----
+#
+# 冒烟证据（qwen3.6-27b，8 文件 Python 包）：14 次 task_list 调用建出 4 条任务、
+# 全部正确推到 completed、49 个测试通过，但四条的 detail 与 acceptance 都是
+# 0 字符 → memory_injection 0 次，推式披露层从未触发；而 Plan 2 的验收闸门按
+# 「这条声明了 acceptance 吗」自缩放，未声明就永不上膛。整个特性架在这两个字段上，
+# 模型却把清单当纯 checklist 用。
+#
+# 根因是没有任何东西推回来：只带 content 的 add 与填写完整的 add 返回一模一样的
+# ok:true。系统提示与工具 description 都只是**描述**这两个字段（89cb0d7 刚补过一轮
+# 指引，模型跟上了「何时建清单」、没跟上「字段要填什么」），所以零代价可省的字段
+# 就会被省。
+# 这里给「省略」加一个即时、可行动的代价——放在工具结果里而不是提示词里，因为它在
+# 调用返回后立刻被读到，那正是模型还能补写的时刻。
+#
+# 刻意是提醒而不是闸门（与验收闸门同为软警告的裁定同源）：硬要求会换来一个为了
+# 过关编出来的 acceptance，而很多合法任务确实没有可验证命令；也会与「3 步以上就建
+# 清单」的触发条件打架——简单清单被拒之门外比清单缺字段更糟。
+#
+# 体积自律：这两段文本会随 tool_result_msg 落进对话历史、按 token 付费，所以
+# 只写「缺什么 + 为什么要紧（一个从句）+ 现在怎么补」，不重述工具 description。
+
+_FIELD_WHY = {
+    "detail": "detail 会在该条成为焦点时自动注入，可能是你届时眼前唯一的方案，须按读者没有其他上下文来写",
+    "acceptance": "acceptance 是证明这条已完成的那一条命令，后续验收闸门按它是否声明来启用",
+}
+
+
+def _missing_spec_fields(item: TaskItem) -> list[str]:
+    """该条尚未填写的方案字段（顺序固定：detail 在前）。"""
+    missing = []
+    if not item.detail.strip():
+        missing.append("detail")
+    if not item.acceptance.strip():
+        missing.append("acceptance")
+    return missing
+
+
+def _add_hint(item: TaskItem) -> str | None:
+    """add 之后的补写提醒；两个字段都已填则返回 None（做对了就不啰嗦）。
+
+    只点名真正缺的字段，补写调用里也只带那些字段：模型填了 detail 却仍被念一遍
+    detail，提醒就退化成了每次都出现的噪声，很快会被当背景读掉。
+    """
+    missing = _missing_spec_fields(item)
+    if not missing:
+        return None
+    fix = ", ".join(f"{key}=..." for key in missing)
+    return (
+        f"未填 {'、'.join(missing)}："
+        + "；".join(_FIELD_WHY[key] for key in missing)
+        + f"。现在就补：task_list update(id={item.id}, {fix})"
+    )
+
+
+def _start_hint(item: TaskItem) -> str | None:
+    """转入 in_progress 而 detail 仍空时的提醒 —— 比 add 那条更短更硬。
+
+    只提 detail，不提 acceptance：一次流转只提醒当下最要紧的那一个字段。detail
+    是这条任务唯一的方案来源，而此刻正是它还能被用上的最后时刻（焦点条已定，
+    披露层马上要读它）；acceptance 到标 completed 之前都还来得及补。
+    """
+    if item.detail.strip():
+        return None
+    return (
+        f"#{item.id} 已标 in_progress 而 detail 仍为空：这是动手前最后一次补写机会，"
+        f"任务进行中不会再有方案注入。补写：task_list update(id={item.id}, detail=...)"
+    )
+
+
 def handle_task_list(session_id: str, inp: dict, current_seq: int | None = None) -> str:
     """处理 task_list 工具调用。
 
@@ -211,7 +285,16 @@ def handle_task_list(session_id: str, inp: dict, current_seq: int | None = None)
     ensure_focus_detail_visible（Task 9）。工具层拿不到自己那条
     tool_result_msg 的 seq（handler 返回之后才落盘），若在这里也注入一份，
     无法记账 detail_origin_seq，下一轮会被重复注入。
+
+    同理，_add_hint / _start_hint 的软提醒是 JSON 里的一个 `hint` 键，**不是**
+    拼在 JSON 之后的散文：拼尾巴会让 tool_result 既不是纯 JSON 又搭披露的便车
+    （test_every_operation_returns_pure_json 与
+    test_tool_result_does_not_carry_disclosure 是这条性质的门禁）。
     """
+    # `.get("operation", "")` 的默认值只覆盖**键缺席**；键在场而值为 null 时拿到
+    # 的是 None（冒烟里那 1 次畸形调用就是这种）。两条路都不在 _KEYS_BY_OPERATION
+    # 里，于是 ignored 为空、五个分支全部落空，收敛到末尾同一句 clean error ——
+    # 不是 KeyError，也不是被 dispatcher 宽 except 包出来的 traceback 噪声。
     operation = inp.get("operation", "")
     ignored = _ignored_keys(operation, inp)
 
@@ -236,7 +319,10 @@ def handle_task_list(session_id: str, inp: dict, current_seq: int | None = None)
             # 下一次模型调用时注入一份与 tool_calls 参数逐字相同的 detail（I1）。
             current_seq=current_seq,
         )
-        return _ok({"action": "added", "task": summary_dict(item)}, ignored)
+        # 提醒读的是**落盘后的条目**，不是入参：模型这次调用里填了的字段自然不在
+        # missing 里，也就不会被重复念一遍（`detail="   "` 这类空白值仍算缺）。
+        return _ok({"action": "added", "task": summary_dict(item)}, ignored,
+                   hint=_add_hint(item))
 
     if operation == "update":
         task_id = _coerce_id(inp.get("id"))
@@ -261,7 +347,12 @@ def handle_task_list(session_id: str, inp: dict, current_seq: int | None = None)
         )
         if item is None:
             return f"Error: task with id {task_id} not found"
-        return _ok({"action": "updated", "task": summary_dict(item)}, ignored)
+        # 条件是**本次请求的新状态**，不是 item.status：一条已经 in_progress 的任务
+        # 后续每次改 content/after_id 都念一遍，提醒就成了每调用必现的噪声。
+        # 「一次流转一次提醒」= 只在真的发生 pending → in_progress 这次调用上提醒。
+        hint = _start_hint(item) if status == TASK_STATUS_IN_PROGRESS else None
+        return _ok({"action": "updated", "task": summary_dict(item)}, ignored,
+                   hint=hint)
 
     if operation == "remove":
         task_id = _coerce_id(inp.get("id"))

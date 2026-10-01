@@ -475,6 +475,122 @@ async def test_dispatcher_clamps_negative_seq_to_none(ws):
     assert list_tasks("s")[0].started_seq == 99
 
 
+# ---- Smoke 修复轮：detail/acceptance 空字段的工具结果软提醒 ----
+#
+# 冒烟证据：真实模型 14 次 task_list 调用建出 4 条任务并全部推到 completed，
+# 但四条的 detail 与 acceptance 都是 0 字符 → memory_injection 0 次，推式层从未
+# 触发，Plan 2 的验收闸门也因为「未声明 acceptance」而永不上膛。系统提示与工具
+# description 都只是**描述**这两个字段，省略它们零代价，于是被省略。
+#
+# 修复口径与验收闸门一致：软提醒，不是硬闸门。硬要求会让模型为了过关编一个
+# acceptance，也会与「3 步以上就建清单」的触发条件打架（简单清单常常没有可验证
+# 命令）。提醒落在工具结果里而不是提示词里，因为它在调用返回后立刻被读到——那
+# 正是模型还能补写的时刻。
+
+
+def test_add_without_detail_or_acceptance_returns_hint(ws):
+    """两个字段都空 → ok:true 照旧，但带上点名两者的 hint。"""
+    out = _call({"operation": "add", "content": "A"})
+    assert out["ok"] is True                      # 软提醒，不是拒绝
+    assert out["action"] == "added"
+    assert len(list_tasks("s")) == 1              # 任务照旧建出来了
+    hint = out["hint"]
+    assert "detail" in hint and "acceptance" in hint
+    assert "update(" in hint                      # 给出可立即执行的补写调用
+    assert f"id={out['task']['id']}" in hint      # 调用里带真实 id，模型不用自己拼
+
+
+def test_add_with_detail_and_acceptance_has_no_hint(ws):
+    """做对了就不啰嗦 —— hint 一旦出现就该是有信息量的。"""
+    out = _call({"operation": "add", "content": "A", "detail": "方案A",
+                 "acceptance": "pytest -k a"})
+    assert out["ok"] is True
+    assert "hint" not in out
+
+
+def test_add_with_only_detail_hints_about_acceptance(ws):
+    """部分填写 → 只点名剩下的那个字段（连同补写调用里也只带它）。"""
+    out = _call({"operation": "add", "content": "A", "detail": "方案A"})
+    hint = out["hint"]
+    assert "acceptance" in hint
+    assert "detail" not in hint                   # 已提供的字段不再被点名
+
+
+def test_update_to_in_progress_without_detail_hints(ws):
+    """转入 in_progress 时 detail 仍空 → 更短更硬的提醒，且不阻塞流转。"""
+    added = _call({"operation": "add", "content": "A"})
+    out = _call({"operation": "update", "id": added["task"]["id"],
+                 "status": "in_progress"}, seq=10)
+    assert out["ok"] is True
+    assert out["task"]["status"] == "in_progress"     # 状态照旧改了
+    got = list_tasks("s")[0]
+    assert got.status == "in_progress"
+    assert got.started_seq == 10                      # 记账也没被提醒影响
+    hint = out["hint"]
+    assert "detail" in hint and "update(" in hint
+    assert "acceptance" not in hint                   # 一次流转只提醒一件事
+
+
+def test_update_to_in_progress_with_detail_has_no_hint(ws):
+    """detail 已在（或本次调用刚补上）→ 不提醒。"""
+    added = _call({"operation": "add", "content": "A", "detail": "方案A"})
+    out = _call({"operation": "update", "id": added["task"]["id"],
+                 "status": "in_progress"}, seq=10)
+    assert out["task"]["status"] == "in_progress"
+    assert "hint" not in out
+
+    # 同一次调用里既转 in_progress 又补 detail → 也不再提醒（不重复唠叨）
+    added2 = _call({"operation": "add", "content": "B", "detail": "方案B"})
+    out2 = _call({"operation": "update", "id": added2["task"]["id"],
+                  "status": "in_progress", "detail": "改写过的方案B"}, seq=11)
+    assert out2["task"]["status"] == "in_progress"
+    assert "hint" not in out2
+    assert list_tasks("s")[1].detail == "改写过的方案B"
+
+
+def test_update_to_completed_does_not_hint(ws):
+    """提醒只属于 add 与 in_progress 流转：completed / remove / list / get 都不带。"""
+    added = _call({"operation": "add", "content": "A"})
+    task_id = added["task"]["id"]
+    _call({"operation": "update", "id": task_id, "status": "in_progress"})
+    out = _call({"operation": "update", "id": task_id, "status": "completed"}, seq=20)
+    assert out["ok"] is True and out["task"]["status"] == "completed"
+    assert "hint" not in out                          # detail 仍空，但这里不提醒
+    assert "hint" not in _call({"operation": "list"})
+    assert "hint" not in _call({"operation": "get", "id": task_id})
+    assert "hint" not in _call({"operation": "remove", "id": task_id})
+
+
+def test_missing_operation_returns_clean_error(ws):
+    """operation 键**缺席**（冒烟里 14 次调用中的那 1 次畸形调用）。
+
+    `.get("operation", "")` 给 ""，落到末尾的 unknown-operation 分支：必须是
+    点名合法操作集的 clean error，不能是 KeyError、不能是 dispatcher 宽 except
+    包出来的 traceback 噪声、更不能静默 ok:true。
+    """
+    raw = handle_task_list("s", {})
+    assert raw.startswith("Error:")
+    for op in ("add", "update", "remove", "list", "get"):
+        assert op in raw
+    assert "KeyError" not in raw and "Traceback" not in raw
+    assert list_tasks("s") == []                      # 什么都没落盘
+
+
+def test_null_operation_returns_clean_error(ws):
+    """operation 键**在场但为 null** —— 与缺席是两条不同的路径。
+
+    `.get(k, default)` 在键在场时返回那个 null，默认值不生效，于是 operation
+    是 None 而不是 ""。两条路必须收敛到同一句 clean error（None 会顺着
+    _ignored_keys 的 `.get(None)` 拿到空集，不炸）。
+    """
+    raw = handle_task_list("s", {"operation": None})
+    assert raw.startswith("Error:")
+    for op in ("add", "update", "remove", "list", "get"):
+        assert op in raw
+    assert "KeyError" not in raw and "Traceback" not in raw
+    assert list_tasks("s") == []
+
+
 def _make_batch_stub_agent(calls: list):
     async def execute_tool_call(name, inp, assistant_seq=None):
         calls.append((name, assistant_seq))
