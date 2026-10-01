@@ -28,8 +28,15 @@ def ws(tmp_path):
     reset_workspace(token)
 
 
-def _call(inp: dict, seq: int | None = None) -> dict:
-    return json.loads(handle_task_list("s", inp, current_seq=seq))
+def _call(inp: dict, seq: int | None = None, evidence=None) -> dict:
+    """evidence = 验收闸门的 evidence_fn（Plan 2 Task 3）。
+
+    刻意是关键字参数并追加在末尾：本文件 67 个调用点全都只传一个位置参数
+    （inp）+ `seq=` 关键字，所以加参数不会让任何既有调用悄悄把值落进 evidence。
+    None 表示闸门静默不启用（子智能体/旧调用方的形状）。
+    """
+    return json.loads(
+        handle_task_list("s", inp, current_seq=seq, evidence_fn=evidence))
 
 
 def test_schema_exposes_five_operations():
@@ -632,3 +639,61 @@ async def test_both_tool_execution_paths_thread_assistant_seq(ws):
     ]
     await loop._execute_tool_batches(items, 77)
     assert calls == [("read_file", 77), ("task_list", 77)]
+
+
+# ---- Plan 2 Task 3：软验收闸门（handler 层）----
+#
+# 闸门本体（agents/tools/task_gate.py）在 test_task_gate.py 里按事件日志单测；
+# 这里只钉 handler 的接线：什么时候上膛、什么时候静默、警告落在 JSON 的哪个位置。
+# 判据是 evidence_fn 的返回值（dispatcher 传进来的、对 session.events 的闭包），
+# handler 自己不看事件——store 不 import session 的规矩在这里也成立。
+
+
+def test_completed_with_acceptance_and_no_evidence_warns(ws):
+    added = _call({"operation": "add", "content": "跑测试",
+                   "acceptance": "pytest tests/x.py -q"})
+    tid = added["task"]["id"]
+    _call({"operation": "update", "id": tid, "status": "in_progress"}, seq=10)
+    out = _call({"operation": "update", "id": tid, "status": "completed"},
+                seq=20, evidence=lambda _since: False)
+    assert out["task"]["status"] == "completed"        # 警告不阻止状态变更
+    assert "pytest tests/x.py -q" in out["warning"]
+
+
+def test_completed_with_evidence_does_not_warn(ws):
+    added = _call({"operation": "add", "content": "跑测试", "acceptance": "pytest"})
+    tid = added["task"]["id"]
+    out = _call({"operation": "update", "id": tid, "status": "completed"},
+                seq=20, evidence=lambda _since: True)
+    assert "warning" not in out
+
+
+def test_completed_without_acceptance_never_warns(ws):
+    """自缩放：没声明验收判据的任务不受闸门约束。"""
+    added = _call({"operation": "add", "content": "写文档"})
+    out = _call({"operation": "update", "id": added["task"]["id"],
+                 "status": "completed"}, seq=20, evidence=lambda _since: False)
+    assert "warning" not in out
+
+
+def test_in_progress_transition_does_not_warn(ws):
+    added = _call({"operation": "add", "content": "跑测试", "acceptance": "pytest"})
+    out = _call({"operation": "update", "id": added["task"]["id"],
+                 "status": "in_progress"}, seq=10, evidence=lambda _since: False)
+    assert "warning" not in out
+
+
+def test_no_evidence_fn_means_no_warning(ws):
+    """evidence_fn 缺席（例如子智能体或旧调用方）时闸门静默不启用，不报错。"""
+    added = _call({"operation": "add", "content": "跑测试", "acceptance": "pytest"})
+    out = _call({"operation": "update", "id": added["task"]["id"], "status": "completed"})
+    assert out["task"]["status"] == "completed"
+    assert "warning" not in out
+
+
+def test_warning_is_inside_the_json_not_appended(ws):
+    added = _call({"operation": "add", "content": "跑测试", "acceptance": "pytest"})
+    raw = handle_task_list("s", {"operation": "update", "id": added["task"]["id"],
+                                 "status": "completed"},
+                           current_seq=20, evidence_fn=lambda _s: False)
+    json.loads(raw)      # 不抛即证明是纯 JSON

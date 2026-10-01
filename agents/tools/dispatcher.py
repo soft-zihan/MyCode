@@ -27,6 +27,10 @@ from agents.plan.plan_tool_executor import execute_plan_mode_tool
 from agents.skills.skills import discover_skills, execute_skill
 from agents.tools import execute_tool
 from agents.tools.question_tools import handle_ask_user
+# 模块级而非延迟 import：tests/unit/test_import_hygiene.py 冻结了「agents/ 内
+# 零函数级 agents import」（M4 依赖治理，豁免表当前为空）。task_gate 只依赖
+# task_store，与本文件既有的 task_tools 同向，不构成环。
+from agents.tools.task_gate import has_successful_shell_since
 from agents.tools.task_tools import handle_task_list
 from agents.tools.wiki_tools import remember
 
@@ -224,7 +228,17 @@ class ToolDispatcher:
                 if assistant_seq is not None and assistant_seq >= 0
                 else None
             )
-            result = handle_task_list(self.agent.session.id, inp, current_seq=current_seq)
+            # 软验收闸门（Plan 2 Task 3）的证据查询。刻意传闭包而不是 session：
+            # task_tools / task_store 都不 import session（循环依赖 + 可测试性），
+            # 所以「有没有成功的 run_shell」这个事实只能由 dispatcher 在这一层
+            # 绑到当前 session 上。
+            result = handle_task_list(
+                self.agent.session.id,
+                inp,
+                current_seq=current_seq,
+                evidence_fn=lambda since: has_successful_shell_since(
+                    self.agent.session, since),
+            )
             self.agent.session.append("task_list/updated", {"session_id": self.agent.session.id})
             return result
         if name == "skill":

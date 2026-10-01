@@ -12,7 +12,9 @@ Plan 模式下禁用（撰写阶段的产物要进 PlanApprovalDialog 供审批�
 from __future__ import annotations
 
 import json
+from typing import Callable
 
+from agents.tools.task_gate import build_acceptance_warning
 from agents.tools.task_store import (
     TASK_PRIORITY_MEDIUM,
     TASK_STATUS_COMPLETED,
@@ -273,7 +275,12 @@ def _start_hint(item: TaskItem) -> str | None:
     )
 
 
-def handle_task_list(session_id: str, inp: dict, current_seq: int | None = None) -> str:
+def handle_task_list(
+    session_id: str,
+    inp: dict,
+    current_seq: int | None = None,
+    evidence_fn: Callable[[int | None], bool] | None = None,
+) -> str:
     """处理 task_list 工具调用。
 
     current_seq: 承载本次 tool_calls 的 assistant 消息的 seq，由 dispatcher
@@ -281,13 +288,20 @@ def handle_task_list(session_id: str, inp: dict, current_seq: int | None = None)
     传下来的值，不是可变的 agent.last_usage_seq）。store 不 import session
     （会引入循环依赖并破坏可测试性），所以 seq 只能由调用方给。
 
+    evidence_fn: 软验收闸门的证据查询，`since_seq -> bool`（Plan 2 Task 3）。
+    刻意是 callable 而不是 session：闸门要读事件日志，而 task_tools / task_store
+    都不能 import session（循环依赖 + 可测试性），所以由 dispatcher 传一个对
+    `agent.session` 的闭包进来（agents/tools/task_gate.has_successful_shell_since）。
+    None = 闸门静默不启用（子智能体与任何旧调用方的形状），不报错也不警告。
+
     所有成功路径只返回纯 JSON，不拼披露文本：披露的单一注入路径是
     ensure_focus_detail_visible（Task 9）。工具层拿不到自己那条
     tool_result_msg 的 seq（handler 返回之后才落盘），若在这里也注入一份，
     无法记账 detail_origin_seq，下一轮会被重复注入。
 
-    同理，_add_hint / _start_hint 的软提醒是 JSON 里的一个 `hint` 键，**不是**
-    拼在 JSON 之后的散文：拼尾巴会让 tool_result 既不是纯 JSON 又搭披露的便车
+    同理，_add_hint / _start_hint 的软提醒与验收闸门的 warning 都是 JSON 里的
+    一个键（`hint` / `warning`），**不是**拼在 JSON 之后的散文：拼尾巴会让
+    tool_result 既不是纯 JSON 又搭披露的便车
     （test_every_operation_returns_pure_json 与
     test_tool_result_does_not_carry_disclosure 是这条性质的门禁）。
     """
@@ -351,8 +365,24 @@ def handle_task_list(session_id: str, inp: dict, current_seq: int | None = None)
         # 后续每次改 content/after_id 都念一遍，提醒就成了每调用必现的噪声。
         # 「一次流转一次提醒」= 只在真的发生 pending → in_progress 这次调用上提醒。
         hint = _start_hint(item) if status == TASK_STATUS_IN_PROGRESS else None
-        return _ok({"action": "updated", "task": summary_dict(item)}, ignored,
-                   hint=hint)
+        # 软验收闸门（Plan 2 Task 3）：警告，不拒绝——状态照常变成 completed。
+        # 上膛要三条同时成立：本次请求把状态改成 completed、这条声明了 acceptance
+        # （自缩放：没声明判据的任务不受约束）、调用方给了 evidence_fn（None =
+        # 子智能体/旧调用方，闸门静默不启用）。
+        # 证据来自事件日志而不是模型自报；区间起点是 started_seq，为 None（跳过
+        # in_progress 直接标 completed）时退化为全量扫描——宽松方向，宁漏勿误。
+        warning = ""
+        if (
+            status == TASK_STATUS_COMPLETED
+            and item.acceptance.strip()
+            and evidence_fn is not None
+            and not evidence_fn(item.started_seq)
+        ):
+            warning = build_acceptance_warning(item)
+        payload = {"action": "updated", "task": summary_dict(item)}
+        if warning:
+            payload["warning"] = warning
+        return _ok(payload, ignored, hint=hint)
 
     if operation == "remove":
         task_id = _coerce_id(inp.get("id"))
