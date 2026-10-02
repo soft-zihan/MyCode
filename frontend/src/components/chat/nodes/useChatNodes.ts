@@ -663,7 +663,10 @@ export function useChatNodes(): UseChatNodesReturn {
         }
 
         case 'permission/request': {
-          // Don't restore permission requests from history - they're only valid for active sessions
+          // 历史回放刻意**不渲染审批卡片**——否则消息流里会留下一堆过期的历史审批卡。
+          // 「仍在等待审批」的 pending 对话框状态不在这里管：它由 useChat 的历史加载
+          // 路径（restorePendingPermission.derivePendingPermission）按最后一条
+          // request 有无同 rpc_id 的 resolved + projections.running 恢复。这里只管节点。
           break;
         }
         

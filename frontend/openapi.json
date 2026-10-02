@@ -1,6 +1,50 @@
 {
   "components": {
     "schemas": {
+      "AutoApproveRequest": {
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "title": "AutoApproveRequest",
+        "type": "object"
+      },
+      "AutoApproveResultOut": {
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "success": {
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "success",
+          "enabled"
+        ],
+        "title": "AutoApproveResultOut",
+        "type": "object"
+      },
+      "AutoApproveStateOut": {
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "title": "AutoApproveStateOut",
+        "type": "object"
+      },
       "BadCaseListResponse": {
         "description": "Bad case 列表响应。",
         "properties": {
@@ -4293,6 +4337,100 @@
           }
         },
         "summary": "Api Abort Session",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
+    "/api/sessions/{session_id}/auto-approve": {
+      "get": {
+        "description": "每会话自动审批开关（裁定 1：不做全局总闸）。\n\n非活跃会话刻意返回 {\"enabled\": false} 而不是 404：没有活 agent 就没有待审批，\n「关」是唯一有意义的答案（照 api_get_permission_mode 的样子）。",
+        "operationId": "api_get_auto_approve_api_sessions__session_id__auto_approve_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutoApproveStateOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Get Auto Approve",
+        "tags": [
+          "sessions"
+        ]
+      },
+      "put": {
+        "description": "翻转开关。热生效不需要任何唤醒机制：_ensure_agent 拿到的是同一个活 agent\n对象，set_auto_approve 改它的属性，而权限门在 0.1s 轮询里读的是零参 callable\n（agent.auto_approve_enabled），所以下一轮轮询就能看到新值、立刻放行正在\n等待的审批。",
+        "operationId": "api_update_auto_approve_api_sessions__session_id__auto_approve_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AutoApproveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutoApproveResultOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Update Auto Approve",
         "tags": [
           "sessions"
         ]

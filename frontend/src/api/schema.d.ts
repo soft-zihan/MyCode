@@ -977,6 +977,36 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{session_id}/auto-approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Api Get Auto Approve
+         * @description 每会话自动审批开关（裁定 1：不做全局总闸）。
+         *
+         *     非活跃会话刻意返回 {"enabled": false} 而不是 404：没有活 agent 就没有待审批，
+         *     「关」是唯一有意义的答案（照 api_get_permission_mode 的样子）。
+         */
+        get: operations["api_get_auto_approve_api_sessions__session_id__auto_approve_get"];
+        /**
+         * Api Update Auto Approve
+         * @description 翻转开关。热生效不需要任何唤醒机制：_ensure_agent 拿到的是同一个活 agent
+         *     对象，set_auto_approve 改它的属性，而权限门在 0.1s 轮询里读的是零参 callable
+         *     （agent.auto_approve_enabled），所以下一轮轮询就能看到新值、立刻放行正在
+         *     等待的审批。
+         */
+        put: operations["api_update_auto_approve_api_sessions__session_id__auto_approve_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions/{session_id}/compact": {
         parameters: {
             query?: never;
@@ -1765,6 +1795,23 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AutoApproveRequest */
+        AutoApproveRequest: {
+            /** Enabled */
+            enabled: boolean;
+        };
+        /** AutoApproveResultOut */
+        AutoApproveResultOut: {
+            /** Enabled */
+            enabled: boolean;
+            /** Success */
+            success: boolean;
+        };
+        /** AutoApproveStateOut */
+        AutoApproveStateOut: {
+            /** Enabled */
+            enabled: boolean;
+        };
         /**
          * BadCaseListResponse
          * @description Bad case 列表响应。
@@ -4384,6 +4431,72 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    api_get_auto_approve_api_sessions__session_id__auto_approve_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutoApproveStateOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    api_update_auto_approve_api_sessions__session_id__auto_approve_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AutoApproveRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutoApproveResultOut"];
                 };
             };
             /** @description Validation Error */

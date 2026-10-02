@@ -7,9 +7,11 @@ import {
   stageRewind, commitRewind,
   fetchSessionSummary, steerSession,
   fetchTasks as fetchTasksApi,
+  getAutoApprove,
   DEFAULT_CONTEXT_WINDOW,
 } from '../../../api/client';
 import type { RewindPlan, TaskApiError } from '../../../api/client';
+import { derivePendingPermission } from './restorePendingPermission';
 import { useChatNodes } from '../../../components/chat/nodes';
 import type { UserNode } from '../../../components/chat/nodes/types';
 import { sessionStore, wsManager, eventRouter, useSessionStore } from '../../../store';
@@ -123,6 +125,7 @@ export function useChat() {
   const hasMoreHistory = useSessionStore(() => sessionId ? sessionStore.get(sessionId)?.hasMore ?? false : false);
   const pendingPermission = useSessionStore(() => sessionId ? sessionStore.getPendingPermission(sessionId) : undefined);
   const pendingQuestion = useSessionStore(() => sessionId ? sessionStore.getPendingQuestion(sessionId) : undefined);
+  const autoApprove = useSessionStore(() => sessionId ? sessionStore.getAutoApprove(sessionId) : false);
   const tasks = useSessionStore(() => sessionId ? sessionStore.getTasks(sessionId) : EMPTY_TASKS);
   const taskFocusId = useSessionStore(() => sessionId ? sessionStore.getTaskFocus(sessionId) : null);
   const planSlug = useSessionStore(() => sessionId ? sessionStore.getPlanSlug(sessionId) : undefined);
@@ -401,10 +404,11 @@ export function useChat() {
     pendingSessionNameRef.current = null;
     
     try {
-      const [summaryResult, eventsResult, fileChangesResult] = await Promise.allSettled([
+      const [summaryResult, eventsResult, fileChangesResult, autoApproveResult] = await Promise.allSettled([
         fetchSessionSummary(sessionId),
         fetch(`/api/sessions/${sessionId}/events?limit=50`).then(r => r.ok ? r.json() : Promise.reject(r.status)),
         fetch(`/api/sessions/${sessionId}/file-changes`).then(r => r.ok ? r.json() : Promise.reject(r.status)),
+        getAutoApprove(sessionId),
       ]);
       
       if (currentSessionIdRef.current !== sessionId) {
@@ -412,18 +416,28 @@ export function useChat() {
         return;
       }
       
+      // 每会话自动审批开关：切会话时总是从后端读回（读不到 = 关），
+      // 绝不把上一个会话的开关状态带过来。
+      sessionStore.setAutoApprove(
+        sessionId,
+        autoApproveResult.status === 'fulfilled' ? autoApproveResult.value.enabled : false,
+      );
+      
+      let sessionRunning = false;
+      
       if (summaryResult.status === 'fulfilled') {
         const summary = summaryResult.value;
         const metadata = summary.metadata || {};
         const projections = summary.projections || {};
         const stats = summary.stats || {};
         const breakdown = summary.breakdown || null;
+        sessionRunning = projections.running ?? false;
         
         sessionStore.updateProjections(sessionId, {
           title: projections.title || metadata.name,
           cwd: metadata.cwd,
           updatedAt: Date.now(),
-          running: projections.running ?? false,
+          running: sessionRunning,
           plan_slug: projections.plan_slug,
         });
         
@@ -463,6 +477,12 @@ export function useChat() {
         const lastSeq = events.length > 0 ? Math.max(...events.map((e: any) => e.seq ?? 0)) : -1;
         sessionStore.setPagination(sessionId, has_more, base_seq, lastSeq);
         loadSessionEvents(sessionId, events);
+        
+        // 缺陷 B：待审批状态从历史恢复。找最后一条 permission/request，若没有
+        // 同 rpc_id 的 permission/resolved 且会话仍在运行（用上面 summary 里已经
+        // 取到的 projections.running，不再多发请求），恢复成 pending 对话框；
+        // 否则**显式清空**——不清空的话，从会话 A 切到会话 B 会把 A 的对话框带过来。
+        sessionStore.setPendingPermission(sessionId, derivePendingPermission(events, sessionRunning));
       }
       
       if (fileChangesResult.status === 'fulfilled') {
@@ -995,6 +1015,7 @@ export function useChat() {
     sessionStats,
     pendingPermission,
     pendingQuestion,
+    autoApprove,
     tasks,
     taskFocusId,
     sessionRefreshTrigger,

@@ -85,6 +85,19 @@ class PermissionModeRequest(BaseModel):
     mode: str
 
 
+class AutoApproveRequest(BaseModel):
+    enabled: bool
+
+
+class AutoApproveStateOut(BaseModel):
+    enabled: bool
+
+
+class AutoApproveResultOut(BaseModel):
+    success: bool
+    enabled: bool
+
+
 @router.get("/api/sessions")
 def api_list_sessions() -> list[dict[str, Any]]:
     # U2：派生会话（子代理/eval）已落盘但不进用户会话列表；钻取走 GET /api/sessions/{sub_id}
@@ -509,6 +522,32 @@ async def api_update_permission_mode(session_id: str, data: PermissionModeReques
         raise HTTPException(status_code=404, detail="Session not found")
     agent.set_permission_mode(data.mode)
     return {"success": True, "permission_mode": data.mode}
+
+
+@router.get("/api/sessions/{session_id}/auto-approve", response_model=AutoApproveStateOut)
+async def api_get_auto_approve(session_id: str) -> dict[str, Any]:
+    """每会话自动审批开关（裁定 1：不做全局总闸）。
+
+    非活跃会话刻意返回 {"enabled": false} 而不是 404：没有活 agent 就没有待审批，
+    「关」是唯一有意义的答案（照 api_get_permission_mode 的样子）。
+    """
+    agent = _get_live_agent(session_id)
+    if agent is not None:
+        return {"enabled": agent.auto_approve_enabled()}
+    return {"enabled": False}
+
+
+@router.put("/api/sessions/{session_id}/auto-approve", response_model=AutoApproveResultOut)
+async def api_update_auto_approve(session_id: str, data: AutoApproveRequest) -> dict[str, Any]:
+    """翻转开关。热生效不需要任何唤醒机制：_ensure_agent 拿到的是同一个活 agent
+    对象，set_auto_approve 改它的属性，而权限门在 0.1s 轮询里读的是零参 callable
+    （agent.auto_approve_enabled），所以下一轮轮询就能看到新值、立刻放行正在
+    等待的审批。"""
+    agent = await _ensure_agent(session_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    agent.set_auto_approve(data.enabled)
+    return {"success": True, "enabled": data.enabled}
 
 
 def _zero_token_breakdown() -> dict[str, Any]:

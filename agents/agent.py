@@ -147,6 +147,8 @@ class Agent:
         # D3 hotfix：待注入的记忆/提醒（chat() 计算，_prepare_turn 落盘为 memory_injection 事件）
         self._pending_system_injections: list[str] = []
         self._permission_waiters: dict[str, asyncio.Future] = {}
+        # 每会话自动审批开关（裁定 1：每会话一个，不做全局总闸）。默认关。
+        self._auto_approve: bool = False
 
         self.total_input_tokens = 0
         self.total_output_tokens = 0
@@ -393,6 +395,18 @@ class Agent:
             self._exit_plan_mode_internal(emit=False)
         self.permission_mode = mode
         self._emit_permission_mode_event()
+
+    def set_auto_approve(self, enabled: bool) -> None:
+        """每会话自动审批开关。只改实例属性——权限门的等待循环每 0.1s 重读
+        零参探针 auto_approve_enabled，所以对一个**正在等待**的请求也立刻生效
+        （热生效），不需要任何唤醒机制。"""
+        self._auto_approve = bool(enabled)
+
+    def auto_approve_enabled(self) -> bool:
+        """零参探针。**刻意不是 bool 快照**：调用方（PermissionGate）把它当
+        callable 拿着，每次轮询现读当前值——这正是「热」的来源（与折叠门探针
+        check_and_compact 交零参 callable 是同一个模式）。"""
+        return self._auto_approve
 
     async def steer(self, message: str) -> None:
         """运行中插话：写入 steering 队列，由 agent_loop 在 step 边界注入为 user 事件（v2 promote 语义）。"""
@@ -786,15 +800,32 @@ class Agent:
         self._permission_gate.set_confirm_fn(self.confirm_fn) if self.confirm_fn else None
         self._permission_gate.set_sub_agent_id(self._current_sub_agent_id)
         self._permission_gate.set_abort_fn(self._abort_requested)
+        # 零参 callable，不是 auto_approve_enabled() 的返回值：门的等待循环每 0.1s
+        # 现读一次，PUT /auto-approve 翻转属性即热生效（见 set_auto_approve）。
+        self._permission_gate.set_auto_approve_fn(self.auto_approve_enabled)
         self._permission_gate.set_current_tool_name(tool_name or getattr(self, '_current_tool_name', 'unknown'))
         return await self._permission_gate.confirm(command, extra_data=extra_data)
 
     async def request_permission(self, request_id: str, command: str, tool_name: str,
                                   message: str = "", sub_agent_id: str | None = None,
-                                  timeout: float = 300.0) -> bool:
+                                  ) -> bool:
+        # 缺陷 A 修复：去掉原来的 timeout=300 + asyncio.wait_for——超时返回 False
+        # 会被上层翻译成「用户拒绝」，而用户根本没看过请求。改成与权限门
+        # _confirm_via_session 同构的无界轮询（0.1s），出口只有三条：人工应答
+        # （respond_permission 完成 future）、abort、自动审批开关。
+        # timeout 形参直接删除而非保留忽略：全仓 grep「request_permission」只有
+        # 本定义处，没有任何调用方（更没人显式传过 timeout）。
+        if self.auto_approve_enabled():
+            # 开关已开：直接放行、一个事件都不落（裁定 2；「已落盘的请求必须补
+            # resolved」的边界见下面等待循环里的 auto 出口）。
+            return True
+
         rpc_id = str(uuid.uuid4())
         future: asyncio.Future = asyncio.get_event_loop().create_future()
-        self._permission_waitters[rpc_id] = future
+        # 顺手修掉 HEAD 里的潜伏笔误 `_permission_waitters`（双 t）：request_permission
+        # 此前没有任何调用方，所以这行从未被执行过、测试也一直是绿的；本轮它成为
+        # 主路径，必须改对。
+        self._permission_waiters[rpc_id] = future
 
         self.session.append("permission/request", {
             "rpc_id": rpc_id,
@@ -805,17 +836,32 @@ class Agent:
             "sub_agent_id": sub_agent_id,
         })
 
-        try:
-            result = await asyncio.wait_for(future, timeout=timeout)
-            allowed = result["allowed"]
-            self.session.append("permission/resolved", {
-                "rpc_id": rpc_id,
-                "outcome": "allowed" if allowed else "denied",
-            })
-            return allowed
-        except asyncio.TimeoutError:
-            self._permission_waiters.pop(rpc_id, None)
-            return False
+        while True:
+            await asyncio.sleep(0.1)
+            if future.done():
+                self._permission_waiters.pop(rpc_id, None)
+                allowed = bool(future.result().get("allowed", False))
+                self.session.append("permission/resolved", {
+                    "rpc_id": rpc_id,
+                    "outcome": "allowed" if allowed else "denied",
+                })
+                return allowed
+            if self._abort_requested():
+                self._permission_waiters.pop(rpc_id, None)
+                self.session.append("permission/resolved", {
+                    "rpc_id": rpc_id,
+                    "outcome": "aborted",
+                })
+                return False
+            if self.auto_approve_enabled():
+                # 请求已落盘、开关中途被打开：必须补 resolved（outcome="auto"），
+                # 否则历史恢复会把这条早已放行的请求复活成幽灵审批对话框。
+                self._permission_waiters.pop(rpc_id, None)
+                self.session.append("permission/resolved", {
+                    "rpc_id": rpc_id,
+                    "outcome": "auto",
+                })
+                return True
 
     def respond_permission(self, rpc_id: str, allowed: bool) -> bool:
         future = self._permission_waiters.pop(rpc_id, None)

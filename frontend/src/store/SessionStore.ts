@@ -70,6 +70,8 @@ export interface SessionState {
   statsCachedTokens: number;
   breakdown: Record<string, any> | null;
   permissionMode: string;
+  /** 每会话自动审批开关（裁定 1：每会话一个，不做全局总闸）。切会话天然隔离。 */
+  autoApprove: boolean;
   _statsCache?: { inputTokens: number; outputTokens: number; cachedTokens: number };
 }
 
@@ -92,6 +94,7 @@ export function createEmptySessionState(sessionId: string | null = null): Sessio
     statsCachedTokens: 0,
     breakdown: null,
     permissionMode: 'default',
+    autoApprove: false,
   };
 }
 
@@ -389,6 +392,17 @@ class SessionStore {
 
   getPermissionMode(sessionId: string): string {
     return this.sessions.get(sessionId)?.permissionMode ?? 'default';
+  }
+
+  getAutoApprove(sessionId: string): boolean {
+    return this.sessions.get(sessionId)?.autoApprove ?? false;
+  }
+
+  setAutoApprove(sessionId: string, enabled: boolean): void {
+    const state = this.getOrCreate(sessionId);
+    if (state.autoApprove === enabled) return;
+    state.autoApprove = enabled;
+    this.notify();
   }
 
   getDetailedStats(sessionId: string): { inputTokens: number; outputTokens: number; cachedTokens: number } {

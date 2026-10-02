@@ -21,6 +21,7 @@ import { PageLayout } from '../../components/PageLayout';
 import { useChat } from './hooks/useChat';
 import { Composer } from '../../components/chat/Composer';
 import { PermissionSelect } from '../../components/chat/PermissionSelect';
+import { AutoApproveToggle } from '../../components/chat/AutoApproveToggle';
 import { fetchWorkspaceTree, WorkspaceNode } from '../../api/client';
 
 const formatTokens = (tokens: number): string => {
@@ -106,6 +107,7 @@ export default function ChatPage() {
     sessionStats,
     pendingPermission,
     pendingQuestion,
+    autoApprove,
     tasks,
     taskFocusId,
     chatSnapshot,
@@ -462,6 +464,9 @@ export default function ChatPage() {
                 mode={permissionMode}
                 onChange={handleSetPermissionMode}
               />
+              {/* 每会话自动审批开关：安全阀，打开时琥珀警示色实心（状态存 SessionStore，
+                  切会话时 useChat 从后端读回，绝不带过来上一个会话的状态） */}
+              <AutoApproveToggle sessionId={currentSessionId} enabled={autoApprove} />
             </div>
           </div>
         </div>

@@ -734,6 +734,36 @@ export async function deleteTask(sessionId: string, taskId: number): Promise<Tas
   return res.json();
 }
 
+// ── 每会话自动审批开关（裁定 1：每会话一个，不做全局总闸）───────────────────
+// 类型照 task 端点的写法从生成的 `paths[...]` 取：后端改路由/模型 → 再生成契约 →
+// 这里先编译不过，而不是先在浏览器里坏掉。
+
+type AutoApproveGetOp = paths['/api/sessions/{session_id}/auto-approve']['get'];
+type AutoApprovePutOp = paths['/api/sessions/{session_id}/auto-approve']['put'];
+
+/** GET 响应体 `{ enabled }`。非活跃会话也返回 200 + false（后端刻意不 404）。 */
+export type AutoApproveState = AutoApproveGetOp['responses'][200]['content']['application/json'];
+/** PUT 响应体 `{ success, enabled }`。 */
+export type AutoApproveResult = AutoApprovePutOp['responses'][200]['content']['application/json'];
+
+/** 读本会话的自动审批开关。 */
+export async function getAutoApprove(sessionId: string): Promise<AutoApproveState> {
+  const res = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/auto-approve`);
+  if (!res.ok) throw await _taskError(res, 'Failed to get auto-approve');
+  return res.json();
+}
+
+/** 翻转本会话的自动审批开关。对**正在等待**的审批热生效（后端 0.1s 轮询现读）。 */
+export async function setAutoApprove(sessionId: string, enabled: boolean): Promise<AutoApproveResult> {
+  const res = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/auto-approve`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) throw await _taskError(res, 'Failed to set auto-approve');
+  return res.json();
+}
+
 // ── 统一回退（对话 + 文件原子回退，三阶段 stage/commit/clear） ──
 
 export interface RewindFileChange {
