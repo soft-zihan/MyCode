@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
@@ -56,6 +57,19 @@ def persist_large_result(tool_name: str, result: str) -> str:
     )
 
 
+# 结构化载荷里「明确为空」的 error 类字段。摘掉它再扫子串，因为键名本身不是失败信号：
+# task_list 的每个任务都带 `error` 字段（失败原因，成功时为空串），于是 `"error": ""`
+# 里的子串会让**每次成功的清单更新**都被判成失败——outcome 落成 error、
+# `_tool_error_streak` 一路推高，而它是写进提示词的（prompt_runtime 的
+# "Recent tool error streak"），模型会在一场完全正常的执行里被告知「你最近连续失败」。
+# 只摘**空值**、不摘键名本身：`{"error": "boom"}` 与 `"status": "error"` 仍然会被抓到，
+# 所以这条不引入新的假阴性。
+_EMPTY_ERROR_FIELD_RE = re.compile(
+    r"""["'](error|denied|timeout|timed_out)["']\s*:\s*("""
+    r"""""|''|null|None|false|False|\[\]|\{\})""",
+)
+
+
 def detect_failure(tool_name: str, raw: str, result: str) -> bool:
     """检测结果是否看起来像失败。
     
@@ -67,7 +81,7 @@ def detect_failure(tool_name: str, raw: str, result: str) -> bool:
     Returns:
         bool: 是否看起来像失败
     """
-    text = f"{raw}\n{result}".lower()
+    text = _EMPTY_ERROR_FIELD_RE.sub("", f"{raw}\n{result}").lower()
     if any(marker in text for marker in ("error", "denied", "timed out", "timeout")):
         return True
     if tool_name == "compact_context" and "no context compaction" in text:
