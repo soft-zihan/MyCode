@@ -7,6 +7,15 @@ interface PermissionSelectProps {
   mode: PermissionMode;
   onChange: (mode: PermissionMode) => void;
   disabled?: boolean;
+  /**
+   * plan → 其它模式的切换被延迟到 step 边界（spec §D6）：显示一行提示，
+   * 直到 permission/mode_changed 到达（由 useChat 清除这个标志）。
+   *
+   * ⚠️ 刻意**只**加提示、不改 `mode` 的显示：选择器必须显示真实模式。乐观更新会
+   * 让用户以为只读约束已经解除，而实际上当前这个工具批次仍在 plan 模式下被权限门
+   * 逐条拒绝——那是「UI 说生效了、实际没生效」这个最贵的缺陷形状。
+   */
+  deferred?: boolean;
 }
 
 const MODES: { value: PermissionMode; label: string; description: string; icon: React.FC<{className?: string}>; color: string }[] = [
@@ -44,6 +53,7 @@ export const PermissionSelect: React.FC<PermissionSelectProps> = ({
   mode,
   onChange,
   disabled = false,
+  deferred = false,
 }) => {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -97,6 +107,14 @@ export const PermissionSelect: React.FC<PermissionSelectProps> = ({
         {current.label}
         <ChevronDown className={`w-3 h-3 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
+
+      {/* 延迟生效提示（spec §D6）。触发按钮仍显示**真实**的当前模式，
+          permission/mode_changed 到达后这行字消失、按钮上的标签才跟着变。 */}
+      {deferred && (
+        <span className="permission-select-deferred text-[10px] text-gray-500 whitespace-nowrap">
+          将在当前工具批次结束后生效
+        </span>
+      )}
 
       {open && (
         <div className="permission-select-dropdown absolute bottom-full left-0 mb-1 w-64 bg-white border border-gray-200 rounded-lg shadow-lg z-50 overflow-hidden">

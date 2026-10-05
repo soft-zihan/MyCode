@@ -115,6 +115,15 @@ export function useChat() {
   const pendingSessionNameRef = useRef<string | null>(null);
   
   const [permissionMode, setPermissionMode] = useState<'default' | 'acceptEdits' | 'plan' | 'bypassPermissions'>('bypassPermissions');
+  // plan → 其它模式在回合中被延迟到 step 边界生效（spec §D6）。这个标志只驱动选择器
+  // 旁边那一行提示，**不**驱动选择器的显示值：显示值必须反映真实模式，由
+  // permission/mode_changed 事件更新。三处清除：模式真的变了、切会话、PUT 返回
+  // deferred=false（那次切换是立即生效的）。
+  const [deferredModeSwitch, setDeferredModeSwitch] = useState(false);
+  // /api/events/respond 报告「没落地」时的原因，与它所属的那条审批绑在一起（rpc_id）：
+  // 审批换了一条、或对话框关掉又打开，旧错误就自动不再显示，不需要额外的清除时机
+  // ——挂着的陈旧错误会冒充新审批的失败原因（spec §十.6 的可观测半边）。
+  const [respondError, setRespondError] = useState<{ rpcId: string; message: string } | null>(null);
   
   const [sessionRefreshTrigger, setSessionRefreshTrigger] = useState(0);
   const [pendingSteerMessages, setPendingSteerMessages] = useState<Array<{content: string, contextFiles: string[], model?: string}>>([]);
@@ -304,6 +313,10 @@ export function useChat() {
           sessionStore.setPermissionMode(eventSessionId, mode);
           if (eventSessionId === currentSessionIdRef.current) {
             setPermissionMode(mode);
+            // 延迟的切换落地了（或用户又切了一次并立即生效）：提示语的使命结束。
+            // 刻意等这个事件而不是自己定时清——事件到达才是「模式真的变了」的唯一
+            // 权威信号（spec §D6：deferred 期间广播它就是撒谎，所以它一定在落地时才发）。
+            setDeferredModeSwitch(false);
           }
         }
       }
@@ -402,6 +415,9 @@ export function useChat() {
     resetNodes(sessionId);
     setIsLoadingSession(true);
     pendingSessionNameRef.current = null;
+    // 提示语是**本会话**的状态，切会话必须清（与 pendingPermission 同一条纪律：
+    // 不清就会把 A 会话的「将在当前工具批次结束后生效」带到 B 会话上）。
+    setDeferredModeSwitch(false);
     
     try {
       const [summaryResult, eventsResult, fileChangesResult, autoApproveResult] = await Promise.allSettled([
@@ -761,13 +777,16 @@ export function useChat() {
   }, [currentSessionId, permissionMode]);
 
   const handleSetPermissionMode = useCallback(async (mode: 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions') => {
-    setPermissionMode(mode);
-    if (currentSessionId) {
-      try {
-        await updatePermissionMode(currentSessionId, mode);
-      } catch (err) {
-        console.error('Failed to update permission mode:', err);
-      }
+    if (!currentSessionId) return;
+    try {
+      const result = await updatePermissionMode(currentSessionId, mode);
+      // **不乐观更新选择器**（此前这里先 setPermissionMode(mode) 再发请求）：
+      // deferred=true 时模式根本还没切，改显示就是让用户以为已经切了；
+      // deferred=false 时 permission/mode_changed 已经在路上，等它到了显示自然变。
+      // 显示值只有一个真相源：后端广播的真实模式。
+      setDeferredModeSwitch(Boolean(result?.deferred));
+    } catch (err) {
+      console.error('Failed to update permission mode:', err);
     }
   }, [currentSessionId]);
 
@@ -859,33 +878,55 @@ export function useChat() {
 
   const handlePermissionApprove = useCallback(async (choice?: string) => {
     if (!pendingPermission || !currentSessionId) return;
+    setRespondError(null);
     try {
-      await respondToPermission(currentSessionId, pendingPermission.request_id, true, undefined, choice);
+      const result = await respondToPermission(currentSessionId, pendingPermission.request_id, true, undefined, choice);
+      if (result?.success === false) {
+        // 后端明说「没落地」（典型：后端重启后 plan.md 重新校验不合格，spec §十.6）。
+        // **不关对话框**、把原因显示出来：关掉就是告诉用户批准成功了，而实际什么都没
+        // 发生、也没有任何痕迹——本项目最恨的那个形状。
+        setRespondError({ rpcId: pendingPermission.rpc_id, message: result.message || '审批未能落地' });
+        return;
+      }
       sessionStore.setPendingPermission(currentSessionId, undefined);
     } catch (err) {
       console.error('Failed to approve permission:', err);
+      setRespondError({
+        rpcId: pendingPermission.rpc_id,
+        message: err instanceof Error ? err.message : '审批请求失败',
+      });
     }
   }, [pendingPermission, currentSessionId]);
 
   const handlePermissionDeny = useCallback(async (feedback?: string) => {
     if (!pendingPermission || !currentSessionId) return;
+    setRespondError(null);
     try {
-      await respondToPermission(currentSessionId, pendingPermission.request_id, false, feedback);
+      const result = await respondToPermission(currentSessionId, pendingPermission.request_id, false, feedback);
+      if (result?.success === false) {
+        setRespondError({ rpcId: pendingPermission.rpc_id, message: result.message || '拒绝未能落地' });
+        return;
+      }
     } catch (err) {
       console.error('Failed to deny permission:', err);
-    } finally {
-      // Always clear pending permission and mark tool call as denied
-      sessionStore.setPendingPermission(currentSessionId, undefined);
-      sessionStore.updateSnapshot(currentSessionId, prev => {
-        const newNodes = new Map(prev.nodes);
-        for (const [key, node] of newNodes) {
-          if (node.kind === 'tool-call' && node.status === 'pending') {
-            newNodes.set(key, { ...node, status: 'denied' });
-          }
-        }
-        return { order: prev.order, nodes: newNodes };
+      setRespondError({
+        rpcId: pendingPermission.rpc_id,
+        message: err instanceof Error ? err.message : '审批请求失败',
       });
+      return;
     }
+    // 只有**真的落地了**才清对话框并把挂着的工具调用标成 denied。此前这两件事在
+    // finally 里无条件做，后端报错时界面照样「假装拒绝成功」。
+    sessionStore.setPendingPermission(currentSessionId, undefined);
+    sessionStore.updateSnapshot(currentSessionId, prev => {
+      const newNodes = new Map(prev.nodes);
+      for (const [key, node] of newNodes) {
+        if (node.kind === 'tool-call' && node.status === 'pending') {
+          newNodes.set(key, { ...node, status: 'denied' });
+        }
+      }
+      return { order: prev.order, nodes: newNodes };
+    });
   }, [pendingPermission, currentSessionId]);
 
   const fetchTasks = useCallback(async (sessionId: string): Promise<boolean> => {
@@ -1010,10 +1051,15 @@ export function useChat() {
     fileSnapshots,
     fileTreeRefreshTrigger,
     permissionMode,
+    deferredModeSwitch,
     contextUsed,
     contextTotal,
     sessionStats,
     pendingPermission,
+    // 只把**属于当前这条审批**的失败原因交出去（见 respondError 的注释）
+    approvalError: respondError && pendingPermission && respondError.rpcId === pendingPermission.rpc_id
+      ? respondError.message
+      : undefined,
     pendingQuestion,
     autoApprove,
     tasks,

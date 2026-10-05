@@ -285,6 +285,11 @@ class TurnRunner:
             await a._current_task
         except asyncio.CancelledError:
             a._aborted = True
+            # spec §D6：异常路径（abort）**清掉**待生效的模式切换、不落地。落地它会让
+            # 「用户看到的状态」与「实际状态」在中断现场对不上。与 agent_loop.run() 的
+            # abort 分支同一条纪律（那条覆盖「两步之间发现被中断」，这条覆盖「模型调用
+            # 被 cancel」——真的 abort 走的是这一条）。
+            a._pending_permission_mode = None
             # U3b：唤醒轮无用户消息可补写（synthetic 通知已在事件流中）
             if user_message is not None and not a._user_message_written_this_turn:
                 a.session.append("user_message", {"content": original_user_message})
@@ -300,6 +305,9 @@ class TurnRunner:
         except Exception as e:
             import traceback
             print_error(f"[ERROR] {type(e).__name__}: {e}\n{traceback.format_exc()}")
+            # spec §D6：error 路径同样**清掉**待生效的模式切换、不落地（理由同上面
+            # CancelledError 分支）。
+            a._pending_permission_mode = None
             turn_span.record_error(e)
             turn_span.add_metadata(event_range_end_seq=a.session.seq)
             a.session.append("error", {"message": str(e), "error_type": type(e).__name__, "sub_agent_id": a._current_sub_agent_id})

@@ -521,7 +521,19 @@ async def api_update_permission_mode(session_id: str, data: PermissionModeReques
     if agent is None:
         raise HTTPException(status_code=404, detail="Session not found")
     agent.set_permission_mode(data.mode)
-    return {"success": True, "permission_mode": data.mode}
+    # deferred = 「请求了 data.mode，但此刻还不在 data.mode」——只有 plan → 其它 且
+    # 回合正在跑时为真（agent.set_permission_mode 记下待生效值，agent_loop 在 step
+    # 边界落地）。这是 spec §D6 刻意选的可观测信号：那一刻模式还没变，广播
+    # permission/mode_changed 就是撒谎，所以信号只能放在这个响应体里，前端据此显示
+    # 「将在当前工具批次结束后生效」并且**不**乐观更新选择器。
+    # permission_mode 同理改成读 agent 的真实值：延迟时回 data.mode 等于声称一个
+    # 还没生效的模式。读属性而不是让 set_permission_mode 多返回一个布尔——它的另外
+    # 两个调用方（service.py、CLI /permission）一个都不关心这件事。
+    return {
+        "success": True,
+        "permission_mode": agent.permission_mode,
+        "deferred": agent.permission_mode != data.mode,
+    }
 
 
 @router.get("/api/sessions/{session_id}/auto-approve", response_model=AutoApproveStateOut)

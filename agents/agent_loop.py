@@ -151,8 +151,21 @@ class AgentLoop:
         while True:
             if self._agent.abort_requested():
                 self._agent.mark_aborted()
+                # spec §D6：异常路径**清掉**待生效的模式切换、不落地。在错误现场落地它，
+                # 会让「用户看到的状态」与「实际状态」对不上（与 turn_runner 的
+                # cancelled/error 两个分支同一条纪律，三处都直接写属性——隔壁
+                # _pending_plan_approval 也是这么清的）。
+                self._agent._pending_permission_mode = None
                 await self._drop_queued("aborted")
                 break
+
+            # step 边界：落地延迟的 plan → 其它模式切换（spec §D6）。
+            # 迭代 ≥2 时这里正是「上一个工具批次跑完、下一次模型调用之前」那道缝
+            # （与下面那个 _drain_steering() 同一条缝，steering 的唯一消费点）；
+            # 迭代 1 时它是「回合刚开始、第一次模型调用之前」——用户在上一回合收尾
+            # 期间切的那个模式必须赶在这次调用之前落地，否则这次调用看到的就是旧模式。
+            # 两种情况都满足设计初衷：没有任何一次模型调用会看到半新半旧的状态。
+            self._agent.apply_pending_permission_mode()
 
             await self._consume_wiki_prefetch()
 

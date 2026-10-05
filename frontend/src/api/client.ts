@@ -508,7 +508,10 @@ export async function fetchSessionSummary(sessionId: string): Promise<SessionSum
   return res.json();
 }
 
-export async function updatePermissionMode(sessionId: string, mode: string): Promise<{ success: boolean; permission_mode: string }> {
+// deferred=true：plan → 其它模式的切换被延迟到 step 边界（spec §D6），此刻模式**还没变**。
+// 调用方据此显示「将在当前工具批次结束后生效」，并且不要乐观更新选择器——真实模式
+// 由 permission/mode_changed 事件送达。字段是可选的：旧后端不返回它。
+export async function updatePermissionMode(sessionId: string, mode: string): Promise<{ success: boolean; permission_mode: string; deferred?: boolean }> {
   const res = await fetch(`${API_BASE}/sessions/${sessionId}/permission-mode`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -579,13 +582,18 @@ export interface PermissionRequest {
   sub_agent_id?: string;
 }
 
-export async function respondToPermission(sessionId: string, requestId: string, allowed: boolean, feedback?: string, choice?: string): Promise<void> {
+// 返回后端的 success 信封。200 + {"success": false, "message"} 表示「没落地」
+// （与本文件 task DELETE 同一约定）——此前这里返回 void、调用方一律当成功，于是
+// 计划审批在后端重启后点批准会「对话框关掉、什么都没发生、也没有任何提示」
+// （spec §十.6 的缺陷形状）。调用方必须在 success === false 时把 message 显示出来。
+export async function respondToPermission(sessionId: string, requestId: string, allowed: boolean, feedback?: string, choice?: string): Promise<{ success: boolean; message?: string }> {
   const res = await fetch(`${API_BASE}/events/respond`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ rpc_id: requestId, allowed, session_id: sessionId, feedback: feedback || '', choice: choice || '' }),
   });
   if (!res.ok) throw new Error('Failed to respond to permission');
+  return res.json();
 }
 
 export async function getPlanDraftArtifacts(sessionId: string): Promise<{ success: boolean; message?: string; data?: { draft_dir: string; artifacts: Record<string, string> } }> {

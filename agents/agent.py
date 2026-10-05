@@ -238,6 +238,14 @@ class Agent:
         # 刻意**不**在 _reset_turn_state 里清——非阻塞审批（spec §D3）的全部含义就是
         # 「回合已经结束、审批还没来」，它必须跨回合存活到 /api/events/respond 命中它。
         self._pending_plan_approval: dict | None = None
+        # _pending_permission_mode：plan → 其它模式的**待生效**目标（spec §D6）。
+        # 立即生效会让一个正在跑的规划回合在半途丢掉只读约束，提示词与工具指引也在
+        # 回合中间变脸；所以只记值，由 agent_loop.run() 的循环顶部（= step 边界，
+        # 两次模型调用之间）调 apply_pending_permission_mode() 落地。
+        # 不变量：非 None ⟹ permission_mode == "plan"，由 apply 与
+        # _enter_plan_mode_internal 各维护一半。同样刻意**不**在 _reset_turn_state
+        # 里清：回合结束时它可能正等着下一个边界落地。
+        self._pending_permission_mode: str | None = None
 
     def _init_prompt(self, opts: "AgentOptions") -> None:
         """段5：system prompt（含 plan 模式）+ OpenAI client（workspace 上下文内构建）。
@@ -347,6 +355,13 @@ class Agent:
     def _enter_plan_mode_internal(self) -> None:
         from .observability.trace import trace_event
 
+        # 进入 plan 一律作废待生效的「离开 plan」动作（spec §D6：以最后一次为准）。
+        # 放在早退之前，因为这一行要覆盖**所有**入口（enter_plan_mode 工具、
+        # CLI /permission、PUT）。少了它的后果：finalize_approved_plan 直接写
+        # permission_mode、绕过 set_permission_mode，于是可能残留一个待生效值，
+        # 而用户随后又进入 plan——下一个 step 边界就会把他刚进入的 plan 模式踢出去。
+        self._pending_permission_mode = None
+
         if self.permission_mode == "plan":
             return
 
@@ -396,6 +411,9 @@ class Agent:
 
     def set_permission_mode(self, mode: str) -> None:
         if mode == self.permission_mode:
+            # 目标就是当前模式。若还挂着一个待生效的「离开 plan」，它在这里作废
+            # （spec §D6：待生效期间用户又切回来 → 以最后一次为准，不排队）。
+            self._pending_permission_mode = None
             return
         if mode == "plan":
             # 进入 plan 走内部入口，它只做四件事：记 pre_plan_mode → 设 permission_mode
@@ -411,9 +429,50 @@ class Agent:
             self._enter_plan_mode_internal()
             return
         if self.permission_mode == "plan":
+            if self.is_processing:
+                # plan → 其它、且**回合正在跑**：延迟到 step 边界生效（spec §D6）。
+                # 立即生效会让这个规划回合半途丢掉只读约束（权限门读的就是这个属性），
+                # 提示词与工具指引也在回合中间变脸——不该有任何一次模型调用看到
+                # 半新半旧的状态。
+                # 只记值、**不广播**：此刻模式还没变，广播 permission/mode_changed
+                # 就是撒谎。可观测信号是 PUT 响应体里的 deferred:true，前端据此显示
+                # 「将在当前工具批次结束后生效」，并且**不**乐观更新选择器。
+                # 待生效期间再切一次 = 覆盖（以最后一次为准），不排队。
+                #
+                # 回合没在跑时**不**延迟：那时没有任何东西需要保护，而延迟会让用户在
+                # 一个空转的会话上永远等不到生效（选择器停在 plan、提示语指向一个
+                # 根本不存在的工具批次）——正是要消灭的那个「UI 说会生效、实际不会」。
+                self._pending_permission_mode = mode
+                return
             # 离开 plan：清 pre_plan_mode 与草稿目录（不发中间态事件），再落到目标模式。
             # 同样没有「恢复 prompt」这回事——system[0] 从头到尾没被碰过。
             self._exit_plan_mode_internal(emit=False)
+        self.permission_mode = mode
+        self._emit_permission_mode_event()
+
+    def apply_pending_permission_mode(self) -> None:
+        """step 边界落地待生效的模式切换（spec §D6）。唯一调用点：agent_loop.run() 循环顶部。
+
+        为什么是循环顶部：迭代 ≥2 时它正是「上一个工具批次跑完、下一次模型调用之前」
+        那道缝（与 steering 的唯一注入点同一条缝，spec §D6 选 step 边界的理由①）；
+        迭代 1 时它是「回合刚开始、第一次模型调用之前」——用户在上一回合收尾期间切的
+        模式必须赶在这次调用之前落地，否则那次调用看到的就是旧模式。
+
+        「已经不在 plan 模式就只清值、不落地」不是防御性代码，是必要的：
+        finalize_approved_plan / toggle_plan_mode / CLI 的 /permission 都**直接**写
+        permission_mode、绕过 set_permission_mode，于是待生效值可能在「已经不是 plan」
+        的状态下活到下一个边界；那时落地它会把批准刚切好的模式又盖掉一次。
+        """
+        mode = self._pending_permission_mode
+        if mode is None:
+            return
+        self._pending_permission_mode = None
+        if self.permission_mode != "plan":
+            return
+        # 与 set_permission_mode 的立即分支逐行同构。⚠️ _exit_plan_mode_internal 不碰
+        # _pending_plan_approval：审批与模式是两件事，延迟切换不能把一条仍然活着的
+        # 审批弄丢（tests/unit/test_deferred_mode_switch.py 钉住这条）。
+        self._exit_plan_mode_internal(emit=False)
         self.permission_mode = mode
         self._emit_permission_mode_event()
 

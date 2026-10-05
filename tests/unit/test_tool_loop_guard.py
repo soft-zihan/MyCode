@@ -362,6 +362,9 @@ def _make_loop_stub_agent():
         tool_budget_exceeded=lambda: False,
         clear_context_flag=lambda: None,
         refresh_runtime_system_prompt=lambda force=False: None,
+        # run() 循环顶部（step 边界）会调它落地延迟的模式切换；本文件钉的是循环守卫，
+        # 那条语义由 tests/unit/test_deferred_mode_switch.py 用真 Agent 钉住。
+        apply_pending_permission_mode=lambda: None,
     )
 
     def append_user_message(content, **kwargs):

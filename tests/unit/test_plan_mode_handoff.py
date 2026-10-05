@@ -172,6 +172,14 @@ class HandoffFakeAgent:
             "mode": self.permission_mode,
         })
 
+    def apply_pending_permission_mode(self) -> None:
+        """agent_loop.run() 循环顶部（step 边界）会调它，替身必须提供。
+
+        刻意是空实现：本文件钉的是送审与非阻塞审批，延迟模式切换由
+        tests/unit/test_deferred_mode_switch.py 用**真 Agent** 钉住。
+        """
+        return None
+
     def of_type(self, type_: str) -> list[dict]:
         return [e for e in self.session.events if e.get("type") == type_]
 
