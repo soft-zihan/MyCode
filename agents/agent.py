@@ -398,11 +398,21 @@ class Agent:
         if mode == self.permission_mode:
             return
         if mode == "plan":
-            # 进入 plan 必须走内部入口：重建 system prompt、创建草稿目录
+            # 进入 plan 走内部入口，它只做四件事：记 pre_plan_mode → 设 permission_mode
+            # → 建草稿目录 → trace + 发 permission/mode_changed。
+            # ⚠️ 这里**不重建 system prompt**（旧注释写着「重建 system prompt」，是句
+            # 撒谎的话，spec §十二.3 点名要修）：plan 提示词住在**尾部 ephemeral 通道**
+            # ——core/prompt_runtime.build_tail_system_messages 每次请求现读重拼、从不
+            # 落盘、也不进 system[0]。所以模式切换对 system[0] 是零改动，进出 plan 模式
+            # 对 prefix cache 完全中性（工具数组那一半的中性由 spec §D5 裁定：不按模式
+            # 过滤工具）。钉住这两条性质的测试在 tests/unit/test_prompt_freeze.py
+            # 的 TestCacheNeutrality——它们存在的唯一目的是让「好心把 plan 提示词搬进
+            # system prompt」或「好心按模式过滤工具」这两种改动当场变红。
             self._enter_plan_mode_internal()
             return
         if self.permission_mode == "plan":
-            # 离开 plan：恢复 prompt、清理草稿目录（不发中间态事件），再落到目标模式
+            # 离开 plan：清 pre_plan_mode 与草稿目录（不发中间态事件），再落到目标模式。
+            # 同样没有「恢复 prompt」这回事——system[0] 从头到尾没被碰过。
             self._exit_plan_mode_internal(emit=False)
         self.permission_mode = mode
         self._emit_permission_mode_event()
