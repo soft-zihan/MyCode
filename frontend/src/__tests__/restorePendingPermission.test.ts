@@ -56,6 +56,31 @@ describe('derivePendingPermission', () => {
     expect(derivePendingPermission([req('r1')], false)).toBeUndefined();
   });
 
+  it('plan_approval 例外：running=false 也恢复（非阻塞审批的正常状态）', () => {
+    /**
+     * 靶心。plan 审批是**非阻塞**的（plan 模式简化 D3）：回合正常结束、running 落地
+     * 为 false，审批作为纯会话状态挂着等人点。拿 running 当门槛会让刷新页面 / 换标签页 /
+     * 换设备打开之后永远点不到批准——正是本模块当初要修的缺陷被新设计重新引入，
+     * 真机复验时抓到（会话 95d0af7d：有未决议的 plan_approval、running=false、
+     * 抽屉不出现）。把 `!== PLAN_APPROVAL_TOOL_NAME` 那个例外去掉，这条就红。
+     */
+    const p = derivePendingPermission(
+      [req('p1', { tool_name: 'plan_approval', command: '# 计划全文' })],
+      false,
+    );
+    expect(p).toBeDefined();
+    expect(p?.rpc_id).toBe('p1');
+    expect(p?.tool_name).toBe('plan_approval');
+  });
+
+  it('plan_approval 已决议 → 即使不看 running 也不恢复', () => {
+    /** 例外只放宽 running 这一个前提，rpc_id 配对那条照旧：
+     *  否则批准过的审批会在每次刷新后复活成幽灵抽屉。 */
+    const evs = [req('p1', { tool_name: 'plan_approval' }), resolved('p1', 'allowed')];
+    expect(derivePendingPermission(evs, false)).toBeUndefined();
+    expect(derivePendingPermission(evs, true)).toBeUndefined();
+  });
+
   it('没有 request → undefined', () => {
     expect(derivePendingPermission([{ type: 'text' }], true)).toBeUndefined();
     expect(derivePendingPermission([], true)).toBeUndefined();

@@ -16,6 +16,7 @@ import { ApprovalBar } from '../../components/agent/ApprovalBar';
 import { PlanApprovalDialog } from '../../components/agent/PlanApprovalDialog';
 import { WikiPlanPanel } from '../../components/agent/WikiPlanPanel';
 import { TaskListPanel } from '../../components/chat/TaskListPanel';
+import { PLAN_APPROVAL_TOOL_NAME } from '../../store/SessionStore';
 import { BackgroundTasksPanel } from '../../components/chat/BackgroundTasksPanel';
 import { PageLayout } from '../../components/PageLayout';
 import { useChat } from './hooks/useChat';
@@ -307,7 +308,7 @@ export default function ChatPage() {
           )}
 
           {/* Permission Request Dialog */}
-          {pendingPermission && pendingPermission.tool_name === 'plan_approval' && currentSessionId && (
+          {pendingPermission && pendingPermission.tool_name === PLAN_APPROVAL_TOOL_NAME && currentSessionId && (
             <PlanApprovalDialog
               request={pendingPermission}
               sessionId={currentSessionId}
@@ -320,7 +321,7 @@ export default function ChatPage() {
           )}
 
           {/* Other Permission Request */}
-          {pendingPermission && pendingPermission.tool_name !== 'plan_approval' && (
+          {pendingPermission && pendingPermission.tool_name !== PLAN_APPROVAL_TOOL_NAME && (
             <ApprovalBar
               toolName={pendingPermission.tool_name}
               command={pendingPermission.command}

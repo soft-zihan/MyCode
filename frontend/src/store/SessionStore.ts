@@ -12,6 +12,17 @@ export interface PermissionRequest {
   sub_agent_id?: string;
 }
 
+/**
+ * plan 审批在 `permission/request.tool_name` 上用的哨兵值。它**不是真工具**
+ * （`exit_plan_mode` 已随 plan 模式简化删除），只是审批种类的标记。
+ *
+ * 单一来源：ChatPage 靠它决定渲染审批抽屉还是普通确认卡，
+ * restorePendingPermission 靠它决定「待审批是否受 running 门槛约束」
+ * （plan 审批非阻塞、回合已结束，running=false 是正常状态）。
+ * 后端对应 `agents/agent_loop.py` 落 permission/request 时写的同一个字面量。
+ */
+export const PLAN_APPROVAL_TOOL_NAME = 'plan_approval';
+
 export interface QuestionRequest {
   request_id: string;
   question: string;
