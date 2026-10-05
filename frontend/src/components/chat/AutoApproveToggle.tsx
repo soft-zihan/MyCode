@@ -51,8 +51,9 @@ export const AutoApproveToggle: React.FC<AutoApproveToggleProps> = ({
       data-auto-approve={enabled ? 'on' : 'off'}
       title={
         '本会话内自动批准 plan 审批与危险操作确认（每会话一个开关，默认关闭）。\n' +
-        '打开后：正在等待的确认立即放行（热生效）；plan 审批自动走「批准并自动执行」路由，' +
-        '不是「逐步确认」。\n' +
+        '打开后立即生效（热生效）：正在等待的确认会被立刻放行——如果屏幕上正摆着' +
+        '待审批的对话框，当前这个审批也会立即被自动批准。\n' +
+        'plan 审批自动走「批准并自动执行」路由，不是「逐步确认」。\n' +
         '人走开时打开，回来后记得关掉。'
       }
       className={`auto-approve-toggle flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded border transition-colors ${

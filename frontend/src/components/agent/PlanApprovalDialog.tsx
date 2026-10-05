@@ -1,8 +1,10 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { MessageSquare, Edit3, Zap, StepForward, Eraser, X, Check, Loader2, FileText } from 'lucide-react';
+import { sessionStore, useSessionStore } from '../../store/SessionStore';
 import type { PermissionRequest } from '../../store/SessionStore';
 import { getPlanDraftArtifacts, updatePlanDraftArtifact } from '../../api/client';
 import { Markdown } from '../chat/markdown';
+import { AutoApproveToggle } from '../chat/AutoApproveToggle';
 
 interface PlanApprovalDialogProps {
   request: PermissionRequest;
@@ -38,6 +40,14 @@ export function PlanApprovalDialog({ request, sessionId, onApprove, onDeny }: Pl
   const [editedContent, setEditedContent] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+
+  // 自动审批开关的对话框内副本（缺陷 2）：遮罩（fixed inset-0 z-40，onClick=拒绝）
+  // 会拦截指针事件，composer 里的开关在对话框打开期间根本点不到——而这个开关的
+  // 全部使用场景恰恰是「人要走开了，让后面的确认自动过」，产生这个念头的时刻屏幕上
+  // 就摆着这个对话框。刻意复用同一个 AutoApproveToggle 组件、订阅同一个 SessionStore
+  // 每会话槽位（两处 aria-pressed 天然同步、PUT 走同一条路），而不是抬高 composer
+  // 开关的 z-index：那会破坏模态语义，且把一个安全阀叠在「点击即拒绝」的遮罩上就是事故。
+  const autoApprove = useSessionStore(() => sessionStore.getAutoApprove(sessionId));
 
   useEffect(() => {
     let cancelled = false;
@@ -238,6 +248,9 @@ export function PlanApprovalDialog({ request, sessionId, onApprove, onDeny }: Pl
                 <MessageSquare className="w-3.5 h-3.5" />
                 修改意见
               </button>
+              {/* 打开后当前这个审批会在 0.1s 内被自动放行（组件 title 已写明），
+                  状态与 composer 里那个开关是同一份（SessionStore 每会话槽位）。 */}
+              <AutoApproveToggle sessionId={sessionId} enabled={autoApprove} />
               <button onClick={() => onDeny()} className="btn-ghost text-gray-400" title="拒绝，继续规划">
                 <X className="w-4 h-4" />
               </button>

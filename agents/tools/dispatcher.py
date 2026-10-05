@@ -36,6 +36,34 @@ from agents.tools.task_tools import handle_task_list
 from agents.tools.wiki_tools import remember
 
 
+# 「在自己执行期间等人应答」的工具：外层不设超时（get_tool_timeout 返回 None，
+# execute_tool_call 直接 await、不套 asyncio.wait_for）。
+#
+# 为什么这些可以无界、别的工具不行：
+# - exit_plan_mode：等待发生在 permission_gate._confirm_via_session 的 0.1s 轮询里，
+#   出口有三条且都不依赖外层超时——①人工应答 ②abort（_abort_fn 绑
+#   agent._abort_requested，每 0.1s 查一次）③自动审批开关热生效（零参 callable
+#   每轮现读）。门内的 300s 超时上一轮已删（超时返回 False 会被 plan 审批层翻译成
+#   「用户拒绝了计划」）；若外层再套 600s，等满后整个工具调用被掐死、待审批状态
+#   被销毁，模型收到一条 timeout 错误——同一个缺陷换个地方复发。
+# - ask_user：同样在执行期间等人回答（question/request → 0.1s 轮询），但它自带
+#   300s 内部上限与 abort 出口（question_tools.handle_ask_user），到点返回可恢复的
+#   错误文案而不是永久挂住。此前外层默认 60s 会先于内部上限把它掐死，模型拿到的是
+#   硬 timeout 错误、而不是设计好的「Proceed with your best judgment」。
+# 其余工具（run_shell / agent / skill / 只读 / 默认 60s）都不等人，超时表原样保留。
+#
+# 无人值守场景复核（本轮判断依据）：
+# - eval 三个入口全部 permission_mode="bypassPermissions"（runner_base.py:178、
+#   executors.py:83、smoke/runner.py:203），eval/ 里 grep 不到任何 plan 模式任务；
+#   非 plan 模式下 exit_plan_mode 立即返回 "Not in plan mode."，根本不会进入等待。
+#   即便模型自发 enter_plan_mode，eval 的 run_agent_task 还有自己的任务级
+#   wait_for(timeout_s)（runner_base.py:196-197）兜底。
+# - CLI 路径走 gate 的 _confirm_fn 或 input() 回退、plan 审批走 plan_approval_fn
+#   （agents/main.py:255-286），三者都即时返回，EOFError 也有兜底，不会挂。
+# 结论：无界安全，不引入环境变量上限。
+HUMAN_WAIT_TOOLS = frozenset({"exit_plan_mode", "ask_user"})
+
+
 class ToolDispatcher:
     """工具调度管理器。"""
 
@@ -46,16 +74,16 @@ class ToolDispatcher:
         """
         self.agent = agent_ref
 
-    def get_tool_timeout(self, name: str) -> int:
-        """获取工具超时时间（秒）。"""
+    def get_tool_timeout(self, name: str) -> int | None:
+        """获取工具超时时间（秒）；None = 不设外层超时（等人应答，见 HUMAN_WAIT_TOOLS）。"""
+        if name in HUMAN_WAIT_TOOLS:
+            return None
         if name == "run_shell":
             return 300
         if name == "agent":
             return int(os.environ.get("MYCODE_AGENT_TOOL_TIMEOUT", "900"))
         if name == "skill":
             return int(os.environ.get("MYCODE_SKILL_TOOL_TIMEOUT", "300"))
-        if name == "exit_plan_mode":
-            return 600
         if name in ("read_file", "outline_file", "grep_search", "list_files", "web_search"):
             return 30
         return 60
@@ -82,7 +110,8 @@ class ToolDispatcher:
             trace_metadata["sub_agent_id"] = self.agent.current_sub_agent_id
 
         timeout = self.get_tool_timeout(name)
-        print_info(f"[DEBUG] execute_tool_call: {name}, timeout={timeout}s")
+        print_info(f"[DEBUG] execute_tool_call: {name}, "
+                   f"timeout={'unbounded (waits for human)' if timeout is None else f'{timeout}s'}")
 
         span_cm = (
             nullcontext(None)
@@ -91,18 +120,28 @@ class ToolDispatcher:
         )
         with span_cm as span:
             try:
-                print_info(f"[DEBUG] execute_tool_call: calling asyncio.wait_for for {name}")
-                result = await asyncio.wait_for(
-                    self._execute_tool_call_inner(name, inp, assistant_seq),
-                    timeout=timeout,
-                )
+                if timeout is None:
+                    # 等人应答的工具：直接 await，不套 wait_for——外层超时会把
+                    # 待审批状态连同工具调用一起掐死（缘由见 HUMAN_WAIT_TOOLS）。
+                    # 等待自身的出口（人工应答 / abort / 自动审批）在门内轮询里。
+                    result = await self._execute_tool_call_inner(name, inp, assistant_seq)
+                else:
+                    print_info(f"[DEBUG] execute_tool_call: calling asyncio.wait_for for {name}")
+                    result = await asyncio.wait_for(
+                        self._execute_tool_call_inner(name, inp, assistant_seq),
+                        timeout=timeout,
+                    )
                 duration_s = round(time.time() - _tool_t0, 2)
                 print_info(f"[DEBUG] execute_tool_call: {name} done, took {duration_s}s")
                 return self._success_result(span, result, name, duration_s, timeout)
             except asyncio.TimeoutError:
-                error = TimeoutError(f"Tool '{name}' timed out after {timeout}s")
+                # timeout=None 时 wait_for 根本没被调用，这个分支只可能是工具自己
+                # 抛的 TimeoutError（3.11+ 与 asyncio.TimeoutError 同类）——如实说
+                # 「timed out」，不编造一个不存在的上限数字。
+                detail = f"timed out after {timeout}s" if timeout is not None else "timed out"
+                error = TimeoutError(f"Tool '{name}' {detail}")
                 return self._timeout_result(span, name, round(time.time() - _tool_t0, 2), timeout,
-                                            detail=f"timed out after {timeout}s", error=error)
+                                            detail=detail, error=error)
             except TimeoutError as e:
                 return self._timeout_result(span, name, round(time.time() - _tool_t0, 2), timeout,
                                             detail=f"timed out: {e}", error=e)
@@ -122,7 +161,7 @@ class ToolDispatcher:
                 )
 
     def _success_result(self, span, result: str | ToolExecutionResult, name: str,
-                        duration_s: float, timeout: int) -> ToolExecutionResult:
+                        duration_s: float, timeout: int | None) -> ToolExecutionResult:
         """成功路径：str 结果封装为 ToolExecutionResult；结构化结果补默认 metadata + span 上报。"""
         if isinstance(result, ToolExecutionResult):
             success = result.status == "ok" and result.outcome == "success"
@@ -159,9 +198,14 @@ class ToolDispatcher:
             metadata={"tool_name": name, "duration_s": duration_s, "timeout_s": timeout},
         )
 
-    def _timeout_result(self, span, name: str, duration_s: float, timeout: int,
+    def _timeout_result(self, span, name: str, duration_s: float, timeout: int | None,
                         *, detail: str, error: Exception) -> ToolExecutionResult:
-        """超时路径（asyncio.TimeoutError / 显式 TimeoutError 统一封装）。"""
+        """超时路径（asyncio.TimeoutError / 显式 TimeoutError 统一封装）。
+
+        timeout 为 None 只可能来自工具自己抛的显式 TimeoutError（等人应答的工具
+        不套 wait_for，asyncio.TimeoutError 到不了这里）；trace 里如实写 None，
+        不编造数字。
+        """
         if span:
             span.record_error(error)
             span.add_metadata(timeout_s=timeout, duration_s=duration_s, outcome="timeout", success=False)
