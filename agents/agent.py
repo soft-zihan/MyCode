@@ -228,6 +228,17 @@ class Agent:
         self._tool_call_count: int = 0
         self._failed_tool_call_count: int = 0
 
+        # ── plan 模式送审状态（spec §D2 / §D3）──
+        # _plan_validation_attempts：本回合内 plan.md 格式校验连续不合格的次数，
+        # 上限 2（agent_loop._PLAN_VALIDATION_RETRY_LIMIT）。**每个新回合都归零**
+        # （turn_runner._reset_turn_state）：跨回合累积会让第二次规划一进来就撞在
+        # 上限上，一次自我修正的机会都没有。
+        self._plan_validation_attempts: int = 0
+        # _pending_plan_approval：已落 permission/request、正在等人应答的计划审批。
+        # 刻意**不**在 _reset_turn_state 里清——非阻塞审批（spec §D3）的全部含义就是
+        # 「回合已经结束、审批还没来」，它必须跨回合存活到 /api/events/respond 命中它。
+        self._pending_plan_approval: dict | None = None
+
     def _init_prompt(self, opts: "AgentOptions") -> None:
         """段5：system prompt（含 plan 模式）+ OpenAI client（workspace 上下文内构建）。
 
@@ -407,6 +418,30 @@ class Agent:
         callable 拿着，每次轮询现读当前值——这正是「热」的来源（与折叠门探针
         check_and_compact 交零参 callable 是同一个模式）。"""
         return self._auto_approve
+
+    # ── plan 审批的非阻塞会话状态（spec §D4）──
+
+    def set_pending_plan_approval(self, entry: dict) -> None:
+        """登记一条待审批的计划。
+
+        非阻塞之后没有「正在等待的协程」可依附（审批期间回合已经结束），所以待审批
+        状态必须挂在 Agent 上。形状见 agent_loop._plan_mode_handoff_inner。
+        """
+        self._pending_plan_approval = entry
+
+    def take_pending_plan_approval(self, rpc_id: str) -> dict | None:
+        """按 rpc_id 取出并清空待审批计划；不匹配返回 None 且**不清空**。
+
+        「取出即清空」是幂等保护：同一个 rpc_id 被 POST 两次（双击、前端重试）时
+        第二次拿到 None，走不到 finalize，于是不会把同一批任务再物化一遍进 task_list。
+        「不匹配不清空」同样重要：那个 rpc_id 可能属于危险命令确认（走权限门轮询的
+        那条路），清掉就把一条仍然活着的审批弄丢了。
+        """
+        entry = self._pending_plan_approval
+        if entry is None or entry.get("rpc_id") != rpc_id:
+            return None
+        self._pending_plan_approval = None
+        return entry
 
     async def steer(self, message: str) -> None:
         """运行中插话：写入 steering 队列，由 agent_loop 在 step 边界注入为 user 事件（v2 promote 语义）。"""

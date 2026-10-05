@@ -9,10 +9,18 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from agents.core.model_caller import ModelCaller
 from agents.core.text_sanitization import safe_utf8_text
+from agents.plan.plan_tool_executor import (
+    PLAN_APPROVAL_SUPERSEDED,
+    PLAN_APPROVAL_TOOL_NAME,
+    _finalize_plan_exit,
+    _validate_and_load_draft,
+    execution_state_line,
+)
 from agents.tools.file_snapshot import capture_file_snapshot
 from agents.tools.registry import CONCURRENCY_SAFE_TOOLS
 from agents.observability.tool_tracker import ToolCallTracker, check_tool_warnings
@@ -155,6 +163,12 @@ class AgentLoop:
                 # 消费（不新起 turn/start，满足"追问不重启轮次"）
                 if await self._drain_steering() or await self._drain_follow_up():
                     continue
+                # plan 模式：产物格式合格就送审（非阻塞），不合格就把错误喂回让模型
+                # 自己修。返回 True = 已注入一条消息、本回合要继续跑。
+                # 位置在双队列之后：用户刚插进来的话优先于「校验产物」，否则模型会先
+                # 被喂一条格式错误、再被喂用户的话，两条消息互相打架。
+                if await self._plan_mode_handoff():
+                    continue
                 await self._finalize_text_response()
                 break
 
@@ -225,6 +239,150 @@ class AgentLoop:
                 "contents": [m.content[:100] for m in dropped],
             })
         await q.clear()
+
+    # ── plan 模式：turn 收尾的产物校验送审（spec §D1/§D2/§D3）──────────
+
+    # 连续不合格时自动续回合让模型自我修正的次数上限（spec §D2）。
+    # 两端都刻意不选：无界修正会烧钱并可能死循环；一次不合格就甩给用户是让用户当
+    # 传声筒（模型往往只差一个标题层级）。「结构校验 + 有限次纠正重试」项目里已有
+    # 先例（压缩模板就是这么做的）。
+    _PLAN_VALIDATION_RETRY_LIMIT = 2
+
+    async def _plan_mode_handoff(self) -> bool:
+        """turn 收尾钩子：plan.md 合格就送审（非阻塞），不合格就把错误喂回模型。
+
+        返回 True = 已注入一条消息、本回合要继续跑；False = 照常收尾结束回合。
+
+        这个函数坐在**所有会话共享**的收尾路径上（spec §十.2），所以两件事是硬的：
+        ① `permission_mode != "plan"` 时立刻返回，一个属性都不读、一个事件都不落；
+        ② 整个函数体包 try/except，失败方向是「不送审、不阻塞回合」——但**必须留痕**
+           （stderr 一条 + 事件流一条）。静默降级还给上层一个成功信号是本项目最贵的
+           缺陷类：C1 里一个非字符串字段在两层嵌套的宽 except 内抛出来，把两档上下文
+           可见性一起关掉，而工具照样返回 ok:true，十一次评审都没发现。
+        """
+        if self._agent.permission_mode != "plan":
+            return False
+        try:
+            return await self._plan_mode_handoff_inner()
+        except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+            print_error(
+                "[plan] turn-end validation hook failed; the turn ends normally and "
+                f"the plan was NOT submitted for approval: {detail}"
+            )
+            self._agent.session.append("error", {
+                "message": f"plan 送审钩子异常（回合照常结束，计划未送审）: {detail}",
+            })
+            return False
+
+    async def _plan_mode_handoff_inner(self) -> bool:
+        """钩子主体。调用前 permission_mode == "plan" 已成立。"""
+        a = self._agent
+        mgr = a._plan_mode_manager
+        if mgr is None or mgr.plan_dir is None:
+            # 在 plan 模式却没有草稿目录：没有产物可校验，什么都不做。
+            return False
+
+        validation = mgr.validate_plan_artifacts()
+        if not validation["valid"]:
+            return self._feed_plan_errors_back(validation["errors"])
+
+        # 装载草稿复用 plan_tool_executor 的同一个函数，不重写装载逻辑（两个装载器
+        # 必然漂移）。校验刚放行、装载又返回失败文案 = 两侧判定口径漂移了。
+        draft = _validate_and_load_draft(mgr)
+        if isinstance(draft, str):
+            print_error(f"[plan] draft load disagreed with the validator: {draft!r}")
+            a.session.append("error", {
+                "message": f"plan 草稿装载与校验器判定不一致（计划未送审）: {draft}",
+            })
+            return False
+
+        if a.auto_approve_enabled():
+            # spec §D9：开关已开 → **不落 permission/request**（沿用上一轮的裁定：
+            # 开关已开时不凭空造请求），当场 finalize 并 continue 去执行。
+            result_msg = _finalize_plan_exit(a, mgr, draft, "execute")
+            # 起始消息 = D8 的当前状态行 + 现有的物化说明（那几行是真机验证过能让
+            # 模型正确使用新体制的，逐字沿用，spec §D8）。
+            a.append_user_message(
+                execution_state_line(a.permission_mode, "execute") + "\n\n" + result_msg)
+            return True
+
+        self._supersede_pending_plan_approval()
+        rpc_id = uuid.uuid4().hex[:8]
+        # 字段形状与权限门那条 permission/request **完全一致**（rpc_id 与 request_id
+        # 同值、command 承载要审的文本、tool_name 是种类标记、sub_agent_id 透传），
+        # 于是前端的既有渲染与「从历史恢复待审批」逻辑一行都不用改（spec §D4）。
+        a.session.append("permission/request", {
+            "rpc_id": rpc_id,
+            "request_id": rpc_id,
+            "command": draft.full_plan,
+            "tool_name": PLAN_APPROVAL_TOOL_NAME,
+            "message": "计划已写完并通过格式校验，等待批准。",
+            "sub_agent_id": a.current_sub_agent_id,
+        })
+        a.set_pending_plan_approval({
+            "rpc_id": rpc_id,
+            "draft": draft,
+            "choice_options": ["execute", "manual-execute", "clear-and-execute", "keep-planning"],
+        })
+        # 返回 False → 回合正常结束（turn/end 落盘），审批作为纯会话状态挂着。
+        # 这就是 spec §D3 的非阻塞：没有任何协程在等，于是「等人的时候不能被计时器
+        # 杀掉」这件事根本不存在（原 600s 工具超时缺陷就是阻塞式的产物）。
+        return False
+
+    def _supersede_pending_plan_approval(self) -> None:
+        """spec §十.3：已有待审批时又产出一份新的合格计划 → 作废旧的那条。
+
+        漏了它，用户会批准一份已经不是当前内容的计划：对话框还开着（历史里那条
+        request 没有配对的 resolved），而 plan.md 已经被改过。作废方式是落
+        permission/resolved{outcome:"superseded"}——请求已落盘，决议就必须落盘，
+        否则前端的「从历史恢复待审批」会把它复活成幽灵对话框（上一轮踩过这条）。
+        """
+        a = self._agent
+        old = a._pending_plan_approval
+        if old is None:
+            return
+        a.session.append("permission/resolved", {
+            "rpc_id": old.get("rpc_id", ""),
+            "outcome": PLAN_APPROVAL_SUPERSEDED,
+        })
+        a._pending_plan_approval = None
+
+    def _feed_plan_errors_back(self, errors: list[str]) -> bool:
+        """不合格 → 把结构化错误喂回模型、自动续一个回合让它自己修（有界）。
+
+        超过上限时把错误清单落成一条**用户可见**的 assistant 消息后结束回合：
+        「计划没送审」这件事如果只在 stderr 里说，用户看到的就是模型写完了却什么都没
+        发生——那是本项目最贵的那类静默故障。
+        """
+        a = self._agent
+        a._plan_validation_attempts += 1
+        listing = "\n".join(f"- {e}" for e in errors)
+
+        if a._plan_validation_attempts > self._PLAN_VALIDATION_RETRY_LIMIT:
+            message = (
+                "计划未能送审：plan.md 的格式在 "
+                f"{self._PLAN_VALIDATION_RETRY_LIMIT} 次自动修正后仍不合格。\n\n"
+                f"{listing}\n\n"
+                "修正上面这些问题后再结束回复，系统会重新校验并送审。"
+            )
+            if a._turn_output_buffer is not None:
+                a._turn_output_buffer.append(message)
+            a.session.append("assistant_message", {
+                "turn": a._current_turn,
+                "step": a._current_step,
+                "content": message,
+            })
+            return False
+
+        # 注入的形状照 _inject_queued：user_message 事件落盘（Event 是唯一数据源），
+        # 于是下一轮模型调用看得到它。
+        a.append_user_message(
+            "plan.md 的格式校验未通过，计划**没有**送审。请按下面的清单修正 "
+            f"{a._plan_mode_manager.plan_dir}/plan.md，然后直接结束回复"
+            "（不要调用任何退出或送审工具），系统会自动重新校验：\n\n" + listing
+        )
+        return True
 
     async def _prepare_turn(self, user_message: str | None) -> None:
         """准备轮次：清理消息、重置状态、创建快照。None=自动唤醒轮（U3b）。"""

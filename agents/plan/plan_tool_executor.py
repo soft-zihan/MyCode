@@ -43,6 +43,22 @@ if TYPE_CHECKING:
     from agents.agent import Agent
 
 
+# permission/request 事件里标记「这是一次计划审批」的哨兵值（spec §D4）。
+#
+# 它**不是真工具**，是审批的种类标记。复用 permission/request + permission/resolved
+# 这一对事件与 /api/events/respond 这个端点，而不是新造 plan/approval_requested 事件族：
+# 「从历史恢复待审批」那段前端逻辑认的就是这一对，换事件族等于把它重写一遍，还要在
+# event_types.py 里登记新类型。前端唯一的改动是把 tool_name 的判断从旧的
+# "exit_plan_mode" 换成这个值（ChatPage/index.tsx）。
+PLAN_APPROVAL_TOOL_NAME = "plan_approval"
+
+# permission/resolved.outcome 的「被新计划取代」值（spec §十.3）。
+# 词表的其余成员（allowed / denied / aborted / auto）住在 permission_gate 的三条出口里。
+# 前端的历史恢复只看「有没有配对的 resolved」，不认 outcome 的具体值，所以加一个值
+# 不影响它；但词表在这里点名一次，别让它在前端另写一份。
+PLAN_APPROVAL_SUPERSEDED = "superseded"
+
+
 async def execute_plan_mode_tool(agent: "Agent", name: str) -> str:
     if name == "enter_plan_mode":
         return _enter_plan_mode(agent)
@@ -372,6 +388,43 @@ def _finalize_plan_exit(agent: "Agent", mgr: Any, draft: _PlanDraft, choice: str
         result_msg += "Proceed with implementation."
 
     return result_msg
+
+
+# ── spec §D8：执行/规划回合起始消息里的「当前状态」行 ──
+#
+# 措辞裁定（**用户纠正过的版本**，别改回去）：只陈述当前状态，绝不讲转场。
+# 「已解除 / 已恢复 / 不再只读 / 刚才」这类词预设读者记得之前的状态，而
+# clear-and-execute 路由会清空上下文——模型根本没有那个「之前」，转场措辞指向的是它
+# 看不见的东西，不只是多余，是制造困惑。状态式声明在三种批准路由下同样成立，
+# 不需要分版本。plan 模式的负面清单也从不进历史（尾部 ephemeral system 消息、
+# 每请求重拼、不落盘），模式一切换它就消失了，没有残留需要「恢复」。
+# tests/unit/test_plan_mode_handoff.py 逐词断言这四个转场词缺席。
+
+def execution_state_line(permission_mode: str, choice: str) -> str:
+    """批准后执行回合的当前状态行。
+
+    `manual-execute` 必须**如实**：它不能和 execute 共用「所有工具可用」那一句，
+    否则会瞒掉「每次编辑仍需用户确认」，模型于是以为可以连着改一批文件
+    （spec §D8 专门点了这条）。所以这里不给它「所有工具可用」。
+    """
+    if choice == "manual-execute":
+        return (
+            f"当前权限模式：{permission_mode}。每次编辑仍需用户确认，逐条改、逐条说明理由。"
+            f"task_list 可用——用它推进任务状态（开始时标 in_progress、完成时标 completed）。"
+        )
+    return (
+        f"当前权限模式：{permission_mode}。所有工具可用，包括 task_list——"
+        f"用它推进任务状态（开始时标 in_progress、完成时标 completed）。"
+    )
+
+
+def keep_planning_state_line() -> str:
+    """拒绝路径（keep-planning）的当前状态行。
+
+    同样只陈述状态。少了它，模型会把「收到一条新消息」误读成「计划通过了」——
+    它仍在 plan 模式、仍然只读、task_list 仍然不可用。
+    """
+    return "当前仍在 plan 模式（只读，task_list 不可用）。"
 
 
 def _injection_line(session_id: str) -> str:

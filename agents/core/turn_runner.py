@@ -271,6 +271,10 @@ class TurnRunner:
         a._tool_budget_stop_reason = None
         a._user_message_written_this_turn = False
         a._current_turn += 1
+        # plan.md 格式校验的自我修正次数**每回合归零**（spec §D2 的「连续 2 次」是
+        # 回合内的连续，不是会话累计）。⚠️ 隔壁的 `_pending_plan_approval` 刻意
+        # **不**在这里清：回合结束时审批还挂着，它是非阻塞审批唯一的会话状态。
+        a._plan_validation_attempts = 0
 
     async def _run_turn_task(self, user_message: str | None, original_user_message: str, turn_span) -> str | None:
         """段4：任务启动 + 取消/异常处理。返回 assistant_text；异常路径返回 None（turn/end 已落盘）。"""
