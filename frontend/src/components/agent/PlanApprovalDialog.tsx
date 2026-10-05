@@ -15,18 +15,19 @@ interface PlanApprovalDialogProps {
 
 type ViewMode = 'preview' | 'edit' | 'feedback';
 
+// 单轨（plan 模式简化 A3）：唯一草稿产物是 plan.md，所以标签表也只有它一项。
+// 旧重量轨的 spec/design/tasks/proposal 自 A 批次起就读不到了（后端
+// sessions.py 的 _DRAFT_ARTIFACT_NAMES 已同步收缩成 {"plan.md"}，两端必须一致：
+// 端点只回这一个键，这里列再多的标签也永远不会被渲染）。
+// 兜底 `|| name` 保留：后端将来真加回第二个产物时，tab 会显示原始文件名而不是空白。
 const TAB_LABELS: Record<string, string> = {
-  'spec.md': 'Spec',
-  'design.md': 'Design',
-  'tasks.md': 'Tasks',
   'plan.md': 'Plan',
-  'proposal.md': 'Proposal',
 };
 
 /**
  * 计划审批抽屉：右侧全高 drawer，长文档舒适阅读。
  *
- * - tab 切换草稿产物（spec/design/tasks/plan/proposal）
+ * - tab 切换草稿产物（单轨后只有 plan.md，tab 栏因此不渲染）
  * - 支持直接编辑保存当前文档
  * - 修改意见（feedback）注入回规划循环
  * - 三种批准路由：execute / manual-execute / clear-and-execute
@@ -57,7 +58,8 @@ export function PlanApprovalDialog({ request, sessionId, onApprove, onDeny }: Pl
         if (result.success && result.data && Object.keys(result.data.artifacts).length > 0) {
           setArtifacts(result.data.artifacts);
           const names = Object.keys(result.data.artifacts);
-          setActiveTab(names.includes('spec.md') ? 'spec.md' : names[0]);
+          // 单轨后只可能是 plan.md，没有「优先选哪个 tab」这件事了（曾优先 spec.md）
+          setActiveTab(names[0]);
         }
       })
       .catch(() => { /* fallback to command text */ });
