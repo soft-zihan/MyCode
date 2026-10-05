@@ -152,36 +152,11 @@ def _collect_hidden_agent_prompts() -> list[PromptInfo]:
 
 
 # 键集必须与 agents/plan/strategies/ 下真实存在的目录一致：下面的
-# _collect_plan_strategy_prompts 是按目录枚举的，多出来的键永远不会被查到
-# （execute / review / converge 的目录随 Plan 3a Task 4 一起删了，Plan 3b Task B1
-# 把这三个残留键清掉）。少一个键则退化成 .get(category, category)，即描述变成
-# 目录名本身——所以两边都要对齐。
-_PLAN_STRATEGY_DESCRIPTIONS = {
-    "grill-spec": "需求澄清策略",
-    "tasks": "任务拆分策略",
-}
-
-
-def _collect_plan_strategy_prompts() -> list[PromptInfo]:
-    """5. Plan Mode 策略文件。"""
-    prompts: list[PromptInfo] = []
-    strategies_dir = Path(__file__).parent.parent / "plan" / "strategies"
-    if not strategies_dir.exists():
-        return prompts
-    for category_dir in sorted(strategies_dir.iterdir()):
-        if not category_dir.is_dir():
-            continue
-        category = category_dir.name
-        for f in sorted(category_dir.glob("*.md")):
-            prompts.append(PromptInfo(
-                name=f"plan_strategy:{category}/{f.stem}",
-                category="plan",
-                description=f"{_PLAN_STRATEGY_DESCRIPTIONS.get(category, category)}: {f.stem}",
-                source=str(f),
-                editable=True,
-                content=f.read_text(encoding="utf-8"),
-            ))
-    return prompts
+# Plan 模式简化：这里原有 `_PLAN_STRATEGY_DESCRIPTIONS` 与 `_collect_plan_strategy_prompts()`
+# （按目录枚举 agents/plan/strategies/ 下的策略 markdown 并注册成可编辑提示词，
+# 由下面的 collect 流程 extend 进清单）。那套东西端到端零消费者——前端从来没有设置
+# 界面调用过 /api/config/plan-strategies——而 plan 提示词已单轨化、把有价值的需求澄清
+# 纪律内联进了 PlanModeManager.build_plan_mode_prompt。目录与枚举器一起删了。
 
 
 def list_all_prompts() -> list[PromptInfo]:
@@ -191,7 +166,6 @@ def list_all_prompts() -> list[PromptInfo]:
     prompts.extend(_collect_subagent_prompts())
     prompts.extend(_collect_side_query_prompts())
     prompts.extend(_collect_hidden_agent_prompts())
-    prompts.extend(_collect_plan_strategy_prompts())
     return prompts
 
 

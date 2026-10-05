@@ -426,26 +426,6 @@ export async function saveConfig(config: AppConfig): Promise<void> {
   if (!res.ok) throw new Error('Failed to save config');
 }
 
-export interface PlanStrategies {
-  grill_spec: string;
-  tasks: string;
-}
-
-export async function fetchPlanStrategies(): Promise<PlanStrategies> {
-  const res = await fetch(`${API_BASE}/config/plan-strategies`);
-  if (!res.ok) throw new Error('Failed to fetch plan strategies');
-  return res.json();
-}
-
-export async function savePlanStrategies(strategies: PlanStrategies): Promise<void> {
-  const res = await fetch(`${API_BASE}/config/plan-strategies`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(strategies),
-  });
-  if (!res.ok) throw new Error('Failed to save plan strategies');
-}
-
 // ── Prompt APIs ─────────────────────────────────────────────────────────────
 
 export interface PromptInfo {

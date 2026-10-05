@@ -137,26 +137,6 @@ def api_update_config(data: ConfigUpdate) -> dict[str, Any]:
     return {"status": "ok", "message": "Config saved successfully"}
 
 
-@router.get("/api/config/plan-strategies")
-def api_get_plan_strategies() -> dict[str, Any]:
-    """获取 Plan 策略配置"""
-    config = load_config()
-    return config.plan_strategies.to_dict()
-
-
-@router.put("/api/config/plan-strategies")
-def api_update_plan_strategies(data: dict[str, str]) -> dict[str, Any]:
-    """更新 Plan 策略配置（只剩 grill-spec / tasks 两个阶段）。"""
-    from agents.config import PlanStrategyConfig
-    config = load_config()
-    config.plan_strategies = PlanStrategyConfig(
-        grill_spec=data.get("grill_spec", config.plan_strategies.grill_spec),
-        tasks=data.get("tasks", config.plan_strategies.tasks),
-    )
-    save_config(config)
-    return {"status": "ok", "message": "Plan strategies saved successfully"}
-
-
 # ── Embedding 模型配置（BC-30：wiki 语义召回/编译去重的 embedding 后端） ──
 
 

@@ -21,11 +21,6 @@ from agents.core.frontmatter import format_frontmatter
 from agents.plan import plan_manager as pm
 from agents.plan.plan_models import PlanGranularity, PlanStatus
 from agents.plan.plan_mode import PlanModeManager
-from agents.plan.strategy_loader import (
-    DEFAULT_STRATEGIES,
-    load_strategy,
-    strategy_config_from_app_config,
-)
 
 
 STRUCTURED_TASKS = """<!-- TASKS START -->
@@ -234,50 +229,26 @@ class TestDualTrack:
         assert "见 https://example.com/doc" in out
 
 
-# ────────────────────────── 策略加载与插件引擎 ──────────────────────────
+# ────────────────────────── 旧配置兼容 ──────────────────────────
 
-class TestStrategies:
-    """策略加载器。
+def test_legacy_plan_strategies_key_in_config_is_ignored():
+    """用户盘上的旧 config.json 带着已删除的 plan_strategies 段，必须能照常加载。
 
-    三个用例原本打在 `execute` 阶段上，而 `strategies/execute|review|converge/`
-    随 `plan_task_*` 协议一起在 Plan 3a Task 4 删除了（它们的唯一消费者
-    PlanExecutor 也没了），所以改打仍存活的 `grill-spec`——那是
-    build_plan_mode_prompt 真正加载的两个阶段之一。
-
-    Plan 3b Task A1 又把配置面从五键收缩到两键：`PlanStrategyConfig` 经
-    `/api/config/plan-strategies` 暴露给前端，那三个键的唯一意义就是喂一个已经
-    没有任何消费者的阶段。test_app_config_key_translation 钉住收缩后的键集。
+    Plan 模式简化把整套策略系统删了（strategy_loader / 5 个策略文件 /
+    PlanStrategyConfig / /api/config/plan-strategies / client 的两个方法），
+    但**不做迁移、不做检测**——AppConfig.from_dict 只 get 认识的键，残留段自然被忽略。
+    这条钉的是「静默忽略」而不是「支持」：若有人日后给 from_dict 加严格校验，
+    所有老用户升级后配置加载就会失败，而他们盘上那个键根本无法自行清除。
     """
+    from agents.config import AppConfig
 
-    def test_load_builtin_default(self):
-        content, source, resolved = load_strategy(
-            "grill-spec", "simple", Path.cwd(), Path.cwd() / ".mycode/plans/x")
-        assert source == "builtin" and resolved == "simple"
-        assert "需求分析" in content
-        # {plan_dir} 占位符被替换掉了
-        assert "{plan_dir}" not in content
-
-    def test_project_override_wins(self):
-        custom_dir = Path.cwd() / ".mycode" / "plan-strategies" / "grill-spec"
-        custom_dir.mkdir(parents=True, exist_ok=True)
-        (custom_dir / "simple.md").write_text("PROJECT CUSTOM", encoding="utf-8")
-        content, source, resolved = load_strategy(
-            "grill-spec", "simple", Path.cwd(), Path.cwd() / ".mycode/plans/x")
-        assert source == "project" and content.strip() == "PROJECT CUSTOM"
-
-    def test_missing_strategy_falls_back(self):
-        content, source, resolved = load_strategy(
-            "grill-spec", "no-such-strategy", Path.cwd(), Path.cwd() / ".mycode/plans/x")
-        assert resolved == DEFAULT_STRATEGIES["grill-spec"] == "simple"
-        assert source == "fallback"
-        assert content.strip()
-
-    def test_app_config_key_translation(self):
-        cfg = strategy_config_from_app_config()
-        assert set(cfg.keys()) == set(DEFAULT_STRATEGIES.keys())
-        # Plan 3b Task A1 把配置面收缩到两阶段：execute/review/converge 的内置策略
-        # 文件与唯一消费者（PlanExecutor）都已在 Plan 3a Task 4 删除。
-        assert set(cfg.keys()) == {"grill-spec", "tasks"}
+    cfg = AppConfig.from_dict({
+        "endpoints": {}, "routing": {},
+        "plan_strategies": {"grill_spec": "simple", "tasks": "structured",
+                            "execute": "direct", "review": "none", "converge": "none"},
+    })
+    assert not hasattr(cfg, "plan_strategies")
+    assert "plan_strategies" not in cfg.to_dict()
 
 
 # ────────────────────────── Git 提交范围 ──────────────────────────
