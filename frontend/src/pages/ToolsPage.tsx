@@ -173,13 +173,6 @@ const toolDetails: Record<string, {
     executionMode: 'sequential',
     category: '模式切换',
   },
-  exit_plan_mode: {
-    idempotent: false,
-    returns: '退出规划模式的确认信息。',
-    errorHandling: '未在规划模式时返回提示。',
-    executionMode: 'sequential',
-    category: '模式切换',
-  },
   // Agent
   agent: {
     idempotent: false,
@@ -323,7 +316,7 @@ export default function ToolsPage() {
                   inputSchema: tool.input_schema,
                   source: 'native',
                 };
-                const isPlanTool = tool.name === 'enter_plan_mode' || tool.name === 'exit_plan_mode';
+                const isPlanTool = tool.name === 'enter_plan_mode';
                 return (
                   <div
                     key={tool.name}

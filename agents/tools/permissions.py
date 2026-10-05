@@ -321,8 +321,9 @@ def _check_permission_inner(
         if plan_result:
             return plan_result
 
-    if tool_name in ("enter_plan_mode", "exit_plan_mode"):
-        # Let the tool handle the confirmation internally with the plan content
+    if tool_name == "enter_plan_mode":
+        # 进入 plan 模式本身没有副作用，直接放行。（exit_plan_mode 已删：送审不再由
+        # 模型举手触发，改成 turn 收尾校验 plan.md，见 agent_loop._plan_mode_handoff。）
         return {"action": "allow"}
 
     if mode == "acceptEdits" and tool_name in EDIT_TOOLS:

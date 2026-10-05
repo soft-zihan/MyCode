@@ -135,11 +135,11 @@ Plan mode is active. You MUST NOT make any edits (except files under {plan_dir})
 
 - **只读**：除 `{plan_dir}` 下的文件外不能写任何东西，不能跑非只读命令。
 - **`task_list` 不可用**：计划批准后由**系统**自动物化进 task_list，不用你建。
+- **写完 `plan.md` 就停**：不要调用任何退出或送审工具，也不要请用户批准——系统会
+  **自动校验**格式并弹出审批；格式不合格会把具体错误喂回给你，改完再收尾即可。
 
 ## 追加模式
-如果 plan 目录已存在，先 read_file 读取现有内容。保留已有背景/方案不变，在任务清单末尾追加新的 tasks。
-
-IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask the user to approve — exit_plan_mode handles that."""
+如果 plan 目录已存在，先 read_file 读取现有内容。保留已有背景/方案不变，在任务清单末尾追加新的 tasks。"""
 
     def read_draft_artifacts(self) -> dict[str, str]:
         """读取草稿产物（单轨：唯一产物 plan.md）。

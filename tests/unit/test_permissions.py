@@ -82,10 +82,11 @@ class TestCheckPermission:
         r = check_permission("read_file", {}, "plan")
         assert r["action"] == "allow"
 
-    def test_plan_mode_allows_enter_exit(self):
-        for tool in ("enter_plan_mode", "exit_plan_mode"):
-            r = check_permission(tool, {}, "plan")
-            assert r["action"] == "allow"
+    def test_plan_mode_allows_enter(self):
+        # exit_plan_mode 已删（送审改成 turn 收尾校验 plan.md，spec §D3），
+        # enter_plan_mode 仍是唯一那个「让工具自己处理」的放行口。
+        r = check_permission("enter_plan_mode", {}, "plan")
+        assert r["action"] == "allow"
 
     def test_dont_ask_denies_confirm_actions(self):
         r = check_permission("run_shell", {"command": "rm -rf /"}, "dontAsk")

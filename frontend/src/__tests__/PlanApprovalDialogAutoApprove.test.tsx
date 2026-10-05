@@ -31,8 +31,9 @@ vi.mock('../api/client', async (importOriginal) => {
 const request: PermissionRequest = {
   rpc_id: 'r1',
   request_id: 'r1',
-  command: 'Plan completed. Exit plan mode?\n\n## 计划\n- [ ] 1. 做一件事',
-  tool_name: 'exit_plan_mode',
+  // 非阻塞审批（spec §D3/D4）：command 直接承载计划全文，工具名是哨兵值 plan_approval
+  command: '## 计划\n- [ ] 1. 做一件事',
+  tool_name: 'plan_approval',
 };
 
 /** 复刻生产接线：composer（ChatPage）里的开关与对话框里的开关订阅同一个 store 槽位。 */

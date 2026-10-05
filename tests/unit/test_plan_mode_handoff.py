@@ -21,12 +21,34 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from agents.agent_loop import AgentLoop
 from agents.core.session import Session
 from agents.core.steer_queue import MessageQueue
 from agents.core.turn_runner import TurnRunner
+from agents.core.workspace import reset_workspace, set_workspace
 from agents.plan.plan_mode import PlanModeManager
+from agents.plan.plan_tool_executor import (
+    finalize_approved_plan,
+    record_plan_rejection,
+)
+
+
+@pytest.fixture(autouse=True)
+def ws(tmp_path):
+    """整个模块都在 tmp_path 的工作区作用域里跑。
+
+    B2 之后本文件会跑真的 finalize_approved_plan：它要落 plan 系统条目
+    （get_plans_dir）并物化进 task_list（task_store 的目录来自 get_workspace()
+    这个 ContextVar）。不设作用域就会写进进程 CWD——那正是 W1 缺陷的形状。
+    """
+    token = set_workspace(tmp_path)
+    yield tmp_path
+    reset_workspace(token)
+
 
 GOOD_PLAN = """# 加一个 clamp 函数
 
@@ -95,6 +117,14 @@ class HandoffFakeAgent:
         self._auto_approve = False
         self.user_messages: list[str] = []
 
+        # finalize_approved_plan 碰到的那几样（B2 起本文件跑真的 finalize）
+        self._system_prompt = "PLAN-SYS"
+        self._base_system_prompt = "BASE-SYS"
+        self.context_cleared = 0
+        self._context_manager = SimpleNamespace(
+            clear_history_keep_system=lambda: setattr(self, "context_cleared",
+                                                      self.context_cleared + 1))
+
         self._plan_mode_manager = PlanModeManager(
             workspace=workspace, session_id=self.session_id)
         self.validation_calls = 0
@@ -135,6 +165,12 @@ class HandoffFakeAgent:
             return None
         self._pending_plan_approval = None
         return entry
+
+    def _emit_permission_mode_event(self) -> None:
+        self.session.append("permission/mode_changed", {
+            "session_id": self.session.id,
+            "mode": self.permission_mode,
+        })
 
     def of_type(self, type_: str) -> list[dict]:
         return [e for e in self.session.events if e.get("type") == type_]
@@ -278,32 +314,30 @@ async def test_validator_exception_does_not_block_the_turn(tmp_path, monkeypatch
 
 
 async def test_auto_approve_on_at_turn_end_finalizes_without_request(tmp_path, monkeypatch):
-    """spec §D9：开关已开时不凭空造请求（请求都没落盘，也就没有 resolved 要补）。"""
-    import agents.agent_loop as agent_loop_module
+    """spec §D9：开关已开时不凭空造请求（请求都没落盘，也就没有 resolved 要补）。
 
+    跑的是**真的** finalize_approved_plan（不桩）：落库、切模式、清草稿、物化进
+    task_list 全在断言里，桩掉就等于把这条链一起桩掉。
+    """
     agent = HandoffFakeAgent(tmp_path)
     agent._auto_approve = True
-
-    calls: list[tuple] = []
-
-    def _fake_finalize(a, mgr, draft, choice):
-        calls.append((a.session_id, choice, draft.full_plan[:20]))
-        a.permission_mode = "acceptEdits"      # 真 finalize 会切模式，替身照做
-        return "FINALIZED-BODY"
-
-    monkeypatch.setattr(agent_loop_module, "_finalize_plan_exit", _fake_finalize)
+    draft_dir = agent._plan_mode_manager.plan_dir
 
     loop, state = _make_loop(agent, monkeypatch)
     await asyncio.wait_for(loop.run(None), 30)
 
     assert agent.of_type("permission/request") == []
-    assert len(calls) == 1 and calls[0][1] == "execute"
     assert agent._pending_plan_approval is None
     assert state["steps"] == 2                 # continue 去执行，不是结束回合
+    assert agent.permission_mode == "acceptEdits"
+    assert agent.session.plan_slug             # 落库真的发生了
+    assert not draft_dir.exists()              # 草稿目录被清掉
+
     assert len(agent.user_messages) == 1
     msg = agent.user_messages[0]
-    assert "FINALIZED-BODY" in msg             # 物化说明逐字沿用
-    assert "当前权限模式" in msg and "task_list" in msg   # D8 的当前状态行
+    assert "条任务已物化进 task_list" in msg   # 物化说明逐字沿用（spec §D8）
+    assert "当前权限模式" in msg and "task_list" in msg   # D8 的当前状态行在最前面
+    assert msg.index("当前权限模式") < msg.index("User approved the plan")
     for banned in ("已解除", "已恢复", "不再只读", "刚才"):
         assert banned not in msg, banned
 
@@ -373,3 +407,322 @@ def test_take_pending_plan_approval_is_idempotent_and_rpc_scoped(tmp_path):
     assert agent.take_pending_plan_approval("r1") is entry
     assert agent._pending_plan_approval is None
     assert agent.take_pending_plan_approval("r1") is None   # 第二次拿不到
+
+
+# ══════════════════════════ B2：审批的解决路径 ══════════════════════════
+#
+# 工具删掉之后，「用户点了批准」这件事必须由后端把后续动作全部做完：落 resolved →
+# finalize（退出 plan 模式 / 落库 / 物化 / 清草稿）→ 起一个新回合，其起始消息携带
+# spec §D8 的当前状态声明。下面这组分两层：
+#   - finalize_approved_plan / record_plan_rejection 的**消息措辞**（D8 靶心）；
+#   - resolve_plan_approval 的**落地动作**（事件、模式、新回合）。
+
+
+def _pending_for(agent: HandoffFakeAgent) -> dict:
+    from agents.plan.plan_tool_executor import _validate_and_load_draft
+
+    draft = _validate_and_load_draft(agent._plan_mode_manager)
+    assert not isinstance(draft, str), draft
+    return {"rpc_id": "r1", "draft": draft,
+            "choice_options": ["execute", "manual-execute", "clear-and-execute",
+                               "keep-planning"]}
+
+
+@pytest.fixture
+def resolve_env(tmp_path, monkeypatch):
+    """把 resolve_plan_approval 的两个外部接缝换成可观测替身。
+
+    - `_spawn_chat_task`：真的会 asyncio.create_task(agent.chat(...))，测试里没有
+      模型可调。捕获参数即可——「起没起新回合、起始消息是什么」正是要断言的东西。
+    - `resolve_session_workspace`：真实现会去查 session_manager 与 projcache，
+      在测试里落到 Path.cwd()。钉成 tmp_path（与 autouse 的 ws 作用域同一个目录），
+      于是 finalize 的落库/物化仍然写进隔离工作区。
+    """
+    from frontend.server.routers import plan_approval as pa
+
+    spawned: list[str] = []
+    monkeypatch.setattr(pa, "_spawn_chat_task",
+                        lambda sm, agent, session, message: spawned.append(message))
+    monkeypatch.setattr(pa, "resolve_session_workspace", lambda sid: tmp_path)
+    return SimpleNamespace(module=pa, spawned=spawned,
+                           sm=SimpleNamespace(register_chat_task=lambda *a, **k: None))
+
+
+# ── D8 措辞：状态，不是转场 ────────────────────────────────────────────────
+
+
+def test_execution_message_states_current_state_not_transition(tmp_path):
+    """spec §D8 靶心：起始消息是**状态式**声明，不是转场叙述。
+
+    为什么这条是硬约束（用户纠正过设计）：clear-and-execute 会清空上下文，模型根本
+    没有那个「之前」，「已解除 / 已恢复 / 不再只读 / 刚才」指向的是它看不见的东西。
+    把状态行改成任何一种转场措辞，这四个 banned 断言立刻红。
+    """
+    agent = HandoffFakeAgent(tmp_path)
+    msg = finalize_approved_plan(agent, _pending_for(agent)["draft"], "execute")
+
+    assert "当前权限模式" in msg and "task_list" in msg
+    for banned in ("已解除", "已恢复", "不再只读", "刚才"):
+        assert banned not in msg, banned
+    # 状态行在**最前面**：它是模型读到的第一句（后面那段物化说明逐字沿用旧文案）
+    assert msg.startswith("当前权限模式：acceptEdits")
+    assert "条任务已物化进 task_list" in msg
+    assert "exit_plan_mode" not in msg
+
+
+def test_manual_execute_message_does_not_claim_unrestricted(tmp_path):
+    """spec §D8：manual-execute 必须如实说「每次编辑仍需用户确认」，
+    不能和 execute 共用一句「所有工具可用」——否则模型会以为可以连着改一批文件。"""
+    agent = HandoffFakeAgent(tmp_path)
+    msg = finalize_approved_plan(agent, _pending_for(agent)["draft"], "manual-execute")
+
+    assert "确认" in msg
+    assert "所有工具可用" not in msg          # 不共用 execute 那一行
+    assert "当前权限模式：default" in msg      # 回 pre_plan_mode，如实报
+    for banned in ("已解除", "已恢复", "不再只读", "刚才"):
+        assert banned not in msg, banned
+
+
+def test_clear_and_execute_message_is_self_contained(tmp_path):
+    """清空上下文后模型对 plan 模式一无所知，这条消息是它唯一线索。
+
+    断言它单独拿出来也能读出模式与工具状态（不依赖任何历史指代）——状态式声明天生
+    满足这一点，因为它根本不引用历史。
+    """
+    agent = HandoffFakeAgent(tmp_path)
+    msg = finalize_approved_plan(agent, _pending_for(agent)["draft"], "clear-and-execute")
+
+    assert agent.context_cleared == 1          # 上下文真的被清了
+    assert agent.permission_mode == "acceptEdits"
+    assert "当前权限模式：acceptEdits" in msg
+    assert "task_list" in msg and "in_progress" in msg and "completed" in msg
+    assert "条任务已物化进 task_list" in msg
+    for banned in ("已解除", "已恢复", "不再只读", "刚才"):
+        assert banned not in msg, banned
+
+
+def test_keep_planning_message_states_still_readonly(tmp_path):
+    """拒绝路径也要陈述当前状态，否则模型会把「收到一条新消息」误读成「计划通过了」。
+    用户意见原文必须在里面——那是模型修改计划的唯一输入。"""
+    agent = HandoffFakeAgent(tmp_path)
+    msg = record_plan_rejection(agent, "第 2 条任务的验收命令跑不起来")
+
+    assert "仍在 plan 模式" in msg and "只读" in msg and "task_list" in msg
+    assert "第 2 条任务的验收命令跑不起来" in msg
+    assert agent.permission_mode == "plan"     # 一步都没动
+    assert "exit_plan_mode" not in msg         # 旧文案那句「call exit_plan_mode again」没了
+    for banned in ("已解除", "已恢复", "不再只读", "刚才"):
+        assert banned not in msg, banned
+
+
+# ── 解决路径的落地动作 ─────────────────────────────────────────────────────
+
+
+def test_approve_finalizes_and_starts_execution_turn(tmp_path, resolve_env):
+    """respond(allowed=True, choice="execute") 的全部后果。
+
+    resolved 必须落盘：否则前端的「从历史恢复待审批」会把这个已批准的审批复活成
+    幽灵对话框（上一轮踩过这条）。
+    """
+    agent = HandoffFakeAgent(tmp_path)
+    pending = _pending_for(agent)
+    draft_dir = agent._plan_mode_manager.plan_dir
+
+    result = resolve_env.module.resolve_plan_approval(
+        resolve_env.sm, agent, pending, allowed=True, choice="execute")
+
+    assert result["success"] is True
+    resolved = agent.of_type("permission/resolved")
+    assert [(r["rpc_id"], r["outcome"]) for r in resolved] == [("r1", "allowed")]
+    assert agent.permission_mode == "acceptEdits"
+    assert agent.session.plan_slug                 # 落库
+    assert not draft_dir.exists()                  # 清草稿
+    assert len(resolve_env.spawned) == 1           # 起了新回合
+    assert resolve_env.spawned[0].startswith("当前权限模式：acceptEdits")
+
+
+@pytest.mark.parametrize("choice,expected_mode", [
+    ("execute", "acceptEdits"),
+    ("manual-execute", "default"),        # 回 pre_plan_mode（替身里设成 default）
+    ("clear-and-execute", "acceptEdits"),
+])
+def test_three_approval_routes(tmp_path, resolve_env, choice, expected_mode):
+    agent = HandoffFakeAgent(tmp_path)
+    pending = _pending_for(agent)
+
+    result = resolve_env.module.resolve_plan_approval(
+        resolve_env.sm, agent, pending, allowed=True, choice=choice)
+
+    assert result["success"] is True
+    assert agent.permission_mode == expected_mode
+    assert len(resolve_env.spawned) == 1
+    assert agent.context_cleared == (1 if choice == "clear-and-execute" else 0)
+
+
+def test_deny_keeps_plan_mode_and_delivers_feedback(tmp_path, resolve_env):
+    agent = HandoffFakeAgent(tmp_path)
+    pending = _pending_for(agent)
+
+    result = resolve_env.module.resolve_plan_approval(
+        resolve_env.sm, agent, pending, allowed=False, feedback="验收命令太弱")
+
+    assert result["success"] is True
+    assert [(r["rpc_id"], r["outcome"]) for r in agent.of_type("permission/resolved")] \
+        == [("r1", "denied")]
+    assert agent.permission_mode == "plan"        # 留在 plan 模式
+    assert not agent.session.plan_slug            # 什么都没落库
+    assert len(resolve_env.spawned) == 1
+    msg = resolve_env.spawned[0]
+    assert "验收命令太弱" in msg and "仍在 plan 模式" in msg
+
+
+def test_finalize_failure_is_observable_and_does_not_start_a_turn(tmp_path, resolve_env, monkeypatch):
+    """finalize 抛异常 → resolved 已落盘（不留幽灵对话框）、事件流里有一条 error、
+    **不起新回合**、success=False。静默降级 + 上层成功信号是本项目最贵的缺陷类（C1）。"""
+    agent = HandoffFakeAgent(tmp_path)
+    pending = _pending_for(agent)
+
+    def _boom(*a, **k):
+        raise RuntimeError("integration exploded")
+
+    monkeypatch.setattr(resolve_env.module, "finalize_approved_plan", _boom)
+
+    result = resolve_env.module.resolve_plan_approval(
+        resolve_env.sm, agent, pending, allowed=True, choice="execute")
+
+    assert result["success"] is False
+    assert "integration exploded" in result["message"]
+    assert [(r["rpc_id"], r["outcome"]) for r in agent.of_type("permission/resolved")] \
+        == [("r1", "allowed")]
+    assert any("integration exploded" in e.get("message", "") for e in agent.of_type("error"))
+    assert resolve_env.spawned == []
+
+
+def test_auto_approve_toggle_resolves_pending_through_the_same_path(tmp_path, monkeypatch, resolve_env):
+    """spec §D9 的交叉：审批**已挂着**才翻开开关 → 按「批准并自动执行」结掉，
+    落 resolved{outcome:"auto"}。
+
+    靶心是「共用同一个函数」：PUT 分支要是自己写一份 finalize，两条路必然漂移
+    （例如一条起新回合、另一条不起）。这里断言它调的就是 resolve_plan_approval，
+    且 outcome 是 "auto" 而不是 "allowed"——请求已落盘，决议必须落盘且如实标注成因。
+    """
+    from frontend.server.routers import sessions as sessions_router
+
+    agent = HandoffFakeAgent(tmp_path)
+    agent.set_pending_plan_approval(_pending_for(agent))
+
+    calls: list[dict] = []
+    real = resolve_env.module.resolve_plan_approval
+
+    def _spy(sm, a, pending, **kw):
+        calls.append(kw)
+        return real(sm, a, pending, **kw)
+
+    monkeypatch.setattr(resolve_env.module, "resolve_plan_approval", _spy)
+
+    sessions_router._resolve_pending_plan_approval_as_auto(agent.session_id, agent)
+
+    assert calls == [{"allowed": True, "choice": "execute", "outcome": "auto"}]
+    assert [(r["rpc_id"], r["outcome"]) for r in agent.of_type("permission/resolved")] \
+        == [("r1", "auto")]
+    assert agent.permission_mode == "acceptEdits"
+    assert len(resolve_env.spawned) == 1
+    assert agent._pending_plan_approval is None
+
+
+def test_auto_approve_toggle_without_pending_does_nothing(tmp_path, resolve_env):
+    """没有待审批时翻开开关：只改属性，不落任何事件、不起任何回合。"""
+    from frontend.server.routers import sessions as sessions_router
+
+    agent = HandoffFakeAgent(tmp_path)
+    sessions_router._resolve_pending_plan_approval_as_auto(agent.session_id, agent)
+
+    assert agent.of_type("permission/resolved") == []
+    assert resolve_env.spawned == []
+
+
+# ── spec §十.4：CLI/headless 的就地问人回退 ─────────────────────────────────
+
+
+async def test_cli_blocking_fallback_forks_on_plan_approval_fn(tmp_path, monkeypatch):
+    """分叉判据 = `mgr.plan_approval_fn is not None`。
+
+    ⚠️ spec 对这个判据的标注是反的（它写「注册了（前端服务）→ 非阻塞」），而全仓
+    唯一的注册点是 agents/main.py:286 的交互式 CLI；前端服务器一个都不注册。所以
+    「注册了」= 终端上坐着一个人 = 就地阻塞问人，「没注册」= 前端/headless = 落事件。
+    照 spec 的字面标注实现会让 CLI 落一条没人应答的事件、审批永久挂着。
+    """
+    asked: list[str] = []
+
+    async def approval_fn(plan_content: str) -> dict:
+        asked.append(plan_content)
+        return {"choice": "execute"}
+
+    agent = HandoffFakeAgent(tmp_path)
+    agent._plan_mode_manager.plan_approval_fn = approval_fn
+    loop, state = _make_loop(agent, monkeypatch)
+    await asyncio.wait_for(loop.run(None), 30)
+
+    assert len(asked) == 1 and "clamp" in asked[0]
+    assert agent.of_type("permission/request") == []   # 就地问人，不落事件
+    assert agent._pending_plan_approval is None
+    assert agent.permission_mode == "acceptEdits"      # 当场 finalize
+    assert state["steps"] == 2                         # 同一个 run 里接着执行
+    assert agent.user_messages[0].startswith("当前权限模式：acceptEdits")
+
+
+async def test_cli_fallback_keep_planning_stays_in_plan_mode(tmp_path):
+    async def approval_fn(plan_content: str) -> dict:
+        return {"choice": "keep-planning", "feedback": "验收命令太弱"}
+
+    agent = HandoffFakeAgent(tmp_path)
+    agent._plan_mode_manager.plan_approval_fn = approval_fn
+    loop = AgentLoop(agent)
+
+    assert await loop._plan_mode_handoff() is True    # 继续本回合让模型改
+    assert agent.permission_mode == "plan"
+    assert agent.of_type("permission/request") == []
+    msg = agent.user_messages[0]
+    assert "验收命令太弱" in msg and "仍在 plan 模式" in msg
+
+
+async def test_frontend_path_still_emits_the_event(tmp_path, monkeypatch):
+    """反面：plan_approval_fn 没注册（前端/headless）→ 必须走非阻塞事件路径。
+
+    与上一条一起钉住分叉判据的两个方向——只测一边，「判据写反」这种改法不会红。
+    """
+    agent = HandoffFakeAgent(tmp_path)
+    assert agent._plan_mode_manager.plan_approval_fn is None
+    loop, _ = _make_loop(agent, monkeypatch)
+    await asyncio.wait_for(loop.run(None), 30)
+
+    assert len(agent.of_type("permission/request")) == 1
+    assert agent.permission_mode == "plan"     # 没被就地 finalize
+
+
+# ── 删除面 ─────────────────────────────────────────────────────────────────
+
+
+def test_exit_plan_mode_is_gone_from_every_backend_surface():
+    """逐个断言工具真的不在了，而不是「声明删了、分支还留着」。"""
+    import agents.plan.plan_tool_executor as pte
+    from agents.tools.dispatcher import HUMAN_WAIT_TOOLS, ToolDispatcher
+    from agents.tools.permissions import check_permission
+    from agents.tools.registry import TOOL_EXECUTION_MODES, tool_definitions
+
+    names = [t["name"] for t in tool_definitions]
+    assert "exit_plan_mode" not in names
+    assert "enter_plan_mode" in names          # 只删 exit，enter 保留
+    assert "exit_plan_mode" not in TOOL_EXECUTION_MODES
+
+    # ask_user 必须**留在** HUMAN_WAIT_TOOLS：它修的是与本设计无关的真缺陷
+    # （外层默认 60s 会先于它自己的 300s 内部上限把它掐死）。
+    assert HUMAN_WAIT_TOOLS == frozenset({"ask_user"})
+    assert ToolDispatcher(agent_ref=SimpleNamespace()).get_tool_timeout("ask_user") is None
+
+    for symbol in ("_exit_plan_mode", "_request_approval", "_finalize_plan_exit"):
+        assert not hasattr(pte, symbol), symbol
+    assert hasattr(pte, "finalize_approved_plan")
+
+    # enter 的放行口还在（权限层仍是唯一防线，spec §D5）
+    assert check_permission("enter_plan_mode", {}, "plan")["action"] == "allow"

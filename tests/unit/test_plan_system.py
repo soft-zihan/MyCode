@@ -467,12 +467,25 @@ class TestPlanStatusDeserialization:
 
 def test_plan_prompt_is_single_track(tmp_path):
     prompt = PlanModeManager(workspace=tmp_path, session_id="s1").build_plan_mode_prompt()
-    # ⚠️ 刻意**不**断言 "exit_plan_mode" 缺席：自动校验送审要到批次 B 才接上，
-    # 在那之前删掉「调 exit_plan_mode」的指令会让 plan 模式根本没法送审——
-    # 每个 commit 都必须是一个可用的产品状态。那条断言属于 B2（随工具一起删）。
+    # "exit_plan_mode" 在 A1 时刻意**没有**进这个列表：自动校验送审要到批次 B 才接上，
+    # 在那之前删掉「调 exit_plan_mode」的指令会让 plan 模式根本没法送审——每个 commit
+    # 都必须是一个可用的产品状态。B2 删掉工具的同时把它加回来（A1 推迟的那条断言）：
+    # 现在提示词里再出现这个名字，就说明有人把「模型举手送审」那条旧路又写回来了。
     for banned in ("双轨", "轻量轨", "重量轨", "Phase 1", "Phase 2",
-                   "spec.md", "design.md", "tasks.md"):
+                   "spec.md", "design.md", "tasks.md", "exit_plan_mode"):
         assert banned not in prompt, banned
+
+
+def test_plan_prompt_says_review_is_automatic(tmp_path):
+    """送审是**系统自动**做的，不是模型举手做的（spec §D7 负面清单第三条）。
+
+    断言关键子串而不是整句（改个标点不该让测试红）。少了这句话，模型写完 plan.md
+    之后会停在原地等一个已经不存在的工具——A1 到 B1 之间正是靠那句
+    「MUST call exit_plan_mode」维持可用的，所以这条断言是删除面的另一半。
+    """
+    prompt = PlanModeManager(workspace=tmp_path, session_id="s1").build_plan_mode_prompt()
+    assert "自动校验" in prompt
+    assert "就停" in prompt      # 写完 plan.md 就停，不要调用任何退出/送审工具
 
 
 def test_plan_prompt_states_negative_list_not_positive(tmp_path):

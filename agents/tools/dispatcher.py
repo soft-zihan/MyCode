@@ -37,31 +37,30 @@ from agents.tools.wiki_tools import remember
 
 
 # 「在自己执行期间等人应答」的工具：外层不设超时（get_tool_timeout 返回 None，
-# execute_tool_call 直接 await、不套 asyncio.wait_for）。
+# execute_tool_call 直接 await、不套 asyncio.wait_for）。集合的判据就是这一句，
+# 目前的唯一成员是 ask_user。
 #
-# 为什么这些可以无界、别的工具不行：
-# - exit_plan_mode：等待发生在 permission_gate._confirm_via_session 的 0.1s 轮询里，
-#   出口有三条且都不依赖外层超时——①人工应答 ②abort（_abort_fn 绑
-#   agent._abort_requested，每 0.1s 查一次）③自动审批开关热生效（零参 callable
-#   每轮现读）。门内的 300s 超时上一轮已删（超时返回 False 会被 plan 审批层翻译成
-#   「用户拒绝了计划」）；若外层再套 600s，等满后整个工具调用被掐死、待审批状态
-#   被销毁，模型收到一条 timeout 错误——同一个缺陷换个地方复发。
-# - ask_user：同样在执行期间等人回答（question/request → 0.1s 轮询），但它自带
-#   300s 内部上限与 abort 出口（question_tools.handle_ask_user），到点返回可恢复的
-#   错误文案而不是永久挂住。此前外层默认 60s 会先于内部上限把它掐死，模型拿到的是
-#   硬 timeout 错误、而不是设计好的「Proceed with your best judgment」。
+# 为什么它可以无界、别的工具不行：等待发生在 question/request 之后的 0.1s 轮询里，
+# 出口有三条且都不依赖外层超时——①人工应答 ②abort ③它自带的 300s 内部上限
+# （question_tools.handle_ask_user），到点返回可恢复的「Proceed with your best
+# judgment」而不是永久挂住。此前外层默认 60s 会**先于**那个内部上限把它掐死，模型
+# 拿到的是一条硬 timeout 错误、而不是设计好的可恢复文案。
 # 其余工具（run_shell / agent / skill / 只读 / 默认 60s）都不等人，超时表原样保留。
+#
+# ⚠️ 这个集合曾经还有第二个成员 exit_plan_mode（plan 审批阻塞在权限门里等人）。
+# 该工具已随「审批改为非阻塞会话状态」一起删除（spec §D3）：审批不再发生在任何工具的
+# 执行期间，于是「等人的时候不能被计时器杀掉」这个问题对它根本不存在——不是把超时
+# 调大，是让超时这件事消失。ask_user 那一半与 plan 模式无关，**永久保留**。
 #
 # 无人值守场景复核（本轮判断依据）：
 # - eval 三个入口全部 permission_mode="bypassPermissions"（runner_base.py:178、
-#   executors.py:83、smoke/runner.py:203），eval/ 里 grep 不到任何 plan 模式任务；
-#   非 plan 模式下 exit_plan_mode 立即返回 "Not in plan mode."，根本不会进入等待。
-#   即便模型自发 enter_plan_mode，eval 的 run_agent_task 还有自己的任务级
-#   wait_for(timeout_s)（runner_base.py:196-197）兜底。
+#   executors.py:83、smoke/runner.py:203），ask_user 在 eval 里没有人应答，靠它自己的
+#   300s 内部上限收敛；run_agent_task 还有任务级 wait_for(timeout_s) 兜底
+#   （runner_base.py:196-197）。
 # - CLI 路径走 gate 的 _confirm_fn 或 input() 回退、plan 审批走 plan_approval_fn
-#   （agents/main.py:255-286），三者都即时返回，EOFError 也有兜底，不会挂。
+#   （agents/main.py:255-286），都即时返回，EOFError 也有兜底，不会挂。
 # 结论：无界安全，不引入环境变量上限。
-HUMAN_WAIT_TOOLS = frozenset({"exit_plan_mode", "ask_user"})
+HUMAN_WAIT_TOOLS = frozenset({"ask_user"})
 
 
 class ToolDispatcher:
@@ -234,7 +233,7 @@ class ToolDispatcher:
             return await self._execute_git_diff_before_last_compress_tool(inp)
         if name == "git_diff_session":
             return await self._execute_git_diff_session_tool(inp)
-        if name in ("enter_plan_mode", "exit_plan_mode"):
+        if name == "enter_plan_mode":
             return await execute_plan_mode_tool(self.agent, name)
         if name == "agent":
             return await execute_agent_tool(self.agent, inp, timeout_s=self.get_tool_timeout("agent"))

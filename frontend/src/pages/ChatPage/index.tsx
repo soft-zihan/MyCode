@@ -305,7 +305,7 @@ export default function ChatPage() {
           )}
 
           {/* Permission Request Dialog */}
-          {pendingPermission && pendingPermission.tool_name === 'exit_plan_mode' && currentSessionId && (
+          {pendingPermission && pendingPermission.tool_name === 'plan_approval' && currentSessionId && (
             <PlanApprovalDialog
               request={pendingPermission}
               sessionId={currentSessionId}
@@ -317,7 +317,7 @@ export default function ChatPage() {
           )}
 
           {/* Other Permission Request */}
-          {pendingPermission && pendingPermission.tool_name !== 'exit_plan_mode' && (
+          {pendingPermission && pendingPermission.tool_name !== 'plan_approval' && (
             <ApprovalBar
               toolName={pendingPermission.tool_name}
               command={pendingPermission.command}

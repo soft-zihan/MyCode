@@ -152,25 +152,21 @@ async def test_human_answer_appends_resolved(allowed, outcome):
 # ── 6. plan 审批自动放行 → execute 路由 ──────────────────────────────────
 
 
-async def test_plan_auto_approval_falls_to_execute_route():
-    from agents.plan.plan_tool_executor import _request_approval
+def test_plan_auto_approval_route_moved_to_the_turn_end_hook():
+    """`_request_approval` 随 exit_plan_mode 一起删了（spec §D3：审批不再阻塞在工具
+    内部，改成 turn 收尾校验 plan.md 后落 permission/request）。
 
-    sess = FakeSession()
-    gate = PermissionGate(session=sess, auto_approve_fn=lambda: True)
+    它原来钉的性质——「自动放行 = execute 路由，且一个事件都不落」——搬到了 turn 收尾
+    钩子，由 tests/unit/test_plan_mode_handoff.py 的
+    test_auto_approve_on_at_turn_end_finalizes_without_request 钉住（那里断言
+    finalize 收到的 choice 恰好是 "execute"、且 permission/request 为零条）。
+    这里只钉删除面：符号真的不在了，别留一个没人调用的僵尸。
+    """
+    import agents.plan.plan_tool_executor as pte
 
-    class FakeAgent:
-        _permission_gate = gate
-
-        async def _confirm_dangerous(self, command, extra_data=None, tool_name=None):
-            return await gate.confirm(command, extra_data=extra_data)
-
-    mgr = SimpleNamespace(plan_approval_fn=None, plan_dir=None)
-    choice, feedback = await _request_approval(FakeAgent(), mgr, "the plan")
-    # 自动放行时 last_choice 是空串 → plan_tool_executor 的 `or "execute"`：
-    # 自动审批 = 「批准并自动执行」，不是「逐步确认」。
-    assert choice == "execute"
-    assert feedback is None
-    assert sess.events == []
+    assert not hasattr(pte, "_request_approval")
+    assert not hasattr(pte, "_exit_plan_mode")
+    assert not hasattr(pte, "_finalize_plan_exit")
 
 
 # ── 8. request_permission：无 timeout 形参，三条出口照常 ─────────────────

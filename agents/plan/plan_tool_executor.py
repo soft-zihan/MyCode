@@ -1,16 +1,21 @@
-"""Plan mode 工具执行（U0 从 Agent._execute_plan_mode_tool 迁出）。
+"""Plan mode 工具执行 + 批准落地（U0 从 Agent._execute_plan_mode_tool 迁出）。
 
-Agent 只留调度：dispatcher 直接调用本模块。行为与原实现逐项等价，
-两条审批分支（plan_approval_fn / confirm_dangerous 回退）的重复尾部
-收敛为单一流程；已核对的原分支差异全部保留：
-- approval_fn 分支 manual-execute：不做 plan system integration（plan_result=None）
-- confirm 分支 manual-execute：做 integration 且 slug 存在时照常物化进 task_list
-- trace metadata：confirm 分支原多带 "choice" 字段，统一后两分支都带（仅 trace 元数据）
+工具面只剩 `enter_plan_mode` 一个：`exit_plan_mode` 已删（spec §D3）。送审不再由模型
+举手触发，而是 turn 收尾时校验 plan.md 的格式（agent_loop._plan_mode_handoff）；
+审批也不再阻塞在工具内部，而是落成 permission/request 事件后会话状态，回合正常结束。
+于是本模块剩下的职责是「批准之后做什么」：finalize_approved_plan 由两条路共用——
+HTTP 应答（frontend/server/routers/plan_approval.py）与 CLI 的就地问人回退
+（agent_loop._plan_approval_blocking，spec §十.4）。
+
+保留的原分支差异（现在只体现在 finalize_approved_plan 内部的一个布尔上）：
+- plan_approval_fn 已注册（= 交互式 CLI，见该函数注释里的方向说明）且 choice 是
+  manual-execute：不做 plan system integration（plan_result=None）
+- 其余情况：做 integration，slug 存在时照常物化进 task_list
 
 批准后不再启动 plan 执行状态机、也不再向对话注入全量任务清单（两者的注入点
-Plan 3a Task 3 已删）：tasks.md 解析出的任务物化进 task_list
+Plan 3a Task 3 已删）：plan.md 解析出的任务物化进 task_list
 （_materialize_plan_into_task_list），清单摘要 S 常驻上下文尾部，焦点任务的
-detail 走条件披露注入。tasks.md 在批准那一刻冻结为「已批准的计划」文档，
+detail 走条件披露注入。plan.md 在批准那一刻冻结为「已批准的计划」文档，
 此后活状态只在 task_list。
 
 同理，批准结果消息里嵌的是 conversation_plan（不含任务清单）而不是 full_plan：
@@ -19,7 +24,7 @@ detail 走条件披露注入。tasks.md 在批准那一刻冻结为「已批准�
 
 同一 session 二次批准会走 handle_plan_system_integration 的 append 分支，盘上的
 tasks.md 于是成为「旧 + 新」的合并体；那条路径只物化本次新增的一块（draft.plan_md
-的 checkbox → 结构化转换结果），否则 task_list 会整份翻倍。详见 _finalize_plan_exit。
+的 checkbox → 结构化转换结果），否则 task_list 会整份翻倍。详见 finalize_approved_plan。
 同一笔重复账还有上游的一半：草稿目录 plan-<session_id> 每轮同路径，批准落地后必须
 清掉，否则下一轮的 plan.md 里还躺着上一轮的 checkbox、被转换器整个重转一遍。
 详见 _clear_draft_dir。
@@ -62,8 +67,6 @@ PLAN_APPROVAL_SUPERSEDED = "superseded"
 async def execute_plan_mode_tool(agent: "Agent", name: str) -> str:
     if name == "enter_plan_mode":
         return _enter_plan_mode(agent)
-    if name == "exit_plan_mode":
-        return await _exit_plan_mode(agent)
     return f"Unknown plan mode tool: {name}"
 
 
@@ -77,7 +80,8 @@ def _enter_plan_mode(agent: "Agent") -> str:
         f"唯一产物：写 plan.md——首行单行 `# 标题`（会被 slug 化成永久目录名），然后 "
         f"## 背景 / ## 方案 / ## 任务清单（checkbox：`- [ ] 1. 描述`，每条带缩进的 `验收:`）/ ## 验收。\n"
         f"task_list 在本模式下不可用：计划批准后由系统自动物化进 task_list。\n\n"
-        f"When your plan is complete, call exit_plan_mode."
+        f"写完 plan.md 就停，不要调用任何退出或送审工具：系统会自动校验格式并弹出审批，"
+        f"不合格会把具体错误喂回给你。"
     )
 
 
@@ -94,7 +98,7 @@ class _PlanDraft:
       按 `## 任务清单` 标题切出来）。
 
     不再携带 checkbox → 结构化的转换结果（曾经的 tasks 字段）：integration 内部
-    自己转，追加路径的物化在 _finalize_plan_exit 里用同一个纯函数重转一遍，
+    自己转，追加路径的物化在 finalize_approved_plan 里用同一个纯函数重转一遍，
     同输入必同输出，多存一份只会多一个漂移点。
     """
     plan_md: str
@@ -182,57 +186,35 @@ def _validate_and_load_draft(mgr: Any) -> str | _PlanDraft:
     return _PlanDraft(plan_md, full_plan, conversation_plan)
 
 
-async def _request_approval(agent: "Agent", mgr: Any, full_plan: str) -> tuple[str, str | None]:
-    """审批双通道：plan_approval_fn（前端交互）优先，confirm_dangerous（CLI）回退。
+def record_plan_rejection(agent: "Agent", feedback: str | None) -> str:
+    """拒绝路径（keep-planning）：落 trace + 组装要注入新回合的起始消息。
 
-    返回 (choice, feedback)。
+    曾是 `_exit_plan_mode` 的拒绝分支（工具返回值）。工具删掉之后它由两条路共用：
+    HTTP 应答的拒绝分支与 CLI 的就地问人回退。trace 与消息放在一起是因为它们必须
+    同时发生——只落 trace 用户看不到，只发消息则评审集里查无此事。
+
+    spec §D8：只陈述当前状态 + 用户意见原文。不讲「计划被拒绝了所以你还要继续」
+    这种转场叙述；但少掉状态行也不行，模型会把「收到一条新消息」误读成「计划通过了」。
     """
-    if mgr.plan_approval_fn is not None:
-        result = await mgr.plan_approval_fn(full_plan)
-        return result.get("choice", "manual-execute"), result.get("feedback")
-
-    confirmed = await agent._confirm_dangerous(
-        f"Plan completed. Exit plan mode?\n\n{full_plan}",
-        extra_data={"plan_dir": str(mgr.plan_dir)} if mgr.plan_dir else None,
-        tool_name="exit_plan_mode",
+    fb = (feedback or "").strip() or "（用户没有留下具体意见）"
+    trace_event(
+        "plan_mode.rejected",
+        input=fb[:2000],
+        metadata={"feedback": fb[:2000]},
     )
-    if confirmed:
-        return agent._permission_gate.last_choice or "execute", None
-    return "keep-planning", agent._permission_gate.last_feedback or "User rejected the plan without comments."
-
-
-async def _exit_plan_mode(agent: "Agent") -> str:
-
-    if agent.permission_mode != "plan":
-        return "Not in plan mode."
-
-    mgr = agent._plan_mode_manager
-    draft = _validate_and_load_draft(mgr)
-    if isinstance(draft, str):
-        return draft
-
-    choice, feedback = await _request_approval(agent, mgr, draft.full_plan)
-
-    if choice == "keep-planning":
-        feedback = feedback or "Please revise the plan."
-        trace_event(
-            "plan_mode.rejected",
-            input=feedback[:2000],
-            metadata={"feedback": feedback[:2000]},
-        )
-        return (
-            "User rejected the plan and wants to keep planning.\n\n"
-            f"User feedback: {feedback}\n\n"
-            "Please revise your plan based on this feedback. When done, call exit_plan_mode again."
-        )
-
-    return _finalize_plan_exit(agent, mgr, draft, choice)
+    plan_dir = agent._plan_mode_manager.plan_dir if agent._plan_mode_manager else None
+    return (
+        f"{keep_planning_state_line()}\n\n"
+        f"用户对计划的意见：{fb}\n\n"
+        f"请据此修改 {plan_dir}/plan.md，改完直接结束回复"
+        "（不要调用任何退出或送审工具），系统会自动重新校验并送审。"
+    )
 
 
 def _clear_draft_dir(plan_dir: Any, slug: str) -> None:
     """批准落地后清掉草稿目录 `<workspace>/.mycode/plans/plan-<session_id>`。
 
-    它此前**从不被清**——_finalize_plan_exit 只把 `mgr.plan_dir` 置 None，那条路径上
+    它此前**从不被清**——finalize_approved_plan 只把 `mgr.plan_dir` 置 None，那条路径上
     没有任何 rmtree/unlink。而这个路径由 session_id 决定，每轮进 plan 模式都回到同一
     个目录；提示词又明教「追加模式」就地追加（plan_mode.py:127-128），轻量轨的转换器
     会把幸存 plan.md 里的**每个** checkbox 重新转一遍——于是第二轮 draft.tasks 几乎
@@ -268,9 +250,23 @@ def _clear_draft_dir(plan_dir: Any, slug: str) -> None:
         print_error(f"[plan] failed to clear draft dir '{draft}': {e!r}")
 
 
-def _finalize_plan_exit(agent: "Agent", mgr: Any, draft: _PlanDraft, choice: str) -> str:
-    """批准路径：integration 落地 + 模式切换 + trace 上报 + 结果消息组装。"""
+def finalize_approved_plan(agent: "Agent", draft: _PlanDraft, choice: str) -> str:
+    """批准落地：integration 落库 + 模式切换 + 清草稿 + 物化 + 组装执行回合的起始消息。
 
+    曾是 `_finalize_plan_exit(agent, mgr, draft, choice)`——`exit_plan_mode` 工具的
+    返回值。工具删掉之后（spec §D3 非阻塞审批）调用方变成两条：HTTP 应答
+    （frontend/server/routers/plan_approval.py）与 turn 收尾钩子的自动审批 / CLI 就地
+    问人分支。返回值不再是「工具结果」，而是**要注入执行回合的那条起始消息**。
+    mgr 从 agent 上取而不是当参数传：两个调用方手里都只有 agent，多一个参数就是多一个
+    能漂移的口径。
+
+    保留的动作一项没少：handle_plan_system_integration 落库、按路由切权限模式、
+    _clear_draft_dir、物化进 task_list（**刻意不传 current_seq**，缘由见
+    _materialize_plan_into_task_list）。消息里那几行物化说明**逐字沿用**旧文案——
+    那是真机验证过能让模型正确使用新体制的，改措辞等于重新赌一次（spec §D8）；
+    D8 只是在它前面加一行当前状态声明。
+    """
+    mgr = agent._plan_mode_manager
     execute = choice in ("clear-and-execute", "execute")
     # 行为保留：approval_fn 分支仅 execute/clear-and-execute 做 integration；
     # confirm 分支（含 manual-execute）始终做 integration。
@@ -387,7 +383,10 @@ def _finalize_plan_exit(agent: "Agent", mgr: Any, draft: _PlanDraft, choice: str
     else:
         result_msg += "Proceed with implementation."
 
-    return result_msg
+    # spec §D8：起始消息的第一句是**当前状态**声明（target_mode 是切换之后的真实值），
+    # 后面才是原有的那几行物化说明。措辞纪律见 execution_state_line 上方的注释——
+    # 不讲转场：clear-and-execute 会清空上下文，模型没有「之前」可指。
+    return execution_state_line(target_mode, choice) + "\n\n" + result_msg
 
 
 # ── spec §D8：执行/规划回合起始消息里的「当前状态」行 ──
@@ -489,7 +488,7 @@ def _materialize_plan_into_task_list(
 
     `tasks_md` 非 None 时解析**这段文本**而不是读盘上的 tasks.md。二次批准走追加
     路径时盘上那份已经是「旧 + 新」的合并体，只有本次新增的一块该被物化（缘由见
-    _finalize_plan_exit 里那段注释）。空串是「本次没有新增」而不是「没给」，所以
+    finalize_approved_plan 里那段注释）。空串是「本次没有新增」而不是「没给」，所以
     判据是 `is None`，不是真假——否则会静默退回读合并体，把旧任务再物化一遍。
 
     `complete=False` 表示中途出过异常、store 里可能只有前缀。返回裸 int 时调用方
@@ -503,7 +502,7 @@ def _materialize_plan_into_task_list(
 
     追加而不清空：session 可能已有清单（add_task 默认追加，after_id 显式串起
     物化顺序与 tasks.md 一致）。物化失败不能让已批准的 plan 中止——用户已经
-    批过了，_finalize_plan_exit 必须走完：解析失败退化为「物化 0 条，照常进入
+    批过了，finalize_approved_plan 必须走完：解析失败退化为「物化 0 条，照常进入
     实现」，中途 store 写失败退化为已成功的前缀条数，都留痕。
     """
     count = 0

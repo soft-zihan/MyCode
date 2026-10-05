@@ -65,8 +65,11 @@ export function PlanApprovalDialog({ request, sessionId, onApprove, onDeny }: Pl
   }, [sessionId]);
 
   const fallbackContent = useMemo(() => {
-    const cmd = request.command || '';
-    return cmd.replace(/^Plan completed\. Exit plan mode\?\s*/, '').trim();
+    // 草稿端点读不到时的兜底：permission/request.command 承载的就是计划全文
+    // （agent_loop._plan_mode_handoff_inner）。以前这里还要剥掉一层
+    // "Plan completed. Exit plan mode?" 前缀——那是已删除的 exit_plan_mode 工具
+    // 经权限门发出来的包装文案，现在事件里只有计划本身。
+    return (request.command || '').trim();
   }, [request.command]);
 
   const tabNames = artifacts ? Object.keys(artifacts) : [];
@@ -125,7 +128,6 @@ export function PlanApprovalDialog({ request, sessionId, onApprove, onDeny }: Pl
         <div className="flex items-center gap-2 px-5 py-3.5 border-b border-gray-200 flex-shrink-0">
           <FileText className="w-4 h-4 text-indigo-600" />
           <h2 className="text-sm font-semibold text-gray-900">计划审批</h2>
-          <span className="text-[11px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 font-mono">exit_plan_mode</span>
           <div className="flex-1" />
           {tabNames.length > 1 && viewMode === 'preview' && (
             <div className="flex items-center gap-0.5 bg-gray-100 rounded-lg p-0.5">

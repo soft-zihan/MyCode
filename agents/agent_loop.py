@@ -17,9 +17,9 @@ from agents.core.text_sanitization import safe_utf8_text
 from agents.plan.plan_tool_executor import (
     PLAN_APPROVAL_SUPERSEDED,
     PLAN_APPROVAL_TOOL_NAME,
-    _finalize_plan_exit,
     _validate_and_load_draft,
-    execution_state_line,
+    finalize_approved_plan,
+    record_plan_rejection,
 )
 from agents.tools.file_snapshot import capture_file_snapshot
 from agents.tools.registry import CONCURRENCY_SAFE_TOOLS
@@ -300,12 +300,13 @@ class AgentLoop:
         if a.auto_approve_enabled():
             # spec §D9：开关已开 → **不落 permission/request**（沿用上一轮的裁定：
             # 开关已开时不凭空造请求），当场 finalize 并 continue 去执行。
-            result_msg = _finalize_plan_exit(a, mgr, draft, "execute")
-            # 起始消息 = D8 的当前状态行 + 现有的物化说明（那几行是真机验证过能让
-            # 模型正确使用新体制的，逐字沿用，spec §D8）。
-            a.append_user_message(
-                execution_state_line(a.permission_mode, "execute") + "\n\n" + result_msg)
+            # 起始消息 = finalize_approved_plan 的返回值（D8 的当前状态行 + 物化说明）。
+            a.append_user_message(finalize_approved_plan(a, draft, "execute"))
             return True
+
+        if mgr.plan_approval_fn is not None:
+            # spec §十.4：CLI/headless 的就地问人回退（阻塞）。
+            return await self._plan_approval_blocking(draft)
 
         self._supersede_pending_plan_approval()
         rpc_id = uuid.uuid4().hex[:8]
@@ -347,6 +348,29 @@ class AgentLoop:
             "outcome": PLAN_APPROVAL_SUPERSEDED,
         })
         a._pending_plan_approval = None
+
+    async def _plan_approval_blocking(self, draft) -> bool:
+        """spec §十.4 的 CLI/headless 分叉：就地阻塞问人，拿到答复当场落地。
+
+        判据是 `mgr.plan_approval_fn is not None`。⚠️ spec 对这个判据的**标注是反的**
+        （它写「注册了（前端服务）→ 非阻塞；没注册（CLI/headless）→ input()」），
+        而全仓只有一个注册点：agents/main.py:286 的交互式 CLI。前端服务器一个都不
+        注册——它靠 permission/request 事件 + HTTP 应答。所以正确的读法是
+        「注册了 = 终端上坐着一个人 = 可以就地问」；照 spec 的字面标注实现会让 CLI
+        落一条没人应答的事件、回合结束后审批永久挂着。判据本身沿用，方向按事实。
+
+        两条路共用同一个校验器（上面刚跑过）与同一个 finalize_approved_plan，
+        只在「怎么问人」这一处分叉。返回值恒为 True：答复已经拿到，本回合直接接着执行
+        （CLI 没有「起一个新回合」这回事，也没有前端要通知）。
+        """
+        a = self._agent
+        result = await a._plan_mode_manager.plan_approval_fn(draft.full_plan) or {}
+        choice = result.get("choice") or "manual-execute"
+        if choice == "keep-planning":
+            a.append_user_message(record_plan_rejection(a, result.get("feedback")))
+            return True
+        a.append_user_message(finalize_approved_plan(a, draft, choice))
+        return True
 
     def _feed_plan_errors_back(self, errors: list[str]) -> bool:
         """不合格 → 把结构化错误喂回模型、自动续一个回合让它自己修（有界）。

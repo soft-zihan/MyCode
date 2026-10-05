@@ -70,7 +70,6 @@ TOOL_EXECUTION_MODES: dict[str, str] = {
     "compact_context": "sequential",
     "context_restore": "sequential",
     "enter_plan_mode": "sequential",
-    "exit_plan_mode": "sequential",
     "agent": "sequential",
     "ask_user": "sequential",
     "task_list": "sequential",
@@ -315,11 +314,6 @@ tool_definitions: list[ToolDef] = [
     {
         "name": "enter_plan_mode",
         "description": "Enter plan mode to switch to a read-only planning phase. In plan mode, you can only read files and write to the plan file.",
-        "input_schema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "exit_plan_mode",
-        "description": "Exit plan mode after you have finished writing your plan to the plan file.",
         "input_schema": {"type": "object", "properties": {}},
     },
     {

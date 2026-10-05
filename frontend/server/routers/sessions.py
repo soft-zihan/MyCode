@@ -547,7 +547,38 @@ async def api_update_auto_approve(session_id: str, data: AutoApproveRequest) -> 
     if agent is None:
         raise HTTPException(status_code=404, detail="Session not found")
     agent.set_auto_approve(data.enabled)
+    if data.enabled:
+        _resolve_pending_plan_approval_as_auto(session_id, agent)
     return {"success": True, "enabled": data.enabled}
+
+
+def _resolve_pending_plan_approval_as_auto(session_id: str, agent: Any) -> None:
+    """spec §D9 的交叉：审批**已挂着**的时候才翻开自动审批开关。
+
+    权限门那条「热生效」只对**阻塞中**的危险命令确认成立（它有轮询者）。plan 审批是
+    非阻塞的（spec §D3）：回合早已结束，没有任何协程会看到这个翻转，所以必须由这里
+    主动把它按「批准并自动执行」结掉，否则对话框会一直挂着、开关看起来坏了。
+
+    决议必须落盘（outcome="auto"）：请求已落盘而没有配对的 resolved，前端的「从历史
+    恢复待审批」会把这个早已放行的审批复活成幽灵对话框——上一轮踩过这条。
+
+    与 /api/events/respond 的批准分支**共用同一个** resolve_plan_approval，不写两份
+    （两份必然漂移，漂移的后果是同一种用户操作在两条路上落地不一样）。
+    """
+    from agents.session_manager import get_session_manager
+
+    from .plan_approval import DEFAULT_APPROVAL_CHOICE, resolve_plan_approval
+
+    entry = agent._pending_plan_approval
+    if entry is None:
+        return
+    pending = agent.take_pending_plan_approval(entry.get("rpc_id", ""))
+    if pending is None:
+        return
+    resolve_plan_approval(
+        get_session_manager(), agent, pending,
+        allowed=True, choice=DEFAULT_APPROVAL_CHOICE, outcome="auto",
+    )
 
 
 def _zero_token_breakdown() -> dict[str, Any]:

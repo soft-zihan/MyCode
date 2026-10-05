@@ -177,7 +177,7 @@ def _draft_mgr(tmp_path, *, plan_md):
 
 
 class _FakeAgent:
-    """只实现 _finalize_plan_exit 真正碰到的那几个属性/方法。"""
+    """只实现 finalize_approved_plan 真正碰到的那几个属性/方法。"""
 
     def __init__(self, session):
         self.session = session
@@ -196,9 +196,15 @@ def _new_session():
 
 
 def _finalize(agent, mgr):
-    """跑真的 _validate_and_load_draft + _finalize_plan_exit（生产路径）。"""
-    from agents.plan.plan_tool_executor import _finalize_plan_exit, _validate_and_load_draft
-    return _finalize_plan_exit(agent, mgr, _validate_and_load_draft(mgr), "execute")
+    """跑真的 _validate_and_load_draft + finalize_approved_plan（生产路径）。
+
+    B2 之后 mgr 不再是参数——finalize_approved_plan 从 `agent._plan_mode_manager` 上
+    取（两个调用方手里都只有 agent，多传一个参数就是多一个能漂移的口径），所以替身
+    必须挂上它。
+    """
+    from agents.plan.plan_tool_executor import _validate_and_load_draft, finalize_approved_plan
+    agent._plan_mode_manager = mgr
+    return finalize_approved_plan(agent, _validate_and_load_draft(mgr), "execute")
 
 
 # ────────────────────────── 基础物化 ──────────────────────────
@@ -348,7 +354,7 @@ def test_tasks_md_empty_string_does_not_fall_back_to_the_merged_file(ws):
 
 
 def test_double_approval_through_finalize_does_not_duplicate(ws, tmp_path):
-    """Finding 1 的调用方一侧：_finalize_plan_exit 在 action=="appended" 时必须
+    """Finding 1 的调用方一侧：finalize_approved_plan 在 action=="appended" 时必须
     把本次新增的那一块（draft.plan_md 的转换结果）交给物化，而不是让它按 slug 读合并体。
 
     两轮都走真的 handle_plan_system_integration：第一轮 created，第二轮因为
@@ -624,7 +630,7 @@ def _approve_round(session, workspace, n: int, desc: str, subitems: str = "  - �
 
 def test_draft_dir_is_cleared_after_successful_approval(ws, tmp_path):
     """草稿目录 `<workspace>/.mycode/plans/plan-<session_id>`（plan_mode.py:57-61）
-    此前**从不被清**：_finalize_plan_exit 只把属性置 None，那条路径上没有任何
+    此前**从不被清**：finalize_approved_plan 只把属性置 None，那条路径上没有任何
     rmtree/unlink。它于是跨轮幸存，成为二次批准重复物化的源头。
     """
     draft_dir, msg = _approve_round(_new_session(), tmp_path, 1, "收紧超时")
@@ -840,7 +846,7 @@ def test_clear_draft_dir_swallows_a_failure_in_its_own_guard(ws, tmp_path, monke
 #    （plan_manager.py:101-104）——它必然存在，因为是第 1 步 mkdir 的；
 # 6. `handle_plan_system_integration` 的 blanket `except Exception` 吞掉它、
 #    `print_error` 一声、返回 None（plan_mode.py:359-361）；
-# 7. `_finalize_plan_exit` 的 `if plan_result and plan_result.get("slug")` 于是为假：
+# 7. `finalize_approved_plan` 的 `if plan_result and plan_result.get("slug")` 于是为假：
 #    不物化、不清草稿、不发 session/plan_linked，消息里只剩
 #    "Proceed with implementation."——读起来像成功。
 #
@@ -890,7 +896,7 @@ def _run_real_minimal_approval(tmp_path, session, plan_md: str):
 
     generate_plan_dir() → 写 plan.md → validate_plan_artifacts() →
     read_draft_artifacts() → handle_plan_system_integration(plan_md)，
-    与生产路径（_validate_and_load_draft → _finalize_plan_exit）同一套函数。
+    与生产路径（_validate_and_load_draft → finalize_approved_plan）同一套函数。
     valid 与否由调用方断言：无 H1 的历史格式现在过不了校验，但 integration
     自己的兜底不变量必须**独立于校验器**成立。
 
@@ -1012,7 +1018,7 @@ def test_integration_failure_logs_the_slug_and_the_cause(ws, tmp_path, monkeypat
 def test_finalize_says_the_plan_was_not_recorded_when_integration_fails(ws, tmp_path):
     """part 3：integration 失败必须在**对话里**响，不能只在 stderr。
 
-    此前 `_finalize_plan_exit` 在 plan_result 为假时发 "Proceed with implementation."
+    此前 `finalize_approved_plan` 在 plan_result 为假时发 "Proceed with implementation."
     ——与成功路径一字不差的「像成功」。此时用户已经批准、permission_mode 已经切换，
     回滚不了；能做的只有别把「一切正常」说给模型和用户听。
 
@@ -1048,7 +1054,7 @@ def test_smoke_symptoms_are_gone_on_the_prescribed_minimal_format(ws, tmp_path):
     smoke（plan 模式 → 写轻量 plan → 批准 → 执行）观测到的是：`session/plan_linked`
     不在事件日志里、草稿目录没被清、结果消息里既没有 `## Approved Plan` 也没有物化
     文案，模型只好自己从零搭一份清单。这里走真的 _validate_and_load_draft +
-    _finalize_plan_exit，plan.md 用规定格式（A3 之后含首行 H1）。
+    finalize_approved_plan，plan.md 用规定格式（A3 之后含首行 H1）。
     """
     session = _new_session()
     mgr = PlanModeManager(workspace=tmp_path, session_id=session.id)
@@ -1079,14 +1085,15 @@ def test_manual_execute_skip_is_not_reported_as_a_failure(ws, tmp_path):
     的行为保留项），那不是失败，不该喊「未能记录」。响与不响分不开，这条信号立刻被
     噪声淹掉，等于白埋。
     """
-    from agents.plan.plan_tool_executor import _finalize_plan_exit, _validate_and_load_draft
+    from agents.plan.plan_tool_executor import _validate_and_load_draft, finalize_approved_plan
 
     session = _new_session()
     mgr = _draft_mgr(tmp_path, plan_md=MINIMAL_PLAN_MD)
     mgr.plan_approval_fn = object()          # 非 None 即走 approval_fn 分支；不会被调用
     agent = _FakeAgent(session)
+    agent._plan_mode_manager = mgr
 
-    msg = _finalize_plan_exit(agent, mgr, _validate_and_load_draft(mgr), "manual-execute")
+    msg = finalize_approved_plan(agent, _validate_and_load_draft(mgr), "manual-execute")
 
     assert "Proceed with implementation." in msg, msg
     assert "未能" not in msg, msg

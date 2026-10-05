@@ -126,12 +126,25 @@ class TaskDeleteResponse(BaseModel):
 async def api_respond_permission(data: PermissionResponseData):
     """响应权限请求。"""
     from agents.session_manager import get_session_manager
-    
+
+    from .plan_approval import resolve_plan_approval
+
     sm = get_session_manager()
     agent = sm.get_agent(data.session_id)
     if not agent:
         return {"success": False, "message": "Session not active"}
-    
+
+    # plan 审批走**另一条**路（spec §D3/D4）：它是非阻塞的，回合早已结束，没有任何
+    # 协程在轮询权限门。所以不能走下面的 set_permission_response——那条路是把响应塞进
+    # 门的轮询字典，这里没有轮询者，塞进去只会被下一次危险命令确认误读成它的答案。
+    # take 成功（rpc_id 匹配）就把后续动作全部做完：落 resolved → finalize → 起新回合。
+    pending = agent.take_pending_plan_approval(data.rpc_id)
+    if pending is not None:
+        return resolve_plan_approval(
+            sm, agent, pending,
+            allowed=data.allowed, choice=data.choice, feedback=data.feedback,
+        )
+
     # Use set_permission_response to work with the permission gate
     agent.set_permission_response(data.rpc_id, data.allowed, data.feedback, data.choice)
     return {"success": True}
