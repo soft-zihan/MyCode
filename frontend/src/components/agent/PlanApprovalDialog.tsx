@@ -11,6 +11,13 @@ interface PlanApprovalDialogProps {
   sessionId: string;
   onApprove: (choice: string) => void;
   onDeny: (feedback?: string) => void;
+  /**
+   * 后端明确报告「这次应答没有落地」时的原因（spec §十.6）。
+   *
+   * 对话框此时**不关**：关掉就等于告诉用户批准成功了，而实际什么都没发生
+   * ——本项目最恨的那个形状。典型来源是后端重启后 plan.md 重新校验不合格。
+   */
+  error?: string;
 }
 
 type ViewMode = 'preview' | 'edit' | 'feedback';
@@ -33,7 +40,7 @@ const TAB_LABELS: Record<string, string> = {
  * - 三种批准路由：execute / manual-execute / clear-and-execute
  * - ⌘+Enter（Ctrl+Enter）快捷批准并自动执行
  */
-export function PlanApprovalDialog({ request, sessionId, onApprove, onDeny }: PlanApprovalDialogProps) {
+export function PlanApprovalDialog({ request, sessionId, onApprove, onDeny, error }: PlanApprovalDialogProps) {
   const [viewMode, setViewMode] = useState<ViewMode>('preview');
   const [feedback, setFeedback] = useState('');
   const [artifacts, setArtifacts] = useState<Record<string, string> | null>(null);
@@ -149,6 +156,13 @@ export function PlanApprovalDialog({ request, sessionId, onApprove, onDeny }: Pl
             </div>
           )}
         </div>
+
+        {/* 后端报告「这次应答没有落地」的原因。刻意放在 header 之下、Content 之外：
+            preview / edit / feedback 三种视图下都看得见（提交意见失败时视图停在
+            feedback，放在 preview 页脚里就等于没说）。 */}
+        {error && (
+          <p className="px-5 py-2 text-xs text-danger bg-red-50 border-b border-gray-200">{error}</p>
+        )}
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto min-h-0">

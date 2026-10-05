@@ -16,6 +16,7 @@ detail 时清空 detail_origin_seq、after_id 以 int 抵达 store、非法 stat
 
 from __future__ import annotations
 
+import logging
 from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -31,9 +32,11 @@ from agents.tools.task_store import (
     update_task,
 )
 
-from .sessions import resolve_session_workspace
+from .sessions import _ensure_agent, resolve_session_workspace
 
 router = APIRouter(tags=["events"])
+
+logger = logging.getLogger(__name__)
 
 # 五值状态词表。**与 task_store.VALID_STATUSES 单源对齐**由
 # tests/unit/test_task_endpoints.py::test_status_vocabulary_is_single_sourced_with_the_store
@@ -127,10 +130,13 @@ async def api_respond_permission(data: PermissionResponseData):
     """响应权限请求。"""
     from agents.session_manager import get_session_manager
 
-    from .plan_approval import resolve_plan_approval
+    from .plan_approval import rebuild_pending_plan_approval, resolve_plan_approval
 
     sm = get_session_manager()
-    agent = sm.get_agent(data.session_id)
+    # `_ensure_agent` 而不是 `sm.get_agent`：后端重启后内存里没有这个 agent，而计划
+    # 审批可能仍然活着（spec §十.6）。restore 优先返回内存里的活 agent，不在内存时
+    # 才从事件日志 hydrate 一个——重建待审批要读的正是那份历史。
+    agent = await _ensure_agent(data.session_id)
     if not agent:
         return {"success": False, "message": "Session not active"}
 
@@ -139,6 +145,19 @@ async def api_respond_permission(data: PermissionResponseData):
     # 门的轮询字典，这里没有轮询者，塞进去只会被下一次危险命令确认误读成它的答案。
     # take 成功（rpc_id 匹配）就把后续动作全部做完：落 resolved → finalize → 起新回合。
     pending = agent.take_pending_plan_approval(data.rpc_id)
+    if pending is None:
+        # spec §十.6：`_pending_plan_approval` 是内存态，后端重启就没了，而前端照旧
+        # 能从历史恢复出审批对话框（有 permission/request{tool_name:"plan_approval"}、
+        # 没有配对的 resolved）。此前用户点批准就掉进下面那条 set_permission_response
+        # ——没有等待者，于是**什么都不发生、也不报错**。现在从盘上重建（不加持久化），
+        # 然后走**同一个** resolve_plan_approval：不写第二份 finalize。
+        # 重建报告失败（例如 plan.md 在重启前后被手工改坏、重新校验不合格）时回明确
+        # 错误，让 UI 显示出来并且不关对话框——绝不静默无操作。
+        rebuilt = rebuild_pending_plan_approval(agent, data.rpc_id)
+        if isinstance(rebuilt, str):
+            logger.error(f"[plan_approval] rebuild failed for rpc_id={data.rpc_id}: {rebuilt}")
+            return {"success": False, "message": rebuilt}
+        pending = rebuilt
     if pending is not None:
         return resolve_plan_approval(
             sm, agent, pending,
