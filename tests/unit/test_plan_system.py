@@ -400,3 +400,51 @@ class TestPlanStatusDeserialization:
         }, ""), encoding="utf-8")
 
         assert pm.get_plan("st-unknown") is None
+
+
+# ── A1：plan 提示词单轨化 + 负面清单 ────────────────────────────────────────
+#
+# 原来提示词分双轨（轻量轨 plan.md / 重量轨 spec+design+tasks），并把 grill-spec 与
+# tasks 两个「阶段策略」插值进重量轨。而那套策略系统端到端**零消费者**：
+# fetchPlanStrategies / savePlanStrategies 从来没有被任何组件调用过（没有设置界面），
+# 唯一改法是手改 ~/.my-code/config.json；load_strategy 全仓只有一个调用方，
+# 插值进的还是**非默认**的重量轨。用户裁定：任务是轻是重模型自会分辨，不必双轨。
+
+
+def test_plan_prompt_is_single_track(tmp_path):
+    prompt = PlanModeManager(workspace=tmp_path, session_id="s1").build_plan_mode_prompt()
+    # ⚠️ 刻意**不**断言 "exit_plan_mode" 缺席：自动校验送审要到批次 B 才接上，
+    # 在那之前删掉「调 exit_plan_mode」的指令会让 plan 模式根本没法送审——
+    # 每个 commit 都必须是一个可用的产品状态。那条断言属于 B2（随工具一起删）。
+    for banned in ("双轨", "轻量轨", "重量轨", "Phase 1", "Phase 2",
+                   "spec.md", "design.md", "tasks.md"):
+        assert banned not in prompt, banned
+
+
+def test_plan_prompt_states_negative_list_not_positive(tmp_path):
+    """负面清单（什么不能用），不是正面清单（你能用什么）。
+
+    正面清单会随每加一个工具就漂移，而且和 registry 构成两份真相；负面清单只有几条
+    且都是稳定的语义约束。本条的靶心是最后那组断言：如果有人日后好心加一句
+    「你可以用 read_file / grep_search / list_files 探索」，它要红。
+    """
+    prompt = PlanModeManager(workspace=tmp_path, session_id="s1").build_plan_mode_prompt()
+    assert "task_list" in prompt      # 明说 plan 模式下不可用
+    assert "plan.md" in prompt        # 唯一产物
+    assert "- [ ] 1." in prompt       # checkbox 格式（校验器按它判，两边必须一致）
+    assert "验收" in prompt            # 每条任务必须有验收
+    for tool in ("grep_search", "list_files", "outline_file", "web_search"):
+        assert tool not in prompt, tool
+
+
+def test_plan_prompt_keeps_the_h1_and_heading_contract(tmp_path):
+    """两条格式约束是**真 bug 的防线**，删提示词时最容易顺手删掉：
+    - 单行 `# 标题`：它是 slug 的唯一来源。Plan 3a 修过一个真 bug——`^#\\s+` 匹配不到
+      `##`，而当时提示词只规定 `##` 小节，结果兜底 slug 与草稿目录同名撞车、
+      create_plan 抛错被吞成 None、物化**静默什么都不落地**。
+    - 精确的 `## 任务清单` 标题：`_strip_task_checklist_section` 只认它，切不动时
+      整份清单会重复进对话。
+    """
+    prompt = PlanModeManager(workspace=tmp_path, session_id="s1").build_plan_mode_prompt()
+    assert "# <标题>" in prompt
+    assert "## 任务清单" in prompt

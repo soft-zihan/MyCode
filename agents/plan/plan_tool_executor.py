@@ -57,9 +57,9 @@ def _enter_plan_mode(agent: "Agent") -> str:
     return (
         f"Entered plan mode. You are now in read-only mode.\n\n"
         f"Your plan directory: {agent._plan_mode_manager.plan_dir}\n"
-        f"双轨规划（二选一）：\n"
-        f"- 轻量轨（默认）：只写 plan.md（## 背景 / ## 方案 / ## 任务清单（checkbox：- [ ] 1. 描述）/ ## 验收）\n"
-        f"- 重量轨（复杂任务）：写 spec.md（含验收标准）+ design.md + tasks.md\n\n"
+        f"唯一产物：写 plan.md——首行单行 `# 标题`（会被 slug 化成永久目录名），然后 "
+        f"## 背景 / ## 方案 / ## 任务清单（checkbox：`- [ ] 1. 描述`，每条带缩进的 `验收:`）/ ## 验收。\n"
+        f"task_list 在本模式下不可用：计划批准后由系统自动物化进 task_list。\n\n"
         f"When your plan is complete, call exit_plan_mode."
     )
 

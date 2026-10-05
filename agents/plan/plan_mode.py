@@ -14,7 +14,6 @@ import re
 from pathlib import Path
 from typing import Callable, Awaitable, Any
 
-from agents.plan.strategy_loader import load_strategy, strategy_config_from_app_config
 from agents.logging import print_error
 from agents.plan.plan_manager import count_tasks, create_plan, get_plan, append_tasks_to_plan, add_artifact
 from agents.plan.plan_models import PlanGranularity
@@ -45,12 +44,10 @@ class PlanModeManager:
         workspace: Path,
         session_id: str,
         plan_approval_fn: Callable[[str], Awaitable[bool]] | None = None,
-        strategy_config: dict[str, str] | None = None,
     ):
         self.workspace = workspace
         self.session_id = session_id
         self.plan_approval_fn = plan_approval_fn
-        self.strategy_config = strategy_config or {}
         self._plan_dir: Path | None = None
         self._pre_plan_mode: str | None = None
 
@@ -66,23 +63,15 @@ class PlanModeManager:
         return d
 
     def build_plan_mode_prompt(self) -> str:
-        """构建 Plan 模式系统提示词（从策略文件动态加载）。"""
-        plan_dir = self._plan_dir or self.generate_plan_dir()
+        """构建 Plan 模式系统提示词（单轨：唯一产物 plan.md）。
 
-        # 加载各阶段策略（全局应用配置为底，会话级覆盖）
-        cfg = {**strategy_config_from_app_config(), **self.strategy_config}
-        grill_spec_content, _, _ = load_strategy(
-            "grill-spec",
-            cfg.get("grill-spec", "simple"),
-            self.workspace,
-            plan_dir,
-        )
-        tasks_content, _, _ = load_strategy(
-            "tasks",
-            cfg.get("tasks", "structured"),
-            self.workspace,
-            plan_dir,
-        )
+        这段文本是**尾部 ephemeral system 消息**（prompt_runtime.build_tail_system_messages
+        每请求现读重拼），不进 system[0]、也不落盘。两个后果都要记住：
+        - 进出 plan 模式对 prefix cache **中性**（尾部在对话历史之后，不参与前缀命中）；
+        - 它**不进历史**，所以模型看不到「上一轮 plan 模式说过什么」，每次调用都是全新一份。
+          这也是为什么本提示词必须自包含，不能依赖「之前已经讲过」。
+        """
+        plan_dir = self._plan_dir or self.generate_plan_dir()
 
         return f"""
 
@@ -92,45 +81,48 @@ Plan mode is active. You MUST NOT make any edits (except files under {plan_dir})
 
 ## Plan Directory: {plan_dir}
 
-## 双轨规划 — 按任务复杂度选择轨道（二选一，不要混用）
+## 唯一产物：`{plan_dir}/plan.md`
 
-### 轻量轨（默认，适合大多数任务）：单一 plan.md
-分钟级~小时级、涉及文件较少的任务，只写一个文件：
-- `{plan_dir}/plan.md` — 首行必须是单行 `# <标题>`（它会被 slug 化，成为这份计划永久目录的名字），随后包含以下小节：
-  - `## 背景`（为什么做）
-  - `## 方案`(怎么做)
-  - `## 任务清单`（checkbox 格式，每行一个，编号从 1 开始）：
+任务是轻是重你自己判断，产物只有这一个文件。结构：
+
+- **首行必须是单行 `# <标题>`**——它会被 slug 化，成为这份计划永久目录的名字。
+  写成 `## 标题` 或者漏写，批准后的落库会失败。
+- `## 背景`（为什么做）
+- `## 方案`（怎么做）
+- `## 任务清单`——**必须是这个精确标题**（切分逻辑只认它），checkbox 格式，编号从 1 开始：
+
     ```
     - [ ] 1. 任务描述（一句话）
       - 验收: 一条能证明完成的命令
       - 改动: 涉及的文件/函数
       - 注意: 容易踩的坑、必须守住的约束
     ```
-    缩进子项会被物化进 task_list 的 detail 与 acceptance：`验收` 成为完成判据，
-    其余成为该任务的详细执行方案，在它成为焦点时自动注入上下文。
-    **explore 与 grill 都是可选的**——需求清楚就直接写，不清楚才用 ask_user 追问。
-  - `## 验收`（如何验证整体完成）
 
-### 重量轨（复杂任务显式升级）：三文档
-跨多模块、需要审计、跨会话的大任务，写三个文件：
-- `{plan_dir}/spec.md` — 需求规格（必须含"验收标准"小节）
-- `{plan_dir}/design.md` — 设计文档
-- `{plan_dir}/tasks.md` — 任务清单
+  缩进子项会被物化进 task_list 的 detail 与 acceptance：`验收` 成为完成判据，
+  其余成为该任务的详细执行方案，在它成为焦点时自动注入上下文。
+  **每条任务都必须有 `验收:`**——缺了它，这条任务永远无法被检验。
+- `## 验收`（如何验证整体完成）
 
-#### Phase 1: Grill + Spec（需求澄清 + 规格）
+## 需求不清楚时才追问
 
-{grill_spec_content}
+需求清楚就直接写，不清楚才用 ask_user 追问。追问用「编号问题 + 推荐答案」的格式，
+让用户一次答完，而不是一轮挤一个问题：
 
-#### Phase 2: Tasks（任务拆分）
+```
+❓ Q1 - 问题描述：选项 A 还是选项 B？
+➡️ 推荐：选项 A（理由）
 
-{tasks_content}
+❓ Q2 - ...
+➡️ 推荐：...
+```
 
-## 提交审批
+## 本模式下的限制
 
-Call exit_plan_mode when your plan is ready for user review.
+- **只读**：除 `{plan_dir}` 下的文件外不能写任何东西，不能跑非只读命令。
+- **`task_list` 不可用**：计划批准后由**系统**自动物化进 task_list，不用你建。
 
 ## 追加模式
-如果 plan 目录已存在，先 read_file 读取现有内容。保留已有规格/方案不变，在任务清单末尾追加新的 tasks。
+如果 plan 目录已存在，先 read_file 读取现有内容。保留已有背景/方案不变，在任务清单末尾追加新的 tasks。
 
 IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask the user to approve — exit_plan_mode handles that."""
 
