@@ -34,6 +34,13 @@ export const AutoApproveToggle: React.FC<AutoApproveToggleProps> = ({
     try {
       const res = await setAutoApprove(sessionId, next);
       sessionStore.setAutoApprove(sessionId, res.enabled);
+      // 打开开关会**立刻放行**正在等待的确认（热生效，裁定 D9），而决议事件
+      // permission/resolved 是 INTERNAL 的、不走 WS，所以前端不会被告知。
+      // 不清空的话抽屉会一直摆着那份已经被批准、且已经在执行的计划——用户再点一次
+      // 「批准并自动执行」只会打到一个已决议的 rpc_id 上（后端 no-op），看起来像按钮坏了。
+      // 真机复验抓到的就是这个：开关翻开、后端 resolved=auto、模式已切、任务已物化，
+      // 而抽屉还在。
+      if (res.enabled) sessionStore.setPendingPermission(sessionId, undefined);
     } catch (err) {
       sessionStore.setAutoApprove(sessionId, previous);
       console.error('[AUTOAPPROVE] Failed to toggle auto-approve:', err);

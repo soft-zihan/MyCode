@@ -27,6 +27,7 @@ describe('AutoApproveToggle', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     sessionStore.setAutoApprove('s1', false);
+    sessionStore.setPendingPermission('s1', undefined);
   });
 
   afterEach(() => {
@@ -42,6 +43,35 @@ describe('AutoApproveToggle', () => {
     expect(sessionStore.getAutoApprove('s1')).toBe(true);
     await waitFor(() => expect(setAutoApprove).toHaveBeenCalledWith('s1', true));
     expect(sessionStore.getAutoApprove('s1')).toBe(true);
+  });
+
+  it('打开开关时清掉待审批（热生效已经放行了，而 resolved 事件不走 WS）', async () => {
+    /**
+     * 靶心。打开开关会**立刻放行**正在等待的确认（裁定 D9），但 `permission/resolved`
+     * 是 INTERNAL 事件、不走 WS，前端不会被告知。不清空的话抽屉会一直摆着那份已经批准、
+     * 且已经在执行的计划——真机复验抓到的就是这个：后端 resolved=auto、模式已切、
+     * 任务已物化，抽屉还开着，用户再点「批准并自动执行」只会打到一个已决议的 rpc_id 上。
+     * 把实现里那行 `setPendingPermission(sessionId, undefined)` 删掉，这条就红。
+     */
+    vi.mocked(setAutoApprove).mockResolvedValue({ success: true, enabled: true });
+    sessionStore.setPendingPermission('s1', {
+      rpc_id: 'p1', request_id: 'p1', command: '# 计划全文', tool_name: 'plan_approval',
+    });
+    render(<AutoApproveToggle sessionId="s1" enabled={false} />);
+    fireEvent.click(btn());
+    await waitFor(() => expect(sessionStore.getPendingPermission('s1')).toBeUndefined());
+  });
+
+  it('关闭开关时不动待审批（关掉不放行任何东西，抽屉该留着）', async () => {
+    /** 反向对照：只写「打开就清」而不判 res.enabled 的实现，在这条红。 */
+    vi.mocked(setAutoApprove).mockResolvedValue({ success: true, enabled: false });
+    sessionStore.setPendingPermission('s1', {
+      rpc_id: 'p2', request_id: 'p2', command: 'rm -rf /', tool_name: 'shell',
+    });
+    render(<AutoApproveToggle sessionId="s1" enabled />);
+    fireEvent.click(btn());
+    await waitFor(() => expect(setAutoApprove).toHaveBeenCalledWith('s1', false));
+    expect(sessionStore.getPendingPermission('s1')).toBeDefined();
   });
 
   it('打开 = 警示色实心，关闭 = 幽灵按钮（安全阀必须视觉上明显）', () => {

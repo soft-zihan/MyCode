@@ -188,7 +188,16 @@ def api_session_summary(session_id: str) -> dict[str, Any]:
     else:
         result["metadata"] = {"id": session_id, "name": session_id, "cwd": ""}
         result["projections"] = {}
-    result["permission_mode"] = "default"
+    # 权限模式必须读**活 agent 的真实值**，不能硬编码 "default"：会话可能正处在 plan
+    # 模式（经 /api/chat/stream 的 permission_mode 进入，或模型自己 enter_plan_mode），
+    # 而前端 PermissionSelect 吃的就是这个字段——硬编码会让一个 plan 模式的会话在界面上
+    # 显示成 Default，用户看不出它其实只读、也看不出为什么写文件被拒。
+    # 与 api_get_permission_mode 保持同一口径（真机复验时两个端点给出过不同答案：
+    # /summary 说 default、/permission-mode 说 plan）。没有活 agent 时才回退 default。
+    _live_agent = _get_live_agent(session_id)
+    result["permission_mode"] = (
+        _live_agent.permission_mode if _live_agent is not None else "default"
+    )
 
     latest_stats = backend.get_latest_event(session_id, "stats") or {}
 
