@@ -18,10 +18,11 @@ detail 走条件披露注入。tasks.md 在批准那一刻冻结为「已批准�
 消费者都是给人看的（前端批准弹窗、CLI 确认框），那边一个字不减。
 
 同一 session 二次批准会走 handle_plan_system_integration 的 append 分支，盘上的
-tasks.md 于是成为「旧 + 新」的合并体；那条路径只物化 draft.tasks（本次新增的
-一块），否则 task_list 会整份翻倍。详见 _finalize_plan_exit。同一笔重复账还有上游
-的一半：草稿目录 plan-<session_id> 每轮同路径，批准落地后必须清掉，否则下一轮的
-plan.md 里还躺着上一轮的 checkbox、被转换器整个重转一遍。详见 _clear_draft_dir。
+tasks.md 于是成为「旧 + 新」的合并体；那条路径只物化本次新增的一块（draft.plan_md
+的 checkbox → 结构化转换结果），否则 task_list 会整份翻倍。详见 _finalize_plan_exit。
+同一笔重复账还有上游的一半：草稿目录 plan-<session_id> 每轮同路径，批准落地后必须
+清掉，否则下一轮的 plan.md 里还躺着上一轮的 checkbox、被转换器整个重转一遍。
+详见 _clear_draft_dir。
 """
 
 from __future__ import annotations
@@ -66,19 +67,20 @@ def _enter_plan_mode(agent: "Agent") -> str:
 
 @dataclass
 class _PlanDraft:
-    """exit_plan_mode 的产物读取结果（轻量轨/重量轨自动判定后）。
+    """送审产物的读取结果（单轨：plan.md 原文 + 它的两个视图）。
 
     full_plan 与 conversation_plan 同源但**不同用途**，不可互换：
     - `full_plan` 给人看——plan_approval_fn 的前端批准弹窗、_confirm_dangerous 的
       CLI 确认框。人正是要审这份任务清单，一个字不能少。
     - `conversation_plan` 进对话（批准结果消息）。任务已经物化进 task_list、
       摘要 S 常驻上下文尾部，再把清单抄一遍就是 format_plan_tasks_block
-      （本任务已删）那笔重复账，所以它不含任务清单。
+      （已删）那笔重复账，所以它不含任务清单（_strip_task_checklist_section
+      按 `## 任务清单` 标题切出来）。
+
+    不再携带 checkbox → 结构化的转换结果（曾经的 tasks 字段）：integration 内部
+    自己转，追加路径的物化在 _finalize_plan_exit 里用同一个纯函数重转一遍，
+    同输入必同输出，多存一份只会多一个漂移点。
     """
-    granularity: str
-    spec: str
-    design: str
-    tasks: str
     plan_md: str
     full_plan: str
     conversation_plan: str
@@ -120,11 +122,11 @@ _PLAN_NOT_RECORDED = (
 
 
 def _strip_task_checklist_section(plan_md: str) -> str:
-    """删掉轻量轨 plan.md 里的 `## 任务清单` 小节：标题行 → 下一个任意级标题或文末。
+    """删掉 plan.md 里的 `## 任务清单` 小节：标题行 → 下一个任意级标题或文末。
 
-    找不到该标题时**逐字原样返回**——不动重量轨（它没有这个标题，任务清单在独立的
-    tasks.md 里，由 conversation_plan 的组装直接略过 `## Tasks` 段），也不动没写
-    清单小节的 plan。
+    找不到该标题时**逐字原样返回**——正常送审路径上到不了这个分支（校验器硬规则 2
+    已把「缺 `## 任务清单`」拦成不合格），但本函数也被测试与历史内容直接调用，
+    原样返回是最安全的降级。
 
     按行扫描而不是一个大 re.S 正则：小节边界是「下一个标题」，行扫描能把「标题行
     本身的宽松匹配」与「边界判定」分开写，两者各自可读。
@@ -145,69 +147,23 @@ def _strip_task_checklist_section(plan_md: str) -> str:
 
 
 def _validate_and_load_draft(mgr: Any) -> str | _PlanDraft:
-    """校验产物完整性并读取草稿；返回 str 时为提前返回的失败消息。"""
+    """校验产物格式并读取草稿（单轨）；返回 str 时为提前返回的失败消息。"""
     validation = mgr.validate_plan_artifacts()
     if not validation["valid"]:
         errors = "\n".join(f"- {e}" for e in validation["errors"])
         return f"Plan artifacts validation failed:\n{errors}\n\nPlease complete your plan before exiting."
 
-    # 读取产物内容（自动判定轻量轨/重量轨）
-    draft = mgr.read_draft_artifacts()
-    granularity = validation.get("granularity", draft["granularity"])
-    spec_content = draft["spec"]
-    plan_content = draft["design"]
-    tasks_content = draft["tasks"]
-    plan_md = draft["plan"]
-    if granularity == "minimal" and not tasks_content:
-        tasks_content = PlanModeManager.checkbox_tasks_to_structured(plan_md)
+    plan_md = mgr.read_draft_artifacts()["plan"]
 
-    # 轻量轨的任务清单是 plan.md 里的 `## 任务清单` 一段，只能按标题切出来。切不动时
-    # （模型把标题写成 `## Tasks`、`## 任务`，或者压根不写标题）_strip_task_checklist_
-    # section 逐字原样返回，于是 conversation_plan == full_plan：整份 checkbox 清单重新
-    # 进对话，正是 conversation_plan 这个设计要消掉的那笔重复账。
-    # 刻意**不**加标题名启发式——猜名字猜错就会切掉一段合法散文，代价比重复一遍清单更
-    # 高。这里只把缺口变成一条可观测的诊断：无声的重复没人会去修，可测量的重复才有
-    # 「到底需不需要名字变体规则」的真数据。
+    # 任务清单是 plan.md 里的 `## 任务清单` 一段，conversation_plan 必须把它切掉
+    # （清单已物化进 task_list、摘要 S 常驻尾部，再抄一遍就是重复账）。「标题写错
+    # 导致切不动」这个缺口此前只能靠一条 trace 诊断事后发现，现在是校验器的硬规则 2
+    # （缺精确标题直接不合格、错误信息给出正确写法），走不到这里——诊断随之删除。
     stripped_plan_md = _strip_task_checklist_section(plan_md)
-    if granularity == "minimal" and tasks_content.strip() and stripped_plan_md == plan_md:
-        print_error(
-            "[plan] plan.md has a checkbox checklist but no recognized `## 任务清单` "
-            "heading, so the conversation copy of the plan still contains the full list"
-        )
-        trace_event(
-            "plan_mode.checklist_section_unrecognized",
-            metadata={
-                "granularity": granularity,
-                "plan_md_chars": len(plan_md),
-                "task_blocks": tasks_content.count("### Task"),
-            },
-        )
 
-    full_plan = "\n\n".join(
-        part for part in (
-            plan_md.strip() if granularity == "minimal" and plan_md.strip() else "",
-            f"## Spec\n{spec_content}" if spec_content.strip() else "",
-            f"## Design\n{plan_content}" if plan_content.strip() else "",
-            f"## Tasks\n{tasks_content}" if granularity != "minimal" and tasks_content.strip() else "",
-        ) if part
-    ) or "(empty plan)"
-    # 对话版：与 full_plan 同源的零件，只是**不含任务清单**。
-    # 重量轨：省掉 `## Tasks\n{tasks_content}` 那一段即可。
-    # 轻量轨（默认且占多数）：full_plan 就是 plan_md.strip()，任务清单是 plan.md
-    #   里的 `## 任务清单` 一段，**没有 `## Tasks` 标题可省**——只删 `## Tasks`
-    #   的「修复」在这条轨上静默无效，必须按标题把那段切出来。
-    conversation_plan = "\n\n".join(
-        part for part in (
-            stripped_plan_md.strip()
-            if granularity == "minimal" and plan_md.strip() else "",
-            f"## Spec\n{spec_content}" if spec_content.strip() else "",
-            f"## Design\n{plan_content}" if plan_content.strip() else "",
-        ) if part
-    ) or _CHECKLIST_ONLY_PLAN
-    return _PlanDraft(
-        granularity, spec_content, plan_content, tasks_content, plan_md,
-        full_plan, conversation_plan,
-    )
+    full_plan = plan_md.strip() or "(empty plan)"
+    conversation_plan = stripped_plan_md.strip() or _CHECKLIST_ONLY_PLAN
+    return _PlanDraft(plan_md, full_plan, conversation_plan)
 
 
 async def _request_approval(agent: "Agent", mgr: Any, full_plan: str) -> tuple[str, str | None]:
@@ -307,8 +263,7 @@ def _finalize_plan_exit(agent: "Agent", mgr: Any, draft: _PlanDraft, choice: str
     integration_attempted = execute or mgr.plan_approval_fn is None
     if integration_attempted:
         plan_result: dict[str, Any] | None = mgr.handle_plan_system_integration(
-            draft.spec, draft.design, draft.tasks, agent.session,
-            granularity=draft.granularity, plan_md=draft.plan_md,
+            draft.plan_md, agent.session,
         )
     else:
         plan_result = None
@@ -368,9 +323,13 @@ def _finalize_plan_exit(agent: "Agent", mgr: Any, draft: _PlanDraft, choice: str
         # 载体，翻倍就意味着常驻摘要 S 每个请求都背着 N 条陈旧重复（正是本设计要
         # 消灭的那笔 token 账），而 find_focus 还可能落到已完成工作的 pending 克隆
         # 上、把它的 detail 重新注入、邀模型把活重做一遍。
-        # draft.tasks 正是 integration 刚追加进文件的那一段文本（轻量轨是
-        # checkbox → 结构化的转换结果，_validate_and_load_draft 里已经转好）。
-        tasks_md = draft.tasks if plan_result.get("action") == "appended" else None
+        # draft.plan_md 的 checkbox → 结构化转换正是 integration 刚追加进文件的那段
+        # 文本（同一个纯函数、同一份输入——_PlanDraft 不再携带转换结果，重转一遍
+        # 而不是多存一份，多存只会多一个漂移点）。
+        tasks_md = (
+            PlanModeManager.checkbox_tasks_to_structured(draft.plan_md)
+            if plan_result.get("action") == "appended" else None
+        )
         materialized, complete = _materialize_plan_into_task_list(
             agent.session.id, plan_slug, tasks_md=tasks_md)
         print_info(
@@ -418,9 +377,9 @@ def _finalize_plan_exit(agent: "Agent", mgr: Any, draft: _PlanDraft, choice: str
 def _injection_line(session_id: str) -> str:
     """结果消息里「详细方案会自动注入」那一句——只在它真会成真时才说。
 
-    轻量轨的 checkbox 不带缩进子项时也能通过校验（validate_plan_artifacts 只要求
-    task_count > 0），转换器于是只产出 `### Task N: 描述` + `- **状态**: …`，两者
-    都被 body 收集排除 → _compose_detail 返回 "" → needs_disclosure 对空 detail 恒为
+    校验器现在强制每条任务带 `验收:` 子项，但 acceptance 单独成字段、被
+    _compose_detail 刻意排除——只带验收的任务（校验器要求的最低形态）转换出的块
+    正文仍是空的 → _compose_detail 返回 "" → needs_disclosure 对空 detail 恒为
     False → **什么都不会注入**。承诺一次不会发生的注入，模型就会干等。
 
     判据取 find_focus 而不是「第 1 条」：ensure_focus_detail_visible 正是用

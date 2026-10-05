@@ -95,12 +95,14 @@ MIXED_STATUS = """<!-- TASKS START -->
 <!-- TASKS END -->
 """
 
-# 轻量轨 checkbox 没有缩进子项时的形状：转换器只产出标题 + 状态，两者都被
-# _compose_detail 排除 → detail 为空 → needs_disclosure False → 什么都不会注入。
-NO_BODY = """<!-- TASKS START -->
-### Task 1: 光有个标题
-- **状态**: [ ] pending
-<!-- TASKS END -->
+# 校验器要求的最低形态：只带 `验收:` 子项。acceptance 单独成字段、被 _compose_detail
+# 刻意排除 → detail 为空 → needs_disclosure False → 什么都不会注入。
+ACCEPTANCE_ONLY_PLAN_MD = """# 光有个标题的计划
+
+## 任务清单
+
+- [ ] 1. 光有个标题
+  - 验收: true
 """
 
 SIMPLE_CHECKBOX = """## 任务清单
@@ -125,25 +127,51 @@ MINIMAL_PLAN_MD = """# Fix Login Timeout
   - 验收: pytest tests/test_login.py -q
   - 注意: 别动重试次数
 - [ ] 2. 加超时提示
+  - 验收: 前端能看到一条提示
 
 ## 验收
 
 pytest tests/test_login.py -q 全绿。
 """
 
-SPEC_MD = "# Spec: Fix Login Timeout\n\n## 验收标准\n\n- pytest 全绿\n"
-DESIGN_MD = "## 设计\n\n把超时收到 10s，前端加一条提示。\n"
+# 走 _finalize 的两轮批准：每轮一份独立的 plan.md（checkbox 清单），转换出的两组
+# 任务与 STRUCTURED / SECOND_BATCH 对应。第二轮编号接着上一轮（与 append_tasks_to_
+# plan 直接拼接 tasks.md 的形状一致）；校验器对编号只警告、不拦（spec §五.3）。
+PLAN_MD_BATCH_1 = """# 解析器与文档
+
+## 任务清单
+
+- [ ] 1. 实现解析器
+  - 验收: pytest tests/test_p.py -q
+- [ ] 2. 补文档
+  - 验收: true
+
+## 验收
+
+pytest 全绿。
+"""
+
+PLAN_MD_BATCH_2 = """# 缓存与迁移
+
+## 任务清单
+
+- [ ] 3. 加缓存层
+  - 验收: pytest tests/test_cache.py -q
+- [ ] 4. 写迁移脚本
+  - 验收: true
+
+## 验收
+
+pytest 全绿。
+"""
 
 
-def _draft_mgr(tmp_path, *, plan_md=None, spec_md=None, design_md=None, tasks_md=None):
-    """造一个带草稿产物的真 PlanModeManager（_validate_and_load_draft 只读它）。"""
+def _draft_mgr(tmp_path, *, plan_md):
+    """造一个带 plan.md 草稿的真 PlanModeManager（单轨：_validate_and_load_draft 只读它）。"""
     mgr = PlanModeManager(workspace=tmp_path, session_id="s1")
     plan_dir = tmp_path / "plandir"
     plan_dir.mkdir(parents=True, exist_ok=True)
-    for name, text in (("plan.md", plan_md), ("spec.md", spec_md),
-                       ("design.md", design_md), ("tasks.md", tasks_md)):
-        if text is not None:
-            (plan_dir / name).write_text(text, encoding="utf-8")
+    (plan_dir / "plan.md").write_text(plan_md, encoding="utf-8")
     mgr.plan_dir = plan_dir
     return mgr
 
@@ -280,9 +308,9 @@ def test_second_approval_materializes_only_the_new_block(ws):
     """同一 session 第二次批准：tasks.md 已经是「旧 + 新」的合并体。
 
     链条是确定性的，不是奇异路径：session.plan_slug 只设不清（跨 clear、跨重启
-    存活），而 Task 3 之后**再没有任何东西推进 plan 状态**（start_plan_execution
-    不再被调用，create_plan 写的是 PROPOSED），PROPOSED/IN_PROGRESS/COMPLETED
-    全都过 `not in ("archived", "abandoned")` 那道闸 → handle_plan_system_integration
+    存活），而执行状态机删除之后**再没有任何东西推进 plan 状态**（create_plan
+    写的是 PROPOSED），PROPOSED/IN_PROGRESS/COMPLETED 全都过
+    `not in ("archived", "abandoned")` 那道闸 → handle_plan_system_integration
     必走 append。按 slug 读于是读到合并体，上一轮已物化过的任务被再物化一遍
     （新 id + pending），task_list 翻倍：S 常驻里长期挂着 N 条陈旧重复（正是本设计
     要消灭的那笔 token 账），find_focus 还可能落到已完成工作的 pending 克隆上、
@@ -305,7 +333,7 @@ def test_tasks_md_bypasses_the_file_entirely(ws):
     """给了 tasks_md 就不读盘：slug 不存在也照样物化。
 
     顺带钉住解析走的是 get_tasks 的同一份逻辑（结构化优先、回退 checkbox 简单
-    格式），所以重量轨与轻量轨两条都能从 tasks_md 物化。
+    格式），所以结构化与 checkbox 两种来源都能从 tasks_md 物化。
     """
     assert _materialize_plan_into_task_list(
         "s1", "no-such-slug", tasks_md=SIMPLE_CHECKBOX) == (2, True)
@@ -321,14 +349,14 @@ def test_tasks_md_empty_string_does_not_fall_back_to_the_merged_file(ws):
 
 def test_double_approval_through_finalize_does_not_duplicate(ws, tmp_path):
     """Finding 1 的调用方一侧：_finalize_plan_exit 在 action=="appended" 时必须
-    把 draft.tasks（本次新增的那一块）交给物化，而不是让它按 slug 读合并体。
+    把本次新增的那一块（draft.plan_md 的转换结果）交给物化，而不是让它按 slug 读合并体。
 
     两轮都走真的 handle_plan_system_integration：第一轮 created，第二轮因为
     session.plan_slug 已在（同一个 Session 对象）而自动落到 append 分支。
     """
     session = _new_session()
 
-    mgr1 = _draft_mgr(tmp_path, spec_md=SPEC_MD, design_md=DESIGN_MD, tasks_md=STRUCTURED)
+    mgr1 = _draft_mgr(tmp_path, plan_md=PLAN_MD_BATCH_1)
     agent1 = _FakeAgent(session)
     msg1 = _finalize(agent1, mgr1)
     assert [t.content for t in list_tasks("s1")] == ["实现解析器", "补文档"]
@@ -337,7 +365,7 @@ def test_double_approval_through_finalize_does_not_duplicate(ws, tmp_path):
     assert agent1.mode_events == 1
 
     slug = session.plan_slug
-    mgr2 = _draft_mgr(tmp_path, spec_md=SPEC_MD, design_md=DESIGN_MD, tasks_md=SECOND_BATCH)
+    mgr2 = _draft_mgr(tmp_path, plan_md=PLAN_MD_BATCH_2)
     msg2 = _finalize(_FakeAgent(session), mgr2)
 
     contents = [t.content for t in list_tasks("s1")]
@@ -350,7 +378,8 @@ def test_double_approval_through_finalize_does_not_duplicate(ws, tmp_path):
 
 
 def test_finalize_passes_tasks_md_only_on_the_appended_path(ws, tmp_path, monkeypatch):
-    """直接钉住调用契约：action=="appended" → tasks_md=draft.tasks；
+    """直接钉住调用契约：action=="appended" → tasks_md=draft.plan_md 的 checkbox →
+    结构化转换结果（与 integration 刚追加进文件的是同一段文本，同一个纯函数）；
     action=="created" → tasks_md 不传（照旧按 slug 读）。"""
     seen: list[tuple[str, str | None]] = []
     real = plan_tool_executor._materialize_plan_into_task_list
@@ -362,41 +391,29 @@ def test_finalize_passes_tasks_md_only_on_the_appended_path(ws, tmp_path, monkey
     monkeypatch.setattr(plan_tool_executor, "_materialize_plan_into_task_list", spy)
 
     session = _new_session()
-    mgr1 = _draft_mgr(tmp_path, spec_md=SPEC_MD, design_md=DESIGN_MD, tasks_md=STRUCTURED)
+    mgr1 = _draft_mgr(tmp_path, plan_md=PLAN_MD_BATCH_1)
     _finalize(_FakeAgent(session), mgr1)
     assert seen[-1][1] is None, "created 路径不该传 tasks_md"
 
-    mgr2 = _draft_mgr(tmp_path, spec_md=SPEC_MD, design_md=DESIGN_MD, tasks_md=SECOND_BATCH)
+    mgr2 = _draft_mgr(tmp_path, plan_md=PLAN_MD_BATCH_2)
     _finalize(_FakeAgent(session), mgr2)
-    assert seen[-1][1] == SECOND_BATCH, "appended 路径必须把本次新增的那一块交下去"
+    assert seen[-1][1] == PlanModeManager.checkbox_tasks_to_structured(PLAN_MD_BATCH_2), (
+        "appended 路径必须把本次新增的那一块交下去"
+    )
 
 
 # ────────────── Finding 2：对话版计划文本 ──────────────
-
-def test_standard_conversation_plan_omits_tasks(ws, tmp_path):
-    from agents.plan.plan_tool_executor import _validate_and_load_draft
-    mgr = _draft_mgr(tmp_path, spec_md=SPEC_MD, design_md=DESIGN_MD, tasks_md=STRUCTURED)
-    draft = _validate_and_load_draft(mgr)
-    assert draft.granularity == "standard"
-    assert "## Spec" in draft.conversation_plan
-    assert "## Design" in draft.conversation_plan
-    assert "验收标准" in draft.conversation_plan
-    assert "## Tasks" not in draft.conversation_plan
-    assert "实现解析器" not in draft.conversation_plan
-    # 人看的那份一个字不动：批准弹窗与 CLI 确认框都要能看到任务清单
-    assert "## Tasks" in draft.full_plan
-    assert "实现解析器" in draft.full_plan
-    assert "## Spec" in draft.full_plan and "## Design" in draft.full_plan
+#
+# （原有 test_standard_conversation_plan_omits_tasks 随重量轨一起删除：单轨之下
+# conversation_plan 只有一种组装方式——plan.md 切掉 `## 任务清单` 小节。）
 
 
 def test_minimal_conversation_plan_omits_checklist(ws, tmp_path):
-    """轻量轨是默认且占多数的那条——它没有 `## Tasks` 小节可省，任务清单是
-    plan.md 里的一段（`## 任务清单`），只能按标题切出来。只删 `## Tasks` 的
-    「修复」在这条轨上静默无效。"""
+    """任务清单是 plan.md 里的一段（`## 任务清单`），只能按标题切出来——它已经
+    物化进 task_list、摘要 S 常驻尾部，conversation_plan 再带一份就是重复账。"""
     from agents.plan.plan_tool_executor import _validate_and_load_draft
     mgr = _draft_mgr(tmp_path, plan_md=MINIMAL_PLAN_MD)
     draft = _validate_and_load_draft(mgr)
-    assert draft.granularity == "minimal"
     for section in ("## 背景", "## 方案", "## 验收"):
         assert section in draft.conversation_plan, section
     assert "30s" in draft.conversation_plan        # 背景正文活着
@@ -411,15 +428,15 @@ def test_minimal_conversation_plan_omits_checklist(ws, tmp_path):
 
 def test_result_message_carries_conversation_plan_not_full_plan(ws, tmp_path):
     """`## Approved Plan:` 那一段进的是**对话**，S 已常驻上下文尾部，再把任务清单
-    抄一遍就是 format_plan_tasks_block（本任务已删）那笔重复账。"""
+    抄一遍就是 format_plan_tasks_block（已删）那笔重复账。"""
     from agents.plan.plan_tool_executor import _validate_and_load_draft
-    mgr = _draft_mgr(tmp_path, spec_md=SPEC_MD, design_md=DESIGN_MD, tasks_md=STRUCTURED)
+    mgr = _draft_mgr(tmp_path, plan_md=MINIMAL_PLAN_MD)
     draft = _validate_and_load_draft(mgr)
     msg = _finalize(_FakeAgent(_new_session()), mgr)
     assert f"## Approved Plan:\n{draft.conversation_plan}" in msg
-    assert "## Spec" in msg and "## Design" in msg
-    assert "实现解析器" not in msg, "任务清单又进对话了"
-    assert "补文档" not in msg
+    assert "## 背景" in msg and "## 方案" in msg
+    assert "收紧超时" not in msg, "任务清单又进对话了"
+    assert "- [ ]" not in msg
 
 
 @pytest.mark.parametrize("heading", [
@@ -467,18 +484,19 @@ def test_strip_task_checklist_section_at_eof():
 # ────────────── Finding 3：不许承诺不会发生的注入 ──────────────
 
 def test_result_message_promises_injection_when_detail_exists(ws, tmp_path):
-    mgr = _draft_mgr(tmp_path, spec_md=SPEC_MD, design_md=DESIGN_MD, tasks_md=STRUCTURED)
+    # MINIMAL_PLAN_MD 的任务 1 带 `注意:` 子项 → 块正文非空 → detail 非空 → 承诺成立
+    mgr = _draft_mgr(tmp_path, plan_md=MINIMAL_PLAN_MD)
     msg = _finalize(_FakeAgent(_new_session()), mgr)
     assert "自动注入" in msg
 
 
 def test_result_message_does_not_promise_injection_for_empty_detail(ws, tmp_path):
-    """轻量轨 checkbox 不带缩进子项时合法通过校验（只要求 task_count > 0），
-    转换器于是只产出 `### Task N: 描述` + `- **状态**: …`，两者都被 body 收集
-    排除 → _compose_detail 返回 "" → needs_disclosure 对空 detail 恒为 False →
-    **什么都不会注入**。旧文案却无条件说「会在下一次模型调用时自动注入」。
+    """checkbox 只带校验器强制的 `验收:` 子项时（最低合法形态），acceptance 单独
+    成字段、被 _compose_detail 刻意排除 → detail 为空 → needs_disclosure 对空
+    detail 恒为 False → **什么都不会注入**。旧文案却无条件说「会在下一次模型
+    调用时自动注入」。
     """
-    mgr = _draft_mgr(tmp_path, spec_md=SPEC_MD, design_md=DESIGN_MD, tasks_md=NO_BODY)
+    mgr = _draft_mgr(tmp_path, plan_md=ACCEPTANCE_ONLY_PLAN_MD)
     msg = _finalize(_FakeAgent(_new_session()), mgr)
     assert "1 条任务已物化" in msg, msg
     assert "自动注入" not in msg, msg
@@ -523,7 +541,7 @@ def test_result_message_flags_truncation(ws, tmp_path, monkeypatch):
         return real_add(*args, **kwargs)
 
     monkeypatch.setattr(plan_tool_executor, "add_task", flaky)
-    mgr = _draft_mgr(tmp_path, spec_md=SPEC_MD, design_md=DESIGN_MD, tasks_md=STRUCTURED)
+    mgr = _draft_mgr(tmp_path, plan_md=PLAN_MD_BATCH_1)
     msg = _finalize(_FakeAgent(_new_session()), mgr)
     assert "1 条任务已物化" in msg, msg
     assert "可能不完整" in msg, msg
@@ -587,13 +605,13 @@ def test_detail_pinned_to_a_visible_seq_is_not_reinjected(ws):
 _MINIMAL_HEAD = "# Fix Login Timeout\n\n## 任务清单\n\n"
 
 
-def _approve_round(session, workspace, n: int, desc: str, subitems: str = ""):
+def _approve_round(session, workspace, n: int, desc: str, subitems: str = "  - 验收: true\n"):
     """跑一轮真批准，草稿目录用 generate_plan_dir() 的真路径（两轮同路径）。
 
-    「追加模式」照提示词教的样子来（plan_mode.py:127-128：目录已存在就先 read_file、
-    在任务清单末尾追加）：plan.md 幸存就读出来追加，被清空了才从头写。所以第二轮的
-    plan.md 里到底有什么，完全由第一轮清没清干净决定——这正是本组要钉的因果，而不是
-    把结论写进 fixture。
+    「追加模式」照提示词教的样子来（目录已存在就先 read_file、在任务清单末尾追加）：
+    plan.md 幸存就读出来追加，被清空了才从头写。所以第二轮的 plan.md 里到底有什么，
+    完全由第一轮清没清干净决定——这正是本组要钉的因果，而不是把结论写进 fixture。
+    subitems 默认带 `验收:`：A3 之后校验器强制每条任务有验收，缺了根本到不了批准。
     """
     mgr = PlanModeManager(workspace=workspace, session_id="s1")
     plan_dir = mgr.generate_plan_dir()
@@ -617,8 +635,8 @@ def test_draft_dir_is_cleared_after_successful_approval(ws, tmp_path):
 def test_second_approval_reusing_draft_dir_does_not_duplicate(ws, tmp_path):
     """收口 A 的后果级钉法：同一路径的草稿目录被第二轮复用。
 
-    轻量轨的转换器会把幸存 plan.md 里的**每个** checkbox 重新转一遍，于是第二轮
-    draft.tasks = 旧 + 新，上一轮已物化过的任务被再物化一遍（新 id + pending）。
+    转换器会把幸存 plan.md 里的**每个** checkbox 重新转一遍，于是第二轮的结构化
+    tasks = 旧 + 新，上一轮已物化过的任务被再物化一遍（新 id + pending）。
     """
     session = _new_session()
     dir1, msg1 = _approve_round(
@@ -648,7 +666,8 @@ def test_draft_dir_survives_when_integration_fails(ws, tmp_path):
     mgr = PlanModeManager(workspace=tmp_path, session_id="s1")
     plan_dir = mgr.generate_plan_dir()
     (plan_dir / "plan.md").write_text(
-        "# Fix Login Timeout\n\n## 任务清单\n\n- [ ] 1. 做点什么\n", encoding="utf-8")
+        "# Fix Login Timeout\n\n## 任务清单\n\n- [ ] 1. 做点什么\n  - 验收: true\n",
+        encoding="utf-8")
     mgr.plan_dir = plan_dir
     (get_plans_dir() / "fix-login-timeout").mkdir(parents=True)
 
@@ -686,7 +705,7 @@ def test_zero_materialized_still_flags_truncation(ws, tmp_path, monkeypatch):
         raise OSError("tasks.md unreadable")
 
     monkeypatch.setattr(plan_tool_executor, "get_tasks", boom)
-    mgr = _draft_mgr(tmp_path, spec_md=SPEC_MD, design_md=DESIGN_MD, tasks_md=STRUCTURED)
+    mgr = _draft_mgr(tmp_path, plan_md=MINIMAL_PLAN_MD)
     msg = _finalize(_FakeAgent(_new_session()), mgr)
     assert "Proceed with implementation." in msg, msg
     assert "可能不完整" in msg, msg
@@ -713,20 +732,21 @@ def test_strip_task_checklist_section_stops_at_following_h1():
 # ────────────── 收口 D：兜底文案不许说「计划是空的」 ──────────────
 
 def test_checklist_only_plan_does_not_say_empty(ws, tmp_path):
-    """plan.md 只有任务清单小节时 conversation_plan 为空，兜底文案此前是
-    "(empty plan)"——计划不是空的，空的是它的散文正文，清单已经物化进 task_list。
+    """plan.md 只有标题 + 任务清单时，切掉清单后 conversation_plan 只剩标题。
+    兜底文案此前是 "(empty plan)"——计划不是空的，空的是它的散文正文，清单已经
+    物化进 task_list。刻意**不**回退到 full_plan：那正是在「清单就是整份计划」
+    这种情况下把清单重新嵌回对话，撤销它来自的那个修复。
 
-    刻意**不**回退到 full_plan：那正是在「清单就是整份计划」这种情况下把清单重新
-    嵌回对话，撤销它来自的那个修复。
+    A3 之后校验器强制首行 H1，所以经校验的路径上切完至少剩标题，_CHECKLIST_ONLY_PLAN
+    兜底只在绕过校验器的调用方（如 test_human_wait_tool_timeout 的 stub）还可达。
     """
     from agents.plan.plan_tool_executor import _validate_and_load_draft
-    mgr = _draft_mgr(tmp_path, plan_md="## 任务清单\n\n- [ ] 1. 做点什么\n")
+    mgr = _draft_mgr(tmp_path, plan_md="# T\n\n## 任务清单\n\n- [ ] 1. 做点什么\n  - 验收: true\n")
     draft = _validate_and_load_draft(mgr)
-    assert draft.granularity == "minimal"
     assert "- [ ]" not in draft.conversation_plan
     assert "做点什么" not in draft.conversation_plan, "不许回退到 full_plan"
     assert "(empty plan)" not in draft.conversation_plan
-    assert "task_list" in draft.conversation_plan
+    assert draft.conversation_plan.strip() == "# T"   # 剩下的就是标题，不说「空」
     # 给人看的那份一个字不减，清单还在
     assert "- [ ] 1. 做点什么" in draft.full_plan
 
@@ -793,84 +813,13 @@ def test_clear_draft_dir_swallows_a_failure_in_its_own_guard(ws, tmp_path, monke
     assert (draft_dir / "plan.md").exists()
 
 
-# ────────────── 收口 F：标题名缺口要可观测，不许静默 ──────────────
-
-def _plan_md_with_checklist(heading: str) -> str:
-    """轻量轨 plan.md：checkbox 清单在 `heading` 下（heading 为空 = 压根没写标题）。"""
-    head = f"{heading}\n\n" if heading else ""
-    return (
-        "# Fix Login Timeout\n\n## 背景\n\n登录请求要等 30s 才超时。\n\n"
-        f"{head}- [ ] 1. 收紧超时\n- [ ] 2. 加超时提示\n\n## 验收\n\npytest 全绿。\n"
-    )
-
-
-@pytest.mark.parametrize("heading", ["## Tasks", "## 任务", ""],
-                         ids=["tasks-en", "renwu", "no-heading"])
-def test_unrecognized_checklist_heading_is_reported(ws, tmp_path, monkeypatch, heading):
-    """strip 只认 `## 任务清单`。模型写成别的名字（或不写标题）时它逐字原样返回，于是
-    conversation_plan == full_plan：整份 checkbox 清单重新进对话，正是这套设计要消掉的
-    那笔重复账，而且此前**无声无息**地发生。
-
-    刻意**不**加标题名启发式：猜 `## Tasks` / `## 任务` / 全角空格，猜错就会切掉一段
-    合法散文。这里只把缺口变成一条可观测的诊断，好让 later plan 拿到「到底需不需要
-    名字变体规则」的真数据，而不是靠想象。
-    """
-    from agents.plan.plan_tool_executor import _validate_and_load_draft
-
-    logged = _capture_errors(monkeypatch)
-    traced: list[str] = []
-    monkeypatch.setattr(plan_tool_executor, "trace_event",
-                        lambda kind, **kw: traced.append(kind))
-
-    mgr = _draft_mgr(tmp_path, plan_md=_plan_md_with_checklist(heading))
-    draft = _validate_and_load_draft(mgr)
-
-    # 前置条件：清单确实解析出来了，而 strip 什么都没切掉——缺口本身，不是 fixture 造的
-    assert draft.granularity == "minimal"
-    assert "收紧超时" in draft.tasks
-    assert "- [ ] 1. 收紧超时" in draft.conversation_plan, "前置条件：清单回到对话里了"
-    assert draft.conversation_plan == draft.full_plan, "前置条件：这就是那笔重复账"
-
-    assert any("任务清单" in m for m in logged), logged
-    assert traced == ["plan_mode.checklist_section_unrecognized"], traced
-
-
-def test_prescribed_checklist_heading_reports_nothing(ws, tmp_path, monkeypatch):
-    """反面：规定写法下 strip 生效，一条诊断都不许发。这条信号一旦被噪声淹掉，later
-    plan 拿到的数据就没有判别力，等于白埋。"""
-    from agents.plan.plan_tool_executor import _validate_and_load_draft
-
-    logged = _capture_errors(monkeypatch)
-    traced: list[str] = []
-    monkeypatch.setattr(plan_tool_executor, "trace_event",
-                        lambda kind, **kw: traced.append(kind))
-
-    mgr = _draft_mgr(tmp_path, plan_md=MINIMAL_PLAN_MD)
-    draft = _validate_and_load_draft(mgr)
-
-    assert "- [ ]" not in draft.conversation_plan      # strip 生效了
-    assert logged == [] and traced == []
-
-
-def test_standard_track_never_reports_the_checklist_gap(ws, tmp_path, monkeypatch):
-    """重量轨没有 `## 任务清单` 可切（清单在独立的 tasks.md 里，conversation_plan 的
-    组装直接略过 `## Tasks` 段），诊断条件里的 `granularity == "minimal"` 就是为此。
-    漏了这个限定，重量轨的 plan_md 是空串、`_strip("") == ""` 恒成立，于是**每次**重量轨
-    批准都会喊一次假警报。"""
-    from agents.plan.plan_tool_executor import _validate_and_load_draft
-
-    logged = _capture_errors(monkeypatch)
-    traced: list[str] = []
-    monkeypatch.setattr(plan_tool_executor, "trace_event",
-                        lambda kind, **kw: traced.append(kind))
-
-    mgr = _draft_mgr(tmp_path, spec_md=SPEC_MD, design_md=DESIGN_MD, tasks_md=STRUCTURED)
-    draft = _validate_and_load_draft(mgr)
-
-    assert draft.granularity == "standard"
-    assert "实现解析器" in draft.tasks                 # 任务照样解析出来了
-    assert "## Tasks" not in draft.conversation_plan   # 重量轨的清单本来就省得掉
-    assert logged == [] and traced == []
+# ────────────── 收口 F：标题名缺口 ──────────────
+#
+# 原有三条「诊断可观测」用例（unrecognized heading 报 trace / 规定写法不报 /
+# 重量轨不报）随 A3 删除：`## 任务清单` 标题写错现在是校验器的**硬规则 2**，
+# 不合格的计划根本到不了 strip 这一步——「放行后靠 trace 发现」被「送审前直接
+# 拦下并告诉模型正确写法」取代（钉在 test_plan_system.py 的
+# test_wrong_checklist_heading_is_a_hard_error）。
 
 
 # ──── Critical：兜底 slug 与草稿目录同名 → 批准落地在默认轨道上静默失效 ────
@@ -903,8 +852,14 @@ def test_standard_track_never_reports_the_checklist_gap(ws, tmp_path, monkeypatc
 # `_draft_mgr` 都是）——两者都绕过 slug 推导，也就绕过了碰撞。下面这组**走真路径**：
 # 真 PlanModeManager、真 generate_plan_dir()、真 read_draft_artifacts/validate、
 # 真 handle_plan_system_integration，slug 一律由代码自己推。
+#
+# A3 之后的现状：第 3 环已不成立（提示词要求首行 H1），第 2 环被校验器硬规则 1
+# 拦在送审之前，slug 正则也放宽到容忍 3 空格缩进（与校验器同一口径）。但兜底
+# 互斥不变量照旧钉着——integration 仍可能被绕过校验器调用，兜底一旦改回
+# `plan-{session_id}`，链条立刻复活。
 
-# 规定的轻量轨格式，逐字照 `build_plan_mode_prompt` 写的：只有 `##` 小节，**没有 H1**。
+# 历史 fixture：当年提示词规定的格式，只有 `##` 小节、**没有 H1**（现在会被校验器
+# 拦下，留着专门压 integration 自己的兜底不变量）。
 PRESCRIBED_MINIMAL_NO_H1 = """## 背景
 
 登录请求要等 30s 才超时，用户全程看不到任何提示。
@@ -926,17 +881,18 @@ PRESCRIBED_MINIMAL_NO_H1 = """## 背景
 pytest tests/test_login.py -q 全绿。
 """
 
-# 同一份 plan，只是补上 part 2 之后提示词要求的 H1 标题。
+# 同一份 plan，加上现在提示词（与校验器硬规则 1）要求的首行 H1 标题。
 PRESCRIBED_MINIMAL_WITH_H1 = "# Fix Login Timeout\n\n" + PRESCRIBED_MINIMAL_NO_H1
 
 
 def _run_real_minimal_approval(tmp_path, session, plan_md: str):
-    """跑真的轻量轨批准落地流程——不手挑 slug、不直接调 create_plan。
+    """跑真的单轨批准落地流程——不手挑 slug、不直接调 create_plan。
 
     generate_plan_dir() → 写 plan.md → validate_plan_artifacts() →
-    read_draft_artifacts() → handle_plan_system_integration(granularity="minimal")。
-    tasks_content 的算法与 `_validate_and_load_draft`（plan_tool_executor.py:142-143）
-    一致，好让这里的结果与生产路径逐字可比。
+    read_draft_artifacts() → handle_plan_system_integration(plan_md)，
+    与生产路径（_validate_and_load_draft → _finalize_plan_exit）同一套函数。
+    valid 与否由调用方断言：无 H1 的历史格式现在过不了校验，但 integration
+    自己的兜底不变量必须**独立于校验器**成立。
 
     Returns: (mgr, draft_dir, validation, result)
     """
@@ -947,17 +903,10 @@ def _run_real_minimal_approval(tmp_path, session, plan_md: str):
     mgr.plan_dir = draft_dir
 
     validation = mgr.validate_plan_artifacts()
-    assert validation["valid"], validation["errors"]
-    assert validation["granularity"] == "minimal"
-
     draft = mgr.read_draft_artifacts()
-    assert draft["granularity"] == "minimal" and draft["plan"] == plan_md
-    tasks_content = draft["tasks"] or PlanModeManager.checkbox_tasks_to_structured(draft["plan"])
+    assert draft == {"plan": plan_md}, "单轨：read_draft_artifacts 只返回 plan.md"
 
-    result = mgr.handle_plan_system_integration(
-        draft["spec"], draft["design"], tasks_content, session,
-        granularity="minimal", plan_md=draft["plan"],
-    )
+    result = mgr.handle_plan_system_integration(draft["plan"], session)
     return mgr, draft_dir, validation, result
 
 
@@ -969,11 +918,12 @@ _COLLISION_HINT = (
 
 
 def test_prescribed_minimal_format_records_the_plan(ws, tmp_path):
-    """主钉：规定格式（无 H1）的轻量轨 plan 批准后必须真的落地。"""
+    """主钉：规定格式（A3 之后含首行 H1）的 plan 批准后必须真的落地。"""
     session = _new_session()
-    _mgr, draft_dir, _validation, result = _run_real_minimal_approval(
-        tmp_path, session, PRESCRIBED_MINIMAL_NO_H1)
+    _mgr, draft_dir, validation, result = _run_real_minimal_approval(
+        tmp_path, session, PRESCRIBED_MINIMAL_WITH_H1)
 
+    assert validation["valid"], validation["errors"]
     assert result, _COLLISION_HINT
     slug = result["slug"]
     assert slug and get_plan(slug) is not None, f"get_plan({slug!r}) 找不到刚批准的计划"
@@ -1012,49 +962,23 @@ def test_fallback_slug_is_disjoint_from_the_draft_dir_name(ws, tmp_path):
     草稿目录先被真 mkdir 出来（真流程就是这样），随后 integration 仍必须能在同一个
     `.mycode/plans/` 下建出永久条目。两套命名一旦重合，默认轨道 100% 撞上——这正是
     那种日后会被「简化」回碰撞的不变量，所以单独钉一条。
+
+    用无 H1 的历史格式直压 integration：正常送审路径上这种 plan 先被校验器硬规则 1
+    拦下（顺带钉住这一点），但兜底不变量必须**独立于校验器**成立——integration
+    可以被绕过校验器调用，校验器与 slug 正则也可能漂移。
     """
     session = _new_session()
-    _mgr, draft_dir, _validation, result = _run_real_minimal_approval(
+    _mgr, draft_dir, validation, result = _run_real_minimal_approval(
         tmp_path, session, PRESCRIBED_MINIMAL_NO_H1)
 
+    assert validation["valid"] is False, "无 H1 的 plan 必须先被校验器拦下"
+    assert any("首行" in e for e in validation["errors"]), validation["errors"]
     assert result, _COLLISION_HINT
     assert result["slug"] != draft_dir.name, "兜底 slug 与草稿目录同名"
     assert not result["slug"].startswith("plan-"), (
         f"兜底 slug {result['slug']!r} 落在了 generate_plan_dir() 的命名空间里"
     )
     assert (get_plans_dir() / result["slug"]).resolve() != draft_dir.resolve()
-
-
-def test_standard_track_fallback_slug_also_avoids_the_draft_dir(ws, tmp_path):
-    """重量轨同一条碰撞：slug 来自 `# Spec: <title>`，spec.md 没这个标题时同样兜底。
-
-    校验只要求 spec.md 含「验收标准」小节，**不**要求 `# Spec:` 标题（见
-    validate_plan_artifacts），所以这不是奇异输入。
-    """
-    session = _new_session()
-    mgr = PlanModeManager(workspace=tmp_path, session_id=session.id)
-    draft_dir = mgr.generate_plan_dir()
-    (draft_dir / "spec.md").write_text(
-        "## 需求\n\n收紧登录超时。\n\n## 验收标准\n\n- pytest 全绿\n", encoding="utf-8")
-    (draft_dir / "design.md").write_text(DESIGN_MD, encoding="utf-8")
-    (draft_dir / "tasks.md").write_text(STRUCTURED, encoding="utf-8")
-    mgr.plan_dir = draft_dir
-
-    validation = mgr.validate_plan_artifacts()
-    assert validation["valid"], validation["errors"]
-    assert validation["granularity"] == "standard"
-    draft = mgr.read_draft_artifacts()
-    assert draft["granularity"] == "standard"
-
-    result = mgr.handle_plan_system_integration(
-        draft["spec"], draft["design"], draft["tasks"], session,
-        granularity="standard", plan_md=draft["plan"])
-
-    assert result, "重量轨的兜底 slug 也撞上了草稿目录"
-    assert result["slug"] != draft_dir.name
-    assert (get_plans_dir() / result["slug"]).resolve() != draft_dir.resolve()
-    assert session.plan_slug == result["slug"]
-    assert get_plan(result["slug"]) is not None
 
 
 def test_integration_failure_logs_the_slug_and_the_cause(ws, tmp_path, monkeypatch):
@@ -1075,8 +999,7 @@ def test_integration_failure_logs_the_slug_and_the_cause(ws, tmp_path, monkeypat
     (get_plans_dir() / "fix-login-timeout").mkdir(parents=True)
 
     draft = mgr.read_draft_artifacts()
-    result = mgr.handle_plan_system_integration(
-        "", "", "", session, granularity="minimal", plan_md=draft["plan"])
+    result = mgr.handle_plan_system_integration(draft["plan"], session)
 
     assert result is None
     assert logged, "失败必须留痕：静默不是降级，是消失"
@@ -1125,12 +1048,12 @@ def test_smoke_symptoms_are_gone_on_the_prescribed_minimal_format(ws, tmp_path):
     smoke（plan 模式 → 写轻量 plan → 批准 → 执行）观测到的是：`session/plan_linked`
     不在事件日志里、草稿目录没被清、结果消息里既没有 `## Approved Plan` 也没有物化
     文案，模型只好自己从零搭一份清单。这里走真的 _validate_and_load_draft +
-    _finalize_plan_exit，plan.md 用规定格式（无 H1）。
+    _finalize_plan_exit，plan.md 用规定格式（A3 之后含首行 H1）。
     """
     session = _new_session()
     mgr = PlanModeManager(workspace=tmp_path, session_id=session.id)
     draft_dir = mgr.generate_plan_dir()
-    (draft_dir / "plan.md").write_text(PRESCRIBED_MINIMAL_NO_H1, encoding="utf-8")
+    (draft_dir / "plan.md").write_text(PRESCRIBED_MINIMAL_WITH_H1, encoding="utf-8")
     mgr.plan_dir = draft_dir
 
     agent = _FakeAgent(session)
@@ -1159,7 +1082,7 @@ def test_manual_execute_skip_is_not_reported_as_a_failure(ws, tmp_path):
     from agents.plan.plan_tool_executor import _finalize_plan_exit, _validate_and_load_draft
 
     session = _new_session()
-    mgr = _draft_mgr(tmp_path, spec_md=SPEC_MD, design_md=DESIGN_MD, tasks_md=STRUCTURED)
+    mgr = _draft_mgr(tmp_path, plan_md=MINIMAL_PLAN_MD)
     mgr.plan_approval_fn = object()          # 非 None 即走 approval_fn 分支；不会被调用
     agent = _FakeAgent(session)
 

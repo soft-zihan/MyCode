@@ -936,7 +936,9 @@ def resolve_session_workspace(session_id: str) -> Path:
     return Path.cwd()
 
 
-_DRAFT_ARTIFACT_NAMES = {"spec.md", "design.md", "tasks.md", "plan.md", "proposal.md"}
+# 单轨（plan 模式简化 A3）：唯一草稿产物是 plan.md。旧会话草稿目录里残留的
+# spec.md / design.md / tasks.md 读不到也改不了——重量轨已删，这是可接受的。
+_DRAFT_ARTIFACT_NAMES = {"plan.md"}
 
 
 class DraftArtifactRequest(BaseModel):

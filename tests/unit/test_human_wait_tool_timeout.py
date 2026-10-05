@@ -62,13 +62,11 @@ class PlanFakeAgent(FakeAgent):
         self._plan_mode_manager = SimpleNamespace(
             plan_dir=None,
             plan_approval_fn=None,  # None → 走 _confirm_dangerous（前端/会话事件路径）
-            validate_plan_artifacts=lambda: {"valid": True, "granularity": "minimal"},
-            # "granularity" 键必须在：_validate_and_load_draft 的
-            # validation.get("granularity", draft["granularity"]) 会急切求值默认参数
-            read_draft_artifacts=lambda: {
-                "spec": "", "design": "", "tasks": "", "granularity": "minimal",
-                "plan": "## 任务清单\n- [ ] 1. 做一件事",
-            },
+            # A3 之后的单轨契约形状：{"valid", "errors", "warnings", "task_count"}；
+            # valid=True 时 _validate_and_load_draft 不读其余键。
+            validate_plan_artifacts=lambda: {
+                "valid": True, "errors": [], "warnings": [], "task_count": 1},
+            read_draft_artifacts=lambda: {"plan": "## 任务清单\n- [ ] 1. 做一件事"},
         )
         self._permission_gate = PermissionGate(
             session=self.session, abort_fn=lambda: self.abort_flag)

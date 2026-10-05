@@ -1,13 +1,15 @@
-"""Plan 系统单元测试：双轨分层、格式契约、策略插件引擎、git 提交范围。
+"""Plan 系统单元测试：单轨产物校验、格式契约、git 提交范围。
 
 Plan 3a Task 4 删掉了执行状态机（mark_task_*、start_plan_execution、PlanExecutor
 的策略注入），Plan 3b Task A1 又删掉了 frontend/server/routers/sessions.py 的 8 个
 plan REST 端点与它们专属的后端函数（pause/resume/skip/redo/abandon 与整条 ledger
 链）。执行状态的唯一载体是 task_list，所以那些函数连同它们的测试一起消失了
-（原 TestTaskStatusFile / TestLedger）。
+（原 TestTaskStatusFile / TestLedger）。plan 模式简化（A2/A3）之后策略系统与
+重量轨也删了：唯一产物 plan.md，validate_plan_artifacts 是格式校验器
+（四硬规则 + 警告通道，返回形状是 B 批次送审钩子的消费契约）。
 
-留在这里的是物化路径的上游（create_plan / add_artifact / 任务解析 / 双轨校验 /
-策略加载）与 _git_commit 的提交范围——create_plan / add_artifact /
+留在这里的是物化路径的上游（create_plan / add_artifact / 任务解析 / checkbox
+转换 / 格式校验）与 _git_commit 的提交范围——create_plan / add_artifact /
 append_tasks_to_plan 仍然调它，而它们正是 plan 批准时物化路径的上游。
 """
 
@@ -74,51 +76,9 @@ class TestParsing:
         assert statuses == {1: "pending", 2: "done", 3: "in-progress", 4: "failed", 5: "skipped"}
 
 
-# ────────────────────────── 双轨校验 ──────────────────────────
+# ────────────── checkbox → 结构化转换（物化侧解析器）──────────────
 
-class TestDualTrack:
-
-    def _mgr(self, session_id: str) -> PlanModeManager:
-        mgr = PlanModeManager(workspace=Path.cwd(), session_id=session_id)
-        mgr.plan_dir = mgr.generate_plan_dir()
-        return mgr
-
-    def test_read_draft_granularity_minimal(self):
-        mgr = self._mgr("s-min")
-        (mgr.plan_dir / "plan.md").write_text("# P\n", encoding="utf-8")
-        assert mgr.read_draft_artifacts()["granularity"] == "minimal"
-
-    def test_read_draft_granularity_standard(self):
-        mgr = self._mgr("s-std")
-        (mgr.plan_dir / "plan.md").write_text("# P\n", encoding="utf-8")
-        (mgr.plan_dir / "spec.md").write_text("# S\n", encoding="utf-8")
-        assert mgr.read_draft_artifacts()["granularity"] == "standard"
-
-    def test_validate_minimal_pass_and_fail(self):
-        mgr = self._mgr("s-vmin")
-        (mgr.plan_dir / "plan.md").write_text(
-            "# Plan\n\n## 任务清单\n\n- [ ] 1. 做点什么\n\n## 验收\n\n跑测试\n", encoding="utf-8")
-        result = mgr.validate_plan_artifacts()
-        assert result["valid"], result["errors"]
-        assert result["granularity"] == "minimal"
-
-        (mgr.plan_dir / "plan.md").write_text("# Plan\n\n没有任务\n", encoding="utf-8")
-        result = mgr.validate_plan_artifacts()
-        assert not result["valid"]
-
-    def test_validate_standard_pass_and_fail(self):
-        mgr = self._mgr("s-vstd")
-        (mgr.plan_dir / "spec.md").write_text(
-            "# Spec\n\n## 验收标准\n\n- [ ] 接口返回 200\n", encoding="utf-8")
-        (mgr.plan_dir / "tasks.md").write_text(STRUCTURED_TASKS, encoding="utf-8")
-        result = mgr.validate_plan_artifacts()
-        assert result["valid"], result["errors"]
-        assert result["granularity"] == "standard"
-
-        (mgr.plan_dir / "spec.md").write_text("# Spec\n\nonly requirements here\n", encoding="utf-8")
-        result = mgr.validate_plan_artifacts()
-        assert not result["valid"]
-        assert any("验收标准" in e for e in result["errors"])
+class TestCheckboxConversion:
 
     def test_checkbox_tasks_to_structured(self):
         out = PlanModeManager.checkbox_tasks_to_structured(SIMPLE_TASKS)
@@ -227,6 +187,129 @@ class TestDualTrack:
         out = PlanModeManager.checkbox_tasks_to_structured(
             "- [ ] 1. A\n  - 见 https://example.com/doc\n")
         assert "见 https://example.com/doc" in out
+
+
+# ── A3：单轨格式校验器（spec §五：四硬规则 + 警告通道）──────────────────────
+#
+# 返回形状 {"valid", "errors", "warnings", "task_count"} 是 B 批次 turn 收尾
+# 送审钩子的消费契约：errors 喂回模型自我修正（所以文本必须可直接执行），
+# warnings 只进诊断，task_count 给人看。
+
+def _mgr_with(tmp_path, content: str):
+    d = tmp_path / "plans" / "plan-s1"
+    d.mkdir(parents=True)
+    (d / "plan.md").write_text(content, encoding="utf-8")
+    mgr = PlanModeManager(session_id="s1", workspace=tmp_path)
+    mgr.plan_dir = d
+    return mgr
+
+GOOD = """# 加一个 clamp 函数
+
+## 背景
+utils.py 缺区间限制。
+
+## 方案
+末尾追加 clamp。
+
+## 任务清单
+
+- [ ] 1. 实现 clamp
+  - 验收: python -c "from utils import clamp"
+  - 改动: utils.py
+
+## 验收
+上面那条命令通过。
+"""
+
+def test_valid_plan_passes(tmp_path):
+    r = _mgr_with(tmp_path, GOOD).validate_plan_artifacts()
+    assert r["valid"] is True and r["errors"] == [] and r["task_count"] == 1
+
+def test_missing_h1_title_is_a_hard_error(tmp_path):
+    """靶心：Plan 3a 的真 bug——`^#\\s+` 匹配不到 `##`，兜底 slug 与草稿目录同名撞车，
+    create_plan 抛错被吞成 None，物化**静默什么都不落地**。"""
+    r = _mgr_with(tmp_path, GOOD.replace("# 加一个 clamp 函数", "## 加一个 clamp 函数", 1)).validate_plan_artifacts()
+    assert r["valid"] is False
+    assert any("首行" in e and "#" in e for e in r["errors"])
+
+def test_indented_h1_is_accepted(tmp_path):
+    """markdown 允许标题前最多 3 个空格缩进，别把它误判成缺标题。"""
+    r = _mgr_with(tmp_path, "   " + GOOD).validate_plan_artifacts()
+    assert r["valid"] is True
+
+def test_wrong_checklist_heading_is_a_hard_error(tmp_path):
+    """`_strip_task_checklist_section` 只认精确的 `## 任务清单`；写成 `## Tasks` 会让
+    整份清单重复进对话。所以这里必须硬报错，而不是放行后靠 trace 发现。"""
+    r = _mgr_with(tmp_path, GOOD.replace("## 任务清单", "## Tasks")).validate_plan_artifacts()
+    assert r["valid"] is False
+    assert any("任务清单" in e for e in r["errors"])
+
+def test_task_without_acceptance_is_a_hard_error(tmp_path):
+    r = _mgr_with(tmp_path, GOOD.replace('  - 验收: python -c "from utils import clamp"\n', "")).validate_plan_artifacts()
+    assert r["valid"] is False
+    assert any("验收" in e and "1" in e for e in r["errors"])  # 错误信息要指明第几条
+
+def test_no_tasks_is_a_hard_error(tmp_path):
+    r = _mgr_with(tmp_path, "# 标题\n\n## 任务清单\n\n（无）\n").validate_plan_artifacts()
+    assert r["valid"] is False
+
+def test_missing_optional_sections_are_warnings_not_errors(tmp_path):
+    bare = "# 标题\n\n## 任务清单\n\n- [ ] 1. 做事\n  - 验收: true\n"
+    r = _mgr_with(tmp_path, bare).validate_plan_artifacts()
+    assert r["valid"] is True, r["errors"]
+    assert r["warnings"]  # 缺 背景/方案/验收 → 警告
+
+def test_non_consecutive_numbering_is_only_a_warning(tmp_path):
+    """物化用的是**顺序**不是编号，把编号连续性做成硬错误只会制造无谓的送审失败（spec §五.3）。"""
+    body = "# 标题\n\n## 任务清单\n\n- [ ] 1. A\n  - 验收: true\n- [ ] 3. B\n  - 验收: true\n"
+    r = _mgr_with(tmp_path, body).validate_plan_artifacts()
+    assert r["valid"] is True and r["task_count"] == 2
+    assert any("编号" in w for w in r["warnings"])
+
+def test_missing_plan_md_is_a_hard_error_with_actionable_text(tmp_path):
+    """spec §十.1：模型只在对话里输出计划、不写文件 → 明确告诉它该写哪。"""
+    d = tmp_path / "plans" / "plan-s1"; d.mkdir(parents=True)
+    mgr = PlanModeManager(session_id="s1", workspace=tmp_path); mgr.plan_dir = d
+    r = mgr.validate_plan_artifacts()
+    assert r["valid"] is False
+    assert any("plan.md" in e for e in r["errors"])
+
+def test_error_messages_are_actionable(tmp_path):
+    """错误信息的具体程度决定模型自我修正的成功率，比校验规则本身更重要（spec §五）。"""
+    r = _mgr_with(tmp_path, "## 标题\n\n## Tasks\n\n- [ ] 1. 做事\n").validate_plan_artifacts()
+    joined = "\n".join(r["errors"])
+    assert "- [ ] 1." in joined        # 给出正确写法的样子
+    assert "## 任务清单" in joined      # 给出正确标题
+
+def test_task_count_is_pinned_to_the_materialization_parser(tmp_path):
+    """校验器与物化侧解析器对「什么算一条任务」必须一致：同一份内容，
+    validate_plan_artifacts 数出的 task_count == checkbox_tasks_to_structured
+    产出的任务数（物化就是解析这段转换结果）。两边用的是两套既有代码
+    （count_tasks 的 checkbox 正则 / _CHECKBOX_TASK_RE），任何一边单独改动都会
+    让这里红——漂移的后果是校验器放行的计划物化出另一个条数。"""
+    content = (
+        "# 标题\n\n## 任务清单\n\n"
+        "- [ ] 1. 甲\n  - 验收: true\n"
+        "- [x] 3. 乙（完成标记也算一条）\n  - 验收: true\n"
+        "- [ ] 7. 丙\n  - 验收: true\n"
+    )
+    r = _mgr_with(tmp_path, content).validate_plan_artifacts()
+    assert r["valid"], r["errors"]
+    structured = PlanModeManager.checkbox_tasks_to_structured(content)
+    # 字面的 3 必须在：两边一起数错（比如都数成 0）也要红
+    assert r["task_count"] == pm.count_tasks(structured) == 3
+    assert len(pm.parse_tasks_content(structured)) == 3
+
+def test_read_draft_artifacts_reads_only_plan_md(tmp_path):
+    """单轨：残留的 spec.md 不读也不进返回值——重量轨已删，返回 dict 里再出现
+    spec/design/tasks/granularity 键就是半套双轨还活着。"""
+    d = tmp_path / "plans" / "plan-s1"
+    d.mkdir(parents=True)
+    (d / "plan.md").write_text("# P\n", encoding="utf-8")
+    (d / "spec.md").write_text("# S\n", encoding="utf-8")
+    mgr = PlanModeManager(session_id="s1", workspace=tmp_path)
+    mgr.plan_dir = d
+    assert mgr.read_draft_artifacts() == {"plan": "# P\n"}
 
 
 # ────────────────────────── 旧配置兼容 ──────────────────────────

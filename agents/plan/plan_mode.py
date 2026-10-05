@@ -1,11 +1,11 @@
 """Plan Mode Manager — Plan 模式逻辑封装。
 
 职责：
-- Plan 目录管理（{plan_dir}/ 下存储 spec.md, tasks.md 等）
-- Plan 模式提示词构建（从策略文件动态加载）
-- Plan 区域解析
-- Plan 系统集成
-- 产物校验
+- Plan 目录管理（{plan_dir}/ 下唯一产物 plan.md——单轨，重量轨已删）
+- Plan 模式提示词构建
+- checkbox 任务清单 → 结构化 tasks.md 转换（物化侧解析器的上游）
+- 产物格式校验（spec §五：四条硬规则 + 警告通道）
+- Plan 系统集成（批准后落库）
 """
 
 from __future__ import annotations
@@ -15,7 +15,10 @@ from pathlib import Path
 from typing import Callable, Awaitable, Any
 
 from agents.logging import print_error
-from agents.plan.plan_manager import count_tasks, create_plan, get_plan, append_tasks_to_plan, add_artifact
+from agents.plan.plan_manager import (
+    count_tasks, create_plan, get_plan, append_tasks_to_plan, add_artifact,
+    parse_tasks_content,
+)
 from agents.plan.plan_models import PlanGranularity
 
 
@@ -28,11 +31,23 @@ _CHECKBOX_SUBITEM_RE = re.compile(r"^[ \t]*[-*+][ \t]+(.+)$")
 
 # 子项里的验收键 → 解析器认得的 `**验收**:` 标记。全角冒号同样认（中文 plan 里
 # `验收：` 很常见，而 plan_manager._parse_structured_tasks 只认半角），英文键也认
-# （与 validate_plan_artifacts 同时接受「验收标准」与 "Acceptance" 一个口径）。
+# （`acceptance:`，与提示词的中文键同一口径）。
 # 刻意**只**特判验收：其余键值对原样留在块正文里，物化时整块进 TaskItem.detail，
 # 而「哪些键算结构化字段」是解析器的契约，转换器不该替它扩展。
 _ACCEPTANCE_SUBITEM_RE = re.compile(
     r"^(验收|acceptance)\s*[:：]\s*(.+)$", re.IGNORECASE)
+
+# 首行 H1 标题（validate_plan_artifacts 硬规则 1）。markdown 允许标题前最多 3 个
+# 空格缩进（4 个起是代码块），所以容忍 ` {0,3}`；`##` 匹配不到——第一个 `#` 后面
+# 必须是空白。必须与 handle_plan_system_integration 的 slug 提取正则保持同一口径：
+# 校验放行的标题，slug 必须提得出来，否则又退回 approved- 兜底那条降级路径。
+_H1_TITLE_RE = re.compile(r"^ {0,3}#\s+\S")
+
+# `## 任务清单` 小节标题（validate_plan_artifacts 硬规则 2）。必须是
+# plan_tool_executor._TASK_LIST_HEADING_RE 的**子集**：校验器放行的标题，
+# _strip_task_checklist_section 必须切得动，否则整份清单会重复进对话。
+# 子集关系：` {0,3}` ⊆ `\s{0,3}`，`##` ⊆ `#{2,}`，其余逐字相同。
+_CHECKLIST_HEADING_RE = re.compile(r"^ {0,3}##[ \t]*任务清单", re.M)
 
 
 class PlanModeManager:
@@ -126,30 +141,16 @@ Plan mode is active. You MUST NOT make any edits (except files under {plan_dir})
 
 IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask the user to approve — exit_plan_mode handles that."""
 
-    def read_draft_artifacts(self) -> dict[str, Any]:
-        """读取草稿产物并判定轨道。
+    def read_draft_artifacts(self) -> dict[str, str]:
+        """读取草稿产物（单轨：唯一产物 plan.md）。
 
-        plan.md 存在且 spec.md 不存在 → 轻量轨（minimal）；否则重量轨（standard）。
+        旧会话草稿目录里残留的 spec.md / design.md / tasks.md 刻意不读：重量轨已删，
+        读进来也没有消费者（sessions.py 的 _DRAFT_ARTIFACT_NAMES 已同步收缩）。
         """
-        result = {"granularity": "standard", "spec": "", "design": "", "tasks": "", "plan": ""}
         if not self._plan_dir:
-            return result
-
-        def _read(name: str) -> str:
-            f = self._plan_dir / name
-            return f.read_text(encoding="utf-8") if f.exists() else ""
-
-        plan_md = _read("plan.md")
-        spec = _read("spec.md")
-        if plan_md and not spec:
-            result["granularity"] = "minimal"
-            result["plan"] = plan_md
-        else:
-            result["spec"] = spec
-            result["design"] = _read("design.md")
-            result["tasks"] = _read("tasks.md")
-            result["plan"] = plan_md
-        return result
+            return {"plan": ""}
+        f = self._plan_dir / "plan.md"
+        return {"plan": f.read_text(encoding="utf-8") if f.exists() else ""}
 
     @staticmethod
     def checkbox_tasks_to_structured(content: str) -> str:
@@ -227,81 +228,123 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
         return "\n".join(out) + "\n"
 
     def validate_plan_artifacts(self) -> dict[str, Any]:
-        """校验 Plan 产物完整性。
+        """校验 plan.md 的格式（单轨，spec §五：四条硬规则 + 警告通道）。
+
+        这是 B 批次 turn 收尾送审钩子的判定输入，返回形状是契约：
 
         Returns:
             {
-                "valid": bool,
-                "errors": list[str],
-                "artifacts": {
-                    "spec.md": {"exists": bool, "size": int},
-                    "tasks.md": {"exists": bool, "size": int, "task_count": int},
-                }
+                "valid": bool,          # 有任一硬错误即 False（不送审）
+                "errors": list[str],    # 硬错误。文本必须**可直接执行**：指明第几条
+                                        # 任务、缺什么、正确写法长什么样——模型自我
+                                        # 修正的成功率取决于这个，比规则本身更重要
+                "warnings": list[str],  # 进诊断、不拦送审
+                "task_count": int,      # count_tasks 数出的 checkbox 任务数
             }
+
+        刻意**不**自带一套任务解析：计数复用 count_tasks（checkbox 分支），逐条
+        验收检查复用 checkbox_tasks_to_structured → parse_tasks_content——物化走的
+        正是后面这条链。两个解析器必然漂移，而漂移的后果是「校验器放行的计划物化出
+        另一个条数」；test_plan_system.py 有一条测试把 task_count 与转换产物钉在一起。
         """
         errors: list[str] = []
-        artifacts: dict[str, dict[str, Any]] = {}
+        warnings: list[str] = []
 
         if not self._plan_dir:
-            return {"valid": False, "errors": ["plan_dir not set"], "artifacts": {}, "granularity": "standard"}
-
+            return {"valid": False, "errors": ["plan_dir 未设置（尚未进入 plan 模式）"],
+                    "warnings": [], "task_count": 0}
 
         plan_path = self._plan_dir / "plan.md"
-        spec_path = self._plan_dir / "spec.md"
-        minimal = plan_path.exists() and not spec_path.exists()
+        if not plan_path.exists():
+            # spec §十.1：模型只在对话里输出计划、不写文件。宽容接受会断掉
+            # 「计划落盘、可审批、可物化」这条链，所以硬报错并说清该写哪。
+            return {
+                "valid": False,
+                "errors": [f"plan.md 不存在：计划必须写进 {plan_path}，"
+                           f"只在对话里输出的计划不会被送审。"],
+                "warnings": [], "task_count": 0,
+            }
 
-        if minimal:
-            # 轻量轨：plan.md 非空 + 含 checkbox 任务清单
-            content = plan_path.read_text(encoding="utf-8")
-            task_count = count_tasks(content)
-            artifacts["plan.md"] = {"exists": True, "size": len(content), "task_count": task_count}
-            if not content.strip():
-                errors.append("plan.md 为空")
-            if task_count == 0:
-                errors.append("plan.md 缺少任务清单（checkbox 格式：- [ ] 1. 任务描述）")
-        else:
-            # 重量轨：spec.md（含验收标准）+ tasks.md（任务数 > 0）
-            if spec_path.exists():
-                spec_content = spec_path.read_text(encoding="utf-8")
-                has_acc = "验收标准" in spec_content or "Acceptance" in spec_content
-                artifacts["spec.md"] = {"exists": True, "size": len(spec_content), "has_acceptance_criteria": has_acc}
-                if not has_acc:
-                    errors.append("spec.md 缺少验收标准")
-            else:
-                artifacts["spec.md"] = {"exists": False, "size": 0}
-                errors.append("spec.md 不存在（重量轨需 spec.md+tasks.md；轻量轨请写 plan.md）")
+        content = plan_path.read_text(encoding="utf-8")
+        if not content.strip():
+            return {
+                "valid": False,
+                "errors": [f"plan.md 为空：把计划写进 {plan_path}"
+                           f"（首行单行 `# <标题>`，任务写进 `## 任务清单` 小节）。"],
+                "warnings": [], "task_count": 0,
+            }
 
-            tasks_path = self._plan_dir / "tasks.md"
-            if tasks_path.exists():
-                tasks_content = tasks_path.read_text(encoding="utf-8")
-                task_count = count_tasks(tasks_content)
-                artifacts["tasks.md"] = {"exists": True, "size": len(tasks_content), "task_count": task_count}
-                if task_count == 0:
-                    errors.append("tasks.md 没有定义任何任务")
-            else:
-                artifacts["tasks.md"] = {"exists": False, "size": 0, "task_count": 0}
-                errors.append("tasks.md 不存在")
+        # 规则 1：首行（首个非空行）必须是单行 `# <标题>`，容忍 markdown 允许的最多
+        # 3 个空格缩进。它是 slug 的唯一来源——Plan 3a 的真 bug：`^#\s+` 匹配不到
+        # `##`，兜底 slug 与草稿目录同名撞车，create_plan 抛错被吞成 None，物化
+        # **静默什么都不落地**。所以 `##` 必须在这里被拦下，而不是等批准后发现。
+        first_line = next((ln for ln in content.split("\n") if ln.strip()), "")
+        if not _H1_TITLE_RE.match(first_line):
+            errors.append(
+                "plan.md 首行必须是单行 `# <标题>`（最多 3 个空格缩进；`## <标题>` "
+                "不算）——标题会被 slug 化成这份计划的永久目录名，缺了它落库只能走"
+                "降级兜底。"
+            )
+
+        # 规则 2：必须有 `## 任务清单` 小节（精确标题）。切分逻辑
+        # （_strip_task_checklist_section）只认它，切不动时整份清单会重复进对话。
+        if not _CHECKLIST_HEADING_RE.search(content):
+            errors.append(
+                "缺少 `## 任务清单` 小节：标题必须逐字是 `## 任务清单`"
+                "（写成 `## Tasks`、`## 任务` 都不行，清单切分逻辑只认这个标题）。"
+            )
+
+        # 规则 3：至少一条 `- [ ] N. <描述>`。计数用 count_tasks，不自写正则。
+        task_count = count_tasks(content)
+        # 规则 4：每条任务必须有 `验收:` 缩进子项——它是完成判据，也是软验收闸门的
+        # 输入，缺了它这条任务永远无法被闸门检验。逐条检查走物化侧同一套解析
+        # （转换 → parse_tasks_content），不另写块解析器。
+        structured = self.checkbox_tasks_to_structured(content)
+        tasks = parse_tasks_content(structured)
+        if task_count == 0 or not tasks:
+            errors.append(
+                "plan.md 没有任务：`## 任务清单` 小节下至少要有一条 checkbox 任务，"
+                "正确写法：\n- [ ] 1. 任务描述（一句话）\n  - 验收: 一条能证明完成的命令"
+            )
+        for t in tasks:
+            if not (t.acceptance or "").strip():
+                errors.append(
+                    f"任务 {t.id}（{t.description}）缺少 `验收:` 缩进子项。正确写法：\n"
+                    f"- [ ] {t.id}. {t.description}\n"
+                    f"  - 验收: 一条能证明完成的命令"
+                )
+
+        # 编号连续性只是警告（spec §五.3）：物化用的是清单**顺序**而不是编号，
+        # 把编号做成硬错误只会制造无谓的送审失败（追加模式下模型接着旧编号往下写
+        # 是常见且无害的，同理不从 1 开始也不拦）。
+        ids = [t.id for t in tasks]
+        if ids and ids != list(range(1, len(ids) + 1)):
+            warnings.append(
+                f"任务编号应从 1 开始且连续（当前：{', '.join(map(str, ids))}）。"
+                "不影响物化（物化按清单顺序），但建议修正。"
+            )
+
+        # 可选小节缺失 → 警告，不拦送审（spec §五）。
+        for name, why in (("背景", "为什么做"), ("方案", "怎么做"), ("验收", "如何验证整体完成")):
+            if not re.search(rf"^ {{0,3}}##[ \t]*{name}", content, re.M):
+                warnings.append(f"缺少 `## {name}` 小节（{why}）——建议补充。")
 
         return {
-            "valid": len(errors) == 0,
+            "valid": not errors,
             "errors": errors,
-            "artifacts": artifacts,
-            "granularity": "minimal" if minimal else "standard",
+            "warnings": warnings,
+            "task_count": task_count,
         }
 
     def handle_plan_system_integration(
         self,
-        spec_content: str,
-        plan_content: str,
-        tasks_content: str,
+        plan_md: str,
         session: Any,
-        granularity: str = "standard",
-        plan_md: str = "",
     ) -> dict | None:
-        """自动创建或追加 Plan 系统条目。
+        """自动创建或追加 Plan 系统条目（单轨：plan.md 是唯一源文档）。
 
-        granularity="minimal"：轻量轨，plan.md 为源文档，
-        checkbox 任务清单转换为结构化 tasks.md（执行状态机依赖）。
+        checkbox 任务清单会被转换成结构化 tasks.md（物化与冻结文档都依赖这个形状），
+        plan.md 与 tasks.md 一起落进永久目录。
 
         返回 None 意味着**什么都没落地**：plan 系统里没有条目、session.plan_slug 没设、
         session/plan_linked 没发，调用方因此也不会物化任务进 task_list。调用方必须把
@@ -309,25 +352,19 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
         唯一能做的是别宣称一切正常（见 plan_tool_executor._PLAN_NOT_RECORDED）。
         """
 
-        if granularity == "minimal":
-            if not plan_md.strip():
-                return None
-            structured_tasks = self.checkbox_tasks_to_structured(plan_md)
-            if "### Task" not in structured_tasks:
-                return None
-            tasks_content = tasks_content or structured_tasks
-        elif not tasks_content:
+        if not plan_md.strip():
             return None
+        structured_tasks = self.checkbox_tasks_to_structured(plan_md)
+        if "### Task" not in structured_tasks:
+            return None
+        tasks_content = structured_tasks
 
         slug = ""
-        if granularity == "minimal":
-            title_match = re.search(r"^#\s+(.+)", plan_md, re.M)
-            if title_match:
-                slug = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "-", title_match.group(1).strip().lower()).strip("-")[:40]
-        elif spec_content:
-            title_match = re.search(r"# Spec:\s*(.+)", spec_content)
-            if title_match:
-                slug = re.sub(r"[^a-z0-9]+", "-", title_match.group(1).strip().lower()).strip("-")[:40]
+        # 与 validate_plan_artifacts 规则 1 同一口径（容忍最多 3 个空格缩进）：
+        # 校验器放行的 H1 必须在这里提得出 slug，不然 approved- 兜底会悄悄接管。
+        title_match = re.search(r"^ {0,3}#\s+(.+)", plan_md, re.M)
+        if title_match:
+            slug = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "-", title_match.group(1).strip().lower()).strip("-")[:40]
 
         if not slug:
             # 兜底 slug 必须与 generate_plan_dir() 的**草稿目录名**结构性不同名。
@@ -340,10 +377,12 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
             #   blanket except 吞掉它返回 None → _finalize_plan_exit 的
             #   `if plan_result and plan_result.get("slug")` 为假 → 不物化、不清草稿、
             #   不发 session/plan_linked，消息里只剩「像成功」的一句话。
-            # 兜底路径**不是**奇异情况：轻量轨的标题正则只认 H1（`^#\s+`，不匹配
-            # `##`），重量轨只认 `# Spec:`，两者都可能没写 → 每次都会走到这里。
             # 曾经这里写的就是 `f"plan-{self.session_id}"`，于是默认轨道上的批准
             # 100% 静默失效（一行 stderr 是唯一痕迹）。别把它「简化」回去。
+            #
+            # A3 之后校验器把「首行必须 H1」做成了硬规则（validate_plan_artifacts
+            # 规则 1），正常送审路径到不了这里；兜底仍必须存在——integration 可能被
+            # 绕过校验器直接调用，且标题可能 slug 化成空串（全是标点/emoji）。
             slug = f"approved-{self.session_id}"
 
         if session.plan_slug:
@@ -361,19 +400,12 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                     return None
 
         try:
-            plan_dir = create_plan(
-                slug=slug,
-                granularity=PlanGranularity.MINIMAL if granularity == "minimal" else PlanGranularity.STANDARD,
-            )
+            # 单轨一律 MINIMAL。PlanGranularity 枚举与 plan_manager 侧的读写是盘上
+            # _meta.md 的反序列化面（旧目录里躺着 `granularity: standard`），刻意
+            # 不动；这里只是不再有别的选择。
+            plan_dir = create_plan(slug=slug, granularity=PlanGranularity.MINIMAL)
 
-            if granularity == "minimal":
-                add_artifact(slug, "plan.md", plan_md)
-            else:
-                if spec_content:
-                    add_artifact(slug, "spec.md", spec_content)
-                if plan_content:
-                    add_artifact(slug, "design.md", plan_content)
-
+            add_artifact(slug, "plan.md", plan_md)
             add_artifact(slug, "tasks.md", tasks_content)
 
             session.plan_slug = slug
