@@ -47,12 +47,24 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # 不能钉 20：jsdom 30 依赖的 undici 会调 webidl.util.markAsUncloneable，
+          # 那是 Node 20.19.0 才 backport 的 API，setup-node 解析 "20" 拿到的低版本
+          # 会让 jsdom 加载失败 → 所有测试文件报 unhandled error → vitest 输出
+          # "no tests" 并以 1 退出（CI 从 2026-09-29 起一直红就是这个）。
+          node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
         run: npm ci
+
+      # 契约新鲜度门禁放在**这里**而不是 backend 作业：它要跑 openapi-typescript，
+      # 只有这个作业装了 node。backend 作业里的同名 pytest 用例在缺 node_modules 时
+      # 会 skip，所以两边都不会假失败，而门禁真的在跑。
+      - name: Contract freshness (schema.d.ts matches openapi.json)
+        run: |
+          npm run gen:api
+          git diff --exit-code src/api/schema.d.ts
 
       - name: Unit tests
         run: npm test

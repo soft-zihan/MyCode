@@ -16,4 +16,9 @@ websockets>=12.0
 # Agent runtime (wiki settings/recall, observability)
 PyYAML>=6.0
 aiohttp>=3.9.0
-langfuse>=3.0.0
+# 上界是必需的：langfuse 5.x 改了 OTel metadata 属性的序列化（字符串值也被 JSON
+# 编码，于是 langfuse.trace.metadata.model 从 `gpt-test` 变成 `"gpt-test"`）。
+# 无界的 >=3.0.0 让 CI 直接拿到 5.0.1 而本地是 4.15.6，四个 pytest 矩阵作业全红。
+# 迁到 5.x 是一件要显式做的事（要同时确认 Langfuse 服务端怎么解读这些属性），
+# 不该由一次依赖解析顺带发生。
+langfuse>=3.0.0,<5
