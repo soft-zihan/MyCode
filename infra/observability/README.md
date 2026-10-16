@@ -18,8 +18,18 @@ Prometheus/Grafana 在容器里，靠 `host.docker.internal` 反向抓宿主。
 ## 起停
 
 ```bash
-# 1) WSL 里起被测服务 + GPU 指标导出器（会挂住，另开终端）
-wsl bash data/infra/i3/serve.sh
+# 1) WSL 里起被测服务 + GPU 指标导出器（会挂住，另开终端）。
+#    本轮用的是 data/infra/i3/serve.sh（scratch，不入库），等价命令如下——
+#    这就是产出下面那张表的实际配置，别顺手加参数，否则数字对不上产物。
+wsl bash -c "cd /mnt/d/Projects/MyCode && \
+  export VLLM_USE_FLASHINFER_SAMPLER=0 HF_HUB_DISABLE_XET=1 && \
+  .venv/bin/python infra/observability/nvidia_smi_exporter.py --port 9401 & \
+  ~/venvs/infra/bin/vllm serve ~/models/Qwen3.5-0.8B --served-model-name q08b \
+    --host 0.0.0.0 --port 8123 --max-model-len 16384 --gpu-memory-utilization 0.85 \
+    --enable-prefix-caching \
+    --limit-mm-per-prompt '{\"image\":0,\"video\":0}'"
+#    注：归因只用引擎侧计数器，不需要 --enable-prompt-tokens-details；
+#    但如果你还想看网关侧的 cached_tokens，必须加它（默认关，见 ../k8s/README.md 坑 4）。
 
 # 2) Windows 侧起监控栈
 cd infra/observability && docker compose up -d
@@ -27,16 +37,18 @@ cd infra/observability && docker compose up -d
 # 3) 造负载（复用 I7b 的采集器当压测客户端）。
 #    **一档并发单独跑一段、跑完立刻单独查一段**，别把两档混进同一个统计窗口——
 #    本轮就因此得出过一个错结论，见下面「一次自我纠错」。
-wsl bash -c "cd /mnt/d/Projects/MyCode && S=\$(date +%s) && \
+wsl bash -c "cd /mnt/d/Projects/MyCode && \
   for i in \$(seq 1 8); do .venv/bin/python infra/quant_quality.py collect \
     --endpoint http://127.0.0.1:8123/v1 --model q08b \
     --num-prompts 60 --max-tokens 256 --concurrency 16 \
     --out data/infra/i3/load_c16_\$i.jsonl; done && \
   echo QUERY_AT=\$((\$(date +%s)+20))"
 
-# 4) 把归因数字捞出来（别手点面板）。--at/--window 把窗口精确对齐到刚才那一档。
+# 4) 把归因数字捞出来（别手点面板）。--at/--window 把窗口精确对齐到刚才那一档：
+#    窗口要 ≥ 负载时长 + 30s（8 批 c16 实测约 120s，故取 160s），
+#    评估时刻取负载结束后 ~20s，避免把后面的空闲算进平均值。
 wsl bash -c "cd /mnt/d/Projects/MyCode && .venv/bin/python infra/observability/query_attribution.py \
-  --at <上一步打印的 QUERY_AT> --window 130s --out data/infra/i3/attribution_c16.md"
+  --at <上一步打印的 QUERY_AT> --window 160s --out data/infra/i3/attribution_c16.md"
 
 # 5) 收工
 cd infra/observability && docker compose down
@@ -95,7 +107,7 @@ Docker Desktop 发布的端口；Windows 侧 `python` 也可以，但**必须写
   所以优化方向是**把批做大**（更高并发、更长输出、把多个 agent 的请求合流）
   或**减少 decode 步数**（投机解码 / 更短输出），**而不是**加显存或调 `gpu-memory-utilization`。
 - 代价也量化了：并发 1 → 32，TTFT p50 从 54ms 涨到 362ms、单请求 decode 从 2.55s 涨到 4.53s。
-  这就是 1.6 节那个跷跷板，**吞吐和延迟必须一起报**。
+  **吞吐和延迟是跷跷板，必须一起报**——只报「吞吐涨了 15 倍」是不诚实的。
 
 时间花在哪也清楚：decode 2.5–4.5s vs prefill 0.06–0.21s（差 20 倍以上），而 decode 是访存瓶颈
 （显存带宽利用率峰值 88% > SM 利用率峰值 79%）——这与 I2 里「FP8 的收益全在 decode 侧
