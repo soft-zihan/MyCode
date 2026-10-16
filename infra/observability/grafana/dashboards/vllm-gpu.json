@@ -1,0 +1,154 @@
+{
+  "uid": "vllm-gpu-i3",
+  "title": "vLLM 推理服务 x GPU（I3）",
+  "tags": ["vllm", "gpu", "infra"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "annotations": { "list": [] },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "GPU 利用率 vs KV cache 使用率（「GPU 忙不忙」和「显存里的 KV 满不满」是两件事；注意 nvidia-smi 的利用率是「有 kernel 在跑的时间占比」，不是 SM 占用率）",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "nvidia_gpu_utilization_percent", "legendFormat": "GPU 利用率 %（有 kernel 在跑的时间占比）" },
+        { "refId": "B", "expr": "nvidia_gpu_memory_utilization_percent", "legendFormat": "GPU 显存带宽利用率 %" },
+        { "refId": "C", "expr": "vllm:kv_cache_usage_perc * 100", "legendFormat": "vLLM KV cache 使用率 %" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "GPU 显存 / 温度 / 功耗",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "mbytes" }, "overrides": [
+        { "matcher": { "id": "byName", "options": "温度 C" }, "properties": [{ "id": "unit", "value": "celsius" }, { "id": "custom.axisPlacement", "value": "right" }] },
+        { "matcher": { "id": "byName", "options": "功耗 W" }, "properties": [{ "id": "unit", "value": "watt" }, { "id": "custom.axisPlacement", "value": "right" }] },
+        { "matcher": { "id": "byName", "options": "SM 频率 MHz" }, "properties": [{ "id": "unit", "value": "none" }, { "id": "custom.axisPlacement", "value": "right" }] }
+      ] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "nvidia_gpu_memory_used_mib", "legendFormat": "显存已用 MiB" },
+        { "refId": "B", "expr": "nvidia_gpu_temperature_celsius", "legendFormat": "温度 C" },
+        { "refId": "C", "expr": "nvidia_gpu_power_draw_watts", "legendFormat": "功耗 W" },
+        { "refId": "D", "expr": "nvidia_gpu_sm_clock_mhz", "legendFormat": "SM 频率 MHz" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "prompt token 来源分解 + 命中率（local_cache_hit 就是 prefix caching 省下的部分；两个计数器互相独立，可交叉验证）",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "custom": { "fillOpacity": 40, "stacking": { "mode": "normal" } } }, "overrides": [
+        { "matcher": { "id": "byName", "options": "命中率" }, "properties": [
+          { "id": "unit", "value": "percentunit" }, { "id": "custom.stacking", "value": { "mode": "none" } },
+          { "id": "custom.fillOpacity", "value": 0 }, { "id": "custom.axisPlacement", "value": "right" },
+          { "id": "max", "value": 1 }, { "id": "min", "value": 0 }
+        ] }
+      ] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(vllm:prompt_tokens_by_source_total{source=\"local_cache_hit\"}[1m]))", "legendFormat": "命中缓存 tok/s" },
+        { "refId": "B", "expr": "sum(rate(vllm:prompt_tokens_by_source_total{source=\"local_compute\"}[1m]))", "legendFormat": "实际计算 tok/s" },
+        { "refId": "C", "expr": "sum(rate(vllm:prompt_tokens_by_source_total{source=\"external_kv_transfer\"}[1m]))", "legendFormat": "外部 KV 传入 tok/s" },
+        {
+          "refId": "D",
+          "expr": "sum(rate(vllm:prompt_tokens_cached_total[1m])) / clamp_min(sum(rate(vllm:prompt_tokens_total[1m])), 1e-9)",
+          "legendFormat": "命中率"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "排队与并发：running / waiting（waiting 涨说明批容量或 KV 到顶）",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "vllm:num_requests_running", "legendFormat": "running" },
+        { "refId": "B", "expr": "vllm:num_requests_waiting", "legendFormat": "waiting" },
+        { "refId": "C", "expr": "vllm:num_requests_waiting_by_reason", "legendFormat": "waiting{{reason}}" },
+        { "refId": "D", "expr": "rate(vllm:num_preemptions_total[1m])", "legendFormat": "抢占/s" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "TTFT 分解：排队 + prefill（首字延迟花在哪，直接读出来而不是猜）",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "rate(vllm:request_queue_time_seconds_sum[1m]) / clamp_min(rate(vllm:request_queue_time_seconds_count[1m]), 1e-9)", "legendFormat": "平均排队" },
+        { "refId": "B", "expr": "rate(vllm:request_prefill_time_seconds_sum[1m]) / clamp_min(rate(vllm:request_prefill_time_seconds_count[1m]), 1e-9)", "legendFormat": "平均 prefill" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket[1m])))", "legendFormat": "TTFT p99" },
+        { "refId": "D", "expr": "histogram_quantile(0.50, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket[1m])))", "legendFormat": "TTFT p50" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "吞吐：输入 token/s vs 输出 token/s（agent 流量应该输入远大于输出）",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "rate(vllm:prompt_tokens_total[1m])", "legendFormat": "prompt tok/s" },
+        { "refId": "B", "expr": "rate(vllm:generation_tokens_total[1m])", "legendFormat": "generation tok/s" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "批饱满度：每次引擎迭代处理多少 token（decode 阶段每序列每迭代 1 token，所以这个数≈在飞的序列数。它低 = GPU 在等活干）",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(vllm:iteration_tokens_total_sum[1m])) / clamp_min(sum(rate(vllm:iteration_tokens_total_count[1m])), 1e-9)",
+          "legendFormat": "平均每迭代 token 数"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.9, sum by (le) (rate(vllm:iteration_tokens_total_bucket[1m])))",
+          "legendFormat": "p90"
+        },
+        { "refId": "C", "expr": "sum(rate(vllm:iteration_tokens_total_count[1m]))", "legendFormat": "迭代次数/s" }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "prefill vs decode 耗时占比（引擎自己的分解，不是从外部推断）",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "rate(vllm:request_prefill_time_seconds_sum[1m])", "legendFormat": "prefill 总耗时/s" },
+        { "refId": "B", "expr": "rate(vllm:request_decode_time_seconds_sum[1m])", "legendFormat": "decode 总耗时/s" },
+        { "refId": "C", "expr": "rate(vllm:request_queue_time_seconds_sum[1m])", "legendFormat": "排队总耗时/s" }
+      ]
+    }
+  ]
+}

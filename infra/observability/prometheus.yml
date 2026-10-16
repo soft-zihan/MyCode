@@ -1,0 +1,22 @@
+# I3：Prometheus 抓取配置
+#
+# 两个 target 都在 WSL 里（不是容器），所以都走 host.docker.internal。
+# 15s 抓取间隔：压测单轮只有 20-80s，再稀就采不到峰值。
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: vllm
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8123"]
+        labels:
+          component: inference-engine
+
+  - job_name: gpu
+    static_configs:
+      - targets: ["host.docker.internal:9401"]
+        labels:
+          component: gpu

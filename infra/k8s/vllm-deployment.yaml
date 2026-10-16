@@ -1,0 +1,134 @@
+# vLLM 推理服务在 K8s 上的部署清单（I5）。
+#
+# 参数不是抄来的模板，来自本机两处实测：
+#   - 压测矩阵用的那组（infra/bench_matrix.py 的 build_server_argv）：
+#     max-model-len 16384 / gpu-memory-utilization 0.85 / max-num-seqs 128 / prefix caching 开
+#   - MyCode 本体接本地端点跑真实会话那组（data/infra/i7/run.sh）：
+#     auto tool choice 开 / tool-call-parser qwen3_xml / enable-prompt-tokens-details
+#     —— 纯压测负载不带 tools 也不需要读 cached_tokens，所以这三个参数在 bench_matrix 里没有，
+#        但**生产部署必须有**，见下面坑 2 和坑 4。
+#
+# 四个真实踩过的坑写成了配置，不是注释里的建议：
+#   1. max-num-seqs 必须 ≤ 可用 Mamba cache block 数，否则服务**拒绝启动**
+#      （本机 BF16 2B 实测：256 > 230 → 起不来）。
+#   2. 带 tools 的请求必须配 --enable-auto-tool-choice + 与模型 chat_template
+#      匹配的 --tool-call-parser，否则 API 层 400 拒掉、且**引擎侧指标一动不动**
+#      （I7a v1 就是这么白跑了一轮）。
+#   3. 模型加载要 ~50s，就绪/存活探针必须让位给 startupProbe，否则加载期间被反复杀掉。
+#   4. --enable-prompt-tokens-details **默认是关的**，不开则响应体里没有
+#      prompt_tokens_details.cached_tokens，网关侧（以及 MyCode/Langfuse 这类观测面）
+#      的 prefix cache 命中率**一律显示 0%**——缓存照常生效，只是不上报。
+#      实测开了之后三个口径逐位相同（0.8483），见 data/infra/i7/reconcile.md。
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  labels:
+    app: vllm
+    component: inference-engine
+spec:
+  # 单卡机上 replicas 只能是 1；HPA 的上限见 hpa.yaml 的注释。
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm
+  strategy:
+    # 推理服务是有显存状态的：滚动更新会同时占两份 GPU，单卡集群必然 Pending。
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: vllm
+        component: inference-engine
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8123"
+        prometheus.io/path: /metrics
+    spec:
+      # vLLM 多进程（EngineCore / worker）靠共享内存通信，默认 64Mi 的 /dev/shm 会直接崩。
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi
+        - name: model-cache
+          emptyDir: {}
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.31.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --model
+            - /models/Qwen3.5-2B
+            - --served-model-name
+            - q2b
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8123"
+            - --max-model-len
+            - "16384"
+            - --gpu-memory-utilization
+            - "0.85"
+            # 见文件头坑 1：这个值受 Mamba cache block 数上限约束
+            - --max-num-seqs
+            - "128"
+            - --enable-prefix-caching
+            # 见文件头坑 4：不开则响应里没有 cached_tokens，网关侧命中率恒显示 0%
+            - --enable-prompt-tokens-details
+            # 见文件头坑 2：两个参数缺一不可
+            - --enable-auto-tool-choice
+            - --tool-call-parser
+            - qwen3_xml
+            - --limit-mm-per-prompt
+            - '{"image":0,"video":0}'
+          ports:
+            - name: http
+              containerPort: 8123
+          env:
+            # 本机 WSL 无 nvcc，flashinfer 走 JIT 编译采样算子会失败并拖垮 EngineCore。
+            - name: VLLM_USE_FLASHINFER_SAMPLER
+              value: "0"
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+            - name: HF_HOME
+              value: /models
+          resources:
+            requests:
+              cpu: "2"
+              memory: 6Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "8"
+              memory: 12Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: model-cache
+              mountPath: /models
+          # 三段探针的分工：startup 容忍冷启动，readiness 控制进流量，liveness 只管真死。
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            # 5s × 120 = 600s 上限；本机实测冷启动 ~52s，留 10 倍余量给大模型。
+            failureThreshold: 120
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+            # 宽松：推理服务一次抢占/重排可能让 /health 短暂变慢，别因此重启整个引擎
+            # （重启代价 = 重新加载权重 + 丢掉全部 prefix cache）。
+            failureThreshold: 5
