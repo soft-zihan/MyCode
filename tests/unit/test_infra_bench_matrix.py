@@ -169,3 +169,36 @@ def test_last_error_picks_last_error_line_and_tolerates_missing_file(tmp_path):
 
     assert "EngineCore failed" in bm.last_error(log)
     assert bm.last_error(tmp_path / "missing.log") == ""
+
+
+def test_peak_kv_cache_usage_takes_max_and_tolerates_no_data(tmp_path):
+    log = tmp_path / "server.log"
+    log.write_text(
+        "INFO Engine 000: Avg prompt throughput: 169.0 tokens/s, GPU KV cache usage: 12.5%\n"
+        "INFO Engine 000: Avg prompt throughput: 647.8 tokens/s, GPU KV cache usage: 63.2%\n"
+        "INFO Engine 000: Avg prompt throughput: 0.0 tokens/s, GPU KV cache usage: 40.0%\n",
+        encoding="utf-8")
+
+    assert bm.peak_kv_cache_usage(log) == 63.2
+    assert bm.peak_kv_cache_usage(tmp_path / "missing.log") is None
+    empty = tmp_path / "empty.log"
+    empty.write_text("INFO no kv lines here\n", encoding="utf-8")
+    assert bm.peak_kv_cache_usage(empty) is None
+
+
+def test_peak_kv_cache_usage_respects_offset(tmp_path):
+    log = tmp_path / "server.log"
+    log.write_text(
+        "INFO Engine 000: Avg prompt throughput: 100.0 tokens/s, GPU KV cache usage: 90.0%\n"
+        "INFO Engine 000: Avg prompt throughput: 100.0 tokens/s, GPU KV cache usage: 20.0%\n",
+        encoding="utf-8")
+    first_line_len = len(log.read_bytes().splitlines(keepends=True)[0])
+
+    # 不截偏移 = 整份日志的峰值（会把上一轮压测的数字算进本轮）
+    assert bm.peak_kv_cache_usage(log) == 90.0
+    assert bm.peak_kv_cache_usage(log, first_line_len) == 20.0
+
+
+def test_warmup_enabled_by_default_so_concurrency_levels_are_comparable():
+    # 三档并发共用一个服务；不预热会让第一档冷缓存、后两档热缓存，对比失真
+    assert bm.BenchConfig(name="x").warmup is True

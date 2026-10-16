@@ -25,9 +25,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -93,6 +95,7 @@ class BenchConfig:
     custom_output_len: int = 128
     num_prompts: int = 60
     concurrencies: tuple[int, ...] = (1, 4, 16)
+    warmup: bool = True
     random_input_len: int = 2048
     random_output_len: int = 128
     random_prefix_len: int = 1024
@@ -104,12 +107,20 @@ CONFIGS: tuple[BenchConfig, ...] = (
     BenchConfig(name="base_pc_on", prefix_caching=True),
     BenchConfig(name="gpu_util_070", prefix_caching=True, gpu_memory_utilization=0.70),
     BenchConfig(name="max_tok_2048", prefix_caching=True, max_num_batched_tokens=2048),
-    BenchConfig(name="no_chunked_prefill", prefix_caching=True, chunked_prefill=False),
+    # 注：没有「关 chunked prefill」这一组——Qwen3.5 是混合架构，vLLM 直接拒绝启动：
+    # "Chunked prefill is required for mamba cache mode 'align'"。该开关在此模型上不可关。
     BenchConfig(name="random_prefix", prefix_caching=True, dataset="random", num_prompts=48),
     BenchConfig(name="random_no_prefix", prefix_caching=True, dataset="random",
                 num_prompts=48, random_prefix_len=0),
+    # 量化对照：同一个 2B 模型，BF16 基线 vs 在线 FP8（Ada/cc8.9 原生支持 FP8）。
+    # 只比显存与吞吐，**不比质量**——质量退化要另做任务级评测，别在这里下结论。
+    # max-num-seqs 必须两边一致才公平：Qwen3.5 是混合架构，每条并发解码序列要占一个
+    # Mamba cache block；BF16 的 2B 权重在 8GB 上只剩 230 块 < 默认 256，服务直接起不来
+    # （"max_num_seqs (256) exceeds available Mamba cache blocks (230)"）。
+    BenchConfig(name="bf16_2b", model=model_ref(MODEL_2B_NAME), prefix_caching=True,
+                extra_server_args=["--max-num-seqs", "128"]),
     BenchConfig(name="fp8_2b", model=model_ref(MODEL_2B_NAME), prefix_caching=True,
-                quantization="fp8"),
+                quantization="fp8", extra_server_args=["--max-num-seqs", "128"]),
 )
 
 
@@ -183,7 +194,7 @@ def to_markdown(rows: list[dict[str, Any]]) -> str:
     columns = ["config", "concurrency", "completed", "ttft_mean_ms", "ttft_p99_ms",
                "tpot_mean_ms", "itl_mean_ms", "e2el_mean_ms",
                "req_throughput", "out_tok_throughput", "total_tok_throughput",
-               "engine_prefix_hit_rate", "server_peak_vram_mb", "bench_s"]
+               "engine_prefix_hit_rate", "peak_kv_cache_pct", "peak_vram_mb", "bench_s"]
     lines = ["| " + " | ".join(columns) + " |",
              "|" + "|".join(["---"] * len(columns)) + "|"]
     for row in rows:
@@ -302,22 +313,32 @@ def run_config(cfg: BenchConfig, run_dir: Path, dry_run: bool = False) -> list[d
                              "error": f"{reason}: {last_error(server_log)}",
                              "server_log": str(server_log)})
                 return rows
+            if cfg.warmup:
+                # 先跑一遍不计入结果：三档并发共用一个服务，不预热的话第一档是冷缓存、
+                # 后两档被前一轮焐热，prefix caching 的收益会虚高（run1 实测踩过）。
+                warm_path = run_dir / f"{cfg.name}_warmup.json"
+                subprocess.run(build_bench_argv(cfg, max(cfg.concurrencies), warm_path),
+                               cwd=str(PROJECT_ROOT), capture_output=True, text=True)
             for concurrency in cfg.concurrencies:
                 result_path = run_dir / f"{cfg.name}_c{concurrency}.json"
                 bench_argv = build_bench_argv(cfg, concurrency, result_path)
                 cache_before = parse_prefix_cache(scrape_metrics())
+                log_offset = server_log.stat().st_size if server_log.exists() else 0
                 t0 = time.time()
-                bench = subprocess.run(bench_argv, cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+                with VramSampler() as sampler:
+                    bench = subprocess.run(bench_argv, cwd=str(PROJECT_ROOT),
+                                           capture_output=True, text=True)
                 elapsed = round(time.time() - t0, 1)
                 cache_after = parse_prefix_cache(scrape_metrics())
                 bench_log = run_dir / f"{cfg.name}_c{concurrency}.bench.log"
                 bench_log.write_text((bench.stdout or "") + "\n--stderr--\n" + (bench.stderr or ""),
                                      encoding="utf-8")
                 row: dict[str, Any] = {"config": cfg.name, "concurrency": concurrency, "bench_s": elapsed,
-                                       "engine_prefix_hit_rate": prefix_hit_rate(cache_before, cache_after)}
+                                       "engine_prefix_hit_rate": prefix_hit_rate(cache_before, cache_after),
+                                       "peak_vram_mb": sampler.peak_mb}
                 if result_path.is_file():
                     row.update(extract_metrics(json.loads(result_path.read_text(encoding="utf-8"))))
-                    row["server_peak_vram_mb"] = _peak_vram_mb(server_log)
+                    row["peak_kv_cache_pct"] = peak_kv_cache_usage(server_log, log_offset)
                 else:
                     row["error"] = f"rc={bench.returncode} no result json (see {bench_log.name})"
                 rows.append(row)
@@ -330,24 +351,59 @@ def run_config(cfg: BenchConfig, run_dir: Path, dry_run: bool = False) -> list[d
     return rows
 
 
-def _peak_vram_mb(server_log: Path) -> int | None:
-    """从服务日志里捞显存占用（vLLM 启动时会打印 KV cache 与显存预算行）。"""
+KV_USAGE_RE = re.compile(r"GPU KV cache usage:\s*([0-9.]+)\s*%")
+
+
+def peak_kv_cache_usage(server_log: Path, offset: int = 0) -> float | None:
+    """服务日志里 GPU KV cache 使用率的峰值。
+
+    offset 用来只看本轮压测新增的日志——服务日志跨该配置的所有压测轮次，
+    不截偏移就会把整组的峰值填到每一行，列名与含义不符。
+    """
     try:
-        text = server_log.read_text(encoding="utf-8", errors="replace")
+        with server_log.open("rb") as fh:
+            fh.seek(offset)
+            text = fh.read().decode("utf-8", errors="replace")
     except OSError:
         return None
-    peak: int | None = None
-    for line in text.splitlines():
-        if "GiB" in line and ("KV cache" in line or "memory" in line.lower()):
-            for token in line.replace("(", " ").replace(")", " ").split():
-                try:
-                    value = float(token)
-                except ValueError:
-                    continue
-                mb = int(value * 1024)
-                if 100 < mb < 64 * 1024:
-                    peak = mb if peak is None else max(peak, mb)
-    return peak
+    values = [float(m) for m in KV_USAGE_RE.findall(text)]
+    return round(max(values), 2) if values else None
+
+
+class VramSampler:
+    """压测期间轮询 nvidia-smi 取显存峰值。
+
+    口径注意：WSL 下 nvidia-smi 报的是**整卡**已用显存（含其他进程），
+    不是本进程独占；本机压测时无其他 GPU 负载，可近似当作服务占用。
+    """
+
+    def __init__(self, interval_s: float = 1.0) -> None:
+        self.interval_s = interval_s
+        self.peak_mb: int | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _poll(self) -> None:
+        while not self._stop.is_set():
+            try:
+                out = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=10)
+                value = int(out.stdout.strip().splitlines()[0])
+                self.peak_mb = value if self.peak_mb is None else max(self.peak_mb, value)
+            except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
+                pass
+            self._stop.wait(self.interval_s)
+
+    def __enter__(self) -> "VramSampler":
+        self._thread = threading.Thread(target=self._poll, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
 
 
 def main(argv: list[str] | None = None) -> int:
