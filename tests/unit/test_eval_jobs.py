@@ -170,3 +170,73 @@ def test_running_jobs_only_counts_queued_and_running(reports):
     write_job(_record(run_id="d", status=JobStatus.INTERRUPTED))
 
     assert sorted(r.run_id for r in running_jobs()) == ["a", "b"]
+
+
+# ── 旧 .state.json 的真实形状 ─────────────────────────────────────────
+# 真盘上的 state 文件是 EvalRunState.to_dict() 写的：时间戳是 time.time() 的
+# **float**，状态词表是 RunStatus（有 pending、没有 queued/interrupted）。
+# 上面那些手写成 ISO 字符串的 fixture 长得好看，但和盘上的数据不是一回事——
+# 类型混进同一个 sorted() 会 TypeError，而 list_jobs 一炸，
+# 运行列表和 MAX_CONCURRENT_JOBS 闸门会一起没。
+
+LEGACY_EPOCH = 1790892113.65  # 2026-10-01 前后，取自真盘上的一份 state 文件
+
+
+def _write_legacy(reports, run_id, **over):
+    data = {"run_id": run_id, "benchmark": "gaia", "status": "completed",
+            "created_at": LEGACY_EPOCH, "started_at": LEGACY_EPOCH,
+            "finished_at": LEGACY_EPOCH + 900.0,
+            "report_json_path": f"/x/{run_id}.json"}
+    data.update(over)
+    (reports / f"{run_id}.state.json").write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_legacy_float_timestamps_sort_against_new_iso_ones(reports):
+    _write_legacy(reports, "old")
+    write_job(_record(run_id="new", started_at="2026-10-18T02:00:00+08:00"))
+
+    runs = list_jobs()  # 不抛 TypeError
+
+    assert [r.run_id for r in runs] == ["new", "old"]  # 新的在前
+    old = runs[1]
+    assert isinstance(old.started_at, str) and old.started_at.startswith("2026-")
+    assert isinstance(old.finished_at, str)
+
+
+def test_legacy_pending_maps_to_queued_not_failed(reports):
+    # service.py 在 create_state 之后就 save_state，所以盘上真有 status=pending 的文件；
+    # 映射成 failed 会把"还没开始"报成"跑挂了"
+    _write_legacy(reports, "p", status="pending", finished_at=None)
+
+    assert list_jobs()[0].status == JobStatus.QUEUED
+
+
+def test_a_legacy_record_with_an_unknown_status_is_interrupted_not_completed(reports):
+    # 读不懂的记录报成"成功跑完"是往错的方向撒谎
+    _write_legacy(reports, "q", status=None)
+
+    assert list_jobs()[0].status == JobStatus.INTERRUPTED
+
+
+def test_a_legacy_running_record_does_not_occupy_the_concurrency_slot(reports):
+    # 旧路径（进程内 asyncio）留下的 running 没有 pid：查不了死活也杀不掉。
+    # 算进名额的话，MAX_CONCURRENT_JOBS=1 会被一份陈年文件永久焊死
+    _write_legacy(reports, "stuck", status="running", finished_at=None)
+
+    assert running_jobs() == []
+    # 列表里仍如实显示 running——不替它撒谎，也不拿它挡新任务
+    assert list_jobs()[0].status == JobStatus.RUNNING
+
+
+def test_attach_on_startup_closes_the_record_it_interrupts(reports):
+    write_job(_record(run_id="dead", pid=2_000_000_000, status=JobStatus.RUNNING,
+                      finished_at=None, error="boom"))
+
+    attach_on_startup()
+
+    fixed = get_job("dead")
+    assert fixed.status == JobStatus.INTERRUPTED
+    # 不收口的话这一条永远没有结束时间，页面上的耗时只能拿 now 去减，越看越长
+    assert fixed.finished_at
+    assert "boom" in fixed.error and "interrupted" in fixed.error
+    assert "boom服务" not in fixed.error  # 两段之间要有分隔，不能粘成一个词

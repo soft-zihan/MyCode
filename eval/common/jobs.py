@@ -12,7 +12,9 @@ import json
 import logging
 import os
 import signal
+import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -102,6 +104,32 @@ def get_job(run_id: str, reports_dir: Path | None = None) -> JobRecord | None:
         return None
 
 
+# 旧 state.json 的状态词表是 RunStatus（models.py），和 JobStatus 不完全重合：
+# `pending` 得映射到 QUEUED，缺失/不认识的一律 INTERRUPTED——
+# 把一份读不懂的记录报成"成功跑完"是往错的方向撒谎
+_LEGACY_STATUS = {
+    "pending": JobStatus.QUEUED,
+    "running": JobStatus.RUNNING,
+    "completed": JobStatus.COMPLETED,
+    "aborted": JobStatus.ABORTED,
+    "failed": JobStatus.FAILED,
+}
+
+
+def _iso(value: Any) -> str | None:
+    """float epoch → 本地时区 ISO 字符串；已经是字符串就原样返回。
+
+    `EvalRunState` 的时间戳是 `time.time()`（float），新 `JobRecord` 的是 ISO 字符串。
+    两种类型混进同一个 `sorted()` 会 TypeError——而 `list_jobs` 是这个模块存在的
+    全部理由，它一炸，运行列表和并发闸门会一起没。
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return datetime.fromtimestamp(float(value)).astimezone().isoformat(timespec="seconds")
+    return str(value)
+
+
 def _legacy_state_records(reports_dir: Path) -> list[JobRecord]:
     """旧的 gaia/hle/smoke/loca run 只有 .state.json，转成 JobRecord 让历史不断档。"""
     out: list[JobRecord] = []
@@ -114,18 +142,17 @@ def _legacy_state_records(reports_dir: Path) -> list[JobRecord]:
         if not run_id:
             continue
         status = d.get("status")
-        try:
-            job_status = JobStatus(status) if status else JobStatus.COMPLETED
-        except ValueError:
-            job_status = JobStatus.FAILED
+        job_status = _LEGACY_STATUS.get(status, JobStatus.INTERRUPTED)
+        if status not in _LEGACY_STATUS:
+            logger.warning("旧的 eval state %s 状态 %r 不认识，按 interrupted 记", path.name, status)
         out.append(
             JobRecord(
                 run_id=run_id,
                 benchmark=d.get("benchmark") or "unknown",
                 params={"model": d.get("model")} if d.get("model") else {},
                 status=job_status,
-                started_at=d.get("started_at") or d.get("created_at"),
-                finished_at=d.get("finished_at"),
+                started_at=_iso(d.get("started_at") or d.get("created_at")),
+                finished_at=_iso(d.get("finished_at")),
                 report_path=d.get("report_json_path"),
                 error=d.get("error"),
             )
@@ -153,7 +180,11 @@ def running_jobs(reports_dir: Path | None = None) -> list[JobRecord]:
     return [
         r
         for r in list_jobs(limit=1000, reports_dir=reports_dir)
-        if r.status in (JobStatus.RUNNING, JobStatus.QUEUED)
+        # `and r.pid`：只算**我们起的、查得到死活也杀得掉**的那些。
+        # 旧 .state.json 记录没有 pid，把它算进名额会让 MAX_CONCURRENT_JOBS=1 的闸门
+        # 被一份陈年 state 文件永久焊死——而那份文件来自进程内 asyncio 的旧执行路径，
+        # 既不由这层调度，也不能被 abort_job 中止
+        if r.status in (JobStatus.RUNNING, JobStatus.QUEUED) and r.pid
     ]
 
 
@@ -189,7 +220,11 @@ def attach_on_startup(reports_dir: Path | None = None) -> list[str]:
         if pid_alive(rec.pid):
             continue
         rec.status = JobStatus.INTERRUPTED
-        rec.error = (rec.error or "") + "服务重启后发现进程已不存在，标记为 interrupted"
+        rec.error = "\n".join(
+            part for part in (rec.error, "服务重启后发现进程已不存在，标记为 interrupted") if part
+        )
+        # 不收口的话这一条永远没有结束时间，页面上的耗时只能拿 now 去减，越看越长
+        rec.finished_at = rec.finished_at or time.strftime("%Y-%m-%dT%H:%M:%S%z")
         write_job(rec, root)
         fixed.append(rec.run_id)
     return fixed
