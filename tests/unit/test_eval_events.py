@@ -129,3 +129,19 @@ def test_sink_from_env_tolerates_missing_run_id(tmp_path, monkeypatch):
     sink.emit("eval/run_started")
 
     assert json.loads((tmp_path / "e.jsonl").read_text(encoding="utf-8").strip())["run_id"] == ""
+
+
+def test_envelope_fields_win_over_a_colliding_payload_key(tmp_path):
+    # 信封字段必须赢过同名的 payload key：调用方万一传了 run_id= / ts=，
+    # 被覆盖掉的是 run 归属和时间戳，前端按它们过滤/排序——静默丢弃比报错难查得多。
+    # （type= 到不了这里：它是 emit 的具名参数，Python 直接 TypeError，是"响"的失败）
+    path = tmp_path / "r.events.jsonl"
+    sink = JsonlEventSink(path, run_id="r1")
+
+    sink.emit("eval/task_started", run_id="other", ts=0.0, task_id="t1")
+
+    event = json.loads(path.read_text(encoding="utf-8").strip())
+    assert event["type"] == "eval/task_started"
+    assert event["run_id"] == "r1"
+    assert event["ts"] > 0
+    assert event["task_id"] == "t1"

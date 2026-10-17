@@ -39,7 +39,9 @@ class JsonlEventSink:
         self._fh = self.path.open("a", encoding="utf-8")
 
     def emit(self, type: str, **payload: Any) -> None:
-        record = {"type": type, "run_id": self.run_id, "ts": time.time(), **payload}
+        # 信封字段放在**后面**：调用方万一传了 run_id= / ts= 这样的同名 kwarg，
+        # 被覆盖掉的就是 run 归属和时间戳，前端靠它们过滤和排序——静默丢弃比报错难查得多
+        record = {**payload, "type": type, "run_id": self.run_id, "ts": time.time()}
         self._fh.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
         self._fh.flush()
 
