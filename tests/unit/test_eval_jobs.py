@@ -240,3 +240,185 @@ def test_attach_on_startup_closes_the_record_it_interrupts(reports):
     assert fixed.finished_at
     assert "boom" in fixed.error and "interrupted" in fixed.error
     assert "boom服务" not in fixed.error  # 两段之间要有分隔，不能粘成一个词
+
+
+# ── Task 3：起进程与中止 ──────────────────────────────────────────────
+
+import signal  # noqa: E402
+import subprocess  # noqa: E402  （追加段，import 放这里避免改动文件头）
+
+from eval.common.jobs import (  # noqa: E402
+    BENCHMARK_MODULES,
+    JobStartError,
+    abort_job,
+    build_argv,
+    finish_job,
+    git_revision,
+    start_job,
+)
+
+
+class _FakeProc:
+    def __init__(self, pid=4321):
+        self.pid = pid
+        self.kwargs: dict = {}
+
+
+def _fake_popen(record: list):
+    def popen(argv, **kwargs):
+        record.append((argv, kwargs))
+        return _FakeProc()
+
+    return popen
+
+
+def test_build_argv_maps_benchmark_to_its_module():
+    argv = build_argv("harbor", {"arm": "mycode", "stage": "final"})
+
+    assert argv[0].endswith("python") or "python" in argv[0]
+    assert "-m" in argv and "eval.harbor.runner" in argv
+    # 参数按 --key value 展开；None 值的键要跳过，否则 CLI 会收到字符串 "None"
+    assert "--arm" in argv and argv[argv.index("--arm") + 1] == "mycode"
+
+
+def test_build_argv_skips_none_and_expands_bool_flags():
+    argv = build_argv("gaia", {"sample": 5, "judge": True, "category": None})
+
+    assert "--sample" in argv and argv[argv.index("--sample") + 1] == "5"
+    assert "--judge" in argv
+    # True 只出 flag 不出值；None 整个跳过。
+    # 不能写 argv[argv.index("--judge") + 1]：category 被跳过后 --judge 就是最后一个，
+    # 取下标会 IndexError——而 IndexError 恰好把"没有值"这件事报成了错误
+    assert "True" not in argv
+    assert "--category" not in argv
+
+
+def test_build_argv_rejects_unknown_benchmark():
+    with pytest.raises(JobStartError):
+        build_argv("nope", {})
+
+
+def test_benchmark_modules_covers_every_benchmark():
+    assert set(BENCHMARK_MODULES) >= {"gaia", "hle", "smoke", "loca", "harbor"}
+
+
+def test_start_job_writes_record_and_passes_event_env(reports):
+    calls: list = []
+
+    rec = start_job("gaia", {"sample": 2}, popen=_fake_popen(calls))
+
+    assert rec.status == JobStatus.RUNNING
+    assert rec.pid == 4321
+    assert rec.benchmark == "gaia"
+    assert get_job(rec.run_id) == rec
+    argv, kwargs = calls[0]
+    env = kwargs["env"]
+    # 子进程靠这两个 env 找到自己该往哪写事件
+    assert env["MYCODE_EVAL_RUN_ID"] == rec.run_id
+    assert env["MYCODE_EVAL_EVENTS_PATH"] == str(events_path(rec.run_id))
+    # 必须脱离服务的进程组，否则服务被杀时它跟着死
+    assert kwargs["start_new_session"] is True
+
+
+def test_start_job_records_git_revision(reports):
+    rec = start_job("gaia", {}, popen=_fake_popen([]))
+
+    assert rec.git_revision  # 非空；具体值取决于仓库状态
+    assert git_revision() == rec.git_revision
+
+
+def test_start_job_refuses_when_one_is_already_running(reports):
+    start_job("gaia", {}, popen=_fake_popen([]))
+
+    with pytest.raises(JobStartError):
+        start_job("hle", {}, popen=_fake_popen([]))
+
+
+def test_start_job_allows_new_one_after_previous_finished(reports):
+    first = start_job("gaia", {}, popen=_fake_popen([]))
+    finish_job(first.run_id, 0)
+
+    second = start_job("hle", {}, popen=_fake_popen([]))
+
+    assert second.status == JobStatus.RUNNING
+
+
+def test_finish_job_maps_exit_code_to_status(reports):
+    rec = start_job("gaia", {}, popen=_fake_popen([]))
+    (reports / f"{rec.run_id}.json").write_text("{}", encoding="utf-8")
+
+    finish_job(rec.run_id, 0)
+
+    done = get_job(rec.run_id)
+    assert done.status == JobStatus.COMPLETED
+    assert done.exit_code == 0
+    assert done.finished_at
+    assert done.report_path == str(reports / f"{rec.run_id}.json")
+
+
+def test_a_zero_exit_without_a_report_is_downgraded_to_failed(reports):
+    # 退出码 0 却什么都没留下：页面会显示"完成"而详情页是空的，
+    # 这比失败更难查，所以宁可报失败
+    rec = start_job("gaia", {}, popen=_fake_popen([]))
+
+    finish_job(rec.run_id, 0)
+
+    done = get_job(rec.run_id)
+    assert done.status == JobStatus.FAILED
+    assert "报告未落盘" in (done.error or "")
+
+
+def test_a_dry_run_is_allowed_to_produce_no_report(reports):
+    # harbor 的 --dry-run / --install-only 本来就只校验配置、只装 agent，
+    # 不写报告是**正确行为**，不能因此被判失败
+    for params in ({"dry_run": True}, {"install_only": True}):
+        rec = start_job("harbor", params, popen=_fake_popen([]))
+
+        finish_job(rec.run_id, 0)
+
+        assert get_job(rec.run_id).status == JobStatus.COMPLETED, params
+
+
+def test_finish_job_marks_failure_and_keeps_stderr_tail(reports):
+    rec = start_job("gaia", {}, popen=_fake_popen([]))
+
+    finish_job(rec.run_id, -9)
+
+    failed = get_job(rec.run_id)
+    assert failed.status == JobStatus.FAILED
+    assert failed.exit_code == -9
+    assert "信号" in (failed.error or "")
+
+
+def test_finish_job_on_unknown_run_is_none(reports):
+    assert finish_job("nope", 0) is None
+
+
+def test_abort_job_sends_sigterm_to_the_process_group(reports):
+    sent: list = []
+    rec = start_job("gaia", {}, popen=_fake_popen([]))
+
+    out = abort_job(rec.run_id, killer=lambda pid, sig: sent.append((pid, sig)))
+
+    # 打的是**进程组**（pgid == pid，因为 start_new_session=True 让子进程自成一组），
+    # 这样 runner 起的 harbor/docker 子进程也会一起收信号，不会留下孤儿容器
+    assert sent == [(rec.pid, signal.SIGTERM)]
+    assert out.status == JobStatus.ABORTED
+
+
+def test_abort_job_on_finished_job_is_a_noop(reports):
+    sent: list = []
+    rec = start_job("gaia", {}, popen=_fake_popen([]))
+    # 报告必须真存在：否则退出码 0 会被降级成 failed（见上面那条降级测试），
+    # 而这条要的是"一个确实跑完了的任务"
+    (reports / f"{rec.run_id}.json").write_text("{}", encoding="utf-8")
+    finish_job(rec.run_id, 0)
+
+    out = abort_job(rec.run_id, killer=lambda pid, sig: sent.append((pid, sig)))
+
+    assert sent == []
+    assert out.status == JobStatus.COMPLETED
+
+
+def test_abort_job_unknown_run_returns_none(reports):
+    assert abort_job("nope") is None

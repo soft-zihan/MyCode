@@ -12,13 +12,16 @@ import json
 import logging
 import os
 import signal
+import subprocess
+import sys
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+from eval.common.events import EVENTS_PATH_ENV, RUN_ID_ENV
 from eval.common.runner_base import REPORTS_DIR
 from eval.common.service import new_run_id
 
@@ -172,7 +175,10 @@ def list_jobs(limit: int = 100, reports_dir: Path | None = None) -> list[JobReco
         rec = get_job(path.name[: -len(".job.json")], root)
         if rec:
             by_id[rec.run_id] = rec
-    ordered = sorted(by_id.values(), key=lambda r: r.started_at or "", reverse=True)
+    # `str(...)`：_iso 归一化了旧 .state.json 那条路，但手改过或外部写进来的
+    # job.json 仍可能带数值型 started_at。float 和 str 混进同一个 sorted() 会
+    # TypeError，而 list_jobs 一炸，运行列表和并发闸门会一起没
+    ordered = sorted(by_id.values(), key=lambda r: str(r.started_at or ""), reverse=True)
     return ordered[:limit]
 
 
@@ -228,3 +234,165 @@ def attach_on_startup(reports_dir: Path | None = None) -> list[str]:
         write_job(rec, root)
         fixed.append(rec.run_id)
     return fixed
+
+
+BENCHMARK_MODULES = {
+    "gaia": "eval.gaia.runner",
+    "hle": "eval.hle.runner",
+    "smoke": "eval.smoke.runner",
+    "loca": "eval.loca.runner",
+    "harbor": "eval.harbor.runner",
+}
+
+
+class JobStartError(RuntimeError):
+    """启动被拒（未知 benchmark、已有任务在跑）。前端映射成 4xx，不是 500。"""
+
+
+def git_revision() -> str:
+    """这轮跑的是哪个版本的代码。没有它，两次运行无法当基线对比。"""
+    from eval.harbor.runner import git_revision as _impl
+
+    return _impl()
+
+
+def build_argv(benchmark: str, params: dict[str, Any]) -> list[str]:
+    module = BENCHMARK_MODULES.get(benchmark)
+    if not module:
+        raise JobStartError(
+            f"未知 benchmark：{benchmark!r}（可选：{', '.join(sorted(BENCHMARK_MODULES))}）"
+        )
+    argv = [sys.executable, "-m", module]
+    for key, value in params.items():
+        if value is None:
+            continue
+        flag = f"--{key.replace('_', '-')}"
+        if isinstance(value, bool):
+            # store_true 型的开关只出 flag；False 就整个不出（CLI 的默认值即 False）
+            if value:
+                argv.append(flag)
+            continue
+        if isinstance(value, (list, tuple)):
+            argv += [flag, ",".join(str(v) for v in value)]
+            continue
+        argv += [flag, str(value)]
+    return argv
+
+
+def start_job(
+    benchmark: str,
+    params: dict[str, Any] | None = None,
+    reports_dir: Path | None = None,
+    popen: Callable[..., Any] | None = None,
+) -> JobRecord:
+    params = dict(params or {})
+    busy = running_jobs(reports_dir)
+    if len(busy) >= MAX_CONCURRENT_JOBS:
+        raise JobStartError(
+            f"已有 {len(busy)} 个评测在跑（上限 {MAX_CONCURRENT_JOBS}）："
+            f"{', '.join(r.run_id for r in busy)}。评测很重且共享同一个网关配额，先中止或等它跑完。"
+        )
+
+    run_id = new_run_id(benchmark)
+    argv = build_argv(benchmark, params)
+    ev_path = events_path(run_id, reports_dir)
+    ev_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 两个 env 名从 events.py 拿：sink_from_env() 就是按那两个常量读的，
+    # 这里再硬编码一份字符串，一旦漂移，子进程会静默地一个事件都不写
+    env = {**os.environ, RUN_ID_ENV: run_id, EVENTS_PATH_ENV: str(ev_path)}
+    spawn = popen or subprocess.Popen
+    # start_new_session=True：子进程自成一个进程组，服务被杀时不会连带被杀。
+    # stdout/stderr 落文件而不是 PIPE——PIPE 没人读会写满 64KB 缓冲区把子进程堵死。
+    log_path = (reports_dir or REPORTS_DIR) / f"{run_id}.log"
+    with open(log_path, "ab") as log_fh:
+        proc = spawn(
+            argv,
+            env=env,
+            cwd=str(Path(__file__).resolve().parents[2]),
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+
+    record = JobRecord(
+        run_id=run_id,
+        benchmark=benchmark,
+        argv=argv,
+        params=params,
+        git_revision=git_revision(),
+        status=JobStatus.RUNNING,
+        pid=getattr(proc, "pid", None),
+        started_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    )
+    write_job(record, reports_dir)
+    return record
+
+
+def finish_job(
+    run_id: str, exit_code: int | None, reports_dir: Path | None = None
+) -> JobRecord | None:
+    rec = get_job(run_id, reports_dir)
+    if not rec:
+        return None
+    if rec.status == JobStatus.ABORTED:
+        # 主动中止过：退出码非零是预期内的，不要覆盖成 failed
+        rec.exit_code = exit_code
+        rec.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        write_job(rec, reports_dir)
+        return rec
+    rec.exit_code = exit_code
+    rec.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    out_dir = Path(reports_dir) if reports_dir else REPORTS_DIR
+    report = out_dir / f"{run_id}.json"
+    if exit_code == 0:
+        rec.status = JobStatus.COMPLETED
+        if report.exists():
+            rec.report_path = str(report)
+        elif not _report_is_optional(rec):
+            # 退出码 0 却什么都没留下：页面会显示"完成"而详情页是空的，
+            # 这比失败更难查，所以宁可报失败
+            rec.status = JobStatus.FAILED
+            rec.error = "子进程退出码 0，但报告未落盘"
+    else:
+        rec.status = JobStatus.FAILED
+        reason = f"被信号 {-exit_code} 杀掉" if (exit_code or 0) < 0 else f"退出码 {exit_code}"
+        log_path = out_dir / f"{run_id}.log"
+        tail = ""
+        if log_path.exists():
+            lines = log_path.read_text(encoding="utf-8", errors="replace").strip().splitlines()
+            tail = "\n".join(lines[-15:])
+        rec.error = f"子进程{reason}" + (f"\n--- 日志末尾 ---\n{tail}" if tail else "")
+    write_job(rec, reports_dir)
+    return rec
+
+
+# 这两种跑法本来就不写报告：--dry-run 只让 harbor 校验配置，--install-only 只装 agent
+_REPORT_IS_OPTIONAL = ("dry_run", "install_only")
+
+
+def _report_is_optional(rec: JobRecord) -> bool:
+    return any((rec.params or {}).get(key) for key in _REPORT_IS_OPTIONAL)
+
+
+def abort_job(
+    run_id: str,
+    reports_dir: Path | None = None,
+    killer: Callable[[int, int], None] | None = None,
+) -> JobRecord | None:
+    rec = get_job(run_id, reports_dir)
+    if not rec:
+        return None
+    if rec.status in (JobStatus.RUNNING, JobStatus.QUEUED) and rec.pid:
+        send = killer or os.killpg
+        try:
+            # 发给**进程组**而不是单个 pid：start_new_session=True 让子进程自成一组
+            # （pgid == pid），而 runner 自己还会起 harbor / docker 子进程，
+            # 只杀 runner 会留下一堆孤儿容器
+            send(rec.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError) as exc:
+            logger.warning("中止 %s 失败（进程可能已退出）：%s", run_id, exc)
+        rec.status = JobStatus.ABORTED
+        rec.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        write_job(rec, reports_dir)
+    return rec
