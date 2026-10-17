@@ -36,6 +36,7 @@ class FakeAgent:
         self.session_id = self.session.id
         self.total_input_tokens = 0
         self.total_output_tokens = 0
+        self.total_reasoning_tokens = 0
         self.current_sub_agent_id = None
         self.permission_mode = "bypassPermissions"
 

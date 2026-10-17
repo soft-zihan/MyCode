@@ -153,6 +153,9 @@ class Agent:
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.total_cached_tokens = 0
+        # 思考 token 是 total_output_tokens 的子集（网关的 completion_tokens 含思考），
+        # 单列出来才分得清「可见输出」和「思考」——两者的成本含义完全不同。
+        self.total_reasoning_tokens = 0
         self.last_input_token_count = 0
         self.last_total_token_count = 0
         self.last_usage_seq = -1
@@ -404,7 +407,12 @@ class Agent:
         return self.permission_mode
 
     def get_token_usage(self) -> dict:
-        return {"input":self.total_input_tokens, "output":self.total_output_tokens}
+        return {
+            "input": self.total_input_tokens,
+            "output": self.total_output_tokens,
+            # output 的子集，不是额外的一份；单独给是为了能算「可见输出 = output - reasoning」
+            "reasoning": self.total_reasoning_tokens,
+        }
 
     def get_messages(self) -> list[dict]:
         return self.session.get_messages_for_llm()

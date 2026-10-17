@@ -215,6 +215,15 @@ async def run_agent_task(
                     },
                 )
 
+            if agent:
+                # run_once 只回 input/output，cache 命中数单独挂在 agent 上。
+                # input 用的是 prompt_tokens 口径（已含 cache），补出 cached 才能
+                # 同时给出「总输入」和「其中缓存」两个数，跟别的 harness 对得上。
+                result["tokens"]["cached"] = agent.total_cached_tokens
+                # reasoning 是 output 的子集。不单列就分不清「可见输出」和「思考」，
+                # 而两臂对比里思考量正是最容易混进结论的变量（见 eval/harbor/README.md §5.6）。
+                result["tokens"]["reasoning"] = agent.total_reasoning_tokens
+
             if agent and agent.session:
                 try:
                     counts = {"tool_folded": 0, "session_folded": 0, "events_hidden": 0}

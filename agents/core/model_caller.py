@@ -169,10 +169,16 @@ def _usage_details_for_trace(usage: dict[str, Any]) -> dict[str, int]:
     total_tokens = int(usage.get("total_tokens") or 0)
     cached_tokens = int(usage.get("cached_tokens") or 0)
     cached_tokens = min(cached_tokens, input_tokens)
+    details = usage.get("completion_tokens_details") or {}
+    reasoning_tokens = int(details.get("reasoning_tokens") or 0)
     return {
         "input": input_tokens - cached_tokens,
         "input_cached_tokens": cached_tokens,
         "output": output_tokens,
+        # 思考是 output 的子集。拆开报，trace 上才看得出「这次慢是因为想得多」
+        # 还是「因为写得多」——两臂对比时这是最关键的一个区分。
+        "output_reasoning_tokens": reasoning_tokens,
+        "output_visible_tokens": max(0, output_tokens - reasoning_tokens),
         "total": total_tokens or (input_tokens + output_tokens),
     }
 
@@ -473,11 +479,18 @@ class ModelCaller:
             prompt_tokens = int(getattr(chunk.usage, "prompt_tokens", 0) or 0)
             completion_tokens = int(getattr(chunk.usage, "completion_tokens", 0) or 0)
             total_tokens = int(getattr(chunk.usage, "total_tokens", 0) or 0)
+            completion_details = getattr(chunk.usage, "completion_tokens_details", None)
             acc["usage"] = {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": total_tokens or (prompt_tokens + completion_tokens),
                 "cached_tokens": chunk.usage.prompt_tokens_details.cached_tokens if chunk.usage.prompt_tokens_details else 0,
+                # 不抄这一层，reasoning_tokens 就在流式路径上彻底丢了：
+                # completion_tokens 是含思考的合计值，少了明细就分不清
+                # 「可见输出」和「思考」，也就没法核对思考开关到底生效没有。
+                "completion_tokens_details": {
+                    "reasoning_tokens": int(getattr(completion_details, "reasoning_tokens", 0) or 0),
+                } if completion_details else None,
             }
 
         if not chunk.choices:

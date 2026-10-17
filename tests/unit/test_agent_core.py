@@ -192,3 +192,75 @@ class TestAgentSessionLifecycle:
         msg = agent.fork_session()
         assert old_id in msg
         assert agent.session_id != old_id
+
+
+class TestReasoningTokenAccounting:
+    """思考 token 必须和可见输出分开记。
+
+    两臂对比里思考量是最容易混进结论的变量：首轮 harbor 25 题就是因为
+    MyCode 臂没思考、opencode 臂全程思考，测出了一个假的「快 1.9×」。
+    分开记才验得出来思考到底开没开。
+    """
+
+    @staticmethod
+    def _record(agent, usage):
+        from agents.agent_loop import AgentLoop
+
+        AgentLoop(agent)._update_token_stats({"usage": usage})
+        stats = [
+            e for e in agent.session.events
+            if (e.get("type") if isinstance(e, dict) else getattr(e, "type", None)) == "stats"
+        ]
+        return stats[-1]
+
+    @staticmethod
+    def _usage(**overrides):
+        base = {
+            "prompt_tokens": 100,
+            "completion_tokens": 40,
+            "total_tokens": 140,
+            "completion_tokens_details": {"reasoning_tokens": 25},
+        }
+        base.update(overrides)
+        return base
+
+    def test_reasoning_is_tracked_as_a_subset_of_output(self):
+        agent = _make_agent()
+
+        self._record(agent, self._usage())
+
+        # 思考是 completion 的子集，不是额外的一份：output 仍是 40，不能变成 65
+        assert agent.total_output_tokens == 40
+        assert agent.total_reasoning_tokens == 25
+        assert agent.get_token_usage() == {"input": 100, "output": 40, "reasoning": 25}
+
+    def test_reasoning_accumulates_across_calls(self):
+        agent = _make_agent()
+
+        self._record(agent, self._usage())
+        self._record(agent, self._usage(completion_tokens=10, total_tokens=110,
+                                       completion_tokens_details={"reasoning_tokens": 7}))
+
+        assert agent.total_reasoning_tokens == 32
+        assert agent.total_output_tokens == 50
+
+    def test_gateway_without_details_counts_zero_and_does_not_crash(self):
+        # 换个不报 completion_tokens_details 的网关不能炸，也不能凭空算出思考量
+        agent = _make_agent()
+
+        self._record(agent, self._usage(completion_tokens_details=None))
+
+        assert agent.total_reasoning_tokens == 0
+        assert agent.total_output_tokens == 40
+
+    def test_stats_event_carries_per_call_and_cumulative_reasoning(self):
+        agent = _make_agent()
+
+        self._record(agent, self._usage())
+        event = self._record(agent, self._usage(completion_tokens=10, total_tokens=110,
+                                                completion_tokens_details={"reasoning_tokens": 7}))
+
+        payload = event if isinstance(event, dict) else event.__dict__
+        data = payload.get("data", payload)
+        assert data["reasoning_tokens"] == 7
+        assert data["total_reasoning_tokens"] == 32
