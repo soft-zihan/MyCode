@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from eval.common.events import JsonlEventSink
-from eval.common.jobs import JobRecord, JobStatus, get_job, write_job
+from eval.common.jobs import JobRecord, JobStatus, get_job, list_jobs, write_job
 from eval.common.tailer import JobTailer
 
 _server_dir = str(Path(__file__).parent.parent.parent / "frontend" / "server")
@@ -213,6 +213,127 @@ async def test_run_polls_until_cancelled(reports):
     await asyncio.gather(task, return_exceptions=True)
     assert task.cancelled()
     assert got and got[0]["type"] == "eval/run_started"
+
+
+# ── Task 6 复审第 1 轮：run() 的护栏 + 一轮只扫一次索引 ─────────────────
+# 两条都是"静默失效"型：跑起来看不出问题，出事时也没有任何输出。
+
+
+async def _wait_until(holds, timeout=3.0, step=0.005) -> bool:
+    """有界等待：条件成立返回 True，超时返回最后一次判定（由调用方 assert）。
+
+    不能裸 `await asyncio.sleep(0.2)` 赌"这时候总该跑完两轮了"——那是在赌 CI 的调度，
+    而且赌输的方式是间歇性的；也不能不 sleep 干转，run() 就在同一个循环里，
+    不让出去它一轮都跑不完。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if holds():
+            return True
+        await asyncio.sleep(step)
+    return holds()
+
+
+def _raise_once_then_behave(tailer, monkeypatch, exc: Exception | None = None) -> dict:
+    """把**这个实例**的 poll_once 换成"第一次抛、之后照常"，返回计数字典。
+
+    默认抛 FileNotFoundError，因为那不是假想的触发路径：read_events 只在 exists()
+    之后裸调 stat() / open() / read()（events.py:67-74），文件在这两步之间被清掉
+    （清理脚本、git clean、手工删旧 run）就是它直接穿出 poll_once。
+    """
+    polls = {"n": 0}
+    real = tailer.poll_once
+
+    def wrapper() -> int:
+        polls["n"] += 1
+        if polls["n"] == 1:
+            raise exc if exc is not None else FileNotFoundError("events 文件读到一半没了")
+        return real()
+
+    monkeypatch.setattr(tailer, "poll_once", wrapper)
+    return polls
+
+
+async def test_run_survives_a_poll_that_raises(reports, monkeypatch):
+    """一轮 poll 炸了不能带走 tailer。
+
+    后果比"页面冻结在 half-way"更糟：main.py 持着这个 task 的唯一强引用，asyncio 那句
+    "Task exception was never retrieved" 要到 GC 才可能打出来，也就是关机时——冻结期间
+    运维拿到的是**零**诊断。而 tailer 是系统里唯一的周期收尸者，它一死，
+    MAX_CONCURRENT_JOBS=1 的闸门要等后端重启才重开。
+    """
+    _job("r1")
+    _sink(reports, "r1").emit("eval/run_started", benchmark="gaia")
+    got: list[dict] = []
+    tailer = JobTailer(got.append, poll_interval_s=0.005)
+    polls = _raise_once_then_behave(tailer, monkeypatch)
+    task = asyncio.create_task(tailer.run())
+
+    try:
+        # 等到第二轮**且**它真的广播了：只等一轮区分不出"活下来了"和"还没来得及死"
+        assert await _wait_until(lambda: polls["n"] >= 2 and got)
+        # 还活着，而且没有以取消收场
+        assert not task.done() and not task.cancelled()
+        # 抛掉的那一轮没把后面的事件一起带走
+        assert got[0]["type"] == "eval/run_started"
+        assert got[0]["run_id"] == "r1"
+        assert got[0]["session_id"] is None
+    finally:
+        # 断言失败的路径上也得收掉，否则漏一个还在转的 task，后面的测试会变飘
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_run_is_still_cancellable_after_a_poll_failure(reports, monkeypatch):
+    """护栏不能顺手把 CancelledError 一起吞掉。
+
+    lifespan 关机时对这个 task 调 .cancel()。except Exception 抓不到 CancelledError
+    （3.8 起它挂在 BaseException 下；本机 3.12.3 已核对 MRO），所以取消照常生效——
+    但那是**解释器**的性质，不是这段代码的性质：谁把它改成 except BaseException
+    或者加个裸 except，关机就会永久挂在这一句上。
+    """
+    _job("r1")
+    tailer = JobTailer(lambda e: None, poll_interval_s=0.005)
+    polls = _raise_once_then_behave(tailer, monkeypatch, RuntimeError("boom"))
+    task = asyncio.create_task(tailer.run())
+
+    try:
+        assert await _wait_until(lambda: polls["n"] >= 2)
+
+        task.cancel()
+        # 有界等待：真被吞了的话 `await task` 就是死等到 pytest 超时，
+        # 报出来的是 timeout 而不是"取消没生效"
+        assert await _wait_until(lambda: task.cancelled(), timeout=2.0)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+def test_poll_once_scans_the_index_once(reports, monkeypatch):
+    """一轮只扫一次索引：收尸和算活跃共用同一份快照。
+
+    list_jobs 要遍历整个 reports 目录、逐个解析 job.json，本机 7 条记录实测
+    23.4 / 24.0 / 28.1 ms（3×200 次，热缓存）。扫两遍就是每 0.5s 往事件循环上压
+    ~47-56ms，而同一个循环还在流式吐 token、发 WS 帧。
+    少了这条断言，未来某次改动把 records= 摘掉、悄悄退回双扫，不会有任何测试变红。
+    """
+    _job("r1")
+    calls: list = []
+
+    def counting(*args, **kwargs):
+        calls.append((args, kwargs))
+        return list_jobs(*args, **kwargs)
+
+    # 两个名字都得换：tailer 用 `from ... import list_jobs` 持着自己那份绑定，
+    # 而 reap_finished / running_jobs 在 jobs.py 内部调的是另一份。只钉 tailer 这一份，
+    # "保留 fetch、把 records= 摘掉"这条最可能的退回路径就测不出来——实测过：那种
+    # 退回版真的扫了 3 次，只钉 tailer 绑定的版本仍然是绿的
+    monkeypatch.setattr("eval.common.tailer.list_jobs", counting)
+    monkeypatch.setattr("eval.common.jobs.list_jobs", counting)
+
+    JobTailer(lambda e: None).poll_once()
+
+    assert len(calls) == 1
 
 
 def test_the_backend_exposes_one_public_broadcast_entry_point():

@@ -785,3 +785,50 @@ def test_an_aborted_job_whose_process_died_reopens_the_gate(reports, monkeypatch
         assert get_job(rec.run_id).status is JobStatus.ABORTED
     finally:
         _drop_handles(made)
+
+
+# ── Task 6 复审第 1 轮：服务重启后留下的孤儿也要收 ─────────────────────
+# _PROCS 是进程内的。后端重启时子进程还活着（detached，杀不到），重启后名册是空的，
+# _poll_exit 只能退回 os.waitpid；而那个孩子早被 reparent 给 init、init 也早把它收走了，
+# waitpid 只会 ChildProcessError → _poll_exit 返回 None。退出码这辈子都拿不到了，
+# 但"进程没了"还判得出来。
+#
+# 不判的后果是**永久**的：finish_job 全仓只有 reap_finished 一个调用点，
+# 记录于是一直停在 running，start_job 的闸门一直关着，要等到下一次重启才由
+# attach_on_startup 打开——而那时它被标成 interrupted，哪怕它其实成功写了报告。
+# Task 6 把 tailer 变成唯一的周期收尸者之后，这条路从"理论缺口"变成了"必然焊死"。
+#
+# 用 2_000_000_000 当 pid：它既不是本测试进程的孩子（waitpid → ChildProcessError），
+# 也不存在（pid_max 是 4194304，见 test_pid_alive_false_for_none_and_dead_pids），
+# 正好是"重启前留下的孤儿"的双身。
+
+
+def test_reap_finished_finalizes_a_post_restart_orphan_whose_pid_is_gone(reports):
+    run_id = "orphan"
+    # 报告在：它真的跑完了，只是没人收尸。退出码判不了就按 0 记，
+    # completed/failed 交给 finish_job 现成的"按报告在不在"决定
+    (reports / f"{run_id}.json").write_text("{}", encoding="utf-8")
+    write_job(_record(run_id=run_id, status=JobStatus.RUNNING, pid=2_000_000_000))
+
+    assert reap_finished(reports_dir=reports) == [run_id]
+
+    done = get_job(run_id)
+    # 不是 interrupted：成功写了报告的运行必须报成功，否则页面上是一次假失败
+    assert done.status is JobStatus.COMPLETED
+    assert done.exit_code == 0
+    assert done.finished_at
+    assert done.report_path == str(reports / f"{run_id}.json")
+    # 收掉了就不该再占名额，闸门随之重开
+    assert running_jobs(reports_dir=reports) == []
+
+
+def test_reap_finished_downgrades_a_post_restart_orphan_without_a_report(reports):
+    # 同一条路、报告不在：复用 finish_job 既有的降级，不需要任何新分支
+    run_id = "orphan-noreport"
+    write_job(_record(run_id=run_id, status=JobStatus.RUNNING, pid=2_000_000_000))
+
+    assert reap_finished(reports_dir=reports) == [run_id]
+
+    failed = get_job(run_id)
+    assert failed.status is JobStatus.FAILED
+    assert "报告未落盘" in (failed.error or "")

@@ -189,10 +189,18 @@ def list_jobs(limit: int = 100, reports_dir: Path | None = None) -> list[JobReco
     return ordered[:limit]
 
 
-def running_jobs(reports_dir: Path | None = None) -> list[JobRecord]:
+def running_jobs(
+    reports_dir: Path | None = None, records: list[JobRecord] | None = None
+) -> list[JobRecord]:
+    # records=：调用方已经扫过索引时直接复用那份快照。list_jobs 要遍历整个 reports
+    # 目录并逐个解析 job.json（本机 7 条记录实测 ~24ms），tailer 一轮里既要收尸又要
+    # 算活跃，扫两次就是把 ~48ms 压在事件循环上——而同一个循环还在流式吐 token、发 WS 帧。
+    # 不传就跟原来一样自己扫，所有既有调用方行为不变
+    if records is None:
+        records = list_jobs(limit=1000, reports_dir=reports_dir)
     return [
         r
-        for r in list_jobs(limit=1000, reports_dir=reports_dir)
+        for r in records
         # `and r.pid`：只算**我们起的、查得到死活也杀得掉**的那些。
         # 旧 .state.json 记录没有 pid，把它算进名额会让 MAX_CONCURRENT_JOBS=1 的闸门
         # 被一份陈年 state 文件永久焊死——而那份文件来自进程内 asyncio 的旧执行路径，
@@ -264,7 +272,9 @@ def _poll_exit(run_id: str, pid: int) -> int | None:
     return os.waitstatus_to_exitcode(status)
 
 
-def reap_finished(reports_dir: Path | None = None) -> list[str]:
+def reap_finished(
+    reports_dir: Path | None = None, records: list[JobRecord] | None = None
+) -> list[str]:
     """非阻塞地收一下还挂在 RUNNING/QUEUED/ABORTED 上的子进程：死了就 finish_job。
 
     为什么必须自己收、不能只看 pid_alive：子进程退出后、父进程 wait() 之前是**僵尸**，
@@ -274,8 +284,10 @@ def reap_finished(reports_dir: Path | None = None) -> list[str]:
     （被信号杀是负数，正好对上 finish_job 的文案约定）。
     句柄在 _PROCS 里就走 proc.poll()，不在（服务重启过）才退回 waitpid——见 _poll_exit。
     """
+    if records is None:
+        records = list_jobs(limit=1000, reports_dir=reports_dir)
     reaped: list[str] = []
-    for rec in list_jobs(limit=1000, reports_dir=reports_dir):
+    for rec in records:
         # ABORTED 也要收：abort_job 只发 SIGTERM 就把状态写成 ABORTED，进程随后退出照样变僵尸。
         # 不收的话 (a) start_job 的 dying 闸门会一直把它当成"还在收尾"而焊死，
         # (b) finish_job 里那条专门给 ABORTED 的分支永远没人调，中止过的运行就没有退出码
@@ -283,7 +295,22 @@ def reap_finished(reports_dir: Path | None = None) -> list[str]:
             continue
         exit_code = _poll_exit(rec.run_id, rec.pid)
         if exit_code is None:
-            continue
+            # 判不了退出码不等于判不了死活。服务重启后 _PROCS 是空的，而那个 detached
+            # 子进程已被 reparent 给 init、init 早把它收走了，waitpid 只会 ChildProcessError
+            # ——退出码再也拿不到。但"进程没了"还能判：不判的话这条记录永远停在 running，
+            # 闸门要等到下一次重启才由 attach_on_startup 打开，而那时它会被标成
+            # interrupted，哪怕它其实成功写了报告
+            #
+            # `rec.run_id in _PROCS` 时不查 pid_alive：句柄在手上，poll() 返回 None 就等于
+            # 孩子真活着（僵尸会被 poll 自己收走并给出退出码；已被别人收走的那条 CPython
+            # 的 _internal_poll 按 ECHILD 判成 sts=0，也返回退出码而不是 None），再查一次
+            # 是多余的，而且会把"句柄说在跑、pid 却查不到"的不一致当成死——生产上不会
+            # 出现这种不一致，测试里的假 pid（_FakeProc 的 4321）会
+            if rec.run_id in _PROCS or pid_alive(rec.pid):
+                continue
+            # 退出码未知，用 0：finish_job 本来就会按报告在不在决定 completed 还是 failed
+            # （退出码 0 但报告不存在 → 降级 FAILED），所以不需要任何新逻辑
+            exit_code = 0
         finish_job(rec.run_id, exit_code, reports_dir)
         reaped.append(rec.run_id)
     return reaped
