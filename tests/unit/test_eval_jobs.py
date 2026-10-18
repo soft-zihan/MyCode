@@ -410,6 +410,9 @@ def test_start_job_kills_the_child_if_the_index_write_fails(reports, monkeypatch
     # list_jobs 那条路拿不到这条 run
     run_id = calls[0][1]["env"]["MYCODE_EVAL_RUN_ID"]
     assert get_job(run_id) is None
+    # 索引没写上＝reap_finished 再也不会访问这个 run_id：名册里不摘掉，
+    # 漏的就是句柄 + 它身后那只没人收的僵尸（_PROCS 还是模块级状态，会串到后面的测试）
+    assert run_id not in _PROCS
 
 
 def test_finish_job_maps_exit_code_to_status(reports):

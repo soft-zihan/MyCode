@@ -267,11 +267,12 @@ def _poll_exit(run_id: str, pid: int) -> int | None:
 def reap_finished(reports_dir: Path | None = None) -> list[str]:
     """非阻塞地收一下还挂在 RUNNING/QUEUED/ABORTED 上的子进程：死了就 finish_job。
 
-    为什么必须自己 waitpid、不能只看 pid_alive：start_job 起了子进程就丢掉 Popen 句柄，
-    全仓没有任何地方 wait()。退出的子进程于是变成僵尸，而 os.kill(pid, 0) 对僵尸是成功的
-    ——pid_alive 会一直说"还活着"。状态永远停在 running，MAX_CONCURRENT_JOBS=1 的闸门
-    就永久关着，第二次评测再也起不来。一次 waitpid(WNOHANG) 同时解决三件事：
-    判死、回收僵尸、拿到真实退出码（被信号杀是负数，正好对上 finish_job 的文案约定）。
+    为什么必须自己收、不能只看 pid_alive：子进程退出后、父进程 wait() 之前是**僵尸**，
+    而 os.kill(pid, 0) 对僵尸是成功的——pid_alive 会一直说"还活着"。状态于是永远停在
+    running，MAX_CONCURRENT_JOBS=1 的闸门永久关着，第二次评测再也起不来。
+    收一次同时解决三件事：判死、回收僵尸、拿到真实退出码
+    （被信号杀是负数，正好对上 finish_job 的文案约定）。
+    句柄在 _PROCS 里就走 proc.poll()，不在（服务重启过）才退回 waitpid——见 _poll_exit。
     """
     reaped: list[str] = []
     for rec in list_jobs(limit=1000, reports_dir=reports_dir):
@@ -406,6 +407,7 @@ def start_job(
     try:
         write_job(record, reports_dir)
     except Exception:
+        _PROCS.pop(run_id, None)  # 索引没写上＝reap_finished 永远不会访问这个 run_id，不摘就漏一条句柄和一只僵尸
         # 子进程已经起来了、索引却没写上：它会占着网关配额和 docker，
         # 在 UI 里隐形、不占并发名额、也中止不掉。宁可现在杀掉。
         pid = getattr(proc, "pid", None)
