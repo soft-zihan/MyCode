@@ -805,9 +805,11 @@ def test_an_aborted_job_whose_process_died_reopens_the_gate(reports, monkeypatch
 
 def test_reap_finished_finalizes_a_post_restart_orphan_whose_pid_is_gone(reports):
     run_id = "orphan"
-    # 报告在：它真的跑完了，只是没人收尸。退出码判不了就按 0 记，
-    # completed/failed 交给 finish_job 现成的"按报告在不在"决定
+    # 报告在：它真的跑完了，只是没人收尸。退出码判不了，就读 runner 自己写下的 status
     (reports / f"{run_id}.json").write_text("{}", encoding="utf-8")
+    (reports / f"{run_id}.state.json").write_text(
+        json.dumps({"run_id": run_id, "status": "completed"}), encoding="utf-8"
+    )
     write_job(_record(run_id=run_id, status=JobStatus.RUNNING, pid=2_000_000_000))
 
     assert reap_finished(reports_dir=reports) == [run_id]
@@ -822,8 +824,8 @@ def test_reap_finished_finalizes_a_post_restart_orphan_whose_pid_is_gone(reports
     assert running_jobs(reports_dir=reports) == []
 
 
-def test_reap_finished_downgrades_a_post_restart_orphan_without_a_report(reports):
-    # 同一条路、报告不在：复用 finish_job 既有的降级，不需要任何新分支
+def test_reap_finished_records_a_post_restart_orphan_without_a_report_as_failed(reports):
+    # 同一条路、报告不在，而且没有 .state.json 可读：按真实 status 记失败（判不出来就算失败）
     run_id = "orphan-noreport"
     write_job(_record(run_id=run_id, status=JobStatus.RUNNING, pid=2_000_000_000))
 
@@ -831,4 +833,31 @@ def test_reap_finished_downgrades_a_post_restart_orphan_without_a_report(reports
 
     failed = get_job(run_id)
     assert failed.status is JobStatus.FAILED
-    assert "报告未落盘" in (failed.error or "")
+    # 走的是 finish_job 的**非零**分支（jobs.py:475-483）：文案是"子进程退出码 1"，
+    # 这条 run 没有 .log 所以不带"--- 日志末尾 ---"。
+    # 旧断言的"报告未落盘"只出现在退出码 0 的降级分支里，本轮改成读 status 后走不到它
+    assert failed.exit_code == 1
+    assert failed.error == "子进程退出码 1"
+
+
+def test_reap_finished_does_not_report_a_failed_orphan_as_completed(reports):
+    """报告存在**不等于**运行成功：write_report 在 finally 里，失败的一轮也写。
+
+    round 1 给孤儿一律填 exit_code=0，于是这条路上每个失败孤儿都被记成 COMPLETED。
+    本轮改成读 runner 自己写下的 .state.json 的 status。
+    """
+    run_id = "orphan-failed"
+    (reports / f"{run_id}.json").write_text("{}", encoding="utf-8")
+    (reports / f"{run_id}.state.json").write_text(
+        json.dumps({"run_id": run_id, "status": "failed", "error": "gateway 500"}),
+        encoding="utf-8",
+    )
+    write_job(_record(run_id=run_id, status=JobStatus.RUNNING, pid=2_000_000_000))
+
+    assert reap_finished(reports_dir=reports) == [run_id]
+
+    done = get_job(run_id)
+    assert done.status is JobStatus.FAILED
+    assert done.exit_code == 1
+    # 闸门照样重开：收尸和判成败是两件事，失败也不能占着名额
+    assert running_jobs(reports_dir=reports) == []

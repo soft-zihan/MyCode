@@ -272,6 +272,24 @@ def _poll_exit(run_id: str, pid: int) -> int | None:
     return os.waitstatus_to_exitcode(status)
 
 
+def _orphan_exit_code(run_id: str, reports_dir: Path | None) -> int:
+    """孤儿的退出码：读 runner 自己写下的 .state.json，别一律填 0。
+
+    为什么不能填 0：EvalService.write_report 在 finally 里调，所以异常失败的一轮
+    （state.status = "failed"）照样会写出 <run_id>.json；而 finish_job 只看
+    "退出码 0 + 报告在不在"，于是每个失败孤儿都会被记成 COMPLETED。
+    运行记录是要当回归基线的，假 COMPLETED 是静默污染。
+    不用 service.load_state()：它读的是 service.py 自己的 REPORTS_DIR 模块全局，
+    会无视这里收到的 reports_dir——测试里两个常量是分别 monkeypatch 的，会读错目录。
+    """
+    root = Path(reports_dir) if reports_dir else REPORTS_DIR
+    try:
+        d = json.loads((root / f"{run_id}.state.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 1
+    return 0 if d.get("status") == "completed" else 1
+
+
 def reap_finished(
     reports_dir: Path | None = None, records: list[JobRecord] | None = None
 ) -> list[str]:
@@ -308,9 +326,8 @@ def reap_finished(
             # 出现这种不一致，测试里的假 pid（_FakeProc 的 4321）会
             if rec.run_id in _PROCS or pid_alive(rec.pid):
                 continue
-            # 退出码未知，用 0：finish_job 本来就会按报告在不在决定 completed 还是 failed
-            # （退出码 0 但报告不存在 → 降级 FAILED），所以不需要任何新逻辑
-            exit_code = 0
+            # 退出码这辈子拿不到了，但 runner 自己写下过真话：<run_id>.state.json 的 status
+            exit_code = _orphan_exit_code(rec.run_id, reports_dir)
         finish_job(rec.run_id, exit_code, reports_dir)
         reaped.append(rec.run_id)
     return reaped
