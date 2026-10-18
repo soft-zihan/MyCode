@@ -33,6 +33,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from eval.common.events import RUN_ID_ENV, sink_from_env  # noqa: E402
+# 模块级 import 是刻意的（原来藏在 main() 里、报告落盘前一行才执行）：
+# jobs 一旦 import 不动，就在**启动时**炸，而不是整轮 loca 跑完之后的报告写入时刻——
+# 后者会让 write_reports 永不执行，几十分钟到几小时的不可再生结果全丢。
+# 无循环 import：jobs.py 只用字符串引用 "eval.loca.runner"
+from eval.common.jobs import git_revision  # noqa: E402
 from eval.common.runner_base import REPORTS_DIR, resolve_model_config, write_reports  # noqa: E402
 from eval.common.schema import normalize_row  # noqa: E402
 
@@ -112,11 +117,19 @@ def loca_variables(
     parallel: int,
     timeout: int,
     loca_commit: str | None,
+    api_base: str | None,
 ) -> dict[str, Any]:
     """这轮的控制变量。对比两次 loca 运行时，守卫校验的就是这一份。
 
     和 harbor 的 `run_variables` 是同一个用意：报告里没写下"思考是关的"，
     假结论就能一路活到汇报环节（见 eval/harbor/README.md §5.6）。
+    `api_base` 同理：同一个 model 名走不同网关（本地 vLLM vs 共享网关，
+    或端点被重新部署/换量化）会改变结果，而报告是不可再生的，
+    没记下来就永久丢了。
+
+    **事件流和报告必须都用这一个函数**：原来 `main()` 里有两份手写清单，
+    10 键那份有 api_base 没有 arm/loca_commit，11 键那份反过来——
+    实时 UI 因此看不到压缩臂，而压缩臂正是 loca 消融实验的自变量。
     """
     return {
         "model": model,
@@ -130,6 +143,7 @@ def loca_variables(
         "parallel": parallel,
         "timeout_s": timeout,
         "loca_commit": loca_commit,
+        "api_base": api_base,
     }
 
 
@@ -174,6 +188,26 @@ def main() -> None:
     picked = select_indices(len(configurations), args.sample, args.select, args.seed, args.indices)
 
     model, api_base, _ = resolve_model_config(args.model, args.api_base)
+    # 控制变量在这里构造**一次**，事件流（run_started）和报告（meta.variables）共用：
+    # 原来 main() 里有两份手写清单，已经漂到实时 UI 看不见压缩臂。放在这一行之后，
+    # 是因为这里是 model / window / api_base / loca_repo 全部就绪的最早点，
+    # 且必须在 run_started 之前——那条事件就带着 variables。
+    # loca_commit 也只在这里取一次：原来 meta 字面量里相邻两处各调一遍 _loca_commit，
+    # HEAD 若在两次之间被移动，矛盾的恰好是守卫要比的那一维
+    loca_commit = _loca_commit(loca_repo)
+    if loca_commit is None:
+        print(
+            f"[WARN] 取不到 LOCA 仓库 commit（{loca_repo} 可能不是 git 检出，"
+            "例如 tarball 解包目录）；meta.variables.loca_commit 会是 null，"
+            "两轮对比时这一维会被判成\"对齐\"，而实际 commit 可能不同",
+            file=sys.stderr, flush=True,
+        )
+    variables = loca_variables(
+        model=model, window=window, arm=args.arm, thinking=args.thinking,
+        seed=args.seed, config_set=args.config_set, select=args.select,
+        max_tool_uses=args.max_tool_uses, parallel=args.parallel,
+        timeout=args.timeout, loca_commit=loca_commit, api_base=api_base,
+    )
     # 被 start_job 起起来时 run_id 由父进程定（索引、事件文件、报告文件名三者必须同名，
     # 否则 finish_job 在 <job.run_id>.json 找不到报告，一轮成功的评测会被判成
     # "退出码 0，但报告未落盘"）；loca 直接构造 EvalRunState、不走 create_state，
@@ -309,18 +343,7 @@ def main() -> None:
             arm=args.arm,
             model=model,
             total=len(picked),
-            variables={
-                "config_set": args.config_set,
-                "window": window,
-                "thinking": args.thinking,
-                "model": model,
-                "api_base": api_base,
-                "select": args.select,
-                "seed": args.seed,
-                "timeout_s": args.timeout,
-                "max_tool_uses": args.max_tool_uses,
-                "parallel": args.parallel,
-            },
+            variables=variables,
         )
         done = 0
         durations: list[float] = []
@@ -359,21 +382,26 @@ def main() -> None:
                 )
                 tr = next((t for t in state.tasks if t.task_id == row["task_id"]), None)
                 if tr is not None:
-                    # 状态和 passed 都直接取归一化的结果，不再另写一份派生：
-                    # 原来这两处各算一遍，正是 Task 7 评审抓到的那个矛盾的成因
-                    # （未判分那题在 state.json 里 status="unscored" 却 passed=False，
-                    # 事件流里则是 passed=None；前端两处都读）。这条路可达：
-                    # loca_eval.json 缺失或没有 reward 键。
+                    # status / passed / error / tokens 四个字段都直接取归一化的结果，
+                    # 不再另写一份派生：原来 status 和 passed 各算一遍，正是 Task 7
+                    # 评审抓到的那个矛盾的成因（未判分那题在 state.json 里
+                    # status="unscored" 却 passed=False，事件流里则是 passed=None；
+                    # 前端两处都读）。这条路可达：loca_eval.json 缺失或没有 reward 键。
                     # EvalTaskResult.passed 本来就是 bool | None，summary_snapshot 只判
-                    # is True，所以 passed 从"恒布尔"变成"可能 None"不改变任何计数
+                    # is True，所以 passed 从"恒布尔"变成"可能 None"不改变任何计数。
+                    # error/tokens 是本轮收进同一来源的：error 与 schema 适配器的规则
+                    # 逐字相同（纯漂移风险），tokens 原来保持原始 2-3 键、报告那份却是
+                    # 补齐的四键——state.json 与报告对同一题给出不同键集，
+                    # 而前端任务列表读的是 state.json。loca 自己的 token 计数
+                    # 读的是原始 row（_summarize），不受这里影响
                     tr.status = unified["status"]
-                    tr.predicted = f"reward={row['reward']}"
                     tr.passed = unified["passed"]
+                    tr.error = unified["error"]
+                    tr.tokens = unified["tokens"]
+                    tr.predicted = f"reward={row['reward']}"
                     tr.duration_s = row["duration_s"]
-                    tr.tokens = row["tokens"]
                     tr.trace_id = row["trace_id"]
                     tr.session_id = row.get("session_id")
-                    tr.error = row["agent_error"] or row["eval_error"]
                     tr.metadata = {
                         "reward": row["reward"],
                         "compression_events": row["compression_events"],
@@ -388,7 +416,6 @@ def main() -> None:
         n = len(rows)
         summary = _summarize(rows, len(picked))
         total_comp = summary["compression_events_total"]
-        from eval.common.jobs import git_revision
 
         meta = {
             "benchmark_detail": "LOCA-bench (hkust-nlp)",
@@ -403,17 +430,12 @@ def main() -> None:
             "timeout_s": args.timeout,
             "max_tool_uses": args.max_tool_uses,
             "loca_repo": str(loca_repo),
-            "loca_commit": _loca_commit(loca_repo),
+            "loca_commit": loca_commit,
             "scaffold": "mycode-agent",
             "parallel": args.parallel,
             "git_revision": git_revision(),
             "task_ids": [row["task_id"] for row in rows],
-            "variables": loca_variables(
-                model=model, window=window, arm=args.arm, thinking=args.thinking,
-                seed=args.seed, config_set=args.config_set, select=args.select,
-                max_tool_uses=args.max_tool_uses, parallel=args.parallel,
-                timeout=args.timeout, loca_commit=_loca_commit(loca_repo),
-            ),
+            "variables": variables,
         }
 
         # BC-16 触发验证：压缩臂在压力窗口下零触发 = 实验无效信号

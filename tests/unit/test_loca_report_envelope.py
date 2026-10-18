@@ -30,9 +30,9 @@ LOCA_ROW = {
 }
 
 VARIABLES = loca_variables(
-    model="qwen3.6-27b", window=65536, arm="full", thinking=None, seed=42,
+    model="qwen3.6-27b", window=65536, arm="full", thinking="off", seed=42,
     config_set="64k", select="random", max_tool_uses=40, parallel=2,
-    timeout=600, loca_commit="deadbeef",
+    timeout=600, loca_commit="deadbeef", api_base="http://127.0.0.1:8000/v1",
 )
 
 
@@ -42,7 +42,7 @@ def test_variables_carry_everything_a_comparison_must_guard_on():
         "model": "qwen3.6-27b",
         "window": 65536,
         "arm": "full",
-        "thinking": None,
+        "thinking": "off",
         "seed": 42,
         "config_set": "64k",
         "select": "random",
@@ -50,6 +50,7 @@ def test_variables_carry_everything_a_comparison_must_guard_on():
         "parallel": 2,
         "timeout_s": 600,
         "loca_commit": "deadbeef",
+        "api_base": "http://127.0.0.1:8000/v1",
     }
 
 
@@ -93,3 +94,21 @@ def test_loca_specific_fields_survive_in_extra(tmp_path):
     assert row["reward"] == 0.75
     assert row["error"] == "verifier timeout"
     assert row["status"] == "failed"
+
+
+def test_the_event_stream_and_the_report_share_one_variable_list():
+    """事件流和报告必须给同一份控制变量。
+
+    原来 main() 里有两份手写清单，10 键那份有 api_base 没有 arm/loca_commit，
+    11 键那份反过来——实时 UI 因此看不到压缩臂，而压缩臂正是 loca 消融实验的自变量。
+    这条测试钉不住 main() 的接线（它不可测），但钉得住 loca_variables 的键集：
+    任何一维从这份清单里掉出去，两个出口就同时瞎掉。
+    """
+    assert set(loca_variables(
+        model="m", window=1, arm="full", thinking="off", seed=1, config_set="64k",
+        select="random", max_tool_uses=1, parallel=1, timeout=1,
+        loca_commit="c", api_base="http://x",
+    )) == {
+        "model", "window", "arm", "thinking", "seed", "config_set", "select",
+        "max_tool_uses", "parallel", "timeout_s", "loca_commit", "api_base",
+    }
