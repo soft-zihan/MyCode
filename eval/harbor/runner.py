@@ -43,7 +43,15 @@ PROVIDER = "openrouter"
 SEED = 20261017
 PROBE_N = 6
 FINAL_N = 25
-STAGE_SIZES = {"probe": PROBE_N, "final": FINAL_N}
+# None = 数据集里有多少题就跑多少。写死 225 的话，数据集一变这个档就静默跑不满，
+# 而报告上照样写着 stage=full——正是"记录的和实际发生的不一致"那一类错。
+STAGE_SIZES: dict[str, int | None] = {"probe": PROBE_N, "final": FINAL_N, "full": None}
+
+
+def stage_n_tasks(stage: str, available: int) -> int:
+    """这一档要跑几题。固定档不随数据集大小变，只有 `full` 跟着数据集走。"""
+    n = STAGE_SIZES[stage]
+    return available if n is None else n
 ARMS = ("mycode", "opencode")
 
 MYCODE_AGENT_IMPORT_PATH = "eval.harbor.mycode_agent:MyCodeAgent"
@@ -664,7 +672,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--stage",
         default="probe",
         choices=sorted(STAGE_SIZES),
-        help=f"probe={PROBE_N} 题（探测），final={FINAL_N} 题（正式数据，probe 是它的子集）",
+        help=f"probe={PROBE_N} 题（探测），final={FINAL_N} 题（正式数据），"
+        "full=数据集全部（aider-polyglot 是 225 题）。三批**嵌套**："
+        "同一个 seed 下 full 的前 25 题就是 final、前 6 题就是 probe，所以数据可以合并统计",
     )
     parser.add_argument(
         "--tasks",
@@ -1049,7 +1059,8 @@ def main(argv: list[str] | None = None) -> int:
         if unknown:
             raise SystemExit(f"数据集里没有这些题目：{', '.join(unknown)}")
     else:
-        tasks = select_tasks(list_task_ids(dataset_dir), STAGE_SIZES[args.stage], args.seed)
+        ids = list_task_ids(dataset_dir)
+        tasks = select_tasks(ids, stage_n_tasks(args.stage, len(ids)), args.seed)
 
     base_url, api_key = _resolve_credentials(args.model)
     settings_env = mycode_settings_env(args.model, args.thinking)

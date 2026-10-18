@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from eval.harbor.runner import select_tasks, task_language
+from eval.harbor.runner import STAGE_SIZES, select_tasks, stage_n_tasks, task_language
 
 
 def _make_ids() -> list[str]:
@@ -56,6 +56,32 @@ def test_prefix_nesting_holds_between_probe_and_final():
     assert final[:6] == probe
     assert len(final) == 25
     assert len(set(final)) == 25
+
+
+def test_the_full_stage_means_every_task_the_dataset_has():
+    ids = _make_ids()
+
+    assert STAGE_SIZES["full"] is None
+    assert stage_n_tasks("full", len(ids)) == len(ids)
+    assert len(select_tasks(ids, stage_n_tasks("full", len(ids)), seed=20261016)) == 225
+
+
+def test_full_nests_the_final_batch_so_the_two_runs_can_be_pooled():
+    """跑满那批的前 25 题必须就是 final 批——否则两次跑批的数据没法合并统计。"""
+    ids = _make_ids()
+
+    full = select_tasks(ids, stage_n_tasks("full", len(ids)), seed=20261016)
+
+    assert full[:25] == select_tasks(ids, 25, seed=20261016)
+    assert full[:6] == select_tasks(ids, 6, seed=20261016)
+
+
+def test_fixed_stages_ignore_how_many_tasks_the_dataset_has():
+    """题数是常量，不随数据集大小变；只有 full 跟着数据集走。"""
+    assert stage_n_tasks("probe", 225) == 6
+    assert stage_n_tasks("final", 225) == 25
+    assert stage_n_tasks("final", 10) == 25
+    assert stage_n_tasks("full", 10) == 10
 
 
 def test_final_allocation_is_balanced_and_favours_big_languages():
