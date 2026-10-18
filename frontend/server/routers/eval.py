@@ -104,7 +104,12 @@ def _options_from_request(data: EvalRunRequest) -> Any:
     return EvalRunOptions(**data.model_dump())
 
 
-def _broadcast(payload: dict[str, Any]) -> None:
+def broadcast_eval_event(payload: dict[str, Any]) -> None:
+    """评测事件上 WS 的唯一出口。
+
+    `session_id: None` 是必须的：评测不属于任何会话，而 broadcast_event 的
+    订阅者过滤按 session_id 走；`eval/` 前缀已在 PUBLIC_EVENT_PREFIXES 里放行。
+    """
     broadcast_event({"session_id": None, **payload})
 
 
@@ -185,7 +190,7 @@ async def api_eval_start_run(data: EvalRunRequest) -> dict[str, Any]:
     options = _options_from_request(data)
     if options.benchmark == "smoke":
         options.execution_mode = "backend_session"
-    state = service.start_run(options, emitter=_broadcast)
+    state = service.start_run(options, emitter=broadcast_eval_event)
     return state.to_dict()
 
 
