@@ -81,6 +81,9 @@ def _row_from_task_result(raw: Mapping[str, Any]) -> tuple[dict[str, Any], froze
         "error": raw.get("error"),
         "session_id": raw.get("session_id"),
         "trace_id": raw.get("trace_id"),
+    # consumed 里两种语义：correct 是**被映射掉**（→ passed），benchmark 是**被故意丢掉**
+    # ——报告顶层已有 benchmark，而 write_reports 一次只收一个 benchmark，
+    # 所以它不可能在一份报告内部变化，逐行再存一遍是冗余。不是丢数据。
     }, frozenset({"correct", "benchmark"})
 
 

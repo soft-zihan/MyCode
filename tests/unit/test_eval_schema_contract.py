@@ -7,17 +7,32 @@
 from __future__ import annotations
 
 import json
+from typing import get_args
 
 import pytest
 
 from eval.common.benchmarks import report_rows, summarize_results, task_status
-from eval.common.models import EvalRunOptions, EvalRunState, EvalTaskResult
+from eval.common.models import BenchmarkName, EvalRunOptions, EvalRunState, EvalTaskResult
 from eval.common.runner_base import write_reports
 from eval.common.schema import ROW_CORE, TOKEN_FIELDS, check_report
 from eval.harbor.runner import collect_trials
 from eval.loca.runner import _summarize
 
 ALL_BENCHMARKS = ("gaia", "hle", "smoke", "loca", "harbor")
+
+
+def test_the_contract_covers_every_benchmark_the_project_knows_about():
+    """新加一个 benchmark 而忘了让它过契约，这条就红。
+
+    `ALL_BENCHMARKS` 原来是手写元组：漏掉一个，这个文件对它就一个字都没断言，
+    而闸门"看起来还是绿的"。评审实测过这个失效模式——把 harbor 形状的行以
+    benchmark="sixth" 写出去，归一化产出 task_id='' / token 全 None 的垃圾行，
+    而 check_report、ROW_CORE 键集、TOKEN_FIELDS 键集三条断言全部通过。
+    """
+    assert set(ALL_BENCHMARKS) == set(get_args(BenchmarkName)), (
+        " benchmark 的取值域变了，契约测试没跟上：新增的那个 benchmark "
+        "现在完全不受这个文件约束"
+    )
 
 
 def _state(benchmark: str) -> EvalRunState:
@@ -84,6 +99,34 @@ def _harbor_trials(tmp_path) -> list[dict]:
         ),
         encoding="utf-8",
     )
+    # 第二条：一条**无判定**的 trial，照抄探测批 opencode 臂的实测形状
+    # （eval/reports/harbor_opencode_probe_20261018__220217.json 里那条真实的
+    # polyglot_rust_gigasecond：agent_setup 正好撞上 1080s 超时上限）。
+    # 没有 verifier_result（rewards 里自然也没有 reward）、没有 agent_execution 键、
+    # 没有 agent_result。collect_trials 实测产出：reward=None、agent_execution_s=None、
+    # agent_setup_s=1080.0、environment_setup_s=46.1、no_reward_file=False；
+    # normalize_row 实测：status="error"、passed=None、duration_s=0.0、tokens 四键全 None。
+    # 没有这条夹具，harbor 在这个文件里永远产不出无判定行，
+    # "n_unscored 是 harbor 的命门"就只是一句没有断言支撑的注释
+    unscored = tmp_path / "polyglot_rust_gigasecond__1"
+    unscored.mkdir(parents=True, exist_ok=True)
+    (unscored / "result.json").write_text(
+        json.dumps(
+            {
+                "task_name": "polyglot_rust_gigasecond",
+                "trial_name": "polyglot_rust_gigasecond__1",
+                "exception_info": {
+                    "exception_type": "AgentSetupTimeoutError",
+                    "exception_message": "Agent setup timed out after 1080.0 seconds",
+                },
+                "environment_setup": {"started_at": "2026-10-18T02:59:00.000Z",
+                                      "finished_at": "2026-10-18T02:59:46.100Z"},
+                "agent_setup": {"started_at": "2026-10-18T03:00:00.000Z",
+                                "finished_at": "2026-10-18T03:18:00.000Z"},
+            }
+        ),
+        encoding="utf-8",
+    )
     return collect_trials(tmp_path)
 
 
@@ -123,6 +166,25 @@ def test_every_benchmark_writes_a_conformant_report(benchmark, tmp_path):
     assert md_path.exists()
 
 
+# 每个 benchmark 的 extra 里必然有的溯源键：只有正确那个适配器跑过才会长成这样。
+# ROW_CORE / TOKEN_FIELDS 那两条断言对任何输入都不可能失败（normalize_row 返回的是
+# 写死这 11 个键的字面量），所以它们锁的是"写入前归一化过"，不是"各臂形状一致"。
+EXPECTED_EXTRA_KEYS = {
+    "gaia": {"expected", "predicted"},
+    "hle": {"expected", "predicted"},
+    "smoke": {"expected", "predicted"},
+    "loca": {"compression_events"},
+    "harbor": {"trial_name", "agent_setup_s"},
+}
+ABSENT_EXTRA_KEYS = {
+    "gaia": {"correct", "benchmark"},   # 被 consumed 吃掉：correct 映射进 passed
+    "hle": {"correct", "benchmark"},
+    "smoke": {"correct", "benchmark"},
+    "loca": set(),
+    "harbor": {"task_name", "n_input_tokens"},  # 被 consumed 吃掉：改名进 task_id / tokens
+}
+
+
 @pytest.mark.parametrize("benchmark", ALL_BENCHMARKS)
 def test_every_benchmark_lands_on_the_same_row_shape(benchmark, tmp_path):
     rows = _rows_for(benchmark, tmp_path)
@@ -136,6 +198,16 @@ def test_every_benchmark_lands_on_the_same_row_shape(benchmark, tmp_path):
     for row in written:
         assert set(row) == set(ROW_CORE), f"{benchmark} 的行多/少了字段"
         assert set(row["tokens"]) == set(TOKEN_FIELDS)
+        # 下面这两条才是真有判别力的：extra 的键集只有正确那个适配器跑过
+        # 才会长成这样——走错适配器，该在的键不在、该被消费掉的键反而留在 extra 里
+        assert EXPECTED_EXTRA_KEYS[benchmark] <= set(row["extra"]), (
+            f"{benchmark} 的 extra 缺溯源键 {sorted(EXPECTED_EXTRA_KEYS[benchmark])}："
+            "正确的适配器没跑过"
+        )
+        assert set(row["extra"]).isdisjoint(ABSENT_EXTRA_KEYS[benchmark]), (
+            f"{benchmark} 的 extra 里混进了本该被适配器消费掉的键 "
+            f"{sorted(ABSENT_EXTRA_KEYS[benchmark])}"
+        )
 
 
 @pytest.mark.parametrize("benchmark", ALL_BENCHMARKS)
@@ -159,7 +231,9 @@ def test_passed_is_the_only_scoring_field(benchmark, tmp_path):
 
 def test_the_summary_core_means_the_same_thing_across_benchmarks(tmp_path):
     # n_unscored 是 harbor 的命门（"跑了没通过"和"没跑起来"不能互相冒充），
-    # 但对 gaia 也必须存在且为 0，否则对比层要为每个 benchmark 分支
+    # 但对 gaia 也必须存在且为 0，否则对比层要为每个 benchmark 分支。
+    # harbor 那一档现在是**正面断言**：夹具里有一条 AgentSetupTimeoutError 的
+    # 无判定 trial，命门由这个文件自己验到，不再只靠 test_harbor_report_envelope.py
     seen = {}
     counts = {}
     for benchmark in ALL_BENCHMARKS:
@@ -169,15 +243,21 @@ def test_the_summary_core_means_the_same_thing_across_benchmarks(tmp_path):
             benchmark, "r", {"variables": {}}, _summary_for(benchmark, rows), rows,
             reports_dir=tmp_path / benchmark, report_stem="r",
         )
-        seen[benchmark] = json.loads(json_path.read_text(encoding="utf-8"))["summary"]
+        seen[benchmark] = json.loads(json_path.read_text(encoding="utf-8"))
 
-    for benchmark, summary in seen.items():
+    for benchmark, report in seen.items():
+        summary = report["summary"]
         # 用写进去的那份 rows 的行数，不要重新调一次 _rows_for：
         # harbor 那一支会在 tmp_path 里建目录、再 collect_trials 一遍，
         # 而"写进去的"和"重新算的"本来就该是同一批行——重算只会掩盖两者的分歧
         assert summary["n_tasks"] == counts[benchmark]
         assert summary["n_scored"] + summary["n_unscored"] == summary["n_tasks"]
-        if benchmark != "harbor":
+        if benchmark == "harbor":
+            assert summary["n_unscored"] == 1
+            unscored = [r for r in report["results"] if r["passed"] is None]
+            assert len(unscored) == 1, "n_unscored==1 就得恰好有一条 passed is None 的行"
+            assert unscored[0]["status"] == "error"
+        else:
             assert summary["n_unscored"] == 0
 
 
