@@ -13,6 +13,7 @@ import pytest
 
 from eval.common.compare import (
     VariableMismatch,
+    _guard_blind_reason,
     _guard_was_blind,
     _label_of,
     compare_reports,
@@ -540,7 +541,14 @@ def test_load_run_of_something_missing_says_what_it_looked_for(tmp_path):
 
 
 def test_compare_rows_alone_may_not_claim_a_winner():
-    """Critical 本体：没做过变量校验的对比不许下胜负结论。"""
+    """Critical 本体：没做过变量校验的对比不许下胜负结论。
+
+    修复轮 2（N1）把这里的子串断言升级成**全串精确相等**。原来只断言
+    `"未经过变量校验" in text`，而守卫那句话的原因串走的是 `_guard_blind_reason`
+    的第 1 支（`compare_rows` 层）——复审重造的 M8 变异往那一支后面追加
+    `。mycode 快 1.86×`，51 条测试**全绿存活**，headline 与 markdown 横幅双双被污染。
+    夹带在一句"不构成结论"的警告中间，人读起来反而更可信。
+    """
     result = compare_rows(
         [_row(f"t{i}", True) for i in range(6)],
         [_row(f"t{i}", False) for i in range(6)],
@@ -549,7 +557,12 @@ def test_compare_rows_alone_may_not_claim_a_winner():
 
     assert "variables_seen" not in result  # 这一层确实看不到报告，所以无从校验
     text = headline(result)
-    assert "未经过变量校验" in text
+    assert text == (
+        "⚠️ 本次对比未经过变量校验"
+        "（这一层只看得到逐题行、看不到报告，无从校验控制变量）："
+        "mycode 6/6 vs opencode 0/6，McNemar p = 0.0312。"
+        "下面只是描述性数字，不构成结论。"
+    )
     for phrase in WINNER_PHRASES:
         assert phrase not in text, f"零校验却出现了胜者句式：{phrase}"
     for word in SUPERLATIVES:
@@ -561,6 +574,15 @@ def test_compare_rows_alone_may_not_claim_a_winner():
     assert "未经过变量校验" in md
     for phrase in WINNER_PHRASES:
         assert phrase not in md, f"零校验的 markdown 里出现了胜者句式：{phrase}"
+    # 横幅同样钉成精确串：它是人眼里的唯一提示，M8 就是从这里穿过去的
+    md_lines = md.splitlines()
+    banner = [i for i, ln in enumerate(md_lines) if ln.startswith(">") and "未经过变量校验" in ln]
+    assert len(banner) == 1, f"守卫横幅该有且只有一条，实际在 {banner}"
+    assert md_lines[banner[0]] == (
+        "> ⚠️ 本次对比未经过变量校验（这一层只看得到逐题行、看不到报告，无从校验控制变量）。"
+    )
+    assert md_lines[banner[0] + 1] == "> 下面所有数字都是描述性的，不构成结论。"
+    assert banner[0] <= 3, f"横幅掉到第 {banner[0] + 1} 行，第一屏看不见"
 
 
 def test_one_side_without_variables_is_blind_too():
@@ -569,6 +591,11 @@ def test_one_side_without_variables_is_blind_too():
     评审构造的形状是 `variables_seen == {'a': 0, 'b': 1}`；`any` 会判它"不瞎"，
     于是 b 侧记了一个变量就足以让 a 侧的空白被当成对齐——1.86× 那次事故
     正是"没人记下思考是关的"，一侧记了另一侧没记同样得不出结论。
+
+    修复轮 2（N1）把子串断言升级成**全串精确相等**：这一条钉的是
+    `_guard_blind_reason` 的第 3 支（一侧…），复审重造的 M7 变异往那一支后面
+    追加 `。mycode 快 1.86×`，51 条测试**全绿存活**。而 `{'a': 0, 'b': 2}`
+    正是 1.86× 事故自己的形状。
     """
     a = _report([_row("t", True)], run_id="mycode")
     a["meta"]["variables"] = {}  # a 侧什么都没记
@@ -579,9 +606,20 @@ def test_one_side_without_variables_is_blind_too():
     assert result["variables_seen"] == {"a": 0, "b": 2}
     assert result["variable_mismatches"] == []  # model/seed 按有效值比过，两边一致
     text = headline(result)
-    assert "未经过变量校验" in text and "没有记录控制变量" in text
+    assert text == (
+        "⚠️ 本次对比未经过变量校验（mycode 一侧没有记录控制变量）："
+        "mycode 1/1 vs opencode 0/1，McNemar p = 1.0。"
+        "下面只是描述性数字，不构成结论。"
+    )
     for phrase in WINNER_PHRASES:
         assert phrase not in text, f"一侧零变量却出现了胜者句式：{phrase}"
+
+    md_lines = render_markdown(result).splitlines()
+    banner = [i for i, ln in enumerate(md_lines) if ln.startswith(">") and "未经过变量校验" in ln]
+    assert len(banner) == 1, f"守卫横幅该有且只有一条，实际在 {banner}"
+    assert md_lines[banner[0]] == "> ⚠️ 本次对比未经过变量校验（mycode 一侧没有记录控制变量）。"
+    assert md_lines[banner[0] + 1] == "> 下面所有数字都是描述性的，不构成结论。"
+    assert banner[0] <= 3, f"横幅掉到第 {banner[0] + 1} 行，第一屏看不见"
 
 
 def test_a_comparison_without_variables_seen_is_blind_not_aligned():
@@ -673,13 +711,21 @@ def test_explicit_labels_reach_both_renders_verbatim():
 
 
 def test_a_report_with_no_identity_at_all_falls_back_to_a_question_mark():
-    """退化报告：连 arm 和 benchmark 都没有，也不能退成字符串 "None"。"""
+    """退化报告：连 arm 和 benchmark 都没有，也不能退成字符串 "None"。
+
+    修复轮 2（N5）之后两侧标签还必须是**可区分**的：`# ? vs ?` 连"是同一臂自己
+    比自己"还是"两臂都认不出来"都分不开，所以自动推导出的同名标签会加后缀。
+    这是**加强**而不是放宽——原来两个标签相同，现在两个标签不同。
+    `_label_of({})` 本身仍然返回 `"?"`（四层回退链一个字没动，
+    由 `test_the_label_fallback_chain_is_ordered_and_never_yields_the_string_none` 看守）。
+    """
     result = compare_reports({"results": [_row("t", True)]}, {"results": [_row("t", False)]})
     md = render_markdown(result)
 
-    assert result["labels"] == {"a": "?", "b": "?"}
-    assert md.splitlines()[0] == "# ? vs ?"
+    assert result["labels"] == {"a": "? (a)", "b": "? (b)"}
+    assert md.splitlines()[0] == "# ? (a) vs ? (b)"
     assert "None" not in md
+    assert _label_of({}) == "?"  # 去重加在 compare_reports 上，不在回退链里
 
 
 def test_the_guard_banners_are_above_the_fold():
@@ -722,6 +768,13 @@ def test_guard_was_blind_treats_missing_and_one_sided_zero_as_blind():
 
     `any` 与 `all` 这两种语义原有测试**分辨不出来**（评审实测把 `any` 改成 `all`
     也是 40 passed），所以这里直接钉判据，否则下一个人改回去没人知道。
+
+    修复轮 2（N2）：判据从**键无关**的 `all(seen.values())` 改成**看 a/b 两个键**。
+    `variables_seen` 的口径是"每一侧看到几个控制变量"（`compare_reports` 写的就是
+    `{"a": int, "b": int}`），所以一个没有 a/b 的 Mapping 对"两臂各自记了几个变量"
+    这件事**什么都没说**——`{}` 因为 `all([])` 恒真而被读成"证据充分"，
+    `{'x': 3}` 因为键无关而被读成"两侧都记了"，两者都拿到了 `变量已对齐。mycode 多过 6 题`。
+    空证据不是充分证据；这正是本模块要区分的那两件事在代码里又被合并了一次。
     """
     assert _guard_was_blind({}) is True                        # 键缺失 = 没校验过
     assert _guard_was_blind({"variables_seen": None}) is True   # 不是 Mapping 同样算缺失
@@ -729,6 +782,57 @@ def test_guard_was_blind_treats_missing_and_one_sided_zero_as_blind():
     assert _guard_was_blind({"variables_seen": {"a": 1, "b": 0}}) is True
     assert _guard_was_blind({"variables_seen": {"a": 0, "b": 0}}) is True  # 1.86× 那次的形状
     assert _guard_was_blind({"variables_seen": {"a": 2, "b": 4}}) is False  # 真校验过
+    # N2 新增三条。
+    assert _guard_was_blind({"variables_seen": {}}) is True       # 空证据 ≠ 充分证据（all([]) 恒真）
+    assert _guard_was_blind({"variables_seen": {"x": 3}}) is True  # 没有 a/b = 对两臂什么都没说
+    # 简报写的是 `is True`，实测与它自己给的实现相反：`not (seen.get("a") and seen.get("b"))`
+    # 在 `{'a':1,'b':1,'c':0}` 上是 False——`c` 不是臂，文档承诺的规则是"a/b 两侧都非 0"。
+    # 复审 §4 N2 的表格同一行也写着"不该判瞎"。见报告 §6 E1。
+    assert _guard_was_blind({"variables_seen": {"a": 1, "b": 1, "c": 0}}) is False
+
+
+def test_the_blind_reason_never_speaks_without_a_subject():
+    """钉住 `_guard_was_blind` 与 `_guard_blind_reason` 的**口径一致**这条不变量。
+
+    N2 之前两者对同一份数据的读法不同：判据是键无关的 `all(seen.values())`，
+    原因串却按键相关的 `seen.get("a")` / `seen.get("b")` 说话。后果是
+    `{'a':1,'b':1,'c':0}` 被判瞎、却走到了那条注释写着"走不到"的第 4 支，
+    印出一句**没有主语**的 `没有记录控制变量`——既不是"都"也不是"一侧"，
+    读者无从知道是谁没记（复审 §4 N2 实测）。
+
+    N2 之后：判瞎 ⟺ a/b 至少一侧取不到非 0 值 ⟺ `empty` 非空 ⟺ 原因串有主语。
+    所以第 4 支改成 `raise AssertionError`——一条永不为真的注释不如一条会炸的断言。
+    选 raise 而不是 `return ""`：空串会渲染成 `⚠️ 本次对比未经过变量校验（）：…`，
+    即"守卫警告但没有理由"，而"说清为什么瞎"正是本模块存在的理由；
+    而且 `python -O` 只剥 `assert`、不剥 `raise AssertionError`，不变量不会跟着
+    优化级别消失。生产侧两个调用点（`headline` / `render_markdown`）都在
+    `_guard_was_blind` 之后才调本函数，所以这一支在生产路径上走不到。
+    """
+    blind_shapes = [
+        None,                       # 键缺失（compare_rows 那一层）
+        {},                         # 空证据
+        {"x": 3},                   # 没有 a/b 键
+        {"a": 0, "b": 0},           # 1.86× 那次的形状
+        {"a": 0, "b": 2},           # 一侧没记
+        {"a": 8, "b": 0},           # 盘上已发表那一对的形状
+        {"a": None, "b": 2},        # 键在、值不是数字
+    ]
+    for seen in blind_shapes:
+        comparison = {} if seen is None else {"variables_seen": seen}
+        assert _guard_was_blind(comparison) is True, f"{seen} 该判瞎"
+        reason = _guard_blind_reason(comparison, "mycode", "opencode")
+        assert reason, f"{seen} 判瞎却没有原因串——沉默的守卫等于没有守卫"
+        # "谁没记录"这类原因必须说清主语和范围。第 1 支（compare_rows 那一层）不在此列：
+        # 它不指责任何一臂，只说清"这一层无从校验"，那一句在它自己的调用层为真。
+        if "没有记录控制变量" in reason:
+            assert "mycode" in reason or "opencode" in reason, f"{seen} 的原因串没有主语：{reason}"
+            assert "都" in reason or "一侧" in reason, f"{seen} 的原因串没说清是一侧还是两侧：{reason}"
+
+    # 反过来：判**不**瞎的形状不许有人来问"为什么瞎"，第 4 支必须炸。
+    for seen in [{"a": 1, "b": 1}, {"a": 2, "b": 4}, {"a": 1, "b": 1, "c": 0}]:
+        assert _guard_was_blind({"variables_seen": seen}) is False, f"{seen} 不该判瞎"
+        with pytest.raises(AssertionError):
+            _guard_blind_reason({"variables_seen": seen}, "mycode", "opencode")
 
 
 def test_the_label_fallback_chain_is_ordered_and_never_yields_the_string_none():
@@ -744,3 +848,244 @@ def test_the_label_fallback_chain_is_ordered_and_never_yields_the_string_none():
     assert _label_of({"run_id": None, "meta": None, "summary": None, "benchmark": None}) == "?"
     assert _label_of({"run_id": "   ", "benchmark": "gaia"}) == "gaia"
     assert _label_of({}, fallback="x") == "x"
+
+
+# ── 修复轮 2：守卫在「既未对齐、又瞎」这个形状下不许把未知说成已知不一致 ──
+#
+# 复审查出（§3.7 / §4 N3）：`headline` 的分支顺序是「先 mismatches 再 blind」，
+# 于是「既未对齐、又瞎」时只说未对齐、一个字不提瞎。盘上已发表那一对
+# （harbor_mycode_final_20261018__025351 vs harbor_opencode_final_20261017__232016）
+# 正是这个形状：variables_seen={'a':8,'b':0}、8 项 mismatch **全部**是 b 侧 None，
+# 其中就有 variables.thinking_mode——1.86× 事故里没被记下的正是这个变量。
+# 而修复前 headline 说的是「变量未对齐（8 项不同）」：把**未知**报成了**已知不一致**。
+#
+# 这个重叠状态在 f804932 时不可能出现（那时 `_guard_was_blind` 用 `any`，
+# `{'a':8,'b':0}` 判不瞎），是修复轮 1 把 `any` 改成 `all` 之后新造出来的。
+
+# 盘上已发表那一份 mycode 报告的 `summary.variables` 键集（只读核过，8 个键）。
+PUBLISHED_ARM_VARIABLES = {
+    "model": "qwen3.6-27b",
+    "seed": 20261017,
+    "git_revision": "ab6b631-dirty",
+    "mycode_env": {"MYCODE_THINKING_FEEDBACK": "false"},
+    "provider": "openrouter",
+    "stage": "final",
+    "thinking_effective": "跟随模型默认（未注入）",
+    "thinking_mode": "default",
+}
+
+
+def test_an_unaligned_and_blind_comparison_says_both_things():
+    """一侧没记录时，不许把「未知」说成「两侧取值不同」，也不许把「瞎」咽掉。
+
+    盘上已发表那一对（mycode_final vs opencode_final）就是这个形状：
+    variables_seen={'a':8,'b':0}、8 项 mismatch 全是 b 侧 None，
+    其中包含 variables.thinking_mode——1.86× 事故里没被记下的正是这个变量。
+
+    夹具走的是真的 `compare_reports`（legacy 报告形状：a 侧 8 个变量、b 侧一个都没有），
+    实测得到的 mismatch 字段与顺序和盘上那一对逐项一致，所以这条测试守的就是那个事故。
+    """
+    a = _legacy_report([_legacy_trial("t", 1.0)],
+                       variables=dict(PUBLISHED_ARM_VARIABLES), arm="mycode")
+    b = _legacy_report([_legacy_trial("t", 0.0)], arm="opencode")  # summary 里没有 variables 键
+    result = compare_reports(a, b)
+
+    # 先钉夹具形状：形状不对，这条测试守的就不是那个事故了
+    assert result["variables_seen"] == {"a": 8, "b": 0}
+    assert len(result["variable_mismatches"]) == 8
+    assert all(m["b"] is None for m in result["variable_mismatches"])  # 全是"一侧没记录"
+    fields = [m["field"] for m in result["variable_mismatches"]]
+    assert "variables.thinking_mode" in fields
+    assert fields == ["meta.model", "meta.seed", "meta.git_revision", "variables.mycode_env",
+                      "variables.provider", "variables.stage", "variables.thinking_effective",
+                      "variables.thinking_mode"]
+
+    text = headline(result)
+    # 金标准串：逐字符相等，不是子串
+    assert text == (
+        "变量未对齐（8 项不同，其中 8 项是一侧没记录、不是两侧取值不同）："
+        "mycode 1/1 vs opencode 0/1，McNemar p = 1.0。"
+        "⚠️ 本次对比未经过变量校验（opencode 一侧没有记录控制变量）。"
+        "下面只是描述性数字，不构成结论。"
+    )
+    # 两件事必须同时说出来
+    assert "变量未对齐" in text and "未经过变量校验" in text
+    # 「未知」不许被说成「已知不一致」
+    assert "8 项是一侧没记录、不是两侧取值不同" in text
+    for phrase in WINNER_PHRASES:
+        assert phrase not in text, f"既未对齐又瞎却出现了胜者句式：{phrase}"
+    for word in SUPERLATIVES:
+        assert word not in text, f"既未对齐又瞎却出现了结论性措辞：{word}"
+
+    # markdown 顶部横幅**同样**带上这两件事——横幅是人眼里的唯一提示
+    lines = render_markdown(result).splitlines()
+    banners = [i for i, ln in enumerate(lines) if ln.startswith(">") and "⚠️" in ln]
+    assert len(banners) == 2, f"该有未对齐与未经校验两条横幅，实际在 {banners}"
+    assert lines[banners[0]] == "> ⚠️ **变量未对齐**——下面所有数字都是描述性的，不构成结论。"
+    assert lines[banners[1]] == "> ⚠️ 本次对比未经过变量校验（opencode 一侧没有记录控制变量）。"
+    assert banners[0] <= 3, f"横幅掉到第 {banners[0] + 1} 行，第一屏看不见"
+
+    # 差异表里「一侧没记录」必须写「未记录」，不是字面量 `None`——
+    # 印 `` `None` `` 会让读者读成「opencode 的 model 值是 None」，同一个毛病的人眼版。
+    table = [ln for ln in lines if ln.startswith("| `")]
+    assert len(table) == 8
+    assert all(ln.endswith("| 未记录 |") for ln in table), table
+    assert not any("`None`" in ln for ln in table), table
+    assert "| `variables.thinking_mode` | `default` | 未记录 |" in lines
+
+
+def test_every_guard_blind_reason_is_a_golden_string():
+    """守卫为什么瞎，这句话本身也是安全关键输出——4 条返回路径全部逐字符钉死。
+
+    修复轮 1 的 D1 把守卫那句话从"1 个固定模板"拆成
+    `GUARD_BLIND_WARNING（{原因}）` + 4 选 1 的原因串，而金标准串只钉住了
+    "都…"那一条。另外三条只有子串断言（`"未经过变量校验" in text`）+ 禁词表看守，
+    而禁词表按 Change 2 自己的论证是**列不全**的：复审重造的 M7/M8 两个变异
+    就是往未钉的那两条分支里追加 `。mycode 快 1.86×`，51 条测试全绿存活——
+    M8 存活的位置正是 Critical 本体那条 `compare_rows` 路径，
+    M7 存活的形状 `{'a': 0, 'b': 2}` 正是 1.86× 事故自己的形状。
+    `快 1.86×` 就是当年真的写进用户汇报的那句措辞。
+
+    这条测试与上面两条端到端金标准串是**互补**的：这条直接钉原因串本身
+    （4 条路径一处不漏），那两条钉原因串被拼进 headline / 横幅之后的完整句子
+    （防拼接处被改）。
+    """
+    # 1) seen 不是 Mapping —— compare_rows 那一层，看不到报告（M8 存活的那条）
+    assert _guard_blind_reason({}, "mycode", "opencode") == (
+        "这一层只看得到逐题行、看不到报告，无从校验控制变量"
+    )
+    assert _guard_blind_reason({"variables_seen": None}, "mycode", "opencode") == (
+        "这一层只看得到逐题行、看不到报告，无从校验控制变量"
+    )
+
+    # 2) 两侧都空
+    assert _guard_blind_reason({"variables_seen": {"a": 0, "b": 0}}, "mycode", "opencode") == (
+        "mycode 与 opencode 都没有记录控制变量"
+    )
+    # `{}` 与 `{'x': 3}` 在 N2 之后也判瞎，落到同一支：没有 a/b 就等于两侧都没记
+    assert _guard_blind_reason({"variables_seen": {}}, "mycode", "opencode") == (
+        "mycode 与 opencode 都没有记录控制变量"
+    )
+    assert _guard_blind_reason({"variables_seen": {"x": 3}}, "mycode", "opencode") == (
+        "mycode 与 opencode 都没有记录控制变量"
+    )
+
+    # 3) 一侧空 —— {'a': 0, 'b': 2} 正是 1.86× 事故的形状（M7 存活的那条）
+    assert _guard_blind_reason({"variables_seen": {"a": 0, "b": 2}}, "mycode", "opencode") == (
+        "mycode 一侧没有记录控制变量"
+    )
+    assert _guard_blind_reason({"variables_seen": {"a": 8, "b": 0}}, "mycode", "opencode") == (
+        "opencode 一侧没有记录控制变量"
+    )
+    # 标签是参数，原因串必须跟着标签走，不许写死臂名
+    assert _guard_blind_reason({"variables_seen": {"a": 0, "b": 2}}, "左臂", "右臂") == (
+        "左臂 一侧没有记录控制变量"
+    )
+
+    # 4) N2 之后第 4 支走不到：a/b 都取到非 0 值就不算瞎，谁都不该来问"为什么瞎"。
+    #    它必须**炸**，而不是印一句没有主语的 `没有记录控制变量`
+    #    （复审实测 `{'a':1,'b':1,'c':0}` 曾走到这一支）。
+    for seen in [{"a": 1, "b": 1}, {"a": 2, "b": 4}, {"a": 1, "b": 1, "c": 0}]:
+        with pytest.raises(AssertionError):
+            _guard_blind_reason({"variables_seen": seen}, "mycode", "opencode")
+
+
+def test_the_documented_self_exemption_hatch_is_pinned_end_to_end():
+    """`compare_rows` 的 docstring 公开推荐"自己把 variables_seen 塞进结果 dict"，
+    而修复前全文件**没有任何一条测试真的这么做过**（复审 grep 确认）——有文档、无测试。
+
+    这条的价值不是修 bug（分支逻辑本来就对），是把这条公开推荐的路径钉住：
+    免得下一个人以为口子坏了而自己去手搓渲染器，或者以为口子比文档写的更宽。
+    修复前实测（复审 §3.6）：塞 `{}`、塞 `{'x': 3}` 都能拿到
+    `变量已对齐。mycode 多过 6 题（…）`——空证据被当成了充分证据，N2 修掉的就是这个。
+
+    规则以 docstring 为准：**`a` / `b` 两个键都取到非 0 的值**才算校验过。
+    """
+    base = compare_rows(
+        [_row(f"t{i}", True) for i in range(6)],
+        [_row(f"t{i}", False) for i in range(6)],
+        labels=("mycode", "opencode"),
+    )
+    assert "variables_seen" not in base            # 这一层确实算不出来
+    assert base["variable_mismatches"] == []       # compare_rows 硬编码为空
+
+    # 1) 正当用途：调用方确实在别处校验过 → 允许给胜者结论（要钉住它**能用**）
+    exempt = dict(base, variables_seen={"a": 2, "b": 2})
+    assert headline(exempt) == (
+        "变量已对齐。mycode 多过 6 题（mycode 6/6 vs opencode 0/6，McNemar p = 0.0312）"
+    )
+
+    # 2) 空证据不是充分证据：`{}` 必须判瞎（`all([])` 恒真是 N2 修掉的那个洞）
+    empty = dict(base, variables_seen={})
+    assert headline(empty) == (
+        "⚠️ 本次对比未经过变量校验（mycode 与 opencode 都没有记录控制变量）："
+        "mycode 6/6 vs opencode 0/6，McNemar p = 0.0312。"
+        "下面只是描述性数字，不构成结论。"
+    )
+
+    # 3) 没有 a/b 键的 Mapping 对"两臂各自记了几个变量"什么都没说 → 同样判瞎
+    offkeys = dict(base, variables_seen={"x": 3})
+    assert headline(offkeys) == headline(empty)
+
+    # 4) 一侧为 0 → 判瞎，且原因串有主语（说清是谁没记）
+    onesided = dict(base, variables_seen={"a": 2, "b": 0})
+    assert headline(onesided) == (
+        "⚠️ 本次对比未经过变量校验（opencode 一侧没有记录控制变量）："
+        "mycode 6/6 vs opencode 0/6，McNemar p = 0.0312。"
+        "下面只是描述性数字，不构成结论。"
+    )
+
+    # 三种空证据一律不许出现胜者措辞
+    for shape in (empty, offkeys, onesided):
+        text = headline(shape)
+        for phrase in WINNER_PHRASES:
+            assert phrase not in text, f"{shape['variables_seen']} 却出现了胜者句式：{phrase}"
+        for word in SUPERLATIVES:
+            assert word not in text, f"{shape['variables_seen']} 却出现了结论性措辞：{word}"
+        assert "变量已对齐" not in text, f"{shape['variables_seen']} 判瞎却自称已对齐"
+
+    # 5) 额外的键不改变判定：文档承诺的规则是"a/b 两侧都非 0"，`c` 不是臂。
+    #    复审 §4 N2 的表格与它自己的"最小修法"文字在这一点上互相矛盾，
+    #    以它给的那行实现为准（`not (seen.get("a") and seen.get("b"))`）——
+    #    也只有这样 `_guard_blind_reason` 的第 4 支才真的走不到。见报告 §6 E1。
+    extrakey = dict(base, variables_seen={"a": 1, "b": 1, "c": 0})
+    assert headline(extrakey) == headline(exempt)
+
+
+def test_two_arms_may_not_collapse_into_the_same_label():
+    """`_label_of` 的倒数第二层回退是 `benchmark`，两份同 benchmark 又没有
+    `run_id` / `meta.arm` / `summary.arm` 的报告会让两侧标签**都是** `"harbor"`。
+
+    修复前实测：`labels == {'a': 'harbor', 'b': 'harbor'}`，markdown 标题渲染成
+    `# harbor vs harbor`、headline 渲染成 `harbor 6/6 vs harbor 0/6`——
+    读者无从分辨谁是谁，而这句话读起来仍然像一个结论。`?` 那一层同样会撞。
+
+    去重只加在 `compare_reports` 上，**不改 `_label_of` 的四层回退链**
+    （上一轮 Change 3 刚钉过它，顺序有测试看守）。
+    """
+    a = {"benchmark": "harbor", "results": [_row(f"t{i}", True) for i in range(6)]}
+    b = {"benchmark": "harbor", "results": [_row(f"t{i}", False) for i in range(6)]}
+
+    result = compare_reports(a, b)
+
+    assert result["labels"] == {"a": "harbor (a)", "b": "harbor (b)"}
+    assert result["labels"]["a"] != result["labels"]["b"], "两臂标签撞成同名，读者无从分辨谁是谁"
+    assert render_markdown(result).splitlines()[0] == "# harbor (a) vs harbor (b)"
+    # headline 里两个臂也必须可区分（复审实测修复前是 `harbor 6/6 vs harbor 0/6`）
+    assert "harbor (a) 6/6 vs harbor (b) 0/6" in headline(result)
+    # 回退链本身一个字没动
+    assert _label_of(a) == "harbor" and _label_of(b) == "harbor"
+
+    # 两侧标签本来就不同时，一个字都不许加（否则会污染所有正常报告）
+    distinct = compare_reports(
+        _report([_row("t", True)], run_id="mycode", **ALIGNED),
+        _report([_row("t", False)], run_id="opencode", **ALIGNED),
+    )
+    assert distinct["labels"] == {"a": "mycode", "b": "opencode"}
+
+    # 显式 `labels=` 是调用方的原话，上一轮 Change 3 钉过"必须原样到达两个渲染"
+    # （`test_explicit_labels_reach_both_renders_verbatim`），所以**不去重**：
+    # 悄悄改写调用方传进来的字符串，比读者看见两个同名标签更坏——
+    # Task 13 的路由走的正是显式 labels=，它得能拿回自己传进去的东西。
+    explicit = compare_reports(a, b, labels=("harbor", "harbor"))
+    assert explicit["labels"] == {"a": "harbor", "b": "harbor"}

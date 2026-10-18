@@ -15,7 +15,8 @@
 所以 `compare_reports` 额外带出 `variables_seen`（每侧看到几个控制变量），
 而 `_guard_was_blind` 把这些都判成"瞎"：`variables_seen` 键根本不存在
 （调用方走的是 `compare_rows`，那一层只看得到行、看不到报告，所以**无从**校验）、
-或者任一侧记到的变量数为 0（一侧没记就等于没法比对）。
+或者 `a` / `b` 这两个键没有都取到非 0 的值（一侧没记就等于没法比对，
+而一个没有 a/b 的 Mapping——包括 `{}`——对两臂各自记了几个变量什么都没说）。
 瞎了就必须把"未经过变量校验"说出来——沉默的守卫等于没有守卫。
 """
 
@@ -282,8 +283,15 @@ def compare_rows(
     正是 `compare_rows`/`pair_rows`/`rows_of`，所以守卫必须在这一层自己生效。
 
     手上有报告就用 `compare_reports`（它会算出 `variables_seen`）；只有行、
-    但确实在别处校验过变量的调用方可以自己把 `variables_seen` 塞进结果 dict，
-    两侧都非 0 才会被当成"校验过"。
+    但确实在别处校验过变量的调用方可以自己把 `variables_seen` 塞进结果 dict。
+    规则是 **`a` / `b` 两个键都取到非 0 的值**才算"校验过"——`_guard_was_blind`
+    就是这么判的，所以塞 `{}`、塞一个没有 a/b 键的 dict（例如 `{"x": 3}`）、
+    或者任一侧为 0，一律判瞎。
+
+    **塞进去就等于你自己为"两臂控制变量对齐"作保，本模块不复核**：这一层拿不到
+    报告，没有东西可以复核。这条口子由
+    `tests/unit/test_eval_compare.py::test_the_documented_self_exemption_hatch_is_pinned_end_to_end`
+    端到端钉住（正当用途能拿到结论，三种空证据一律拿不到）。
     """
     every = pair_rows(rows_a, rows_b, dimension=dimension)
     banned = set(exclude)
@@ -360,6 +368,21 @@ def _label_of(report: Mapping[str, Any], fallback: str = "?") -> str:
     return fallback
 
 
+def _dedupe_labels(label_a: str, label_b: str) -> tuple[str, str]:
+    """自动推导出来的两侧标签撞成同名时，给它们加上可区分的后缀。
+
+    `_label_of` 的回退链倒数第二层是 `report.get("benchmark")`：两份同 benchmark、
+    又没有 `run_id` / `meta.arm` / `summary.arm` 的报告，两侧标签**都是** `"harbor"`，
+    markdown 标题渲染成 `# harbor vs harbor`、headline 渲染成
+    `harbor 15/24 vs harbor 10/24`——读者无从分辨谁是谁，而这句话读起来仍然像一个结论。
+    最后一层的 `"?"` 同样会撞（`# ? vs ?` 连"是同一臂自己比自己"还是"两臂都认不出来"
+    都分不开）。**回退链本身不动**（四层顺序有测试看守），只在合并成对之后去重。
+    """
+    if label_a != label_b:
+        return label_a, label_b
+    return f"{label_a} (a)", f"{label_b} (b)"
+
+
 def compare_reports(
     report_a: Mapping[str, Any],
     report_b: Mapping[str, Any],
@@ -368,10 +391,17 @@ def compare_reports(
     dimension: Dimension | None = None,
     exclude: Sequence[str] = (),
 ) -> dict[str, Any]:
+    if labels:
+        # 显式 `labels=` 是调用方的原话，**不去重**：悄悄改写调用方传进来的字符串
+        # 比读者看见两个同名标签更坏（Task 13 的路由走的正是显式 labels=，
+        # 它得能拿回自己传进去的东西），而且上一轮已经钉过"显式标签原样到达两个渲染"。
+        pair: tuple[str, str] = (labels[0], labels[1])
+    else:
+        pair = _dedupe_labels(_label_of(report_a), _label_of(report_b))
     result = compare_rows(
         rows_of(report_a),
         rows_of(report_b),
-        labels=labels or (_label_of(report_a), _label_of(report_b)),
+        labels=pair,
         dimension=dimension,
         exclude=exclude,
     )
@@ -392,15 +422,28 @@ def _guard_was_blind(comparison: Mapping[str, Any]) -> bool:
     """True = 这次对比没有做过有效的变量校验，所以不许下结论。
 
     两种情况都算瞎：
-    - `variables_seen` 根本不存在——调用方走的是 `compare_rows`，它只看得到行、
-      看不到报告，所以**无从校验**。"没校验"和"校验通过"必须给出不同的话，
-      否则 `compare_rows` + `headline` 这条公开路径就能在零校验下报出胜者
-      （修复前它印的是 `mycode 多过 6 题（mycode 6/6 vs opencode 0/6，…）`）。
-    - 任一侧记录的变量数为 0——`all` 而不是 `any`：一侧没记就等于没法比对，
-      而 1.86× 那次事故正是这个形状（两份报告都没记下思考是关的）。
+    - `variables_seen` 根本不存在（或不是 Mapping）——调用方走的是 `compare_rows`，
+      它只看得到行、看不到报告，所以**无从校验**。"没校验"和"校验通过"必须给出
+      不同的话，否则 `compare_rows` + `headline` 这条公开路径就能在零校验下报出
+      胜者（修复前它印的是 `mycode 多过 6 题（mycode 6/6 vs opencode 0/6，…）`）。
+    - **`a` / `b` 这两个键没有都取到非 0 的值**。`variables_seen` 的口径是
+      "每一侧看到几个控制变量"（`compare_reports` 写的就是 `{"a": int, "b": int}`），
+      所以判据看的是这两个键，而不是键无关的 `all(seen.values())`：
+      * `{}` 必须判瞎——`all([])` 恒真，会把"一条证据都没有"读成"证据充分"。
+        **空证据不是充分证据**：这正是本模块要区分的"什么都没校验"与"校验通过"
+        在代码里又被合并了一次，而 1.86× 那次就是前者被当成了后者。
+      * `{'x': 3}` 必须判瞎——一个没有 a/b 的 Mapping 对"两臂各自记了几个变量"
+        这件事**什么都没说**，键无关的判据却会因为"所有值都非 0"而放行。
+      * 一侧没记就等于没法比对，所以是 `all` 而不是 `any`：`{'a': 0, 'b': 2}` 判瞎。
+        1.86× 那次事故正是这个形状（两份报告都没记下思考是关的）。
+
+    看 a/b 两个键也是为了与 `_guard_blind_reason` **口径一致**：后者一直用
+    `seen.get("a")` / `seen.get("b")` 说话。判据键无关、原因串键相关，就会在
+    `{'a': 1, 'b': 1, 'c': 0}` 这种形状上判瞎、却走到那条"没有主语"的第 4 支，
+    印出一句读者无从知道是谁没记的 `没有记录控制变量`。
     """
     seen = comparison.get("variables_seen")
-    return not isinstance(seen, Mapping) or not all(seen.values())
+    return not isinstance(seen, Mapping) or not (seen.get("a") and seen.get("b"))
 
 
 def _guard_blind_reason(comparison: Mapping[str, Any], label_a: str, label_b: str) -> str:
@@ -409,6 +452,12 @@ def _guard_blind_reason(comparison: Mapping[str, Any], label_a: str, label_b: st
     原来那句写死"两份报告都没有记录控制变量"，在 `compare_rows` 这一层是假的：
     那一层根本拿不到报告。一句在某个调用层为假的话不该被继续复用，所以原因按
     实际拿到的东西说。
+
+    **这几条返回串是安全关键输出**，被
+    `tests/unit/test_eval_compare.py::test_every_guard_blind_reason_is_a_golden_string`
+    逐字符钉死（4 条路径全覆盖）。它出现在 `⚠️ 本次对比未经过变量校验（…）` 的
+    括号里，也就是夹在一句"不构成结论"的警告中间——往里塞胜者措辞反而更可信，
+    而禁词表按 Change 2 自己的论证是列不全的。改措辞就必须有意识地改那条测试。
     """
     seen = comparison.get("variables_seen")
     if not isinstance(seen, Mapping):
@@ -418,7 +467,19 @@ def _guard_blind_reason(comparison: Mapping[str, Any], label_a: str, label_b: st
         return f"{empty[0]} 与 {empty[1]} 都{GUARD_NO_VARIABLES_NOTE}"
     if empty:
         return f"{empty[0]} 一侧{GUARD_NO_VARIABLES_NOTE}"
-    return GUARD_NO_VARIABLES_NOTE  # 走不到：判成瞎就意味着至少一侧为 0
+    # 走不到：`_guard_was_blind` 判瞎 ⟺ a/b 至少一侧取不到非 0 值 ⟺ `empty` 非空；
+    # 而两个调用点（`headline` / `render_markdown`）都在 `_guard_was_blind` 之后才调本函数。
+    # 一条永不为真的注释不如一条会炸的断言：真走到这里，说明有人新造了第三种"瞎"
+    # 却没在这里给它一句真话——那就当场炸，而不是印一句**没有主语**的
+    # `没有记录控制变量`（既不是"都"也不是"一侧"，读者无从知道是谁没记）。
+    # 用 `raise` 而不是 `assert`：`python -O` 会把 `assert` 整个剥掉，
+    # 守卫的不变量不该跟着优化级别消失。也不返回 `""`：那会渲染成
+    # `⚠️ 本次对比未经过变量校验（）：…`，即"有警告、没理由"，
+    # 而"说清为什么瞎"正是本模块存在的理由。
+    raise AssertionError(
+        "判成瞎就意味着 a/b 至少一侧为 0；走到这里说明 "
+        "_guard_was_blind 与 _guard_blind_reason 的口径又不一致了"
+    )
 
 
 def headline(comparison: Mapping[str, Any]) -> str:
@@ -426,6 +487,8 @@ def headline(comparison: Mapping[str, Any]) -> str:
 
     两个守卫分支（未对齐 / 未经校验）的输出被
     `tests/unit/test_eval_compare.py` 钉成**金标准串**：逐字符相等。
+    「既未对齐、又瞎」这个重叠形状（盘上已发表那一对就是）也单独钉了一条，
+    它必须**同时**说出两件事，还要说清那几项差异里有几项是「一侧没记录」。
     这是安全关键输出，测试与生产各存一份是特性不是缺陷——改措辞就必须有意识地改测试。
     """
     label_a = comparison["labels"]["a"]
@@ -438,9 +501,29 @@ def headline(comparison: Mapping[str, Any]) -> str:
     )
     mismatches = comparison.get("variable_mismatches") or []
     if mismatches:
+        # 「一侧没记录」和「两侧记了但值不同」是两件事：前者是**未知**，
+        # 后者是**已知不一致**。把未知报成已知不一致，正是 1.86× 事故的措辞形态
+        # （当年没人记下思考是关的，于是「没记录」在报告里长得像「两边一样」）。
+        # 盘上已发表那一对的 8 项 mismatch 全部是 b 侧 None，其中就有
+        # variables.thinking_mode——所以这一支必须把「几项是未知」单独说出来。
+        unknown = sum(1 for m in mismatches if m["a"] is None or m["b"] is None)
+        unknown_note = (
+            f"，其中 {unknown} 项是一侧没记录、不是两侧取值不同" if unknown else ""
+        )
+        # 守卫瞎了要一并说出来：这个重叠状态是 `any`→`all` 之后才可能出现的
+        # （`{'a': 8, 'b': 0}` 在 `any` 下判不瞎），而本分支在 `_guard_was_blind`
+        # 之前 return，只报「未对齐」会让读者以为那些差异是两臂都实测出来的。
+        # 注意 GUARD_BLIND_WARNING 是**裸前缀串**、不是 format 模板，原因必须走
+        # `_guard_blind_reason`，否则读者不知道守卫为什么瞎——而「说清为什么」
+        # 正是本模块存在的理由。
+        blind_note = (
+            f"{GUARD_BLIND_WARNING}（{_guard_blind_reason(comparison, label_a, label_b)}）。"
+            if _guard_was_blind(comparison)
+            else ""
+        )
         return (
-            f"变量未对齐（{len(mismatches)} 项不同）：{descriptive}。"
-            f"下面只是描述性数字，不构成结论。"
+            f"变量未对齐（{len(mismatches)} 项不同{unknown_note}）：{descriptive}。"
+            f"{blind_note}下面只是描述性数字，不构成结论。"
         )
     if _guard_was_blind(comparison):
         # 不给结论性措辞：说"未经过变量校验"的同一句话里说"谁更强"是自相矛盾，
@@ -449,7 +532,8 @@ def headline(comparison: Mapping[str, Any]) -> str:
             f"{GUARD_BLIND_WARNING}（{_guard_blind_reason(comparison, label_a, label_b)}）："
             f"{descriptive}。下面只是描述性数字，不构成结论。"
         )
-    # 能走到这里就说明 `variables_seen` 是个 Mapping、两侧都非 0、且一项差异都没有，
+    # 能走到这里就说明 `variables_seen` 是个 Mapping、它的 `a` / `b` 两个键都取到了
+    # 非 0 的值、且一项差异都没有（`_guard_was_blind` 为 False 就是前两件），
     # 也就是变量**真的**比过而且一致——所以这句前缀由上面两个分支保住，不是客套。
     aligned = "变量已对齐。"
     if comparison["only_a"] and not comparison["only_b"]:
@@ -457,6 +541,18 @@ def headline(comparison: Mapping[str, Any]) -> str:
     if comparison["only_b"] and not comparison["only_a"]:
         return f"{aligned}{label_b} 多过 {len(comparison['only_b'])} 题（{descriptive}）"
     return f"{aligned}没测出差别：{descriptive}"
+
+
+def _mismatch_cell(value: Any) -> str:
+    """差异表的一格。`None` 在这里的意思是**这一侧没记录**，不是一个叫 None 的取值。
+
+    直接印 `` `None` `` 会让读者读成"opencode 的 model 值是 None"——把未知说成
+    已知取值，和 `headline` 那句"8 项不同"是同一个毛病的人眼版（复审 §3.7 实测
+    盘上已发表那一对的差异表 8 行全是 `` `None` ``）。所以只翻译 `None` 这一种值，
+    并且**不给它反引号**：反引号在本表里表示"这是一个实测到的字面取值"。
+    表格的其余渲染（列名、对齐、`_mark`）一个字不动。
+    """
+    return "未记录" if value is None else f"`{value}`"
 
 
 def render_markdown(comparison: Mapping[str, Any]) -> str:
@@ -468,15 +564,26 @@ def render_markdown(comparison: Mapping[str, Any]) -> str:
         # 这段文字里不能出现任何胜者措辞：它是"变量未对齐"时唯一一定会被读到的地方，
         # 写进去就等于自己把守卫拆了。禁词清单（`SUPERLATIVES` / `WINNER_PHRASES`）
         # 只在 `tests/unit/test_eval_compare.py` 里存一份——那是**真的会被执行**的那份，
-        # 外加下面两条横幅的金标准串断言（多一个字、少一个字都红）。
+        # 外加下面几条横幅的金标准串断言（多一个字、少一个字都红）。
+        lines.append("> ⚠️ **变量未对齐**——下面所有数字都是描述性的，不构成结论。")
+        if _guard_was_blind(comparison):
+            # 「既未对齐、又瞎」时横幅也得带上"瞎"这件事：横幅是人眼里的唯一提示，
+            # 而 headline 那行在 markdown 正文里、读者可能只扫前几行。
+            # 只报"未对齐"会让人以为那些差异是两臂都实测出来的。
+            lines.append(
+                f"> {GUARD_BLIND_WARNING}"
+                f"（{_guard_blind_reason(comparison, label_a, label_b)}）。"
+            )
         lines += [
-            "> ⚠️ **变量未对齐**——下面所有数字都是描述性的，不构成结论。",
             "> 对齐之后重跑，或者只把它当线索。",
             "",
             "| 变量 | " + label_a + " | " + label_b + " |",
             "| --- | --- | --- |",
         ]
-        lines += [f"| `{m['field']}` | `{m['a']}` | `{m['b']}` |" for m in mismatches]
+        lines += [
+            f"| `{m['field']}` | {_mismatch_cell(m['a'])} | {_mismatch_cell(m['b'])} |"
+            for m in mismatches
+        ]
         lines.append("")
     elif _guard_was_blind(comparison):
         lines += [
