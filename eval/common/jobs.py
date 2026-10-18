@@ -253,7 +253,13 @@ def git_revision() -> str:
     """这轮跑的是哪个版本的代码。没有它，两次运行无法当基线对比。"""
     from eval.harbor.runner import git_revision as _impl
 
-    return _impl()
+    try:
+        return _impl()
+    except (OSError, subprocess.SubprocessError):
+        # 委托的那份实现只兜住了第一个 git 子进程，`git status --porcelain` 没兜。
+        # start_job 调它的时候评测子进程可能已经起来了，让它抛出去等于
+        # 把一个正在跑的评测变成没有索引、中止不掉的孤儿
+        return "unknown"
 
 
 def build_argv(benchmark: str, params: dict[str, Any]) -> list[str]:
@@ -292,6 +298,20 @@ def start_job(
             f"已有 {len(busy)} 个评测在跑（上限 {MAX_CONCURRENT_JOBS}）："
             f"{', '.join(r.run_id for r in busy)}。评测很重且共享同一个网关配额，先中止或等它跑完。"
         )
+    # abort_job 只发 SIGTERM 就返回，不等进程真的死：runner 下面还挂着 harbor / docker，
+    # 收尾要几秒。这段时间里 running_jobs 已经不算它了，闸门会照常放行下一轮，
+    # 于是新旧两轮抢同一个网关配额
+    dying = [
+        r
+        for r in list_jobs(limit=1000, reports_dir=reports_dir)
+        if r.status is JobStatus.ABORTED and r.pid and pid_alive(r.pid)
+    ]
+    if dying:
+        raise JobStartError(
+            f"上一轮评测刚被中止、进程还在收尾（{', '.join(r.run_id for r in dying)}）。"
+            "runner 下面还挂着 harbor / docker，SIGTERM 不是立刻生效的。"
+            "等几秒再启动，否则两轮会抢同一个网关配额。"
+        )
 
     run_id = new_run_id(benchmark)
     argv = build_argv(benchmark, params)
@@ -302,6 +322,7 @@ def start_job(
     # 这里再硬编码一份字符串，一旦漂移，子进程会静默地一个事件都不写
     env = {**os.environ, RUN_ID_ENV: run_id, EVENTS_PATH_ENV: str(ev_path)}
     spawn = popen or subprocess.Popen
+    revision = git_revision()
     # start_new_session=True：子进程自成一个进程组，服务被杀时不会连带被杀。
     # stdout/stderr 落文件而不是 PIPE——PIPE 没人读会写满 64KB 缓冲区把子进程堵死。
     log_path = (reports_dir or REPORTS_DIR) / f"{run_id}.log"
@@ -320,12 +341,23 @@ def start_job(
         benchmark=benchmark,
         argv=argv,
         params=params,
-        git_revision=git_revision(),
+        git_revision=revision,
         status=JobStatus.RUNNING,
         pid=getattr(proc, "pid", None),
         started_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     )
-    write_job(record, reports_dir)
+    try:
+        write_job(record, reports_dir)
+    except Exception:
+        # 子进程已经起来了、索引却没写上：它会占着网关配额和 docker，
+        # 在 UI 里隐形、不占并发名额、也中止不掉。宁可现在杀掉。
+        pid = getattr(proc, "pid", None)
+        if pid:
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except OSError:
+                logger.warning("启动失败后清理子进程 %s 也没成功", pid)
+        raise
     return record
 
 

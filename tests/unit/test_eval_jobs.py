@@ -293,6 +293,14 @@ def test_build_argv_skips_none_and_expands_bool_flags():
     assert "--category" not in argv
 
 
+def test_build_argv_drops_false_bool_flags():
+    argv = build_argv("gaia", {"judge": False, "sample": 3})
+
+    # False 的 store_true 开关只能整个不出：出了 flag 就等于在 CLI 那边翻成 True
+    assert "--judge" not in argv
+    assert "--sample" in argv
+
+
 def test_build_argv_rejects_unknown_benchmark():
     with pytest.raises(JobStartError):
         build_argv("nope", {})
@@ -327,11 +335,40 @@ def test_start_job_records_git_revision(reports):
     assert git_revision() == rec.git_revision
 
 
+def test_git_revision_returns_unknown_when_the_delegate_raises(monkeypatch):
+    # 委托的 eval.harbor.runner.git_revision 只兜住了第一个 git 子进程，
+    # `git status --porcelain` 那次的 TimeoutExpired 会抛出来。start_job 里它一抛，
+    # 已经起来的评测子进程就成了没索引、不占名额、中止不掉的孤儿
+    def boom():
+        raise subprocess.TimeoutExpired(cmd="git", timeout=15)
+
+    monkeypatch.setattr("eval.harbor.runner.git_revision", boom)
+
+    assert git_revision() == "unknown"
+
+
 def test_start_job_refuses_when_one_is_already_running(reports):
     start_job("gaia", {}, popen=_fake_popen([]))
 
     with pytest.raises(JobStartError):
         start_job("hle", {}, popen=_fake_popen([]))
+
+
+def test_start_job_refuses_while_an_aborted_process_is_still_dying(reports, monkeypatch):
+    rec = start_job("gaia", {}, popen=_fake_popen([]))
+    # killer= 必须传假的：默认那条路会真的 os.killpg(4321)，打到机器上恰好存在的进程组
+    abort_job(rec.run_id, killer=lambda pid, sig: None)
+
+    # abort_job 只发 SIGTERM 就返回、不等进程真死，所以闸门得自己看一眼还活着没有；
+    # 否则"中止 → 改参数 → 重跑"会放一轮新的进来，两轮抢同一个网关配额
+    monkeypatch.setattr("eval.common.jobs.pid_alive", lambda pid: True)
+    with pytest.raises(JobStartError) as exc:
+        start_job("gaia", {}, popen=_fake_popen([]))
+    assert "收尾" in str(exc.value)
+
+    # 进程真死了就得照常放行——这道闸门不能把评测永久焊死
+    monkeypatch.setattr("eval.common.jobs.pid_alive", lambda pid: False)
+    assert start_job("gaia", {}, popen=_fake_popen([])).status == JobStatus.RUNNING
 
 
 def test_start_job_allows_new_one_after_previous_finished(reports):
@@ -341,6 +378,29 @@ def test_start_job_allows_new_one_after_previous_finished(reports):
     second = start_job("hle", {}, popen=_fake_popen([]))
 
     assert second.status == JobStatus.RUNNING
+
+
+def test_start_job_kills_the_child_if_the_index_write_fails(reports, monkeypatch):
+    calls: list = []
+    killed: list = []
+
+    def no_write(record, reports_dir=None):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("eval.common.jobs.write_job", no_write)
+    monkeypatch.setattr(
+        "eval.common.jobs.os.killpg", lambda pgid, sig: killed.append((pgid, sig))
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        start_job("gaia", {}, popen=_fake_popen(calls))
+
+    # 子进程已经起来了、索引却没写上：不杀掉它就是一条查不到也中止不掉的孤儿
+    assert killed == [(4321, signal.SIGTERM)]
+    # run_id 从 fake spawn 看到的 env 取——write_job 被打了补丁，jobs 目录是空的，
+    # list_jobs 那条路拿不到这条 run
+    run_id = calls[0][1]["env"]["MYCODE_EVAL_RUN_ID"]
+    assert get_job(run_id) is None
 
 
 def test_finish_job_maps_exit_code_to_status(reports):
@@ -404,6 +464,20 @@ def test_abort_job_sends_sigterm_to_the_process_group(reports):
     # 这样 runner 起的 harbor/docker 子进程也会一起收信号，不会留下孤儿容器
     assert sent == [(rec.pid, signal.SIGTERM)]
     assert out.status == JobStatus.ABORTED
+
+
+def test_abort_job_defaults_to_killing_the_process_group(reports, monkeypatch):
+    # 上面那条注入了 killer=，所以它压根区分不出默认走的是 os.killpg 还是 os.kill。
+    # 而这个默认值的差别在真机上是"连带收掉 runner 起的 harbor/docker"和"留下一堆孤儿容器"
+    sent: list = []
+    rec = start_job("gaia", {}, popen=_fake_popen([]))
+    monkeypatch.setattr(
+        "eval.common.jobs.os.killpg", lambda pgid, sig: sent.append((pgid, sig))
+    )
+
+    abort_job(rec.run_id)
+
+    assert sent == [(rec.pid, signal.SIGTERM)]
 
 
 def test_abort_job_on_finished_job_is_a_noop(reports):
