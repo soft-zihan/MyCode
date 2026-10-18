@@ -880,7 +880,7 @@ def write_report(
             report=REPORTS_DIR / f"{stem}.md",
         )
     )
-    # 返回 .json 而不是 .md：调用方要把它当 `report_path` 发进 eval/run_finished，
+    # 返回 .json 而不是 .md：调用方要把它当 `report_json_path` 发进 eval/run_finished，
     # 而 job 索引和 /api/eval/reports/{id} 吃的都是 JSON 报告——finish_job 更是直接按
     # <run_id>.json 找报告，找不到就把成功的一轮判成 FAILED。人看的那份仍然 print .md。
     return REPORTS_DIR / f"{stem}.json"
@@ -927,51 +927,101 @@ def run_arm(
     print(f"[{arm}] {len(tasks)} 题 → {config_path}")
     print(f"[{arm}] $ {shlex.join(command)}")
     started = time.time()
-    completed = subprocess.run(command, env=harbor_env(api_key=api_key, base_url=base_url))
-    if completed.returncode != 0:
-        print(f"[{arm}] harbor 退出码 {completed.returncode}", file=sys.stderr)
 
-    if args.dry_run or args.install_only or args.no_report:
+    # dry_run / install_only 不是评测轮次（finish_job 把「没有报告」当正常），
+    # 所以这两条一个事件都不发。必须赶在建 sink 之前返回：JsonlEventSink.__init__
+    # 就会创建事件文件，晚一步就会留下一个只有 run_started、永远等不到终态事件的空 feed。
+    if args.dry_run or args.install_only:
+        completed = subprocess.run(command, env=harbor_env(api_key=api_key, base_url=base_url))
+        if completed.returncode != 0:
+            print(f"[{arm}] harbor 退出码 {completed.returncode}", file=sys.stderr)
         return completed.returncode
 
-    run_dir = latest_run_dir(jobs_dir, since=started - 5)
-    if run_dir is None:
-        print(f"[{arm}] 在 {jobs_dir} 里没找到这次的结果目录", file=sys.stderr)
-        return completed.returncode or 1
-
-    report_path = write_report(
-        arm=arm,
-        stage=args.stage,
-        model=args.model,
-        trials=collect_trials(run_dir),
-        run_dirs=[run_dir],
-        tasks=tasks,
-        seed=args.seed,
-        stamp=stamp,
-        config_path=config_path,
-        variables=run_variables(args, settings_env),
-    )
-
-    # 事件在收集阶段一次性补发：harbor 是同步 shell 出去的，跑完才有结果，
-    # 拿不到"某题刚开始"的时刻（详见 emit_trial_events 的 docstring）。
+    # sink 必须在 shell 出去**之前**建起来：JsonlEventSink.__init__ 才是创建事件文件的
+    # 那一步，而一轮 harbor 要跑几十分钟到几小时。放到跑完再建的话，Task 6 的 tailer
+    # 整轮都看不到文件，2N+2 条事件在最后一秒回放，run_started.ts ≈ run_finished.ts
+    # → 任何从这两条推出来的时长都是 0s。在收尾时刻补一个开始时间戳，和
+    # emit_trial_events docstring 里那句「不要为了对齐而伪造时间戳」是同一个谎话的反方向版本。
     # CLI 直跑时 sink_from_env() 给 NullSink，行为和改动前完全一致。
     from eval.common.events import sink_from_env
 
+    variables = run_variables(args, settings_env)
     sink = sink_from_env()
-    sink.emit(
-        "eval/run_started",
-        benchmark="harbor",
-        arm=arm,
-        total=len(tasks),
-        variables=run_variables(args, settings_env),
-    )
-    emit_trial_events(sink, arm, tasks, collect_trials(run_dir))
-    sink.emit("eval/run_finished", benchmark="harbor", arm=arm, report_path=str(report_path))
-    # NullSink 没有 close()：直跑 CLI 时不能因为收尾而 AttributeError
-    close = getattr(sink, "close", None)
-    if close:
-        close()
-    return completed.returncode
+    try:
+        sink.emit(
+            "eval/run_started",
+            benchmark="harbor",
+            arm=arm,
+            model=args.model,
+            total=len(tasks),
+            variables=variables,
+        )
+        completed = subprocess.run(command, env=harbor_env(api_key=api_key, base_url=base_url))
+        if completed.returncode != 0:
+            print(f"[{arm}] harbor 退出码 {completed.returncode}", file=sys.stderr)
+
+        if args.no_report:
+            sink.emit(
+                "eval/run_finished",
+                benchmark="harbor",
+                arm=arm,
+                status="aborted",
+                error="--no-report：本轮不出报告，没有 report_json_path 可指",
+            )
+            return completed.returncode
+
+        run_dir = latest_run_dir(jobs_dir, since=started - 5)
+        if run_dir is None:
+            message = f"[{arm}] 在 {jobs_dir} 里没找到这次的结果目录"
+            print(message, file=sys.stderr)
+            sink.emit("eval/run_error", benchmark="harbor", arm=arm, error=message)
+            return completed.returncode or 1
+
+        trials = collect_trials(run_dir)
+        report_path = write_report(
+            arm=arm,
+            stage=args.stage,
+            model=args.model,
+            trials=trials,
+            run_dirs=[run_dir],
+            tasks=tasks,
+            seed=args.seed,
+            stamp=stamp,
+            config_path=config_path,
+            variables=variables,
+        )
+
+        # 事件在收集阶段一次性补发：harbor 是同步 shell 出去的，跑完才有结果，
+        # 拿不到"某题刚开始"的时刻（详见 emit_trial_events 的 docstring）。
+        emit_trial_events(sink, arm, tasks, trials)
+        # summary 必须是 cli.py 认得的那套键（passed/total/pass_at_1）：harbor 自己
+        # summarize() 出来的 n_passed/n_scored/pass_rate 一个都对不上，直接发过去
+        # 会被读成 0/0 = 0.0%——静默给错数字比不给更糟。完整口径统一是 Task 7 的活，
+        # 在那之前 JSON 报告仍是其余一切的唯一真相来源。多带 unscored 是因为
+        # 「没判分」是真实的第三态，光一个通过率会把它藏掉；cli.py 忽略不认识的键。
+        s = summarize(arm, args.stage, trials, model=args.model)
+        sink.emit(
+            "eval/run_finished",
+            benchmark="harbor",
+            arm=arm,
+            status="completed" if completed.returncode == 0 else "failed",
+            error=None if completed.returncode == 0 else f"harbor 退出码 {completed.returncode}",
+            summary={
+                "passed": s["n_passed"],
+                "total": s["n_scored"],
+                "pass_at_1": s["pass_rate"],
+                "unscored": s["n_unscored"],
+            },
+            report_json_path=str(report_path),
+            report_md_path=str(report_path.with_suffix(".md")),
+        )
+        return completed.returncode
+    finally:
+        # NullSink 没有 close()：直跑 CLI 时不能因为收尾而 AttributeError。
+        # 放在 finally 里，异常路径也能给 feed 收口（已发的事件每行都 flush 过，不会丢）
+        close = getattr(sink, "close", None)
+        if close:
+            close()
 
 
 def main(argv: list[str] | None = None) -> int:

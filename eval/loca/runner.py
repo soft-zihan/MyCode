@@ -103,7 +103,8 @@ def _unified_row(row: dict[str, Any]) -> dict[str, Any]:
     reward = row.get("reward")
     error = row.get("agent_error") or row.get("eval_error")
     passed = bool(row.get("passed"))
-    # loca 的 passed 恒为布尔（`reward >= 0.999`，见 runner.py:237），所以"没判分"
+    # loca 的 passed 恒为布尔（`run_one` 里那句
+    # `passed = isinstance(reward, (int, float)) and reward >= 0.999`），所以"没判分"
     # 只能从 reward 看出来：verifier 没产出 reward 时 reward 是 None、passed 是 False。
     # 这时若也没有 error，就是 unscored 而不是 failed——没判分和判了没过是两件事。
     # 派生顺序因此和 harbor 那份**不完全一样**（harbor 的 reward 可以是 None 而 passed 三态，
@@ -304,126 +305,134 @@ def main() -> None:
     # 就跑在主线程上——绝不能挪进 run_one（那是 worker 线程）。
     # CLI 直跑时 sink_from_env() 给 NullSink，行为和改动前完全一致。
     sink = sink_from_env()
-    sink.emit(
-        "eval/run_started",
-        benchmark="loca",
-        arm=args.arm,
-        total=len(picked),
-        variables={
+    # try/finally 兜住整段：中途任何异常（rows_by_task 的 KeyError、write_reports 失败）
+    # 都不该让 feed 悬着不收口。已发的事件每行都 flush 过、丢不了，
+    # 这里保的是「终态事件发不出去时，句柄也要关掉」。
+    try:
+        sink.emit(
+            "eval/run_started",
+            benchmark="loca",
+            arm=args.arm,
+            model=model,
+            total=len(picked),
+            variables={
+                "config_set": args.config_set,
+                "window": window,
+                "thinking": args.thinking,
+                "model": model,
+                "api_base": api_base,
+                "select": args.select,
+                "seed": args.seed,
+                "timeout_s": args.timeout,
+                "max_tool_uses": args.max_tool_uses,
+                "parallel": args.parallel,
+            },
+        )
+        done = 0
+        durations: list[float] = []
+        with ThreadPoolExecutor(max_workers=max(1, args.parallel)) as pool:
+            futures = {pool.submit(run_one, n, idx): idx for n, idx in enumerate(picked, 1)}
+            for fut in as_completed(futures):
+                idx = futures[fut]
+                try:
+                    row = fut.result()
+                except Exception as e:
+                    row = {
+                        "task_id": f"{args.config_set}-{idx}",
+                        "name": configurations[idx].get("name", f"config_{idx}"),
+                        "index": idx, "reward": None, "passed": False, "duration_s": 0.0,
+                        "tokens": {}, "compression_events": {}, "trace_id": None,
+                        "agent_error": f"runner exception: {type(e).__name__}: {e}",
+                        "eval_error": None, "step_info": None, "task_dir": "",
+                    }
+                rows_by_task[row["task_id"]] = row
+                # 到这里这一题的 row 才定稿（异常兜底那条也已合流），所以事件在这里发
+                done += 1
+                durations.append(row.get("duration_s") or 0.0)
+                sink.emit("eval/task_finished", task_id=row["task_id"], result=_unified_row(row))
+                remaining = max(0, len(picked) - done)
+                # ETA 用已完成题目的中位耗时估算，不是均值——和 harbor 那份口径一致
+                median = statistics.median(durations) if durations else 0.0
+                sink.emit(
+                    "eval/run_progress",
+                    completed=done,
+                    total=len(picked),
+                    eta_s=round(median * remaining, 1),
+                )
+                tr = next((t for t in state.tasks if t.task_id == row["task_id"]), None)
+                if tr is not None:
+                    tr.status = "passed" if row["passed"] else (
+                        "error" if (row["agent_error"] or row["eval_error"]) else "failed")
+                    tr.predicted = f"reward={row['reward']}"
+                    tr.passed = row["passed"]
+                    tr.duration_s = row["duration_s"]
+                    tr.tokens = row["tokens"]
+                    tr.trace_id = row["trace_id"]
+                    tr.session_id = row.get("session_id")
+                    tr.error = row["agent_error"] or row["eval_error"]
+                    tr.metadata = {
+                        "reward": row["reward"],
+                        "compression_events": row["compression_events"],
+                        "step_info": row["step_info"],
+                        "index": row["index"],
+                        "task_dir": row["task_dir"],
+                    }
+                state.summary = _summarize(list(rows_by_task.values()), len(picked))
+                save_state(state)
+
+        rows = [rows_by_task[f"{args.config_set}-{idx}"] for idx in picked]
+        n = len(rows)
+        summary = _summarize(rows, len(picked))
+        total_comp = summary["compression_events_total"]
+        meta = {
+            "benchmark_detail": "LOCA-bench (hkust-nlp)",
             "config_set": args.config_set,
-            "window": window,
-            "thinking": args.thinking,
-            "model": model,
-            "api_base": api_base,
             "select": args.select,
             "seed": args.seed,
+            "indices": picked,
+            "arm": args.arm,
+            "window": window,
+            "model": model,
+            "thinking": args.thinking,
             "timeout_s": args.timeout,
             "max_tool_uses": args.max_tool_uses,
+            "loca_repo": str(loca_repo),
+            "loca_commit": _loca_commit(loca_repo),
+            "scaffold": "mycode-agent",
             "parallel": args.parallel,
-        },
-    )
-    done = 0
-    durations: list[float] = []
-    with ThreadPoolExecutor(max_workers=max(1, args.parallel)) as pool:
-        futures = {pool.submit(run_one, n, idx): idx for n, idx in enumerate(picked, 1)}
-        for fut in as_completed(futures):
-            idx = futures[fut]
-            try:
-                row = fut.result()
-            except Exception as e:
-                row = {
-                    "task_id": f"{args.config_set}-{idx}",
-                    "name": configurations[idx].get("name", f"config_{idx}"),
-                    "index": idx, "reward": None, "passed": False, "duration_s": 0.0,
-                    "tokens": {}, "compression_events": {}, "trace_id": None,
-                    "agent_error": f"runner exception: {type(e).__name__}: {e}",
-                    "eval_error": None, "step_info": None, "task_dir": "",
-                }
-            rows_by_task[row["task_id"]] = row
-            # 到这里这一题的 row 才定稿（异常兜底那条也已合流），所以事件在这里发
-            done += 1
-            durations.append(row.get("duration_s") or 0.0)
-            sink.emit("eval/task_finished", task_id=row["task_id"], result=_unified_row(row))
-            remaining = max(0, len(picked) - done)
-            # ETA 用已完成题目的中位耗时估算，不是均值——和 harbor 那份口径一致
-            median = statistics.median(durations) if durations else 0.0
-            sink.emit(
-                "eval/run_progress",
-                completed=done,
-                total=len(picked),
-                eta_s=round(median * remaining, 1),
-            )
-            tr = next((t for t in state.tasks if t.task_id == row["task_id"]), None)
-            if tr is not None:
-                tr.status = "passed" if row["passed"] else (
-                    "error" if (row["agent_error"] or row["eval_error"]) else "failed")
-                tr.predicted = f"reward={row['reward']}"
-                tr.passed = row["passed"]
-                tr.duration_s = row["duration_s"]
-                tr.tokens = row["tokens"]
-                tr.trace_id = row["trace_id"]
-                tr.session_id = row.get("session_id")
-                tr.error = row["agent_error"] or row["eval_error"]
-                tr.metadata = {
-                    "reward": row["reward"],
-                    "compression_events": row["compression_events"],
-                    "step_info": row["step_info"],
-                    "index": row["index"],
-                    "task_dir": row["task_dir"],
-                }
-            state.summary = _summarize(list(rows_by_task.values()), len(picked))
-            save_state(state)
+        }
 
-    rows = [rows_by_task[f"{args.config_set}-{idx}"] for idx in picked]
-    n = len(rows)
-    summary = _summarize(rows, len(picked))
-    total_comp = summary["compression_events_total"]
-    meta = {
-        "benchmark_detail": "LOCA-bench (hkust-nlp)",
-        "config_set": args.config_set,
-        "select": args.select,
-        "seed": args.seed,
-        "indices": picked,
-        "arm": args.arm,
-        "window": window,
-        "model": model,
-        "thinking": args.thinking,
-        "timeout_s": args.timeout,
-        "max_tool_uses": args.max_tool_uses,
-        "loca_repo": str(loca_repo),
-        "loca_commit": _loca_commit(loca_repo),
-        "scaffold": "mycode-agent",
-        "parallel": args.parallel,
-    }
+        # BC-16 触发验证：压缩臂在压力窗口下零触发 = 实验无效信号
+        if args.arm != "truncate" and sum(total_comp.values()) == 0:
+            print("\n⚠️  压缩事件计数为 0——本次运行未触发压缩，消融对比无效（BC-16）。"
+                  "检查窗口/环境描述长度组合是否足以越过阈值。", flush=True)
 
-    # BC-16 触发验证：压缩臂在压力窗口下零触发 = 实验无效信号
-    if args.arm != "truncate" and sum(total_comp.values()) == 0:
-        print("\n⚠️  压缩事件计数为 0——本次运行未触发压缩，消融对比无效（BC-16）。"
-              "检查窗口/环境描述长度组合是否足以越过阈值。", flush=True)
-
-    json_path, md_path = write_reports("loca", run_id, meta, summary, rows,
-                                       reports_dir=REPORTS_DIR, report_stem=run_id)
-    state.status = "completed"
-    state.finished_at = time.time()
-    state.summary = summary
-    state.report_json_path = str(json_path)
-    state.report_md_path = str(md_path)
-    save_state(state)
-    # 先落 state.json 再发 run_finished（和 EvalService 的顺序一致），
-    # report_path 给的是 JSON 报告：job 索引和 /api/eval/reports/{id} 吃的是它
-    sink.emit(
-        "eval/run_finished",
-        benchmark="loca",
-        arm=args.arm,
-        status=state.status,
-        summary=summary,
-        report_path=str(json_path),
-    )
-    # NullSink 没有 close()：直跑 CLI 时不能因为收尾而 AttributeError。
-    # 必须在 run_finished 之后关，否则最后这条事件落不了盘
-    close = getattr(sink, "close", None)
-    if close:
-        close()
+        json_path, md_path = write_reports("loca", run_id, meta, summary, rows,
+                                           reports_dir=REPORTS_DIR, report_stem=run_id)
+        state.status = "completed"
+        state.finished_at = time.time()
+        state.summary = summary
+        state.report_json_path = str(json_path)
+        state.report_md_path = str(md_path)
+        save_state(state)
+        # 先落 state.json 再发 run_finished（和 EvalService 的顺序一致）。
+        # 键名跟 Task 4 的 EvalService 对齐（report_json_path / report_md_path）：
+        # cli.py 读的就是这两个，发 report_path 等于前端拿不到报告链接
+        sink.emit(
+            "eval/run_finished",
+            benchmark="loca",
+            arm=args.arm,
+            status=state.status,
+            summary=summary,
+            report_json_path=str(json_path),
+            report_md_path=str(md_path),
+        )
+    finally:
+        # NullSink 没有 close()：直跑 CLI 时不能因为收尾而 AttributeError。
+        # 必须在 run_finished 之后关，否则最后这条事件落不了盘
+        close = getattr(sink, "close", None)
+        if close:
+            close()
     print(f"[loca] completed {summary['passed']}/{n} pass@1={summary['pass_at_1']:.1%} "
           f"avg_reward={summary['avg_reward']} comp={total_comp}")
     print(f"[loca] report: {json_path}\n[loca]         {md_path}")
