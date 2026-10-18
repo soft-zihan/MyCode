@@ -6,6 +6,13 @@ loca 有 agent_error/eval_error、harbor 是 task_name/n_input_tokens/agent_exec
 
 **这个模块必须是叶子**：`runner_base.write_reports` 要 import 它，而 `jobs.py` 又
 import `runner_base`——这里只要有一个反向依赖就成了导入环。
+
+error 行的口径（裁定，不是疏忽）：gaia/hle/smoke 的一条 error 行是 `passed=False`，
+进 `n_scored` 分母、不进 `n_passed`；harbor 一条根本没有 reward 的 trial 是
+`passed=None`，进 `n_unscored`、**不进**分母。两者不一致但故意保留——同一个 benchmark
+的两条臂走同一个适配器，口径在臂间是一致的，而对比只在臂间发生；跨 benchmark 比
+pass_rate 本来就不成立（题目集不同）。改掉它会追溯性地作废所有既有 gaia/hle 基线数字。
+锁在 tests/unit/test_eval_schema_contract.py::test_an_error_row_is_scored_as_a_failure_not_as_unscored。
 """
 
 from __future__ import annotations
