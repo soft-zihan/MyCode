@@ -10,7 +10,7 @@ import `runner_base`——这里只要有一个反向依赖就成了导入环。
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Callable
 
 ENVELOPE_KEYS = ("benchmark", "run_id", "generated_at", "meta", "summary", "results")
@@ -81,7 +81,11 @@ def _row_from_loca_row(raw: Mapping[str, Any]) -> tuple[dict[str, Any], frozense
     return {
         "task_id": raw.get("task_id"),
         "name": raw.get("name"),
-        "passed": _as_bool(raw.get("passed")),
+        # loca 的 passed 恒为布尔（run_one 里是 isinstance(reward, (int,float)) and reward>=0.999），
+        # 所以"没判分"只能从 reward 看出来：verifier 没产出 reward 时 reward 是 None、
+        # passed 是 False。直接映射 passed 就会把"没判分"记成"判了没过"，
+        # 进 n_scored 分母、压低 pass_rate，还和 state.json / 事件流那两个出口打脸
+        "passed": None if raw.get("reward") is None else _as_bool(raw.get("passed")),
         "reward": raw.get("reward"),
         "duration_s": raw.get("duration_s"),
         "tokens": _tokens(raw.get("tokens")),
@@ -123,38 +127,50 @@ _ROW_ADAPTERS: dict[str, _Adapter] = {
 }
 
 
-def normalize_row(raw: Mapping[str, Any], *, benchmark: str) -> dict[str, Any]:
-    core_keys = set(ROW_CORE)
-    if core_keys <= set(raw):
-        # 已经是公共核心的形状（normalize_row 自己的输出，或 harbor/loca 的
-        # unified_* 记录）：原样带过去。再走一遍适配器只会读到缺席的原名——
-        # task_name / agent_error / n_input_tokens 第一轮就被收进 extra 了，
-        # 于是 task_id、error、tokens 全被清空，"幂等"就成了"第二次归一化洗掉数据"。
-        prior = raw.get("extra")
-        extra = dict(prior) if isinstance(prior, Mapping) else {}
-        extra.update({k: v for k, v in raw.items() if k not in core_keys})
-        normalized: dict[str, Any] = {k: raw[k] for k in ROW_CORE}
-        normalized["extra"] = extra
-        return normalized
+def _split_normalized(raw: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """已经是公共核心形状的行：拆成 (核心, extra)，**不再走适配器**。
 
-    core, consumed = _ROW_ADAPTERS.get(benchmark, _row_from_task_result)(raw)
+    再走一遍适配器只会读到缺席的原名——task_name / agent_error / n_input_tokens
+    第一轮就被收进 extra 了，于是 task_id、error、tokens 全被清空，
+    "幂等"就成了"第二次归一化洗掉数据"。
+    """
+    core_keys = set(ROW_CORE)
+    prior = raw.get("extra")
+    extra = dict(prior) if isinstance(prior, Mapping) else {}
+    extra.update({k: v for k, v in raw.items() if k not in core_keys})
+    return {k: raw.get(k) for k in ROW_CORE if k != "extra"}, extra
+
+
+def normalize_row(raw: Mapping[str, Any], *, benchmark: str) -> dict[str, Any]:
+    """任意 benchmark 的行字典 → 公共核心 + extra。幂等。"""
+    if set(ROW_CORE) <= set(raw):
+        core, extra = _split_normalized(raw)
+    else:
+        core, consumed = _ROW_ADAPTERS.get(benchmark, _row_from_task_result)(raw)
+        extra = {k: v for k, v in raw.items() if k not in set(ROW_CORE) | consumed}
+
+    # 强制逻辑只有这一份，两条路共用：命中快速路径不代表后置条件可以免检，
+    # 否则一条 tokens 只有两个键、status 是个没听过的值的行会被静默放行，
+    # 而 check_report 要等到报告落盘之后才发现——报告是不可再生的
+    passed = _as_bool(core.get("passed"))
+    error = core.get("error")
     duration = core.get("duration_s")
-    row: dict[str, Any] = {
+    return {
         "task_id": str(core.get("task_id") or ""),
         "name": core.get("name") or "",
-        "status": _status(raw.get("status"), core.get("passed"), core.get("error")),
-        "passed": core.get("passed"),
+        # 读 raw 而不是 core 是刻意的：适配器路径下 raw["status"] 是源行自带的状态
+        # （gaia 的 EvalTaskResult.status），快速路径下它就是上一轮派生出来的那个值——
+        # 两种情况都要"已经在词表里就不覆盖"
+        "status": _status(raw.get("status"), passed, error),
+        "passed": passed,
         "reward": core.get("reward"),
         "duration_s": float(duration) if isinstance(duration, (int, float)) else 0.0,
-        "tokens": core.get("tokens") or _tokens(),
-        "error": core.get("error"),
+        "tokens": _tokens(core.get("tokens")),
+        "error": error,
         "session_id": core.get("session_id"),
         "trace_id": core.get("trace_id"),
-        "extra": {},
+        "extra": extra,
     }
-    skip = set(ROW_CORE) | consumed
-    row["extra"] = {k: v for k, v in raw.items() if k not in skip}
-    return row
 
 
 def summarize_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -216,13 +232,21 @@ def check_report(report: Mapping[str, Any]) -> list[str]:
     meta = report.get("meta")
     if isinstance(meta, Mapping):
         problems += [f"meta 缺 {key}" for key in META_CORE if key not in meta]
-    for key in SUMMARY_CORE:
-        summary = report.get("summary")
-        if isinstance(summary, Mapping) and key not in summary:
-            problems.append(f"summary 缺 {key}")
+    elif "meta" in report:
+        # 键**缺席**上面 ENVELOPE_KEYS 那一段已经报过了，这里只报"在，但不是对象"：
+        # 一份啥都没有的报告不该被同一件事骂两遍
+        problems.append(f"meta 不是对象（{type(meta).__name__}）")
+
+    summary = report.get("summary")
+    if isinstance(summary, Mapping):
+        problems += [f"summary 缺 {key}" for key in SUMMARY_CORE if key not in summary]
+    elif "summary" in report:
+        problems.append(f"summary 不是对象（{type(summary).__name__}）")
 
     results = report.get("results")
-    if isinstance(results, Iterable):
+    # 只认 list/tuple：str 和 dict 也是 Iterable，一份 results="abc" 会按字符
+    # 刷出 3 条"不是对象"，噪音掩盖真问题
+    if isinstance(results, (list, tuple)):
         for index, row in enumerate(results):
             if not isinstance(row, Mapping):
                 problems.append(f"results[{index}] 不是对象")
@@ -235,6 +259,8 @@ def check_report(report: Mapping[str, Any]) -> list[str]:
                 problems.append(f"results[{index}] tokens 的键不是 {list(TOKEN_FIELDS)}")
             elif row.get("status") not in ROW_STATUSES:
                 problems.append(f"results[{index}] status={row.get('status')!r} 不在词表里")
+    elif "results" in report:
+        problems.append(f"results 不是数组（{type(results).__name__}）")
     return problems
 
 

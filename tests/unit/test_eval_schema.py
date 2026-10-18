@@ -6,9 +6,7 @@ import pytest
 
 from eval.common.schema import (
     ENVELOPE_KEYS,
-    META_CORE,
     ROW_CORE,
-    SUMMARY_CORE,
     TOKEN_FIELDS,
     check_report,
     looks_like_run_report,
@@ -127,6 +125,28 @@ def test_loca_error_prefers_the_agent_error():
     assert row["status"] == "failed"  # 判过分了，就是失败，不是异常
 
 
+def test_loca_without_a_reward_is_unscored_not_failed():
+    """loca 的 passed 恒为布尔，"没判分"只能从 reward 看出来。
+
+    verifier 没产出 reward 时 loca 给的是 reward=None + passed=False。直接映射 passed
+    就会把"没判分"记成"判了没过"：进 n_scored 分母、压低 pass_rate，
+    而同一条 row 在 state.json 和事件流里是 unscored / passed=None——报告于是和
+    另外两个出口打脸，而报告文件是不可再生的，对比层读的正是它。
+    """
+    row = normalize_row(
+        {**LOCA_ROW, "reward": None, "passed": False, "agent_error": None, "eval_error": None},
+        benchmark="loca",
+    )
+
+    assert row["passed"] is None
+    assert row["status"] == "unscored"
+    assert row["reward"] is None
+
+    summary = summarize_rows([row, normalize_row(LOCA_ROW, benchmark="loca")])
+    assert summary["n_scored"] == 1 and summary["n_unscored"] == 1
+    assert summary["n_passed"] == 0
+
+
 def test_benchmark_specific_fields_all_land_in_extra():
     harbor = normalize_row(HARBOR_TRIAL, benchmark="harbor")
     loca = normalize_row(LOCA_ROW, benchmark="loca")
@@ -199,6 +219,47 @@ def test_summarize_rows_of_nothing_reports_unknown_not_zero():
     assert summary["n_tasks"] == 0
 
 
+@pytest.mark.parametrize(
+    "benchmark,raw",
+    [("gaia", TASK_RESULT), ("loca", LOCA_ROW), ("harbor", HARBOR_TRIAL)],
+)
+def test_normalize_row_is_idempotent_for_every_shape(benchmark, raw):
+    # 幂等不是"跑两遍不炸"，是"第二遍不许洗掉数据"：extra 是 benchmark 特有键
+    # 唯一的落脚点，而适配器读的正是那些第一轮就被收进 extra 的原名
+    once = normalize_row(raw, benchmark=benchmark)
+
+    twice = normalize_row(once, benchmark=benchmark)
+
+    assert twice == once
+    assert once["extra"], f"{benchmark} 的特有键应该落在 extra 里"
+
+
+def test_the_fast_path_still_enforces_the_core_postconditions():
+    """命中快速路径不等于免检：Task 8/9 之后 harbor/loca 的 unified_* 记录都会走这条。
+
+    一条 tokens 只有两个键、status 是个没听过的值的行如果被原样放行，
+    check_report 要等到报告落盘之后才发现——而报告是不可再生的。
+    """
+    half = normalize_row(TASK_RESULT, benchmark="gaia")
+    half["tokens"] = {"input": 10}
+    half["status"] = "exploded"
+    half["passed"] = 1
+    half["duration_s"] = "12"
+
+    out = normalize_row(half, benchmark="gaia")
+
+    assert out["tokens"] == {"input": 10, "output": None, "reasoning": None, "cached": None}
+    assert out["status"] == "passed"   # "exploded" 不在词表里 → 按 passed 重新派生
+    assert out["passed"] is True       # 1 → True，不是 1
+    assert out["duration_s"] == 0.0    # "12" 不是数值，走既有兜底
+
+    report = normalize_report(
+        {"benchmark": "gaia", "run_id": "r", "generated_at": "t",
+         "meta": {}, "summary": {}, "results": [half]}
+    )
+    assert check_report(report) == []
+
+
 def test_normalize_report_fills_the_envelope_and_is_idempotent():
     once = normalize_report(
         {"benchmark": "gaia", "run_id": "gaia-x", "generated_at": "2026-10-18T00:00:00Z",
@@ -243,6 +304,27 @@ def test_check_report_reports_at_most_one_problem_per_row():
         row.clear()
 
     assert len([p for p in check_report(report) if p.startswith("results[")]) == 50
+
+
+def test_check_report_rejects_a_meta_that_is_not_an_object():
+    # 契约是"空列表 = 合格"，而 Task 11-14 要拿它当加载历史报告的门。
+    # meta: null 被放行的话，炸点在下游的 report["meta"]["model"]，离病因很远
+    problems = check_report(
+        {"benchmark": "gaia", "run_id": "r", "generated_at": "t",
+         "meta": None, "summary": None, "results": "abc"}
+    )
+
+    assert any(p.startswith("meta 不是对象") for p in problems)
+    assert any(p.startswith("summary 不是对象") for p in problems)
+    assert any(p.startswith("results 不是数组") for p in problems)
+
+
+def test_check_report_does_not_double_report_a_missing_key():
+    # 键**缺席**已经由 ENVELOPE_KEYS 那一段报过了，不能再报一条"不是对象"
+    problems = check_report({"benchmark": "gaia", "results": [{"task_id": "a"}]})
+
+    assert sum(1 for p in problems if "meta" in p) == 1
+    assert sum(1 for p in problems if "summary" in p) == 1
 
 
 def test_looks_like_run_report_rejects_compare_output_and_junk():
