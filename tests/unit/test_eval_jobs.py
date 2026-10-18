@@ -246,6 +246,8 @@ def test_attach_on_startup_closes_the_record_it_interrupts(reports):
 
 import signal  # noqa: E402
 import subprocess  # noqa: E402  （追加段，import 放这里避免改动文件头）
+import sys  # noqa: E402
+import time  # noqa: E402
 
 from eval.common.jobs import (  # noqa: E402
     BENCHMARK_MODULES,
@@ -254,6 +256,7 @@ from eval.common.jobs import (  # noqa: E402
     build_argv,
     finish_job,
     git_revision,
+    reap_finished,
     start_job,
 )
 
@@ -496,3 +499,134 @@ def test_abort_job_on_finished_job_is_a_noop(reports):
 
 def test_abort_job_unknown_run_returns_none(reports):
     assert abort_job("nope") is None
+
+
+# ── Task 3 复审第 2 轮：reap_finished 收尸 ───────────────────────────
+# start_job 起了子进程就丢掉 Popen 句柄，全仓没有任何地方 wait()：退出的子进程变成僵尸，
+# 而 os.kill(pid, 0) 对僵尸是**成功**的——pid_alive 会一直说"还活着"。于是状态永远停在
+# running，MAX_CONCURRENT_JOBS=1 的闸门永久关着，不重启服务就再也起不了第二轮评测。
+# 一次 waitpid(WNOHANG) 同时解决判死、回收僵尸、拿真实退出码三件事。
+#
+# 所以下面这些测试必须起**真的**子进程：waitpid 只认自己的子进程，_FakeProc(pid=4321)
+# 那条假路走不通（它只会命中 ChildProcessError 分支）。
+
+
+def _cleanup_child(proc):
+    """测试里起的真子进程必须收干净，断言失败也要收。
+
+    漏一个会占着资源、让后面的测试变得不稳定（其中一条起的子进程要睡 30 秒）。
+    kill 打不到已经退出的进程（send_signal 自己吞 ProcessLookupError），
+    wait 对被 reap_finished 抢先收走的子进程也不抛（Popen 兜住了 ChildProcessError）。
+    """
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _poll_reap(reports, run_id, timeout=5.0):
+    """轮询到 reap_finished 收下这条为止，返回最后一次的收尸列表。
+
+    不能图省事 proc.wait() 再调 reap_finished：wait() 已经把僵尸收走了，
+    被测的那次 waitpid 只会抛 ChildProcessError 走 continue——测的是假路径。
+    """
+    deadline = time.monotonic() + timeout
+    reaped: list[str] = []
+    while time.monotonic() < deadline:
+        reaped = reap_finished(reports_dir=reports)
+        if run_id in reaped:
+            break
+        time.sleep(0.05)
+    return reaped
+
+
+def test_reap_finished_completes_a_job_whose_process_exited(reports):
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        run_id = "done"
+        # 报告得真存在：否则退出码 0 会被 finish_job 降级成 failed（见上面那条降级测试）
+        (reports / f"{run_id}.json").write_text("{}", encoding="utf-8")
+        write_job(_record(run_id=run_id, status=JobStatus.RUNNING, pid=proc.pid))
+
+        reaped = _poll_reap(reports, run_id)
+
+        assert run_id in reaped
+        done = get_job(run_id)
+        assert done.status is JobStatus.COMPLETED
+        assert done.exit_code == 0
+    finally:
+        _cleanup_child(proc)
+
+
+def test_reap_finished_records_a_signal_death_as_a_negative_exit_code(reports):
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGTERM)"]
+    )
+    try:
+        run_id = "sig"
+        write_job(_record(run_id=run_id, status=JobStatus.RUNNING, pid=proc.pid))
+
+        reaped = _poll_reap(reports, run_id)
+
+        assert run_id in reaped
+        failed = get_job(run_id)
+        assert failed.status is JobStatus.FAILED
+        # waitstatus_to_exitcode 把信号死报成负数——finish_job 那句"被信号 N 杀掉"
+        # 全靠这个约定，符号一翻就变成"被信号 -15 杀掉"
+        assert failed.exit_code == -signal.SIGTERM
+    finally:
+        _cleanup_child(proc)
+
+
+def test_reap_finished_leaves_a_running_child_alone(reports):
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        run_id = "running"
+        write_job(_record(run_id=run_id, status=JobStatus.RUNNING, pid=proc.pid))
+
+        assert reap_finished(reports_dir=reports) == []
+        assert get_job(run_id).status is JobStatus.RUNNING
+    finally:
+        # 不收掉就漏一个要睡 30 秒的进程在这儿
+        _cleanup_child(proc)
+
+
+def test_reap_finished_skips_a_pid_that_is_not_our_child(reports):
+    # 服务重启过、或 pid 被别的进程复用了：waitpid 抛 ChildProcessError。
+    # 不兜住它，reap_finished 会在每一条重启前留下的记录上炸——而 start_job 现在
+    # 一进门就调它，等于任何一次启动都直接 500
+    write_job(_record(run_id="foreign", status=JobStatus.RUNNING, pid=1))
+
+    assert reap_finished(reports_dir=reports) == []
+
+    # 判不了死活就一个字都别改，那是 attach_on_startup 的活
+    assert get_job("foreign").status is JobStatus.RUNNING
+
+
+def test_start_job_reaps_a_finished_job_before_checking_the_gate(reports):
+    # 这条钉的是"焊死"本身：上一轮已经退出、状态却还挂着 running（没人 wait 过它），
+    # running_jobs 就一直算它一个名额，闸门永久关着，不重启服务再也起不了第二轮
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        run_id = "wedge"
+        (reports / f"{run_id}.json").write_text("{}", encoding="utf-8")
+        write_job(_record(run_id=run_id, status=JobStatus.RUNNING, pid=proc.pid))
+
+        started = None
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                started = start_job("gaia", {}, reports_dir=reports, popen=_fake_popen([]))
+                break
+            except JobStartError:
+                time.sleep(0.05)  # 子进程还没退出，这时候拒得对；等它退出并被收掉
+
+        assert started is not None and started.status is JobStatus.RUNNING
+        # 放行是**因为**先把上一条收了，不是绕过了闸门
+        assert get_job(run_id).status is JobStatus.COMPLETED
+    finally:
+        _cleanup_child(proc)

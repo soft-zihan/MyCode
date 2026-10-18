@@ -236,6 +236,34 @@ def attach_on_startup(reports_dir: Path | None = None) -> list[str]:
     return fixed
 
 
+def reap_finished(reports_dir: Path | None = None) -> list[str]:
+    """非阻塞地收一下还挂在 RUNNING/QUEUED 上的子进程：死了就 finish_job。
+
+    为什么必须自己 waitpid、不能只看 pid_alive：start_job 起了子进程就丢掉 Popen 句柄，
+    全仓没有任何地方 wait()。退出的子进程于是变成僵尸，而 os.kill(pid, 0) 对僵尸是成功的
+    ——pid_alive 会一直说"还活着"。状态永远停在 running，MAX_CONCURRENT_JOBS=1 的闸门
+    就永久关着，第二次评测再也起不来。一次 waitpid(WNOHANG) 同时解决三件事：
+    判死、回收僵尸、拿到真实退出码（被信号杀是负数，正好对上 finish_job 的文案约定）。
+    """
+    reaped: list[str] = []
+    for rec in list_jobs(limit=1000, reports_dir=reports_dir):
+        if rec.status not in (JobStatus.RUNNING, JobStatus.QUEUED) or not rec.pid:
+            continue
+        try:
+            pid, status = os.waitpid(rec.pid, os.WNOHANG)
+        except ChildProcessError:
+            # 不是我们的子进程（服务重启过、或 pid 被别的进程复用了）：
+            # 这里判不了它的死活，交给 attach_on_startup
+            continue
+        except OSError:
+            continue
+        if pid == 0:
+            continue  # 还在跑
+        finish_job(rec.run_id, os.waitstatus_to_exitcode(status), reports_dir)
+        reaped.append(rec.run_id)
+    return reaped
+
+
 BENCHMARK_MODULES = {
     "gaia": "eval.gaia.runner",
     "hle": "eval.hle.runner",
@@ -292,6 +320,9 @@ def start_job(
     popen: Callable[..., Any] | None = None,
 ) -> JobRecord:
     params = dict(params or {})
+    # 上一轮可能已经退出了、状态却还挂着 running（没人 wait 过它）。
+    # 不先收掉，闸门看到的就是过期状态：要么白关着，要么把一个僵尸当成还在收尾
+    reap_finished(reports_dir)
     busy = running_jobs(reports_dir)
     if len(busy) >= MAX_CONCURRENT_JOBS:
         raise JobStartError(
