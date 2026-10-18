@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable
 
 from eval.common.benchmarks import get_adapter, report_rows, summarize_results
+from eval.common.events import RUN_ID_ENV, sink_from_env
 from eval.common.langfuse_dataset import dataset_name, sync_task_to_dataset
 from eval.common.models import (
     BenchmarkName,
@@ -112,7 +114,11 @@ class EvalService:
         return detach
 
     def create_state(self, options: EvalRunOptions) -> EvalRunState:
-        run_id = new_run_id(options.benchmark)
+        # 被 start_job 起的子进程：run_id 由父进程定。索引、事件文件、报告文件名三者
+        # 必须同名，否则 finish_job 在 <job.run_id>.json 找不到报告，
+        # 一轮成功的评测会被判成"退出码 0，但报告未落盘"。
+        # CLI 直跑时这个变量不存在，照旧自己造
+        run_id = os.environ.get(RUN_ID_ENV) or new_run_id(options.benchmark)
         state = EvalRunState(
             run_id=run_id,
             benchmark=options.benchmark,
@@ -133,6 +139,13 @@ class EvalService:
 
     async def run(self, state: EvalRunState, options: EvalRunOptions | None = None) -> dict[str, Any]:
         options = options or state.options
+        sink = sink_from_env()
+
+        def _to_sink(payload: dict[str, Any]) -> None:
+            body = {k: v for k, v in payload.items() if k not in ("type", "run_id")}
+            sink.emit(payload.get("type", "eval/log"), **body)
+
+        detach_sink = self.attach_emitter(state.run_id, _to_sink)
         adapter = get_adapter(options.benchmark)
         state.status = "running"
         state.started_at = time.time()
@@ -272,6 +285,11 @@ class EvalService:
                 "report_md_path": state.report_md_path,
                 "error": state.error,
             })
+            # 必须在 run_finished 之后：先关 sink 的话最后这条事件就再也落不了盘
+            detach_sink()
+            close = getattr(sink, "close", None)
+            if close:
+                close()
 
         return state.to_dict()
 
