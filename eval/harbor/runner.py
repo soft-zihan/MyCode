@@ -496,6 +496,86 @@ def collect_trials(run_dir: Path | str) -> list[dict[str, Any]]:
     return trials
 
 
+def emit_trial_events(sink, arm: str, tasks: Sequence[str], trials: Sequence[dict[str, Any]]) -> None:
+    """把收集到的 trial 逐条发成事件。
+
+    harbor 是 shell 出去跑完再收集结果的，拿不到"某题刚开始"的时刻，
+    所以 task_started 发不了、进度只能在收集阶段一次性补发。
+    这是 harbor 与其他 benchmark 的真实差异，不要为了对齐而伪造时间戳。
+    """
+    import statistics
+
+    total = len(tasks)
+    by_name = {t.get("task_name"): t for t in trials}
+    done = 0
+    durations: list[float] = []
+    for name in tasks:
+        trial = by_name.get(name)
+        if not trial:
+            continue
+        done += 1
+        durations.append(trial.get("agent_execution_s") or 0.0)
+        sink.emit(
+            "eval/task_finished",
+            task_id=name,
+            result=unified_task_result(trial, benchmark="harbor", arm=arm),
+        )
+        remaining = max(0, total - done)
+        median = statistics.median(durations) if durations else 0.0
+        sink.emit(
+            "eval/run_progress",
+            completed=done,
+            total=total,
+            eta_s=round(median * remaining, 1),
+        )
+
+
+def unified_task_result(trial: dict[str, Any], *, benchmark: str, arm: str) -> dict[str, Any]:
+    """trial → 统一 result 记录（临时版，Task 7 会搬到 eval/common/schema.py）。"""
+    reward = trial.get("reward")
+    exc = trial.get("exception_type")
+    meta = trial.get("agent_metadata") or {}
+    passed = None if reward is None else bool(reward >= 1.0)
+    # 状态派生顺序必须和 Task 7 的口径一致，否则 Task 7 把这份临时实现换掉时
+    # 语义会跟着变、Task 10 的契约测试就会红：
+    # passed True → passed；passed False → failed；有异常 → error；其余 → unscored。
+    # 关键在"reward 为 None 且没有异常"（verifier 没产出 reward 文件）必须是
+    # **unscored 而不是 failed**——没判分和判了没过是两件事，混在一起通过率就假的
+    if passed is True:
+        status = "passed"
+    elif passed is False:
+        status = "failed"
+    elif exc:
+        status = "error"
+    else:
+        status = "unscored"
+    return {
+        "task_id": trial.get("task_name"),
+        "name": trial.get("task_name"),
+        "status": status,
+        "passed": passed,
+        "reward": reward,
+        "duration_s": trial.get("agent_execution_s"),
+        "tokens": {
+            "input": trial.get("n_input_tokens") or 0,
+            "output": trial.get("n_output_tokens") or 0,
+            "reasoning": meta.get("mycode_reasoning_tokens") or 0,
+            "cached": trial.get("n_cache_tokens") or 0,
+        },
+        "error": exc,
+        "session_id": meta.get("mycode_session_id"),
+        "trace_id": meta.get("mycode_trace_id"),
+        "extra": {
+            "arm": arm,
+            "agent_setup_s": trial.get("agent_setup_s"),
+            "verifier_s": trial.get("verifier_s"),
+            "environment_setup_s": trial.get("environment_setup_s"),
+            "no_reward_file": trial.get("no_reward_file"),
+            "trial_name": trial.get("trial_name"),
+        },
+    }
+
+
 def summarize(
     arm: str, stage: str, trials: Sequence[dict[str, Any]], model: str = MODEL
 ) -> dict[str, Any]:
@@ -800,7 +880,10 @@ def write_report(
             report=REPORTS_DIR / f"{stem}.md",
         )
     )
-    return REPORTS_DIR / f"{stem}.md"
+    # 返回 .json 而不是 .md：调用方要把它当 `report_path` 发进 eval/run_finished，
+    # 而 job 索引和 /api/eval/reports/{id} 吃的都是 JSON 报告——finish_job 更是直接按
+    # <run_id>.json 找报告，找不到就把成功的一轮判成 FAILED。人看的那份仍然 print .md。
+    return REPORTS_DIR / f"{stem}.json"
 
 
 def run_arm(
@@ -856,7 +939,7 @@ def run_arm(
         print(f"[{arm}] 在 {jobs_dir} 里没找到这次的结果目录", file=sys.stderr)
         return completed.returncode or 1
 
-    write_report(
+    report_path = write_report(
         arm=arm,
         stage=args.stage,
         model=args.model,
@@ -868,6 +951,26 @@ def run_arm(
         config_path=config_path,
         variables=run_variables(args, settings_env),
     )
+
+    # 事件在收集阶段一次性补发：harbor 是同步 shell 出去的，跑完才有结果，
+    # 拿不到"某题刚开始"的时刻（详见 emit_trial_events 的 docstring）。
+    # CLI 直跑时 sink_from_env() 给 NullSink，行为和改动前完全一致。
+    from eval.common.events import sink_from_env
+
+    sink = sink_from_env()
+    sink.emit(
+        "eval/run_started",
+        benchmark="harbor",
+        arm=arm,
+        total=len(tasks),
+        variables=run_variables(args, settings_env),
+    )
+    emit_trial_events(sink, arm, tasks, collect_trials(run_dir))
+    sink.emit("eval/run_finished", benchmark="harbor", arm=arm, report_path=str(report_path))
+    # NullSink 没有 close()：直跑 CLI 时不能因为收尾而 AttributeError
+    close = getattr(sink, "close", None)
+    if close:
+        close()
     return completed.returncode
 
 

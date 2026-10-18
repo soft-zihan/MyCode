@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
+import statistics
 import subprocess
 import sys
 import time
@@ -30,6 +32,7 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from eval.common.events import RUN_ID_ENV, sink_from_env  # noqa: E402
 from eval.common.runner_base import REPORTS_DIR, resolve_model_config, write_reports  # noqa: E402
 
 EVAL_WORKSPACES = Path.home() / ".mycode" / "eval_workspaces"
@@ -95,6 +98,46 @@ def _summarize(rows: list[dict[str, Any]], total_tasks: int) -> dict[str, Any]:
     }
 
 
+def _unified_row(row: dict[str, Any]) -> dict[str, Any]:
+    """loca 的 row → 统一 result 记录（临时版，Task 9 换成 schema 的实现）。"""
+    reward = row.get("reward")
+    error = row.get("agent_error") or row.get("eval_error")
+    passed = bool(row.get("passed"))
+    # loca 的 passed 恒为布尔（`reward >= 0.999`，见 runner.py:237），所以"没判分"
+    # 只能从 reward 看出来：verifier 没产出 reward 时 reward 是 None、passed 是 False。
+    # 这时若也没有 error，就是 unscored 而不是 failed——没判分和判了没过是两件事。
+    # 派生顺序因此和 harbor 那份**不完全一样**（harbor 的 reward 可以是 None 而 passed 三态，
+    # loca 的 passed 只有两态），但四种状态的**含义**一致
+    if passed:
+        status = "passed"
+    elif error:
+        status = "error"
+    elif reward is None:
+        status = "unscored"
+    else:
+        status = "failed"
+    return {
+        "task_id": row.get("task_id"),
+        "name": row.get("name"),
+        "status": status,
+        "passed": None if reward is None else passed,
+        "reward": reward,
+        "duration_s": row.get("duration_s"),
+        # tokens.reasoning 是 tokens.output 的子集而不是额外一份（网关 completion_tokens
+        # 含思考）；loca 的 ar.get("tokens") 已经是这个口径，原样带过去
+        "tokens": row.get("tokens") or {},
+        "error": error,
+        "session_id": row.get("session_id"),
+        "trace_id": row.get("trace_id"),
+        "extra": {
+            "index": row.get("index"),
+            "compression_events": row.get("compression_events"),
+            "step_info": row.get("step_info"),
+            "task_dir": row.get("task_dir"),
+        },
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="LOCA-bench 评测 runner（MyCode scaffold）")
     parser.add_argument("--config-set", default="64k",
@@ -136,7 +179,11 @@ def main() -> None:
     picked = select_indices(len(configurations), args.sample, args.select, args.seed, args.indices)
 
     model, api_base, _ = resolve_model_config(args.model, args.api_base)
-    run_id = f"loca-{args.arm}-{time.strftime('%Y%m%d_%H%M%S')}"  # arm 入 id：并行臂防碰撞 + 报告自归因
+    # 被 start_job 起起来时 run_id 由父进程定（索引、事件文件、报告文件名三者必须同名，
+    # 否则 finish_job 在 <job.run_id>.json 找不到报告，一轮成功的评测会被判成
+    # "退出码 0，但报告未落盘"）；loca 直接构造 EvalRunState、不走 create_state，
+    # 所以这条约定得自己套。CLI 直跑时环境变量不存在，照旧自己造
+    run_id = os.environ.get(RUN_ID_ENV) or f"loca-{args.arm}-{time.strftime('%Y%m%d_%H%M%S')}"  # arm 入 id：并行臂防碰撞 + 报告自归因
     print(f"[loca] run_id={run_id} set={args.config_set} arm={args.arm} window={window} "
           f"model={model} tasks={len(picked)}/{len(configurations)} select={args.select}")
 
@@ -253,6 +300,30 @@ def main() -> None:
         return row
 
     rows_by_task: dict[str, dict[str, Any]] = {}
+    # sink 只在主线程用：JsonlEventSink 不是线程安全的，而 as_completed 的循环体
+    # 就跑在主线程上——绝不能挪进 run_one（那是 worker 线程）。
+    # CLI 直跑时 sink_from_env() 给 NullSink，行为和改动前完全一致。
+    sink = sink_from_env()
+    sink.emit(
+        "eval/run_started",
+        benchmark="loca",
+        arm=args.arm,
+        total=len(picked),
+        variables={
+            "config_set": args.config_set,
+            "window": window,
+            "thinking": args.thinking,
+            "model": model,
+            "api_base": api_base,
+            "select": args.select,
+            "seed": args.seed,
+            "timeout_s": args.timeout,
+            "max_tool_uses": args.max_tool_uses,
+            "parallel": args.parallel,
+        },
+    )
+    done = 0
+    durations: list[float] = []
     with ThreadPoolExecutor(max_workers=max(1, args.parallel)) as pool:
         futures = {pool.submit(run_one, n, idx): idx for n, idx in enumerate(picked, 1)}
         for fut in as_completed(futures):
@@ -269,6 +340,19 @@ def main() -> None:
                     "eval_error": None, "step_info": None, "task_dir": "",
                 }
             rows_by_task[row["task_id"]] = row
+            # 到这里这一题的 row 才定稿（异常兜底那条也已合流），所以事件在这里发
+            done += 1
+            durations.append(row.get("duration_s") or 0.0)
+            sink.emit("eval/task_finished", task_id=row["task_id"], result=_unified_row(row))
+            remaining = max(0, len(picked) - done)
+            # ETA 用已完成题目的中位耗时估算，不是均值——和 harbor 那份口径一致
+            median = statistics.median(durations) if durations else 0.0
+            sink.emit(
+                "eval/run_progress",
+                completed=done,
+                total=len(picked),
+                eta_s=round(median * remaining, 1),
+            )
             tr = next((t for t in state.tasks if t.task_id == row["task_id"]), None)
             if tr is not None:
                 tr.status = "passed" if row["passed"] else (
@@ -325,6 +409,21 @@ def main() -> None:
     state.report_json_path = str(json_path)
     state.report_md_path = str(md_path)
     save_state(state)
+    # 先落 state.json 再发 run_finished（和 EvalService 的顺序一致），
+    # report_path 给的是 JSON 报告：job 索引和 /api/eval/reports/{id} 吃的是它
+    sink.emit(
+        "eval/run_finished",
+        benchmark="loca",
+        arm=args.arm,
+        status=state.status,
+        summary=summary,
+        report_path=str(json_path),
+    )
+    # NullSink 没有 close()：直跑 CLI 时不能因为收尾而 AttributeError。
+    # 必须在 run_finished 之后关，否则最后这条事件落不了盘
+    close = getattr(sink, "close", None)
+    if close:
+        close()
     print(f"[loca] completed {summary['passed']}/{n} pass@1={summary['pass_at_1']:.1%} "
           f"avg_reward={summary['avg_reward']} comp={total_comp}")
     print(f"[loca] report: {json_path}\n[loca]         {md_path}")
