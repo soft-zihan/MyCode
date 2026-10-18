@@ -47,6 +47,38 @@ def find_latest_report(arm: str, stage: str, reports_dir: Path | str = REPORTS_D
     return max(matches)[1]
 
 
+def report_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """取这次运行的逐题行。
+
+    新报告是统一信封（`results`，行已是标准核心）；2026-10-18 之前落盘的是
+    `trials`（harbor 原始词汇）。两种都要能读——那些报告重跑一次要 45 分钟
+    网关时间，而 §5 的结论就引自它们。
+    """
+    rows = report.get("results")
+    if rows is not None:
+        # 归一化后 task_name 变成了 task_id、n_*_tokens 变成了 tokens.*，
+        # 这里还原成 pair_tasks 认的形状，统计逻辑就只有一份
+        return [_as_trial(row) for row in rows]
+    return report.get("trials") or []
+
+
+def _as_trial(row: dict[str, Any]) -> dict[str, Any]:
+    if "task_name" in row:  # 已经是原始 trial
+        return row
+    extra = row.get("extra") or {}
+    tokens = row.get("tokens") or {}
+    return {
+        "task_name": row.get("task_id"),
+        "reward": row.get("reward"),
+        "exception_type": extra.get("exception_type"),
+        "agent_execution_s": row.get("duration_s"),
+        "n_input_tokens": tokens.get("input"),
+        "n_output_tokens": tokens.get("output"),
+        "n_cache_tokens": tokens.get("cached"),
+        **{k: v for k, v in extra.items() if k not in {"exception_type"}},
+    }
+
+
 def passed(trial: dict[str, Any]) -> bool | None:
     """True/False = 判过分的通过与否；None = 没有可用判定，不能当成失败。
 
@@ -263,8 +295,8 @@ def main(argv: list[str] | None = None) -> int:
     mine, theirs = load_report(mine_path), load_report(theirs_path)
 
     result = compare(
-        mine["trials"],
-        theirs["trials"],
+        report_rows(mine),
+        report_rows(theirs),
         mycode_label=f"{mine_path.stem}",
         opencode_label=f"{theirs_path.stem}",
         exclude_languages=args.exclude_language,

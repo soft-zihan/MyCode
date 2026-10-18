@@ -282,7 +282,13 @@ def write_reports(
         "summary": summary,
         "results": results,
     })
-    json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 原子写（tmp + os.replace）：finish_job 只看"<run_id>.json 在不在"，list_jobs
+    # 现在还会去解析它——写到一半被打断留下的截断文件，既能把失败的一轮判成
+    # COMPLETED，又能让索引每轮抛 JSONDecodeError。.md 那份不用改：它是给人看的，
+    # 截断了不会污染索引或状态机
+    tmp = json_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, json_path)
 
     lines = [
         f"# {benchmark.upper()} 评测报告",

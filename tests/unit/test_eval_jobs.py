@@ -861,3 +861,76 @@ def test_reap_finished_does_not_report_a_failed_orphan_as_completed(reports):
     assert done.exit_code == 1
     # 闸门照样重开：收尸和判成败是两件事，失败也不能占着名额
     assert running_jobs(reports_dir=reports) == []
+
+
+# ── Task 8：第三个来源——标准信封报告 ─────────────────────────────────
+# harbor 是从 CLI 直跑的：既没有 job.json 也没有 state.json。只认前两种来源的话，
+# 运行列表里永远不会有 harbor，而它恰恰是最贵、最需要被看见的那一个。
+# 优先级靠"不覆盖"实现：job.json > state.json > 报告。
+
+
+def _write_report(reports, run_id, benchmark="harbor", **over):
+    data = {
+        "benchmark": benchmark,
+        "run_id": run_id,
+        "generated_at": "2026-10-18T02:53:51Z",
+        "meta": {"model": "qwen3.6-27b", "seed": 20261017, "git_revision": "ab6b631",
+                 "task_ids": ["polyglot_cpp_yacht"], "variables": {"thinking_mode": "default"}},
+        "summary": {"n_tasks": 1, "n_passed": 1, "n_scored": 1, "pass_rate": 1.0},
+        "results": [{"task_id": "polyglot_cpp_yacht", "passed": True}],
+    }
+    data.update(over)
+    (reports / f"{run_id}.json").write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_list_jobs_picks_up_a_report_that_has_no_state_file(reports):
+    # harbor 是从 CLI 直接跑的：没有 job.json、也没有 state.json，
+    # 但页面上必须看得见它，否则"评测成为功能之一"就只覆盖了三个 benchmark
+    _write_report(reports, "harbor_mycode_final_20261018__025351")
+
+    runs = list_jobs()
+
+    assert [r.run_id for r in runs] == ["harbor_mycode_final_20261018__025351"]
+    assert runs[0].benchmark == "harbor"
+    assert runs[0].status == JobStatus.COMPLETED
+    assert runs[0].git_revision == "ab6b631"
+    assert runs[0].report_path.endswith("harbor_mycode_final_20261018__025351.json")
+
+
+def test_list_jobs_ignores_compare_output(reports):
+    # eval/reports 里还躺着 harbor_compare_*.json，形状像报告但不是一次运行
+    (reports / "harbor_compare_final_20261018__034229.json").write_text(
+        json.dumps({"n_paired": 20, "mcnemar_p": 0.0625, "pairs": []}), encoding="utf-8"
+    )
+    _write_report(reports, "real-run")
+
+    assert [r.run_id for r in list_jobs()] == ["real-run"]
+
+
+def test_a_job_file_wins_over_the_report_for_the_same_run_id(reports):
+    write_job(_record(run_id="dup", status=JobStatus.FAILED, error="boom"))
+    _write_report(reports, "dup")
+
+    runs = list_jobs()
+
+    assert len(runs) == 1 and runs[0].status == JobStatus.FAILED
+
+
+def test_report_records_are_cached_and_not_reparsed_every_scan(reports, monkeypatch):
+    _write_report(reports, "harbor_mycode_final_20261018__025351")
+    calls = []
+    real_loads = json.loads
+
+    def counting_loads(text, *a, **kw):
+        calls.append(text)
+        return real_loads(text, *a, **kw)
+
+    monkeypatch.setattr(json, "loads", counting_loads)
+    first = list_jobs()
+    n_first = len(calls)
+    second = list_jobs()
+
+    assert [r.run_id for r in first] == [r.run_id for r in second]
+    # 第二次扫一个文件都不该重新解析：tailer 每 0.5s 扫一次，
+    # 不缓存就是每 0.5s 把整个报告目录解析一遍（本机实测 +44ms/次）
+    assert len(calls) == n_first

@@ -43,7 +43,24 @@ def report_md_path(run_id: str) -> Path:
 def save_state(state: EvalRunState) -> Path:
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     path = state_path(state.run_id)
-    path.write_text(json.dumps(state.to_dict(), ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    # 原子写（tmp + os.replace），和 jobs.write_job 一个模式。这个文件每道题前后都写，
+    # 而它同时是三个读者的输入：jobs._legacy_state_records、jobs._orphan_exit_code、
+    # UI 的任务列表。裸 write_text 被 SIGKILL 截在多字节字符中间时，
+    # _legacy_state_records 会抛 UnicodeDecodeError（它的 except 只有 JSONDecodeError/OSError），
+    # 异常穿出 list_jobs → 运行列表和 MAX_CONCURRENT_JOBS 闸门一起没
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(state.to_dict(), ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        # 替换失败也别把临时文件留在 eval/reports 里：那个目录存的是不可再生的
+        # benchmark 数据，多出来的 .tmp 只会让人以为是某次运行的产物。
+        # 清理自己失败不能再抛——那会盖掉真正要报的那个 OSError
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return path
 
 

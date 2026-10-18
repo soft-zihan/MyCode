@@ -27,6 +27,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from eval.common.schema import normalize_report, normalize_row
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REPORTS_DIR = PROJECT_ROOT / "eval" / "reports"
 
@@ -531,49 +533,16 @@ def emit_trial_events(sink, arm: str, tasks: Sequence[str], trials: Sequence[dic
 
 
 def unified_task_result(trial: dict[str, Any], *, benchmark: str, arm: str) -> dict[str, Any]:
-    """trial → 统一 result 记录（临时版，Task 7 会搬到 eval/common/schema.py）。"""
-    reward = trial.get("reward")
-    exc = trial.get("exception_type")
-    meta = trial.get("agent_metadata") or {}
-    passed = None if reward is None else bool(reward >= 1.0)
-    # 状态派生顺序必须和 Task 7 的口径一致，否则 Task 7 把这份临时实现换掉时
-    # 语义会跟着变、Task 10 的契约测试就会红：
-    # passed True → passed；passed False → failed；有异常 → error；其余 → unscored。
-    # 关键在"reward 为 None 且没有异常"（verifier 没产出 reward 文件）必须是
-    # **unscored 而不是 failed**——没判分和判了没过是两件事，混在一起通过率就假的
-    if passed is True:
-        status = "passed"
-    elif passed is False:
-        status = "failed"
-    elif exc:
-        status = "error"
-    else:
-        status = "unscored"
-    return {
-        "task_id": trial.get("task_name"),
-        "name": trial.get("task_name"),
-        "status": status,
-        "passed": passed,
-        "reward": reward,
-        "duration_s": trial.get("agent_execution_s"),
-        "tokens": {
-            "input": trial.get("n_input_tokens") or 0,
-            "output": trial.get("n_output_tokens") or 0,
-            "reasoning": meta.get("mycode_reasoning_tokens") or 0,
-            "cached": trial.get("n_cache_tokens") or 0,
-        },
-        "error": exc,
-        "session_id": meta.get("mycode_session_id"),
-        "trace_id": meta.get("mycode_trace_id"),
-        "extra": {
-            "arm": arm,
-            "agent_setup_s": trial.get("agent_setup_s"),
-            "verifier_s": trial.get("verifier_s"),
-            "environment_setup_s": trial.get("environment_setup_s"),
-            "no_reward_file": trial.get("no_reward_file"),
-            "trial_name": trial.get("trial_name"),
-        },
-    }
+    """trial → 统一 result 记录。
+
+    Task 5 的临时实现在这里手抄了一份映射，和 schema 的那份漂了（tokens 用 `or 0`
+    而不是 `None`，违反"未知填 None"的口径；error 只有异常类型没有消息）。
+    现在只保留 harbor 独有的一件事：把 arm 塞进 extra——两条臂的事件要能分得开，
+    而 `normalize_row` 是跨 benchmark 的，不该认识 arm 这个概念。
+    """
+    row = normalize_row(trial, benchmark=benchmark)
+    row["extra"]["arm"] = arm
+    return row
 
 
 def summarize(
@@ -637,6 +606,9 @@ def render_markdown(summary: dict[str, Any], trials: Sequence[dict[str, Any]]) -
         reward = trial["reward"]
         if trial.get("no_reward_file"):
             reward = f"{reward}（构建失败）"
+        elif reward is None:
+            # 没判分 ≠ 判了没过：原来这里会打成字面量 "None"，和"做错了"看不出区别
+            reward = "未判分"
         lines.append(
             "| {task} | {reward} | {exc} | {exec_s} | {setup_s} | {inp} | {out} |".format(
                 task=trial["task_name"],
@@ -862,13 +834,49 @@ def write_report(
     summary["seed"] = seed
     summary["variables"] = dict(variables or {})
 
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     stem = f"harbor_{arm}_{stage}_{stamp}"
-    (REPORTS_DIR / f"{stem}.json").write_text(
-        json.dumps({"summary": summary, "trials": trials}, indent=2, ensure_ascii=False),
-        encoding="utf-8",
+    # run_id 就是文件名主干：/api/eval/reports/{run_id} 按 f"{run_id}.json" 找，
+    # 对上这一个，harbor 就不再是那个恒 404 的特例（compare 的 find_latest_report
+    # 也靠这个文件名正则，所以名字不能改）
+    report = normalize_report({
+        "benchmark": "harbor",
+        "run_id": stem,
+        # 必须和 runner_base.write_reports 逐字一致（UTC 的 ...Z）：list_jobs 按
+        # str(started_at) **字符串**排序，而 jobs._record_from_report 把 generated_at
+        # 直接当 started_at。本地时区写法产出 "+08:00"，'+'(0x2B) < 'Z'(0x5A)，
+        # 同一时刻的 harbor 运行和 gaia 运行会在列表里差开 8 小时
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "meta": {
+            "model": model,
+            "arm": arm,
+            "stage": stage,
+            "seed": seed,
+            "git_revision": (variables or {}).get("git_revision") or git_revision(),
+            "task_ids": list(tasks),
+            "variables": dict(variables or {}),
+            "run_dir": summary["run_dir"],
+            "config_path": summary["config_path"],
+        },
+        "summary": summary,
+        "results": list(trials),
+    })
+
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    json_path = REPORTS_DIR / f"{stem}.json"
+    # 原子写（tmp + os.replace）：finish_job 只看"<run_id>.json 在不在"，list_jobs
+    # 现在还会去解析它——写到一半被打断留下的截断文件，既能把失败的一轮判成
+    # COMPLETED，又能让索引每轮抛 JSONDecodeError
+    tmp = json_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, json_path)
+    # markdown 仍从**原始 trial** 渲染：它要的是 no_reward_file / exception_type /
+    # agent_setup_s 这些 harbor 词汇，归一化后它们都在 extra 里，读起来只会更绕。
+    # 两份产物出自同一次调用的同一份 trials，不会漂。
+    # summary 用归一化后的那份：它是旧键的**超集**（normalize_report 只 update 不删），
+    # render_markdown 读的 arm/stage/model/n_build_failure/mean_reward 一个都没少
+    (REPORTS_DIR / f"{stem}.md").write_text(
+        render_markdown(report["summary"], trials), encoding="utf-8"
     )
-    (REPORTS_DIR / f"{stem}.md").write_text(render_markdown(summary, trials), encoding="utf-8")
 
     print(
         "[{arm}] 通过率 {passed}/{scored}（无判定 {unscored}，其中构建失败 {build}）→ {report}".format(

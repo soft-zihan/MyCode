@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -23,6 +24,7 @@ from typing import Any, Callable
 
 from eval.common.events import EVENTS_PATH_ENV, RUN_ID_ENV
 from eval.common.runner_base import REPORTS_DIR
+from eval.common.schema import looks_like_run_report
 from eval.common.service import new_run_id
 
 logger = logging.getLogger(__name__)
@@ -170,6 +172,69 @@ def _legacy_state_records(reports_dir: Path) -> list[JobRecord]:
     return out
 
 
+def _record_from_report(data: Mapping[str, Any], path: Path) -> JobRecord | None:
+    """从一份标准信封报告倒推出运行记录。
+
+    harbor 是从 CLI 直接跑的，既没有 job.json 也没有 state.json；只认前两种来源的话，
+    运行列表里就永远不会有 harbor，而它恰恰是最贵、最需要被看见的那一个。
+    """
+    if not looks_like_run_report(data):
+        return None
+    meta = data.get("meta") or {}
+    generated = data.get("generated_at")
+    return JobRecord(
+        run_id=str(data.get("run_id") or path.stem),
+        benchmark=str(data.get("benchmark") or "unknown"),
+        argv=[],
+        params=dict(meta.get("variables") or {}),
+        git_revision=meta.get("git_revision") or "unknown",
+        # 信封里没有"这次运行成没成"这个字段（ENVELOPE_KEYS 只有六个键，没有 status），
+        # 而能写出报告就说明 runner 走完了写盘那一步。不要去 meta 里猜一个 status：
+        # 没有任何生产者会写它，那条分支只会让人以为报告能表达失败
+        status=JobStatus.COMPLETED,
+        pid=None,
+        started_at=generated,
+        finished_at=generated,
+        exit_code=None,  # 报告里不记退出码；有报告就说明它跑完了，不猜具体码
+        report_path=str(path),
+        error=None,
+    )
+
+
+# path → (mtime_ns, size, 解析结果)。报告文件写完就不再变（run_id 带时间戳，
+# 一次运行一个文件），所以按 (mtime_ns, size) 缓存是安全的。
+_REPORT_RECORDS: dict[str, tuple[int, int, JobRecord | None]] = {}
+
+
+def _report_record(path: Path) -> JobRecord | None:
+    """这份 JSON 是不是一次运行的标准信封报告；是就倒推出记录，不是就 None。
+
+    **必须缓存**。list_jobs 被 tailer 每 0.5s 调一次，而本机实测：现在（两来源）
+    一次 24.9ms；把 eval/reports/ 下那 7 份 harbor 报告（545KB 里的大头，每份 25 行）
+    也解析一遍要再加约 44ms。那就是每 0.5s 往事件循环上压 ~65ms——而同一个循环
+    还在流式吐 token、发 WS 帧。更糟的是它随运行次数线性增长：跑上 30 轮 harbor
+    就是 ~150ms/tick。缓存之后稳态只剩每个文件一次 stat()（几十微秒），
+    解析只在新文件出现时发生一次。
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    key = str(path)
+    cached = _REPORT_RECORDS.get(key)
+    if cached is not None and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+        return cached[2]
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        # 不 catch UnicodeDecodeError：本任务同时把三处写盘改成了原子写，截断从此不会发生；
+        # 真发生了就该炸出来，静默跳过等于把一次运行从列表里藏掉
+        data = None
+    record = _record_from_report(data, path) if data is not None else None
+    _REPORT_RECORDS[key] = (st.st_mtime_ns, st.st_size, record)
+    return record
+
+
 def list_jobs(limit: int = 100, reports_dir: Path | None = None) -> list[JobRecord]:
     root = reports_dir or REPORTS_DIR
     if not root.exists():
@@ -182,6 +247,20 @@ def list_jobs(limit: int = 100, reports_dir: Path | None = None) -> list[JobReco
         rec = get_job(path.name[: -len(".job.json")], root)
         if rec:
             by_id[rec.run_id] = rec
+    # 第三个来源：标准信封报告。harbor 从 CLI 直跑，两个索引文件都没有。
+    # 优先级靠"不覆盖"实现，不是靠顺序：by_id 是 dict，前两个来源已经填过了，
+    # 这里只在 run_id 还没出现时才补——所以 job.json > state.json > 报告。
+    for path in sorted(root.glob("*.json")):
+        if path.name.endswith(".state.json") or path.stem in by_id:
+            continue
+        record = _report_record(path)
+        if record is not None:
+            by_id[record.run_id] = record
+    # 缓存只保留还存在的文件：服务是长命的，报告目录只增不减，
+    # 不清的话被删掉那些报告的条目会一直挂在字典里
+    for key in list(_REPORT_RECORDS):
+        if not Path(key).exists():
+            del _REPORT_RECORDS[key]
     # `str(...)`：_iso 归一化了旧 .state.json 那条路，但手改过或外部写进来的
     # job.json 仍可能带数值型 started_at。float 和 str 混进同一个 sorted() 会
     # TypeError，而 list_jobs 一炸，运行列表和并发闸门会一起没
