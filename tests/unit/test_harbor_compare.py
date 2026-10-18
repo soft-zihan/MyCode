@@ -7,13 +7,16 @@ from pathlib import Path
 
 import pytest
 
+from eval.common.compare import GUARD_BLIND_WARNING, rows_of
+from eval.common.schema import normalize_row
 from eval.harbor.compare import (
+    ARM_KEYS,
     by_language,
-    by_task,
     compare,
+    compare_run_reports,
+    drop_expected_mismatches,
     find_latest_report,
     load_report,
-    mcnemar_exact,
     pair_tasks,
     passed,
     render_markdown,
@@ -31,32 +34,9 @@ def trial(name: str, reward: float | None, exception: str | None = None, **extra
     }
 
 
-# ── McNemar 精确检验 ──────────────────────────────────────────────────
-
-
-def test_mcnemar_of_no_discordance_is_one():
-    # 两臂判定完全一致时没有信息，p 必须是 1，不能是 0
-    assert mcnemar_exact(0, 0) == 1.0
-
-
-def test_mcnemar_matches_the_reference_value():
-    # b=8, c=2 → 2 * (C(10,0)+C(10,1)+C(10,2)) / 2^10 = 0.109375
-    assert mcnemar_exact(8, 2) == pytest.approx(0.109375)
-
-
-def test_mcnemar_is_symmetric():
-    # 谁是「左臂」不该影响 p 值
-    assert mcnemar_exact(8, 2) == mcnemar_exact(2, 8)
-
-
-def test_mcnemar_never_exceeds_one():
-    # b=c=1 时裸算出来是 1.5，必须截到 1.0
-    assert mcnemar_exact(1, 1) == 1.0
-
-
-def test_mcnemar_gets_small_when_discordance_is_one_sided():
-    assert mcnemar_exact(10, 0) == pytest.approx(2 / 2**10)
-    assert mcnemar_exact(10, 0) < mcnemar_exact(6, 4)
+# McNemar 精确检验的 5 条测试搬到了 tests/unit/test_eval_compare.py（实现也随之搬到
+# eval/common/compare.py）。这里不留第二份：两份断言各自漂移，两臂对比和跨 benchmark
+# 对比就会给出不一样的 p 值，而两边都"看起来对"，没人会发现。
 
 
 # ── 出异常的题不能当成「没通过」 ─────────────────────────────────────
@@ -86,12 +66,6 @@ def test_compare_pairs_a_build_failure_against_a_real_pass():
     assert result["n_paired"] == 1
     assert result["n_unscored"] == 0
     assert result["only_opencode"] == ["polyglot_cpp_x"]
-
-
-def test_by_task_keeps_the_latest_attempt_of_a_repeated_task():
-    trials = [trial("t", 0.0), trial("t", 1.0)]
-
-    assert by_task(trials)["t"]["reward"] == 1.0
 
 
 def test_pair_tasks_matches_by_name_and_keeps_single_arm_tasks():
@@ -256,3 +230,88 @@ def test_load_report_round_trips(tmp_path):
     path.write_text(json.dumps({"summary": {"arm": "mycode"}, "trials": []}), encoding="utf-8")
 
     assert load_report(path)["summary"]["arm"] == "mycode"
+
+
+# ── 委托给通用层：统计只有一份 ───────────────────────────────────────
+
+
+def test_the_statistics_come_from_the_common_layer():
+    # 委托的意义就在于此：harbor 的 p 值必须和通用层逐位相同。
+    # 哪天有人图方便在 harbor 这边又写一份 McNemar，这条会红
+    from eval.common.compare import compare_rows, mcnemar_exact
+
+    mine = [trial("a", 1.0), trial("b", 1.0), trial("c", 0.0)]
+    theirs = [trial("a", 0.0), trial("b", 0.0), trial("c", 0.0)]
+    rows = lambda items: [normalize_row(t, benchmark="harbor") for t in items]
+
+    generic = compare_rows(rows(mine), rows(theirs), labels=("mycode", "opencode"))
+
+    assert compare(mine, theirs)["mcnemar_p"] == generic["mcnemar_p"] == mcnemar_exact(2, 0)
+    assert compare(mine, theirs)["only_mycode"] == generic["only_a"] == ["a", "b"]
+
+
+def test_compare_reads_a_legacy_trials_report_and_a_new_results_report_alike(tmp_path):
+    # 盘上 2026-10-17 那两轮是 trials 形状，重跑一次要 45 分钟网关时间，
+    # 而 README §5.7 的结论就引自它们；新报告是 results 形状。两种都得能比
+    legacy = {"summary": {"arm": "mycode"},
+              "trials": [trial("polyglot_rust_a", 1.0), trial("polyglot_rust_b", 0.0)]}
+    modern = {"benchmark": "harbor", "run_id": "r", "generated_at": "t",
+              "meta": {}, "summary": {},
+              "results": [normalize_row(trial("polyglot_rust_a", 1.0), benchmark="harbor"),
+                          normalize_row(trial("polyglot_rust_b", 0.0), benchmark="harbor")]}
+
+    assert compare(legacy["trials"], rows_of(modern))["n_paired"] == 2
+    assert compare(rows_of(legacy), rows_of(modern))["only_mycode"] == []
+
+
+# ── 变量守卫：沉默地给出一个看起来可信的结论是本模块唯一的严重失效 ──
+
+
+def test_drop_expected_mismatches_drops_only_the_revision():
+    # ARM_KEYS 里只能有"两臂本来就该不同"的那一项。多一条 = 守卫被悄悄拆掉；
+    # 少一条 = 横幅永远挂着、而永远挂着的警告等于没有警告。两种都必须红。
+    result = {
+        "variable_mismatches": [
+            {"field": "meta.git_revision", "a": "ab6b631-dirty", "b": None},
+            {"field": "variables.thinking_mode", "a": "off", "b": "on"},
+            {"field": "meta.model", "a": "qwen3.6-27b", "b": None},
+        ]
+    }
+
+    kept = drop_expected_mismatches(result)["variable_mismatches"]
+
+    assert [m["field"] for m in kept] == ["variables.thinking_mode", "meta.model"]
+    # 死条目和 SUPERLATIVES 是同一类缺陷：一份看着在守、其实永远不触发的清单。
+    # `arm` 不在 `run_variables()` 的 8 个键里，通用层也从不比 meta.arm/summary.arm，
+    # 所以 "variables.arm" 永远产不出来——不许"留着以防万一"
+    assert ARM_KEYS == frozenset({"meta.git_revision"})
+
+
+def test_the_guard_banner_names_the_side_that_recorded_nothing():
+    # README §5.7 那一对的形状：mycode 侧记了控制变量，opencode 侧一个都没记。
+    # 横幅必须说清是「一侧没记录」，而不是一串看起来像取值的 `None`——
+    # 把未知渲染成已知取值，正是「MyCode 快 1.9×」那个假结论的人眼版
+    mine = {
+        "benchmark": "harbor",
+        "summary": {"arm": "mycode", "variables": {"model": "m", "thinking_mode": "off"}},
+        "trials": [trial("polyglot_rust_a", 1.0), trial("polyglot_go_b", 1.0)],
+    }
+    theirs = {
+        "benchmark": "harbor",
+        "summary": {"arm": "opencode"},
+        "trials": [trial("polyglot_rust_a", 0.0), trial("polyglot_go_b", 0.0)],
+    }
+
+    result = compare_run_reports(mine, theirs, mycode_label="mycode", opencode_label="opencode")
+    text = render_markdown(result)
+
+    assert [m["field"] for m in result["variable_mismatches"]] == [
+        "meta.model",
+        "variables.thinking_mode",
+    ]
+    assert "两臂的控制变量不一致" in text
+    # 「既未对齐、又瞎」必须同时说出来，否则读者以为那几项差异是两臂都实测出来的
+    assert GUARD_BLIND_WARNING in text
+    assert "opencode 一侧没有记录控制变量" in text
+    assert "| 未记录 |" in text
+    assert "`None`" not in text

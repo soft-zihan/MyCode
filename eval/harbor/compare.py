@@ -1,11 +1,23 @@
 """两臂对比：把 MyCode 和 opencode 的 harbor 报告配成对，算差异和显著性。
 
+统计（配对、McNemar 精确检验、分层）在 `eval/common/compare.py`，这里**只做词汇映射**：
+通用层说 a/b，harbor 说 mycode/opencode；通用层说 `tokens.input`，harbor 说
+`mycode_mean_input_tokens`。保留这一层的理由是 README §5 和既有测试用的都是
+harbor 的词汇，而改成 a/b 收益为零。
+
 两臂跑的是同一批题、同一个模型、同一套判分，所以是**配对设计**——差异只在 agent
 本身。配对数据该用 McNemar（只看两臂判定不一致的题），而不是两个独立比例的 z 检验。
 
+**变量守卫**：本模块曾经只会算数字、不会问"这两臂的控制变量一样吗"，于是
+"MyCode 快 1.9×"这个假结论（两臂的思考开关根本没对齐）一路活到了汇报环节。
+现在守卫来自通用层，harbor 这一层负责把它渲染出来。注意**行层面的 `compare()`
+拿不到报告，所以无从校验变量**——CLI 走的是 `compare_run_reports()`，两条路的
+区别不是风格问题：走错了守卫就静默失效，而静默失效的守卫在输出上和"校验通过"
+长得一模一样。
+
 用法::
 
-    .venv/bin/python -m eval.harbor.compare --stage probe
+    .venv/bin/python -m eval.harbor.compare --stage final --exclude-language java
     .venv/bin/python -m eval.harbor.compare --mycode eval/reports/a.json --opencode eval/reports/b.json
 """
 
@@ -14,17 +26,56 @@ from __future__ import annotations
 import argparse
 import json
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
-from math import comb
 from pathlib import Path
 from typing import Any
+
+# `_guard_blind_reason` / `_guard_was_blind` / `_mismatch_cell` 是通用层的私有符号，
+# 这里跨模块 import 它们是**有意的**：这三条决定守卫横幅的措辞，而措辞是安全关键输出
+# （"`None`" 和 "未记录" 是两件事——前者把未知说成已知取值，正是 1.9× 假结论的人眼版）。
+# 在 harbor 这边抄一份就一定会各自漂移。通用层缺的是一个公开的
+# `guard_banner(comparison) -> list[str]`；已经报给控制器，不在本轮私自加。
+from eval.common.compare import (
+    GUARD_BLIND_WARNING,
+    _guard_blind_reason,
+    _guard_was_blind,
+    _mismatch_cell,
+    compare_reports,
+    compare_rows,
+    pair_rows,
+)
+from eval.common.schema import normalize_row
+from eval.harbor.runner import task_language
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REPORTS_DIR = PROJECT_ROOT / "eval" / "reports"
 REPORT_NAME_RE = re.compile(r"^harbor_(?P<arm>[a-z]+)_(?P<stage>[a-z]+)_(?P<stamp>\d{8}__\d{6})\.json$")
 
-PASSED_THRESHOLD = 1.0
+# harbor 只报这三项：token 两项 + agent 执行时长。装 agent 的时长是 harness 开销
+# （pip 装 1.35 MB 本地依赖 vs npm 装 opencode），放进对比只会被误读成 scaffold 优劣
+HARBOR_METRICS = ("tokens.input", "tokens.output", "duration_s")
+
+_MEAN_KEYS = {
+    "tokens.input": ("mycode_mean_input_tokens", "opencode_mean_input_tokens"),
+    "tokens.output": ("mycode_mean_output_tokens", "opencode_mean_output_tokens"),
+    "duration_s": ("mycode_mean_seconds", "opencode_mean_seconds"),
+}
+
+# 两臂不是同一秒起跑的，git_revision 记录的是"哪一版 MyCode 编排了这一臂"，
+# 不是"哪一版 agent 代码在跑"。把它算成"变量没对齐"，横幅就会永远挂着，
+# 而永远挂着的警告等于没有警告。
+#
+# **只有这一项，不许"多留一条以防万一"**。这里曾经还挂着一条 `"variables.arm"`，
+# 实测是死条目：`arm` 不在 `run_variables()` 返回的 8 个键里
+# （`git_revision, model, mycode_env, provider, seed, stage, thinking_effective,
+# thinking_mode`，见 `eval/harbor/runner.py` 的 `run_variables`），它只写进
+# `meta.arm` / `summary.arm`，而通用层的 `variable_mismatches` **不比这两处**
+# （它比 `benchmark`、`_META_BACKED_VARIABLES` 三项、`meta.task_ids`、
+# 以及 `_variables_of` 两边键的并集）。盘上两对真报告实测也印证了：探测批
+# 0 项 mismatch，已发表那一对 8 项、field 里没有 `variables.arm`。
+# 一份看着在守、其实永远不触发的清单，会让人以为 arm 已经被处理了。
+ARM_KEYS = frozenset({"meta.git_revision"})
 
 
 def load_report(path: Path | str) -> dict[str, Any]:
@@ -47,151 +98,176 @@ def find_latest_report(arm: str, stage: str, reports_dir: Path | str = REPORTS_D
     return max(matches)[1]
 
 
-def report_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
-    """取这次运行的逐题行。
+def passed(trial: Mapping[str, Any]) -> bool | None:
+    """True/False = 判过分的通过与否；None = 没有可用判定，不能当成失败。
 
-    新报告是统一信封（`results`，行已是标准核心）；2026-10-18 之前落盘的是
-    `trials`（harbor 原始词汇）。两种都要能读——那些报告重跑一次要 45 分钟
-    网关时间，而 §5 的结论就引自它们。
+    口径的唯一来源是 `schema` 的 harbor 适配器（`reward >= PASSED_THRESHOLD`，
+    cpp 那类「verifier 没写出 reward 文件」的 trial 已经在 `collect_trials` 里按 0 分记进
+    reward 了，异常类型只作为证据保留在报告里）。这里只做归一化后取值，不再自己推一遍：
+    本模块曾经自己从 reward 推，于是同一件事有两处实现、而生产路径只走 schema 那一处，
+    改 schema 不会让这里的测试变红——测试就成了安慰剂。
     """
-    rows = report.get("results")
-    if rows is not None:
-        # 归一化后 task_name 变成了 task_id、n_*_tokens 变成了 tokens.*，
-        # 这里还原成 pair_tasks 认的形状，统计逻辑就只有一份
-        return [_as_trial(row) for row in rows]
-    return report.get("trials") or []
+    return normalize_row(trial, benchmark="harbor")["passed"]
 
 
-def _as_trial(row: dict[str, Any]) -> dict[str, Any]:
-    if "task_name" in row:  # 已经是原始 trial
-        return row
-    extra = row.get("extra") or {}
-    tokens = row.get("tokens") or {}
+def language_of(task_id: str, row: Mapping[str, Any] | None = None) -> str | None:
+    """`common.pair_rows` 要的 dimension 回调：按语言分层。
+
+    抽样本来就是按语言均衡的，整体数会把它抹平。
+    """
+    return task_language(task_id)
+
+
+def _rows(items: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """既吃 harbor 原始 trial，也吃已归一化的行。"""
+    return [
+        dict(item) if "task_id" in item else normalize_row(item, benchmark="harbor")
+        for item in items
+    ]
+
+
+def _harbor_pair(pair: Mapping[str, Any]) -> dict[str, Any]:
+    """通用层的一对（a/b + 原始行）→ harbor 的一对（mycode/opencode + 平铺字段）。"""
+    a, b = pair["a"], pair["b"]
+
+    def side(row: Mapping[str, Any] | None, path: str) -> Any:
+        cur: Any = row
+        for part in path.split("."):
+            if not isinstance(cur, Mapping):
+                return None
+            cur = cur.get(part)
+        return cur
+
     return {
-        "task_name": row.get("task_id"),
-        "reward": row.get("reward"),
-        "exception_type": extra.get("exception_type"),
-        "agent_execution_s": row.get("duration_s"),
-        "n_input_tokens": tokens.get("input"),
-        "n_output_tokens": tokens.get("output"),
-        "n_cache_tokens": tokens.get("cached"),
-        **{k: v for k, v in extra.items() if k not in {"exception_type"}},
+        "task_name": pair["task_id"],
+        "language": pair["dimension"],
+        "mycode_passed": pair["a_passed"],
+        "opencode_passed": pair["b_passed"],
+        # `error` 由 schema 从 `exception_type` + `exception_message` 合成，
+        # 所以"出过异常没"这一位和原来的 `bool(trial["exception_type"])` 等价
+        "mycode_errored": bool(side(a, "error")),
+        "opencode_errored": bool(side(b, "error")),
+        "mycode_input_tokens": side(a, "tokens.input"),
+        "opencode_input_tokens": side(b, "tokens.input"),
+        "mycode_output_tokens": side(a, "tokens.output"),
+        "opencode_output_tokens": side(b, "tokens.output"),
+        "mycode_seconds": side(a, "duration_s"),
+        "opencode_seconds": side(b, "duration_s"),
     }
 
 
-def passed(trial: dict[str, Any]) -> bool | None:
-    """True/False = 判过分的通过与否；None = 没有可用判定，不能当成失败。
+def _harbor_result(
+    generic: Mapping[str, Any], mycode_label: str, opencode_label: str
+) -> dict[str, Any]:
+    """通用层的对比结果 → harbor 的词汇。**只翻译，不算任何统计。**
 
-    只看 `reward`：cpp 那类「verifier 没写出 reward 文件」的 trial 已经在
-    `collect_trials` 里按 0 分记进 reward 了，异常类型只作为证据保留在报告里。
+    `means` 里必须有 `_MEAN_KEYS` 的三项。走 `compare_rows` 时由 `HARBOR_METRICS`
+    保证；走 `compare_reports` 时由通用层的 `DEFAULT_METRICS` 保证——它是
+    `HARBOR_METRICS` 的超集（`compare_reports` 不接受 `metrics=`，已报给控制器）。
+    哪天通用层收窄了 `DEFAULT_METRICS`，这里会当场 KeyError，不会静默出一张空表。
     """
-    reward = trial.get("reward")
-    if reward is None:
-        return None
-    return reward >= PASSED_THRESHOLD
-
-
-def by_task(trials: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """题目名 → trial。同名多题（多 attempt）时留最后一个，也就是最新那次。"""
-    return {trial["task_name"]: trial for trial in trials if trial.get("task_name")}
+    result: dict[str, Any] = {
+        "mycode_label": mycode_label,
+        "opencode_label": opencode_label,
+        "excluded_languages": generic["excluded"],
+        "n_paired": generic["n_paired"],
+        "n_unscored": generic["n_unscored"],
+        "unscored_tasks": generic["unscored_tasks"],
+        "mycode_passed": generic["a_passed"],
+        "opencode_passed": generic["b_passed"],
+        "mycode_pass_rate": generic["a_pass_rate"],
+        "opencode_pass_rate": generic["b_pass_rate"],
+        "only_mycode": generic["only_a"],
+        "only_opencode": generic["only_b"],
+        "mcnemar_p": generic["mcnemar_p"],
+        "pairs": [_harbor_pair(pair) for pair in generic["pairs"]],
+        "variable_mismatches": list(generic.get("variable_mismatches") or []),
+    }
+    if "variables_seen" in generic:
+        # 键缺失本身就是"没校验过"的信号，`_guard_was_blind` 就是这么判的。
+        # 所以行层面那条路**不许**在这里补一个 `{"a": 0, "b": 0}` 之类的假值：
+        # 补了就是把"无从校验"伪装成"校验过但一侧记了 0 个"，措辞会说错话。
+        result["variables_seen"] = generic["variables_seen"]
+    for metric, (mine_key, theirs_key) in _MEAN_KEYS.items():
+        result[mine_key] = generic["means"][metric]["a"]
+        result[theirs_key] = generic["means"][metric]["b"]
+    return result
 
 
 def pair_tasks(
-    mine: Sequence[dict[str, Any]], theirs: Sequence[dict[str, Any]]
+    mine: Sequence[Mapping[str, Any]], theirs: Sequence[Mapping[str, Any]]
 ) -> list[dict[str, Any]]:
     """按题目名把两臂配成对；只有一臂跑过的题单独列出来，不混进配对统计。"""
-    left, right = by_task(mine), by_task(theirs)
-    pairs: list[dict[str, Any]] = []
-    for task_name in sorted(set(left) | set(right)):
-        mine_trial, theirs_trial = left.get(task_name), right.get(task_name)
-        pairs.append(
-            {
-                "task_name": task_name,
-                "language": task_name.split("_")[1] if task_name.startswith("polyglot_") else None,
-                "mycode_passed": passed(mine_trial) if mine_trial else None,
-                "opencode_passed": passed(theirs_trial) if theirs_trial else None,
-                "mycode_errored": bool(mine_trial and mine_trial.get("exception_type")),
-                "opencode_errored": bool(theirs_trial and theirs_trial.get("exception_type")),
-                "mycode_input_tokens": (mine_trial or {}).get("n_input_tokens"),
-                "opencode_input_tokens": (theirs_trial or {}).get("n_input_tokens"),
-                "mycode_output_tokens": (mine_trial or {}).get("n_output_tokens"),
-                "opencode_output_tokens": (theirs_trial or {}).get("n_output_tokens"),
-                "mycode_seconds": (mine_trial or {}).get("agent_execution_s"),
-                "opencode_seconds": (theirs_trial or {}).get("agent_execution_s"),
-            }
-        )
-    return pairs
+    return [
+        _harbor_pair(pair)
+        for pair in pair_rows(_rows(mine), _rows(theirs), dimension=language_of)
+    ]
 
 
-def mcnemar_exact(only_left: int, only_right: int) -> float:
-    """McNemar 精确检验的双侧 p 值。
-
-    只有「两臂判定不一致」的题携带信息：a 臂过 b 臂没过 = only_left，反之 = only_right。
-    两臂都过或都没过的题在这个检验里不出现，所以 25 题里可能只有几题进入检验，
-    p 值自然大——那是样本量的事实，不是没差别。
-    """
-    n = only_left + only_right
-    if n == 0:
-        return 1.0
-    tail = sum(comb(n, k) for k in range(min(only_left, only_right) + 1)) / 2**n
-    return min(1.0, 2 * tail)
-
-
-def _mean(values: Sequence[float | None]) -> float | None:
-    known = [v for v in values if v is not None]
-    return round(sum(known) / len(known), 1) if known else None
+def drop_expected_mismatches(result: dict[str, Any]) -> dict[str, Any]:
+    """摘掉"两臂本来就该不同"的变量（见 `ARM_KEYS`）。原地改并返回同一个 dict。"""
+    result["variable_mismatches"] = [
+        m for m in result.get("variable_mismatches", []) if m["field"] not in ARM_KEYS
+    ]
+    return result
 
 
 def compare(
-    mine: Sequence[dict[str, Any]],
-    theirs: Sequence[dict[str, Any]],
+    mine: Sequence[Mapping[str, Any]],
+    theirs: Sequence[Mapping[str, Any]],
     *,
     mycode_label: str = "mycode",
     opencode_label: str = "opencode",
     exclude_languages: Sequence[str] = (),
 ) -> dict[str, Any]:
-    pairs = pair_tasks(mine, theirs)
-    excluded = sorted({p["language"] for p in pairs if p["language"] in set(exclude_languages)})
-    if excluded:
-        pairs = [p for p in pairs if p["language"] not in excluded]
-    both_scored = [
-        pair
-        for pair in pairs
-        if pair["mycode_passed"] is not None and pair["opencode_passed"] is not None
-    ]
-    only_mycode = [p for p in both_scored if p["mycode_passed"] and not p["opencode_passed"]]
-    only_opencode = [p for p in both_scored if p["opencode_passed"] and not p["mycode_passed"]]
-    unscored = [p for p in pairs if p not in both_scored]
+    """**行层面**的两臂对比：统计全部委托给 `common.compare_rows`。
 
-    def rate(flag: str) -> float | None:
-        return (
-            round(sum(1 for p in both_scored if p[flag]) / len(both_scored), 4)
-            if both_scored
-            else None
+    这一层只看得到逐题行、看不到报告，所以 `variable_mismatches` 恒为空、
+    `variables_seen` 这个键根本不存在——那**不代表校验通过，代表无从校验**。
+    手上有报告就用 `compare_run_reports`，否则守卫是空的。
+    """
+    return _harbor_result(
+        compare_rows(
+            _rows(mine),
+            _rows(theirs),
+            labels=(mycode_label, opencode_label),
+            metrics=HARBOR_METRICS,
+            dimension=language_of,
+            exclude=exclude_languages,
+        ),
+        mycode_label,
+        opencode_label,
+    )
+
+
+def compare_run_reports(
+    mine_report: Mapping[str, Any],
+    theirs_report: Mapping[str, Any],
+    *,
+    mycode_label: str = "mycode",
+    opencode_label: str = "opencode",
+    exclude_languages: Sequence[str] = (),
+) -> dict[str, Any]:
+    """**报告层面**的两臂对比：统计与变量守卫都来自 `common.compare_reports`。
+
+    和 `compare()` 的唯一区别就是守卫有没有数据，而这个区别是本模块存在的理由：
+    `compare()` 走 `compare_rows`，`variable_mismatches` 恒为空、`variables_seen`
+    键不存在；只有这一条路会真的去比 `meta.variables` / `summary.variables`。
+    CLI 走这一条。已经摘掉 `ARM_KEYS`（否则横幅永远挂着）。
+    """
+    return drop_expected_mismatches(
+        _harbor_result(
+            compare_reports(
+                mine_report,
+                theirs_report,
+                labels=(mycode_label, opencode_label),
+                dimension=language_of,
+                exclude=exclude_languages,
+            ),
+            mycode_label,
+            opencode_label,
         )
-
-    return {
-        "mycode_label": mycode_label,
-        "opencode_label": opencode_label,
-        "excluded_languages": excluded,
-        "n_paired": len(both_scored),
-        "n_unscored": len(unscored),
-        "unscored_tasks": [p["task_name"] for p in unscored],
-        "mycode_passed": sum(1 for p in both_scored if p["mycode_passed"]),
-        "opencode_passed": sum(1 for p in both_scored if p["opencode_passed"]),
-        "mycode_pass_rate": rate("mycode_passed"),
-        "opencode_pass_rate": rate("opencode_passed"),
-        "only_mycode": [p["task_name"] for p in only_mycode],
-        "only_opencode": [p["task_name"] for p in only_opencode],
-        "mcnemar_p": round(mcnemar_exact(len(only_mycode), len(only_opencode)), 4),
-        "mycode_mean_input_tokens": _mean([p["mycode_input_tokens"] for p in both_scored]),
-        "opencode_mean_input_tokens": _mean([p["opencode_input_tokens"] for p in both_scored]),
-        "mycode_mean_output_tokens": _mean([p["mycode_output_tokens"] for p in both_scored]),
-        "opencode_mean_output_tokens": _mean([p["opencode_output_tokens"] for p in both_scored]),
-        "mycode_mean_seconds": _mean([p["mycode_seconds"] for p in both_scored]),
-        "opencode_mean_seconds": _mean([p["opencode_seconds"] for p in both_scored]),
-        "pairs": pairs,
-    }
+    )
 
 
 def by_language(pairs: Sequence[dict[str, Any]]) -> dict[str, dict[str, int]]:
@@ -200,13 +276,51 @@ def by_language(pairs: Sequence[dict[str, Any]]) -> dict[str, dict[str, int]]:
     for pair in pairs:
         if pair["mycode_passed"] is None or pair["opencode_passed"] is None:
             continue
-        row = table.setdefault(
-            pair["language"] or "?", {"n": 0, "mycode": 0, "opencode": 0}
-        )
+        row = table.setdefault(pair["language"] or "?", {"n": 0, "mycode": 0, "opencode": 0})
         row["n"] += 1
         row["mycode"] += int(pair["mycode_passed"])
         row["opencode"] += int(pair["opencode_passed"])
     return dict(sorted(table.items()))
+
+
+def _guard_lines(result: Mapping[str, Any]) -> list[str]:
+    """守卫横幅。措辞全部取自通用层——这里是安全关键输出，不许有第二份。"""
+    label_a, label_b = result["mycode_label"], result["opencode_label"]
+    mismatches = result.get("variable_mismatches") or []
+    blind = _guard_was_blind(result)
+    reason = _guard_blind_reason(result, label_a, label_b) if blind else ""
+
+    if mismatches:
+        # 这段文字里不能出现任何"谁更强"的措辞：变量没对齐时它是唯一一定会被读到的
+        # 地方，写进去就等于自己把守卫拆了。
+        lines = ["> ⚠️ **两臂的控制变量不一致** —— 下面全是描述性数字，不能读成「谁更强」。"]
+        if blind:
+            # 「既未对齐、又瞎」必须同时说出来：只报"未对齐"会让读者以为
+            # 那几项差异是两臂都实测出来的。盘上已发表那一对正是这个形状
+            # （mycode 记了 8 个变量、opencode 一个都没记）。
+            lines.append(f"> {GUARD_BLIND_WARNING}（{reason}）。")
+        lines += [
+            ">",
+            f"| 变量 | {label_a} | {label_b} |",
+            "| --- | --- | --- |",
+        ]
+        # 单元格走通用层的 `_mismatch_cell`：`None` 在这里的意思是**这一侧没记录**，
+        # 不是一个叫 None 的取值。直接印 `None` 会把未知说成已知取值，
+        # 而"没记录"在报告里长得像"两边一样"正是 1.9× 那次假结论的机制。
+        lines += [
+            f"| `{m['field']}` | {_mismatch_cell(m['a'])} | {_mismatch_cell(m['b'])} |"
+            for m in mismatches
+        ]
+        lines.append("")
+        return lines
+    if blind:
+        # 没有 mismatch 也可能是"根本没得比"。沉默的守卫等于没有守卫。
+        return [
+            f"> {GUARD_BLIND_WARNING}（{reason}）。",
+            "> 下面全是描述性数字，不能读成「谁更强」。",
+            "",
+        ]
+    return []
 
 
 def render_markdown(result: dict[str, Any]) -> str:
@@ -216,6 +330,7 @@ def render_markdown(result: dict[str, Any]) -> str:
         f"# MyCode vs opencode（{result['mycode_label']} / {result['opencode_label']}）",
         "",
     ]
+    lines += _guard_lines(result)
     if excluded:
         lines += [
             f"> **已剔除语言：{', '.join(excluded)}**（理由见 eval/harbor/README.md 第 4 节："
@@ -294,9 +409,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     mine, theirs = load_report(mine_path), load_report(theirs_path)
 
-    result = compare(
-        report_rows(mine),
-        report_rows(theirs),
+    # 必须是 `compare_run_reports`（吃报告）而不是 `compare`（吃行）：
+    # 只有前者能算出 `variable_mismatches` / `variables_seen`，也就是守卫的唯一数据来源。
+    result = compare_run_reports(
+        mine,
+        theirs,
         mycode_label=f"{mine_path.stem}",
         opencode_label=f"{theirs_path.stem}",
         exclude_languages=args.exclude_language,
