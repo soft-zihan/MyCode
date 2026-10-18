@@ -288,9 +288,10 @@ def list_jobs(limit: int = 100, reports_dir: Path | None = None) -> list[JobReco
     # 原来的写法实测 53.5 ms（27 个键，单次 exists() ~1.98 ms），差集是纯内存操作、
     # 0 次 syscall，这一项**彻底**不随报告数增长了。
     # 但别以为线性增长就此消失：上面那个 entry.stat() 仍然是每份候选报告一次
-    # （实测 ~1.68 ms/份），所以每 tick 的成本还是 O(报告数)——本轮把它从
-    # ~3.95 ms/份（2 次 stat + 1 次 exists）降到 ~1.68 ms/份，是**减半不是归零**。
-    # 外推：约 700 份报告仍是 ~1.2 s/tick，超过 tailer 0.5s 的轮询周期。
+    # （实测 ~1.68 ms/份），所以每 tick 的成本还是 O(报告数)——本轮把它从每份
+    # 2 次 stat 系统调用（_report_record 里一次 Path.stat ~1.97 ms，剪枝里一次
+    # Path.exists ~1.98 ms，exists 内部也是 stat）降到 1 次，即 ~3.95 -> ~1.68 ms/份，
+    # 是**减半不是归零**。外推：约 700 份报告仍是 ~1.2 s/tick，超过 tailer 0.5s 的轮询周期。
     # 真要撑到那个量级，得把第三来源的扫描频率降到每 N 轮一次，而不是继续优化这里。
     for key in set(_REPORT_RECORDS) - seen_paths:
         _REPORT_RECORDS.pop(key, None)
