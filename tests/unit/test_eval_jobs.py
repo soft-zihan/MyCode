@@ -252,6 +252,7 @@ import time  # noqa: E402
 from eval.common.jobs import (  # noqa: E402
     BENCHMARK_MODULES,
     JobStartError,
+    _PROCS,
     abort_job,
     build_argv,
     finish_job,
@@ -262,9 +263,14 @@ from eval.common.jobs import (  # noqa: E402
 
 
 class _FakeProc:
-    def __init__(self, pid=4321):
+    def __init__(self, pid=4321, exit_code=None):
         self.pid = pid
+        # None = 还在跑。测试可以中途把它翻成 0，让这假进程"退出"
+        self.exit_code = exit_code
         self.kwargs: dict = {}
+
+    def poll(self):
+        return self.exit_code  # 默认 None（还在跑），形状和真 Popen.poll() 一致
 
 
 def _fake_popen(record: list):
@@ -630,3 +636,149 @@ def test_start_job_reaps_a_finished_job_before_checking_the_gate(reports):
         assert get_job(run_id).status is JobStatus.COMPLETED
     finally:
         _cleanup_child(proc)
+
+
+# ── Task 3 复审第 3 轮：句柄必须持着，ABORTED 也要收 ─────────────────
+# 两个洞，同一个后果：MAX_CONCURRENT_JOBS=1 的闸门被焊死，不重启后端再也起不了第二轮。
+#
+# (1) start_job 只留 proc.pid、让 Popen 对象引用计数归零，Popen.__del__ 就把它挂到
+#     subprocess._active 上；此后这个进程里**任何**一次 Popen 构造都先跑 subprocess._cleanup()，
+#     用 waitpid(WNOHANG) 把它收走。后端是一个 uvicorn 进程同时服务评测 API 和 agent/git 路由，
+#     普通只读端点就会构造 Popen（GET /api/projects/{cwd}/worktrees → worktree._run_git →
+#     subprocess.run）。它抢在 reap_finished 前面收尸，我们那次 waitpid 只剩 ChildProcessError，
+#     记录永远停在 running。所以 _PROCS 必须持着句柄，收尸走 proc.poll()。
+# (2) abort_job 只发 SIGTERM 就把状态写成 ABORTED，进程随后退出照样变僵尸，而 os.kill(pid, 0)
+#     对僵尸是成功的：不收它，start_job 的 dying 闸门就永远当它"还在收尾"，同时 finish_job
+#     里那条专门给 ABORTED 的分支（只补退出码、不改状态）永远没人调。
+#
+# 与第 2 轮那组相反，这组测试**大多不需要真子进程**：句柄在手上时走的是 poll()，
+# 一个能翻 exit_code 的假进程就是诚实的双身。唯一的例外是收 ABORTED 那条，它要钉住
+# "没有句柄（服务重启过）时的 waitpid 退路"照样收得到，所以起真子进程。
+
+
+def _controllable_popen():
+    """假 popen + 一份名册，名册里是 (run_id, 假进程)。
+
+    _fake_popen 把造出来的对象丢掉了（只记 argv/kwargs），而这组测试要"先让 poll() 返回
+    None、再让它返回 0"，所以必须拿得到那个对象。run_id 从工厂看到的 env 里取——那正是
+    start_job 拿去当 _PROCS 键的值，所以测试结束能照着名册把模块级状态清干净。
+    """
+    made: list = []
+
+    def popen(argv, **kwargs):
+        proc = _FakeProc()
+        made.append((kwargs["env"]["MYCODE_EVAL_RUN_ID"], proc))
+        return proc
+
+    return popen, made
+
+
+def _drop_handles(made):
+    """_PROCS 是模块级状态：漏一条就串到后面的测试，所以每条都在 finally 里过这里。"""
+    for run_id, _ in made:
+        _PROCS.pop(run_id, None)
+
+
+def test_reap_finished_uses_the_retained_handle_not_a_raw_waitpid(reports):
+    popen, made = _controllable_popen()
+    try:
+        rec = start_job("gaia", {}, reports_dir=reports, popen=popen)
+        _, fake = made[0]
+        # 报告得真存在：否则退出码 0 会被 finish_job 降级成 failed（见上面那条降级测试）
+        (reports / f"{rec.run_id}.json").write_text("{}", encoding="utf-8")
+
+        # pid 是 4321，不是本进程的子进程：真去 waitpid 只会 ChildProcessError 走 continue。
+        # 唯一收得到它的路，就是用持着的句柄 poll()
+        assert fake.poll() is None
+        assert reap_finished(reports_dir=reports) == []
+        assert get_job(rec.run_id).status is JobStatus.RUNNING
+
+        fake.exit_code = 0
+        assert reap_finished(reports_dir=reports) == [rec.run_id]
+        done = get_job(rec.run_id)
+        assert done.status is JobStatus.COMPLETED
+        assert done.exit_code == 0
+    finally:
+        _drop_handles(made)
+
+
+def test_start_job_retains_the_popen_handle(reports):
+    popen, made = _controllable_popen()
+    try:
+        rec = start_job("gaia", {}, reports_dir=reports, popen=popen)
+
+        # 存进去的必须是**同一个对象**：不持着它，Popen.__del__ 就把它挂上 subprocess._active，
+        # 此后随便一次 Popen 构造（worktrees 那种只读端点就够）都会先 _cleanup() 替我们收尸
+        assert _PROCS[rec.run_id] is made[0][1]
+        # 键就是 run_id：_poll_exit 全靠这个对应关系找句柄
+        assert rec.run_id == made[0][0]
+    finally:
+        _drop_handles(made)
+
+
+def test_reap_finished_drops_the_handle_once_reaped(reports):
+    popen, made = _controllable_popen()
+    try:
+        rec = start_job("gaia", {}, reports_dir=reports, popen=popen)
+        assert rec.run_id in _PROCS
+
+        made[0][1].exit_code = 0
+        reap_finished(reports_dir=reports)
+
+        # 收完还留着就是泄漏：_PROCS 会跟着历史运行数一直长，而且留着的是已死的句柄
+        assert rec.run_id not in _PROCS
+    finally:
+        _drop_handles(made)
+
+
+def test_reap_finished_collects_an_aborted_job_and_records_its_exit_code(reports):
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        run_id = "aborted"
+        # 手写记录（不经 start_job）＝句柄不在 _PROCS 里，正是服务重启过的那条退路
+        write_job(_record(run_id=run_id, status=JobStatus.ABORTED, pid=proc.pid))
+
+        reaped = _poll_reap(reports, run_id)
+
+        assert run_id in reaped
+        rec = get_job(run_id)
+        # 状态必须**还是** ABORTED：finish_job 对中止过的运行只补退出码，不能升级成 completed。
+        # 故意不写报告文件——那条早退分支在"退出码 0 却没报告就降级 failed"之前就返回了，
+        # 少了它这条断言就区分不出"走了 ABORTED 分支"和"碰巧报告存在"
+        assert rec.status is JobStatus.ABORTED
+        assert rec.exit_code == 0
+        assert rec.finished_at
+    finally:
+        _cleanup_child(proc)
+
+
+def test_an_aborted_job_whose_process_died_reopens_the_gate(reports, monkeypatch):
+    popen, made = _controllable_popen()
+    reaped: list = []
+    try:
+        rec = start_job("gaia", {}, reports_dir=reports, popen=popen)
+        fake = made[0][1]
+        # killer= 必须传假的：默认那条路会真的 os.killpg(4321)，打到机器上恰好存在的进程组
+        abort_job(rec.run_id, reports_dir=reports, killer=lambda pid, sig: None)
+        # pid_alive 挂在"收过尸没有"上，而不是手翻的常量：真机上僵尸被收走之前
+        # os.kill(pid, 0) 一直成功，收走之后 pid 才消失。手翻开关会让这条绿得不诚实——
+        # 它必须**真的被 reap_finished 收下**才放行，否则就复现那个永久焊死
+        monkeypatch.setattr("eval.common.jobs.pid_alive", lambda pid: rec.run_id not in reaped)
+
+        # 进程还没死透：闸门报"还在收尾"，这时候拒得对
+        assert fake.poll() is None
+        with pytest.raises(JobStartError) as exc:
+            start_job("gaia", {}, reports_dir=reports, popen=popen)
+        assert "收尾" in str(exc.value)
+
+        # 进程退了：ABORTED 也得收，不然僵尸永远在，上面那道闸门再也打不开
+        fake.exit_code = 0
+        reaped.extend(reap_finished(reports_dir=reports))
+        assert reaped == [rec.run_id]
+
+        second = start_job("gaia", {}, reports_dir=reports, popen=popen)
+        assert second.status is JobStatus.RUNNING
+        # 放行是**因为**僵尸被收了；而收尸只补退出码，不把中止过的运行改成 completed
+        assert get_job(rec.run_id).status is JobStatus.ABORTED
+    finally:
+        _drop_handles(made)

@@ -30,6 +30,13 @@ logger = logging.getLogger(__name__)
 JOBS_DIR_NAME = "jobs"
 MAX_CONCURRENT_JOBS = 1
 
+# run_id → 我们起的那个 Popen。**必须持着**：句柄一旦引用计数归零，Popen.__del__ 会把它
+# 挂到 subprocess._active 上，此后这个进程里任何一次 Popen 构造都会先跑 subprocess._cleanup()，
+# 用 waitpid(WNOHANG) 把它收走。后端是一个 uvicorn 进程同时服务评测 API 和 agent/git 路由，
+# 普通只读端点（如 worktrees）就会构造 Popen——它抢在我们前面收尸，我们的 reap 就只剩
+# ChildProcessError，记录永远停在 running，MAX_CONCURRENT_JOBS=1 的闸门再也打不开。
+_PROCS: dict[str, Any] = {}
+
 
 class JobStatus(str, Enum):
     QUEUED = "queued"
@@ -236,8 +243,29 @@ def attach_on_startup(reports_dir: Path | None = None) -> list[str]:
     return fixed
 
 
+def _poll_exit(run_id: str, pid: int) -> int | None:
+    """子进程退出了就返回退出码（被信号杀是负数），还在跑或判不了就返回 None。"""
+    proc = _PROCS.get(run_id)
+    if proc is not None:
+        # 句柄在手上就走 poll()：它自己 waitpid，退出码直接是 int，
+        # 被信号杀已经是负数——正好是 finish_job 的文案约定要的形状
+        code = proc.poll()
+        if code is not None:
+            _PROCS.pop(run_id, None)
+        return code
+    # 句柄不在这个进程里（服务重启过）：只能自己 waitpid。
+    # 不是我们的子进程会 ChildProcessError，那就判不了死活，交给 attach_on_startup
+    try:
+        reaped_pid, status = os.waitpid(pid, os.WNOHANG)
+    except (ChildProcessError, OSError):
+        return None
+    if reaped_pid == 0:
+        return None
+    return os.waitstatus_to_exitcode(status)
+
+
 def reap_finished(reports_dir: Path | None = None) -> list[str]:
-    """非阻塞地收一下还挂在 RUNNING/QUEUED 上的子进程：死了就 finish_job。
+    """非阻塞地收一下还挂在 RUNNING/QUEUED/ABORTED 上的子进程：死了就 finish_job。
 
     为什么必须自己 waitpid、不能只看 pid_alive：start_job 起了子进程就丢掉 Popen 句柄，
     全仓没有任何地方 wait()。退出的子进程于是变成僵尸，而 os.kill(pid, 0) 对僵尸是成功的
@@ -247,19 +275,15 @@ def reap_finished(reports_dir: Path | None = None) -> list[str]:
     """
     reaped: list[str] = []
     for rec in list_jobs(limit=1000, reports_dir=reports_dir):
-        if rec.status not in (JobStatus.RUNNING, JobStatus.QUEUED) or not rec.pid:
+        # ABORTED 也要收：abort_job 只发 SIGTERM 就把状态写成 ABORTED，进程随后退出照样变僵尸。
+        # 不收的话 (a) start_job 的 dying 闸门会一直把它当成"还在收尾"而焊死，
+        # (b) finish_job 里那条专门给 ABORTED 的分支永远没人调，中止过的运行就没有退出码
+        if rec.status not in (JobStatus.RUNNING, JobStatus.QUEUED, JobStatus.ABORTED) or not rec.pid:
             continue
-        try:
-            pid, status = os.waitpid(rec.pid, os.WNOHANG)
-        except ChildProcessError:
-            # 不是我们的子进程（服务重启过、或 pid 被别的进程复用了）：
-            # 这里判不了它的死活，交给 attach_on_startup
+        exit_code = _poll_exit(rec.run_id, rec.pid)
+        if exit_code is None:
             continue
-        except OSError:
-            continue
-        if pid == 0:
-            continue  # 还在跑
-        finish_job(rec.run_id, os.waitstatus_to_exitcode(status), reports_dir)
+        finish_job(rec.run_id, exit_code, reports_dir)
         reaped.append(rec.run_id)
     return reaped
 
@@ -366,6 +390,8 @@ def start_job(
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+
+    _PROCS[run_id] = proc
 
     record = JobRecord(
         run_id=run_id,
