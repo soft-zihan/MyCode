@@ -34,6 +34,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from eval.common.events import RUN_ID_ENV, sink_from_env  # noqa: E402
 from eval.common.runner_base import REPORTS_DIR, resolve_model_config, write_reports  # noqa: E402
+from eval.common.schema import normalize_row  # noqa: E402
 
 EVAL_WORKSPACES = Path.home() / ".mycode" / "eval_workspaces"
 
@@ -98,44 +99,37 @@ def _summarize(rows: list[dict[str, Any]], total_tasks: int) -> dict[str, Any]:
     }
 
 
-def _unified_row(row: dict[str, Any]) -> dict[str, Any]:
-    """loca 的 row → 统一 result 记录（临时版，Task 9 换成 schema 的实现）。"""
-    reward = row.get("reward")
-    error = row.get("agent_error") or row.get("eval_error")
-    passed = bool(row.get("passed"))
-    # loca 的 passed 恒为布尔（`run_one` 里那句
-    # `passed = isinstance(reward, (int, float)) and reward >= 0.999`），所以"没判分"
-    # 只能从 reward 看出来：verifier 没产出 reward 时 reward 是 None、passed 是 False。
-    # 这时若也没有 error，就是 unscored 而不是 failed——没判分和判了没过是两件事。
-    # 派生顺序因此和 harbor 那份**不完全一样**（harbor 的 reward 可以是 None 而 passed 三态，
-    # loca 的 passed 只有两态），但四种状态的**含义**一致
-    if passed:
-        status = "passed"
-    elif error:
-        status = "error"
-    elif reward is None:
-        status = "unscored"
-    else:
-        status = "failed"
+def loca_variables(
+    *,
+    model: str,
+    window: int | None,
+    arm: str,
+    thinking: str | None,
+    seed: int,
+    config_set: str,
+    select: str,
+    max_tool_uses: int | None,
+    parallel: int,
+    timeout: int,
+    loca_commit: str | None,
+) -> dict[str, Any]:
+    """这轮的控制变量。对比两次 loca 运行时，守卫校验的就是这一份。
+
+    和 harbor 的 `run_variables` 是同一个用意：报告里没写下"思考是关的"，
+    假结论就能一路活到汇报环节（见 eval/harbor/README.md §5.6）。
+    """
     return {
-        "task_id": row.get("task_id"),
-        "name": row.get("name"),
-        "status": status,
-        "passed": None if reward is None else passed,
-        "reward": reward,
-        "duration_s": row.get("duration_s"),
-        # tokens.reasoning 是 tokens.output 的子集而不是额外一份（网关 completion_tokens
-        # 含思考）；loca 的 ar.get("tokens") 已经是这个口径，原样带过去
-        "tokens": row.get("tokens") or {},
-        "error": error,
-        "session_id": row.get("session_id"),
-        "trace_id": row.get("trace_id"),
-        "extra": {
-            "index": row.get("index"),
-            "compression_events": row.get("compression_events"),
-            "step_info": row.get("step_info"),
-            "task_dir": row.get("task_dir"),
-        },
+        "model": model,
+        "window": window,
+        "arm": arm,
+        "thinking": thinking,
+        "seed": seed,
+        "config_set": config_set,
+        "select": select,
+        "max_tool_uses": max_tool_uses,
+        "parallel": parallel,
+        "timeout_s": timeout,
+        "loca_commit": loca_commit,
     }
 
 
@@ -349,7 +343,10 @@ def main() -> None:
                 # 到这里这一题的 row 才定稿（异常兜底那条也已合流），所以事件在这里发
                 done += 1
                 durations.append(row.get("duration_s") or 0.0)
-                unified = _unified_row(row)
+                # 传进去的必须是**原始** row（rows_by_task 里那种）。normalize_row 有条
+                # 快速路径：带齐 11 个核心键的行不再走 loca 适配器，于是适配器里那条
+                # 「reward is None → passed=None」会被跳过，未判分又变回 failed
+                unified = normalize_row(row, benchmark="loca")
                 sink.emit("eval/task_finished", task_id=row["task_id"], result=unified)
                 remaining = max(0, len(picked) - done)
                 # ETA 用已完成题目的中位耗时估算，不是均值——和 harbor 那份口径一致
@@ -362,13 +359,16 @@ def main() -> None:
                 )
                 tr = next((t for t in state.tasks if t.task_id == row["task_id"]), None)
                 if tr is not None:
-                    # 直接取 _unified_row 派生出的状态，不再另写一份：原来这里是
-                    # passed/error/failed 三支、没有 unscored，于是同一题在 state.json 里
-                    # 读成 failed、在事件流里读成 unscored——UI 的任务列表（读 state.json）
-                    # 和实时流互相打脸。这条路可达：loca_eval.json 缺失或没有 reward 键。
+                    # 状态和 passed 都直接取归一化的结果，不再另写一份派生：
+                    # 原来这两处各算一遍，正是 Task 7 评审抓到的那个矛盾的成因
+                    # （未判分那题在 state.json 里 status="unscored" 却 passed=False，
+                    # 事件流里则是 passed=None；前端两处都读）。这条路可达：
+                    # loca_eval.json 缺失或没有 reward 键。
+                    # EvalTaskResult.passed 本来就是 bool | None，summary_snapshot 只判
+                    # is True，所以 passed 从"恒布尔"变成"可能 None"不改变任何计数
                     tr.status = unified["status"]
                     tr.predicted = f"reward={row['reward']}"
-                    tr.passed = row["passed"]
+                    tr.passed = unified["passed"]
                     tr.duration_s = row["duration_s"]
                     tr.tokens = row["tokens"]
                     tr.trace_id = row["trace_id"]
@@ -388,6 +388,8 @@ def main() -> None:
         n = len(rows)
         summary = _summarize(rows, len(picked))
         total_comp = summary["compression_events_total"]
+        from eval.common.jobs import git_revision
+
         meta = {
             "benchmark_detail": "LOCA-bench (hkust-nlp)",
             "config_set": args.config_set,
@@ -404,6 +406,14 @@ def main() -> None:
             "loca_commit": _loca_commit(loca_repo),
             "scaffold": "mycode-agent",
             "parallel": args.parallel,
+            "git_revision": git_revision(),
+            "task_ids": [row["task_id"] for row in rows],
+            "variables": loca_variables(
+                model=model, window=window, arm=args.arm, thinking=args.thinking,
+                seed=args.seed, config_set=args.config_set, select=args.select,
+                max_tool_uses=args.max_tool_uses, parallel=args.parallel,
+                timeout=args.timeout, loca_commit=_loca_commit(loca_repo),
+            ),
         }
 
         # BC-16 触发验证：压缩臂在压力窗口下零触发 = 实验无效信号
