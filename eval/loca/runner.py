@@ -349,7 +349,8 @@ def main() -> None:
                 # 到这里这一题的 row 才定稿（异常兜底那条也已合流），所以事件在这里发
                 done += 1
                 durations.append(row.get("duration_s") or 0.0)
-                sink.emit("eval/task_finished", task_id=row["task_id"], result=_unified_row(row))
+                unified = _unified_row(row)
+                sink.emit("eval/task_finished", task_id=row["task_id"], result=unified)
                 remaining = max(0, len(picked) - done)
                 # ETA 用已完成题目的中位耗时估算，不是均值——和 harbor 那份口径一致
                 median = statistics.median(durations) if durations else 0.0
@@ -361,8 +362,11 @@ def main() -> None:
                 )
                 tr = next((t for t in state.tasks if t.task_id == row["task_id"]), None)
                 if tr is not None:
-                    tr.status = "passed" if row["passed"] else (
-                        "error" if (row["agent_error"] or row["eval_error"]) else "failed")
+                    # 直接取 _unified_row 派生出的状态，不再另写一份：原来这里是
+                    # passed/error/failed 三支、没有 unscored，于是同一题在 state.json 里
+                    # 读成 failed、在事件流里读成 unscored——UI 的任务列表（读 state.json）
+                    # 和实时流互相打脸。这条路可达：loca_eval.json 缺失或没有 reward 键。
+                    tr.status = unified["status"]
                     tr.predicted = f"reward={row['reward']}"
                     tr.passed = row["passed"]
                     tr.duration_s = row["duration_s"]

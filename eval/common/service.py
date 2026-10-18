@@ -294,6 +294,10 @@ class EvalService:
         return state.to_dict()
 
     def write_report(self, state: EvalRunState, options: EvalRunOptions) -> tuple[str, str]:
+        # 延迟 import：jobs.py 在模块级 import 了 service.new_run_id，
+        # 这里再模块级 import jobs 就成了导入环
+        from eval.common.jobs import git_revision
+
         rows = report_rows(state)
         meta = {
             "model": state.model,
@@ -308,6 +312,18 @@ class EvalService:
             "sync_langfuse_dataset": options.sync_langfuse_dataset,
             "langfuse_dataset": dataset_name(options.benchmark) if options.sync_langfuse_dataset else None,
             "status": state.status,
+            "git_revision": git_revision(),
+            "variables": {
+                "model": state.model,
+                "seed": options.seed,
+                "thinking": options.thinking,
+                "thinking_feedback": options.thinking_feedback,
+                "compression_arm": options.compression_arm,
+                "context_window": options.context_window,
+                "execution_mode": options.execution_mode,
+                "level": options.level,
+                "category": options.category,
+            },
         }
         if options.benchmark == "smoke":
             meta["suite"] = options.suite

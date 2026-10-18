@@ -4,10 +4,12 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-BenchmarkName = Literal["gaia", "hle", "smoke", "loca"]
+BenchmarkName = Literal["gaia", "hle", "smoke", "loca", "harbor"]
 ExecutionMode = Literal["backend_session", "in_process"]
 RunStatus = Literal["pending", "running", "completed", "aborted", "failed"]
-TaskStatus = Literal["pending", "running", "passed", "failed", "error", "aborted"]
+# "unscored" = 跑了但 verifier 没给出判定（reward 缺失）。它既不算过也不算没过，
+# 不能挤进 "failed"——挤进去等于把没判分的题算进分母，通过率就假的
+TaskStatus = Literal["pending", "running", "passed", "failed", "error", "aborted", "unscored"]
 
 
 @dataclass(slots=True)

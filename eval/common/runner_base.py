@@ -19,6 +19,8 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
+from eval.common.schema import normalize_report
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 REPORTS_DIR = PROJECT_ROOT / "eval" / "reports"
 
@@ -270,14 +272,16 @@ def write_reports(
     json_path = out_dir / f"{stem}.json"
     md_path = out_dir / f"{stem}.md"
 
-    report = {
+    # 写盘之前先归一化：五个 benchmark 的行字典在这里收成同一份公共核心 + extra，
+    # 对比层和前端因此不用认 correct / reward / task_name 三套字段
+    report = normalize_report({
         "benchmark": benchmark,
         "run_id": run_id,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "meta": meta,
         "summary": summary,
         "results": results,
-    }
+    })
     json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
     lines = [
@@ -293,11 +297,13 @@ def write_reports(
         "| # | task_id | 正确 | 耗时(s) | trace_id | 备注 |",
         "|---|---------|------|---------|----------|------|",
     ]
-    for i, r in enumerate(results, 1):
-        mark = "✅" if r.get("correct") else "❌"
+    for i, r in enumerate(report["results"], 1):
+        passed = r.get("passed")
+        mark = "✅" if passed else ("❓" if passed is None else "❌")
+        extra = r.get("extra") or {}
         note = r.get("error") or ""
         if not note:
-            note = f"expected={str(r.get('expected'))[:30]} predicted={str(r.get('predicted'))[:30]}"
+            note = f"expected={str(extra.get('expected'))[:30]} predicted={str(extra.get('predicted'))[:30]}"
         lines.append(
             f"| {i} | `{str(r.get('task_id'))[:12]}` | {mark} | {r.get('duration_s', 0)} | `{str(r.get('trace_id'))[:12]}` | {note[:60]} |"
         )
