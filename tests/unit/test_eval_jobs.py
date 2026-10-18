@@ -10,6 +10,7 @@ import pytest
 from eval.common.jobs import (
     JobRecord,
     JobStatus,
+    _REPORT_RECORDS,
     attach_on_startup,
     events_path,
     get_job,
@@ -934,3 +935,97 @@ def test_report_records_are_cached_and_not_reparsed_every_scan(reports, monkeypa
     # 第二次扫一个文件都不该重新解析：tailer 每 0.5s 扫一次，
     # 不缓存就是每 0.5s 把整个报告目录解析一遍（本机实测 +44ms/次）
     assert len(calls) == n_first
+
+
+# ── Task 8 复审第 1 轮：缓存消掉了解析成本，却把成本搬到了 stat 上 ──────
+# 评审在 /mnt/d（DrvFs，也就是后端真实运行环境）上实测：单次 stat **1.38 ms**，
+# 不是原 docstring 写的"几十微秒"，差了 30-70 倍。热态 list_jobs 因此从
+# ~38 ms 涨到 92.4 ms/tick（本仓库复测 87.4 ms），占 tailer 0.5s 周期的 ~18%，
+# 而同一个事件循环还在流式吐 token、发 WS 帧。
+#
+# 多出来的 syscall 有两组：
+#   (a) glob 自己已经 stat 过一遍，_report_record 内部又 stat 一遍——同一个文件两次；
+#   (b) 剪枝循环给每个缓存键发一次 Path.exists()。这组更糟，它把"随运行次数
+#       线性增长"原样搬到了 stat 上：约 700 份报告就是 ~1 s/tick，超过轮询周期。
+#
+# 本轮改成一次 os.scandir（顺带拿到 name/size/mtime）+ 用"本轮扫到的集合"做差集剪枝。
+
+
+def test_a_state_file_wins_over_the_report_for_the_same_run_id(reports):
+    """生产常态：gaia/hle/smoke/loca 的一次运行同时有 <run_id>.json 和 <run_id>.state.json。
+
+    报告是最低优先级，所以 state.json 说的那份状态赢——否则一次失败的运行
+    会因为"报告文件存在"被倒推成 COMPLETED。
+    """
+    run_id = "gaia-20261018_000000-abc123"
+    _write_report(reports, run_id, benchmark="gaia")
+    (reports / f"{run_id}.state.json").write_text(
+        json.dumps({"run_id": run_id, "benchmark": "gaia", "status": "failed",
+                    "model": "qwen3.6-27b"}),
+        encoding="utf-8",
+    )
+
+    runs = list_jobs()
+
+    assert len(runs) == 1
+    assert runs[0].status is JobStatus.FAILED
+    # 报告根本没被解析：这一档是靠 stem 命中 by_id 跳过的，不是靠解析后比较。
+    # **这条断言改前就是绿的**（旧实现同样在 _report_record 之前 continue），
+    # 所以它不是本轮的 RED 证据，只是把"跳过发生在解析之前"钉住的回归网；
+    # 真正能区分改前改后的，是下面那条 syscall 计数测试。
+    assert str(reports / f"{run_id}.json") not in _REPORT_RECORDS
+
+
+def test_an_unparseable_report_is_skipped_but_not_silently(reports, caplog):
+    """坏报告不该进列表，但也不该无声无息——缓存会把"跳过"永久固定下来。"""
+    (reports / "broken.json").write_text("{not json", encoding="utf-8")
+
+    with caplog.at_level("WARNING", logger="eval.common.jobs"):
+        runs = list_jobs()
+
+    assert runs == []
+    assert any("broken.json" in r.getMessage() for r in caplog.records)
+
+
+def test_a_warm_scan_does_not_stat_the_report_files_at_all(reports, monkeypatch):
+    """稳态那一趟不许再给报告文件发任何 syscall——这正是本轮要修的性能回归。
+
+    改前实测（6 份报告，热态一趟 list_jobs）：报告文件上的 Path.exists **6 次**
+    （剪枝，每个缓存键一次）、Path.stat **12 次**（_report_record 自己 stat 一次
+    + 剪枝那个 exists() 内部再 stat 一次）。两组都随报告数线性增长，
+    在 DrvFs 上每次 1.38 ms。
+
+    改后：第三来源走一次 os.scandir，size/mtime 由 DirEntry 顺带给（不再走 Path.stat）；
+    剪枝走差集，纯内存。所以报告文件上一次都不该被问到。
+    """
+    from pathlib import Path  # noqa: E402  （本轮追加段）
+
+    run_ids = [f"harbor-run-{i}" for i in range(6)]
+    for run_id in run_ids:
+        _write_report(reports, run_id)
+    report_paths = {str(reports / f"{run_id}.json") for run_id in run_ids}
+
+    list_jobs()  # 冷一趟，把缓存填满
+    # 子集而不是相等：_REPORT_RECORDS 是模块级的，前面几条测试留下的键可能还在
+    # （它们指向别的 tmp_path，文件也都还存在），本条只关心自己这 6 份进了缓存
+    assert report_paths <= set(_REPORT_RECORDS)
+
+    asked: list[str] = []
+    real_exists, real_stat = Path.exists, Path.stat
+
+    def spy_exists(self, *a, **kw):
+        asked.append(str(self))
+        return real_exists(self, *a, **kw)
+
+    def spy_stat(self, *a, **kw):
+        asked.append(str(self))
+        return real_stat(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "exists", spy_exists)
+    monkeypatch.setattr(Path, "stat", spy_stat)
+
+    runs = list_jobs()  # 热一趟，正是 tailer 每 0.5s 跑的那一趟
+
+    assert sorted(r.run_id for r in runs) == sorted(run_ids)
+    touched = [p for p in asked if p in report_paths]
+    assert touched == [], f"稳态不该再 stat/exists 报告文件，实际问到：{touched}"

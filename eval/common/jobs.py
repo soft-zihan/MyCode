@@ -203,35 +203,38 @@ def _record_from_report(data: Mapping[str, Any], path: Path) -> JobRecord | None
 
 # path → (mtime_ns, size, 解析结果)。报告文件写完就不再变（run_id 带时间戳，
 # 一次运行一个文件），所以按 (mtime_ns, size) 缓存是安全的。
+# 第三位是 None 时那是一条**负缓存**（"这个文件不是一次运行的报告"），
+# 必须留着：eval/reports/ 根下 34 个 JSON 里有 20 个是非报告，只缓存成功的话
+# 这 20 个每 tick 都要重解析一遍。
 _REPORT_RECORDS: dict[str, tuple[int, int, JobRecord | None]] = {}
 
 
-def _report_record(path: Path) -> JobRecord | None:
+def _report_record(path: Path, mtime_ns: int, size: int) -> JobRecord | None:
     """这份 JSON 是不是一次运行的标准信封报告；是就倒推出记录，不是就 None。
 
-    **必须缓存**。list_jobs 被 tailer 每 0.5s 调一次，而本机实测：现在（两来源）
-    一次 24.9ms；把 eval/reports/ 下那 7 份 harbor 报告（545KB 里的大头，每份 25 行）
-    也解析一遍要再加约 44ms。那就是每 0.5s 往事件循环上压 ~65ms——而同一个循环
-    还在流式吐 token、发 WS 帧。更糟的是它随运行次数线性增长：跑上 30 轮 harbor
-    就是 ~150ms/tick。缓存之后稳态只剩每个文件一次 stat()（几十微秒），
-    解析只在新文件出现时发生一次。
+    **必须缓存**：list_jobs 被 tailer 每 0.5s 调一次，而 eval/reports/ 下的报告
+    每份几十 KB、25 行，全解析一遍本机实测 +44 ms。缓存之后解析只在新文件
+    出现时发生一次，稳态只剩调用方为拿到 mtime/size 而发的那**一次** stat。
+    mtime_ns / size 由调用方从 DirEntry 传进来，本函数不再自己 stat：在 /mnt/d
+    （DrvFs）上单次 stat 实测 1.7-2.0 ms（不是几十微秒），函数内部再 stat 一次
+    就是白扔一倍。注意 entry.stat() 在 WSL/Linux 上**不是白拿的**——DirEntry 的
+    stat 缓存只在 Windows 上由 FindNextFile 免费提供，这里仍是一次真的 fstatat，
+    所以省的是"第二次"，不是"这一次"。
     """
-    try:
-        st = path.stat()
-    except OSError:
-        return None
     key = str(path)
     cached = _REPORT_RECORDS.get(key)
-    if cached is not None and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+    if cached is not None and cached[0] == mtime_ns and cached[1] == size:
         return cached[2]
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        # 不 catch UnicodeDecodeError：本任务同时把三处写盘改成了原子写，截断从此不会发生；
-        # 真发生了就该炸出来，静默跳过等于把一次运行从列表里藏掉
+    except (OSError, json.JSONDecodeError) as e:
+        # 不 catch UnicodeDecodeError：Task 8 已经把三处写盘改成原子写，截断从此不会发生；
+        # 真发生了就该炸出来。但 JSONDecodeError 要**说一声**——静默跳过等于把一次运行
+        # 从列表里藏掉，而这份缓存会把"藏掉"永久固定下来（下次 mtime 没变就不重试了）
+        logger.warning("eval 报告 %s 解析失败，跳过：%r", path.name, e)
         data = None
     record = _record_from_report(data, path) if data is not None else None
-    _REPORT_RECORDS[key] = (st.st_mtime_ns, st.st_size, record)
+    _REPORT_RECORDS[key] = (mtime_ns, size, record)
     return record
 
 
@@ -250,17 +253,47 @@ def list_jobs(limit: int = 100, reports_dir: Path | None = None) -> list[JobReco
     # 第三个来源：标准信封报告。harbor 从 CLI 直跑，两个索引文件都没有。
     # 优先级靠"不覆盖"实现，不是靠顺序：by_id 是 dict，前两个来源已经填过了，
     # 这里只在 run_id 还没出现时才补——所以 job.json > state.json > 报告。
-    for path in sorted(root.glob("*.json")):
-        if path.name.endswith(".state.json") or path.stem in by_id:
+    #
+    # 用 os.scandir 而不是 glob + 每文件一次 Path.stat：这个目录在 /mnt/d（DrvFs）上，
+    # 单次 stat 实测 1.7-2.0 ms（不是本地 ext4 的几十微秒）。改前是 glob 一趟 +
+    # _report_record 内部再 stat 一趟 + 剪枝每个缓存键一次 exists()，27 个候选文件
+    # 实测 109.8 ms；改后只剩 scandir 一趟里的那一次 entry.stat()，实测 48.0 ms。
+    # 注意收益来自**砍掉一整趟 stat**，不是 entry.stat() 比 Path.stat() 便宜：
+    # DirEntry 的 stat 缓存在 Windows 上才是白拿的，后端跑在 WSL/Linux 上，
+    # scandir 只给 d_name/d_type，entry.stat() 照样是一次真的 fstatat（实测 1.68 ms）。
+    # list_jobs 被 tailer 每 0.5s 调一次，省下的这 ~38 ms 是直接从事件循环上拿掉的。
+    seen_paths: set[str] = set()
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        entries = []
+    for entry in sorted(entries, key=lambda e: e.name):
+        if not entry.name.endswith(".json") or entry.name.endswith(".state.json"):
             continue
-        record = _report_record(path)
+        stem = entry.name[: -len(".json")]
+        if stem in by_id:
+            continue
+        try:
+            st = entry.stat()
+        except OSError:
+            continue
+        # 键统一用 str(root / entry.name)，不用 entry.path：DirEntry.path 在 root
+        # 带尾斜杠时会和 root / name 不一致，那样下面的差集永远删不掉任何东西
+        path = root / entry.name
+        seen_paths.add(str(path))
+        record = _report_record(path, st.st_mtime_ns, st.st_size)
         if record is not None:
             by_id[record.run_id] = record
-    # 缓存只保留还存在的文件：服务是长命的，报告目录只增不减，
-    # 不清的话被删掉那些报告的条目会一直挂在字典里
-    for key in list(_REPORT_RECORDS):
-        if not Path(key).exists():
-            del _REPORT_RECORDS[key]
+    # 剪枝用**本轮扫到的集合**做差集，不给每个缓存键再发一次 exists()：
+    # 原来的写法实测 53.5 ms（27 个键，单次 exists() ~1.98 ms），差集是纯内存操作、
+    # 0 次 syscall，这一项**彻底**不随报告数增长了。
+    # 但别以为线性增长就此消失：上面那个 entry.stat() 仍然是每份候选报告一次
+    # （实测 ~1.68 ms/份），所以每 tick 的成本还是 O(报告数)——本轮把它从
+    # ~3.95 ms/份（2 次 stat + 1 次 exists）降到 ~1.68 ms/份，是**减半不是归零**。
+    # 外推：约 700 份报告仍是 ~1.2 s/tick，超过 tailer 0.5s 的轮询周期。
+    # 真要撑到那个量级，得把第三来源的扫描频率降到每 N 轮一次，而不是继续优化这里。
+    for key in set(_REPORT_RECORDS) - seen_paths:
+        _REPORT_RECORDS.pop(key, None)
     # `str(...)`：_iso 归一化了旧 .state.json 那条路，但手改过或外部写进来的
     # job.json 仍可能带数值型 started_at。float 和 str 混进同一个 sorted() 会
     # TypeError，而 list_jobs 一炸，运行列表和并发闸门会一起没
