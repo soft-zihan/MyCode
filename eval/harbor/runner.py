@@ -646,6 +646,24 @@ def merge_trials(run_dirs: Sequence[Path | str]) -> list[dict[str, Any]]:
     return [merged[key] for key in sorted(merged)]
 
 
+def completed_task_names(run_dir: Path | str) -> set[str]:
+    """这个 job 目录里已经有 result.json 的题目名。
+
+    **有 result.json 就算完成，不管结果是 pass / fail / 未评分。**
+    重跑失败的题目等于挑数据：一次失败的测量也是一次测量。
+    真要重跑某几道（比如 setup 超时那种明显是设施的），用 `--tasks` 显式点名。
+
+    没有 `task_name` 的 trial 不算完成（`collect_trials` 读的是 `data.get("task_name")`，
+    缺键就是 None）：那种目录里的 trial 连题目都对不上，跳过它只会让下一轮
+    的合并多出一个键不明的行。
+    """
+    return {
+        name
+        for name in (trial.get("task_name") for trial in collect_trials(run_dir))
+        if name
+    }
+
+
 def latest_run_dir(jobs_dir: Path | str, since: float) -> Path | None:
     """harbor 自己在 jobs_dir 下建时间戳子目录，取这次跑出来的那个。"""
     jobs_dir = Path(jobs_dir)
@@ -721,6 +739,14 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help="不跑 harbor，只把这个已有的 job 目录重新出报告（判分口径改了之后用）。"
         "可重复给：多个目录合并，同名题目以后给的为准",
+    )
+    parser.add_argument(
+        "--resume-from",
+        default=None,
+        metavar="DIR",
+        help="从这个已有的 job 目录续跑：它里面已经有 result.json 的题目会被跳过，"
+        "跑完把两个目录合并成一份报告（同名题目以新跑的为准）。"
+        "只能配单个 --arm——一个 job 目录只属于一臂。",
     )
     return parser
 
@@ -835,6 +861,8 @@ def write_report(
     stamp: str,
     config_path: Path | None = None,
     variables: Mapping[str, Any] | None = None,
+    resumed_from: Path | str | None = None,
+    n_resumed: int = 0,
 ) -> Path:
     """把一批 trial 出成报告（.json 给统计用，.md 给人看）。"""
     summary = summarize(arm, stage, trials, model=model)
@@ -843,6 +871,14 @@ def write_report(
     summary["tasks"] = list(tasks)
     summary["seed"] = seed
     summary["variables"] = dict(variables or {})
+    # 续跑痕迹是**运行元数据**，不是控制变量，所以记进 summary 而不是 variables：
+    # `variable_mismatches`（eval/common/compare.py）按两边键的**并集**比 variables，
+    # 续跑的那一臂多记一个键，两臂对比就会报"变量未对齐"、守卫开火、headline 拒绝
+    # 给结论——而"这份数据是接着上一次的目录跑出来的"根本不影响 agent 的行为。
+    # 无条件写（没续跑就是 None / 0）：读报告的人要能分清"没续跑"和"这份报告是
+    # 加这个键之前跑的"，缺键表达不了前者。
+    summary["resumed_from"] = str(resumed_from) if resumed_from else None
+    summary["n_resumed"] = n_resumed
 
     stem = f"harbor_{arm}_{stage}_{stamp}"
     # run_id 就是文件名主干：/api/eval/reports/{run_id} 按 f"{run_id}.json" 找，
@@ -920,31 +956,48 @@ def run_arm(
     config_dir = Path(args.config_dir).expanduser()
     config_dir.mkdir(parents=True, exist_ok=True)
 
-    config_path = config_dir / f"{stamp}-{arm}-{args.stage}.json"
-    config = build_job_config(
-        arm=arm,
-        tasks=tasks,
-        dataset_dir=dataset_dir,
-        host_ip=args.host_ip or detect_host_ip(),
-        base_url=base_url,
-        model=args.model,
-        settings_env=settings_env if arm == "mycode" else None,
-    )
-    config_path.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
+    resume_dir = Path(args.resume_from).expanduser() if args.resume_from else None
+    # 续跑、而且题目全都已经跑完：这一路一个 harbor 进程都不起。0 题的 job 是未定义
+    # 行为（`build_job_config` 对空 tasks 直接 ValueError），而报告只要能由续跑目录
+    # 合出来就够了——所以配置也不写、`detect_host_ip` 也不探，没 docker 也能出报告。
+    resume_only = resume_dir is not None and not tasks
 
-    command = harbor_command(
-        config_path=config_path,
-        jobs_dir=jobs_dir,
-        n_concurrent=args.n_concurrent,
-        install_only=args.install_only,
-        dry_run=args.dry_run,
-    )
-    if needs_docker_group():
-        command = wrap_with_docker_group(command)
+    config_path: Path | None = None
+    command: list[str] = []
+    if resume_only:
+        print(f"[{arm}] 续跑：不起 harbor，只用 {resume_dir} 合并出报告")
+    else:
+        config_path = config_dir / f"{stamp}-{arm}-{args.stage}.json"
+        config = build_job_config(
+            arm=arm,
+            tasks=tasks,
+            dataset_dir=dataset_dir,
+            host_ip=args.host_ip or detect_host_ip(),
+            base_url=base_url,
+            model=args.model,
+            settings_env=settings_env if arm == "mycode" else None,
+        )
+        config_path.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    print(f"[{arm}] {len(tasks)} 题 → {config_path}")
-    print(f"[{arm}] $ {shlex.join(command)}")
+        command = harbor_command(
+            config_path=config_path,
+            jobs_dir=jobs_dir,
+            n_concurrent=args.n_concurrent,
+            install_only=args.install_only,
+            dry_run=args.dry_run,
+        )
+        if needs_docker_group():
+            command = wrap_with_docker_group(command)
+
+        print(f"[{arm}] {len(tasks)} 题 → {config_path}")
+        print(f"[{arm}] $ {shlex.join(command)}")
     started = time.time()
+
+    # resume_only 时根本没有命令可跑（`command` 是空的），也没有配置可校验、
+    # 没有 agent 要装；而 --dry-run 的既有口径是"不出报告"，这里不破例。
+    # main() 已经把"跳过几题、还要跑几题"打出来了，那就是这次 --dry-run 要的答案。
+    if resume_only and (args.dry_run or args.install_only):
+        return 0
 
     # dry_run / install_only 不是评测轮次（finish_job 把「没有报告」当正常），
     # 所以这两条一个事件都不发。必须赶在建 sink 之前返回：JsonlEventSink.__init__
@@ -974,9 +1027,14 @@ def run_arm(
             total=len(tasks),
             variables=variables,
         )
-        completed = subprocess.run(command, env=harbor_env(api_key=api_key, base_url=base_url))
-        if completed.returncode != 0:
-            print(f"[{arm}] harbor 退出码 {completed.returncode}", file=sys.stderr)
+        returncode = 0
+        if not resume_only:
+            completed = subprocess.run(
+                command, env=harbor_env(api_key=api_key, base_url=base_url)
+            )
+            returncode = completed.returncode
+            if returncode != 0:
+                print(f"[{arm}] harbor 退出码 {returncode}", file=sys.stderr)
 
         if args.no_report:
             sink.emit(
@@ -986,44 +1044,73 @@ def run_arm(
                 status="aborted",
                 error="--no-report：本轮不出报告，没有 report_json_path 可指",
             )
-            return completed.returncode
+            return returncode
 
-        run_dir = latest_run_dir(jobs_dir, since=started - 5)
-        if run_dir is None:
-            message = f"[{arm}] 在 {jobs_dir} 里没找到这次的结果目录"
-            print(message, file=sys.stderr)
-            sink.emit("eval/run_error", benchmark="harbor", arm=arm, error=message)
-            return completed.returncode or 1
+        run_dir: Path | None = None
+        if not resume_only:
+            run_dir = latest_run_dir(jobs_dir, since=started - 5)
+            if run_dir is None:
+                message = f"[{arm}] 在 {jobs_dir} 里没找到这次的结果目录"
+                print(message, file=sys.stderr)
+                sink.emit("eval/run_error", benchmark="harbor", arm=arm, error=message)
+                return returncode or 1
 
-        trials = collect_trials(run_dir)
+        # 顺序要紧：`merge_trials` 是"后面的覆盖前面的"，所以**新跑的目录必须排在
+        # 续跑目录后面**，补跑的那一道才顶得掉续跑目录里的旧结果。
+        if resume_only:
+            run_dirs: list[Path] = [resume_dir]
+        elif resume_dir is not None:
+            run_dirs = [resume_dir, run_dir]
+        else:
+            run_dirs = [run_dir]
+        # 不续跑时仍旧走 collect_trials：merge_trials 会按题目名重排，而 .md 的逐题
+        # 表格一直是按 trial 目录名排的，没必要为用不上的那条路改掉它的顺序。
+        trials = merge_trials(run_dirs) if resume_dir is not None else collect_trials(run_dir)
+
+        # `meta.task_ids` 是对比层的一项控制变量（`eval/common/compare.py` 的
+        # variable_mismatches 会比两臂的 task_ids 集合）：续跑时只记这次补跑的那几道，
+        # 两臂对比就会报"任务集未对齐"、守卫开火、headline 拒绝给结论。这份报告覆盖的
+        # 是合并后的全集，记的就该是全集——与 reprocess_run_dir 的口径一致。
+        report_tasks: Sequence[str] = tasks
+        n_resumed = 0
+        if resume_dir is not None:
+            report_tasks = [t["task_name"] for t in trials if t.get("task_name")]
+            n_resumed = len(completed_task_names(resume_dir))
+
         report_path = write_report(
             arm=arm,
             stage=args.stage,
             model=args.model,
             trials=trials,
-            run_dirs=[run_dir],
-            tasks=tasks,
+            run_dirs=run_dirs,
+            tasks=report_tasks,
             seed=args.seed,
             stamp=stamp,
             config_path=config_path,
             variables=variables,
+            resumed_from=resume_dir,
+            n_resumed=n_resumed,
         )
 
         # 事件在收集阶段一次性补发：harbor 是同步 shell 出去的，跑完才有结果，
         # 拿不到"某题刚开始"的时刻（详见 emit_trial_events 的 docstring）。
+        # 这里给的是**这个进程真跑的那几道**：续跑目录里那些题的完成时刻在别的进程里，
+        # 替它们补发 task_finished 就是在伪造时间戳（同一个 docstring 明令禁止的事）。
         emit_trial_events(sink, arm, tasks, trials)
         # summary 必须是 cli.py 认得的那套键（passed/total/pass_at_1）：harbor 自己
         # summarize() 出来的 n_passed/n_scored/pass_rate 一个都对不上，直接发过去
         # 会被读成 0/0 = 0.0%——静默给错数字比不给更糟。完整口径统一是 Task 7 的活，
         # 在那之前 JSON 报告仍是其余一切的唯一真相来源。多带 unscored 是因为
         # 「没判分」是真实的第三态，光一个通过率会把它藏掉；cli.py 忽略不认识的键。
+        # 续跑时这份 summary 出自**合并后**的 trials：run_finished 报的是这份报告的
+        # 通过率，不是补跑那几道的通过率。
         s = summarize(arm, args.stage, trials, model=args.model)
         sink.emit(
             "eval/run_finished",
             benchmark="harbor",
             arm=arm,
-            status="completed" if completed.returncode == 0 else "failed",
-            error=None if completed.returncode == 0 else f"harbor 退出码 {completed.returncode}",
+            status="completed" if returncode == 0 else "failed",
+            error=None if returncode == 0 else f"harbor 退出码 {returncode}",
             summary={
                 "passed": s["n_passed"],
                 "total": s["n_scored"],
@@ -1033,7 +1120,7 @@ def run_arm(
             report_json_path=str(report_path),
             report_md_path=str(report_path.with_suffix(".md")),
         )
-        return completed.returncode
+        return returncode
     finally:
         # NullSink 没有 close()：直跑 CLI 时不能因为收尾而 AttributeError。
         # 放在 finally 里，异常路径也能给 feed 收口（已发的事件每行都 flush 过，不会丢）
@@ -1052,6 +1139,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.run_dir:
         return reprocess_run_dir(args)
 
+    # 两条校验都必须在**跑任何东西之前**失败：解析凭据、探宿主 IP、预热镜像、
+    # 起 harbor，任何一步之后才发现参数不对，代价都是几十分钟到几小时。
+    resume_dir: Path | None = None
+    if args.resume_from:
+        if args.arm == "both":
+            raise SystemExit(
+                "--resume-from 只能配单个 --arm：一个 job 目录只属于一臂"
+            )
+        resume_dir = Path(args.resume_from).expanduser()
+        if not resume_dir.is_dir() or not any(resume_dir.glob("*/result.json")):
+            raise SystemExit(
+                f"{resume_dir} 不像是一个 harbor job 目录（没有 result.json）"
+            )
+
     dataset_dir = Path(args.dataset_dir).expanduser()
     if args.tasks:
         tasks = [name.strip() for name in args.tasks.split(",") if name.strip()]
@@ -1061,6 +1162,28 @@ def main(argv: list[str] | None = None) -> int:
     else:
         ids = list_task_ids(dataset_dir)
         tasks = select_tasks(ids, stage_n_tasks(args.stage, len(ids)), args.seed)
+
+    if resume_dir is not None:
+        done = completed_task_names(resume_dir)
+        # 续跑目录必须对应这一次的题目选择。对不上就说明 seed / 数据集 / stage 变了，
+        # 合并出来的报告会是一个混了两个总体的东西——而这正是变量守卫要防的那类错，
+        # 只不过它发生在数据采集阶段，守卫在报告阶段已经看不出来了
+        # （`meta.task_ids` 只能告诉你两边题目集合不同，说不出是哪一次跑混进来的）。
+        foreign = sorted(done - set(tasks))
+        if foreign:
+            raise SystemExit(
+                f"{resume_dir} 里有 {len(foreign)} 道题不在本次选择范围内"
+                f"（例如 {', '.join(foreign[:3])}）；"
+                "seed / --stage / 数据集变了吗？续跑必须和原跑选中同一批题"
+            )
+        # 剔除之后顺序不变：`select_tasks` 是按语言均衡轮转排的，重排就破坏了分层
+        skipped = [name for name in tasks if name in done]
+        tasks = [name for name in tasks if name not in done]
+        print(
+            f"[{args.arm}] 续跑：跳过已完成的 {len(skipped)} 题，还要跑 {len(tasks)} 题"
+        )
+        if not tasks:
+            print(f"[{args.arm}] 续跑：所有题目都已完成，只重新出报告")
 
     base_url, api_key = _resolve_credentials(args.model)
     settings_env = mycode_settings_env(args.model, args.thinking)
