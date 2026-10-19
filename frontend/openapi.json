@@ -754,6 +754,24 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "JobStartRequest": {
+        "properties": {
+          "benchmark": {
+            "title": "Benchmark",
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": true,
+            "title": "Params",
+            "type": "object"
+          }
+        },
+        "required": [
+          "benchmark"
+        ],
+        "title": "JobStartRequest",
+        "type": "object"
+      },
       "JudgeRequest": {
         "properties": {
           "judge": {
@@ -2761,6 +2779,316 @@
           }
         },
         "summary": "Api Eval Benchmarks",
+        "tags": [
+          "eval"
+        ]
+      }
+    },
+    "/api/eval/compare": {
+      "get": {
+        "description": "任意两次运行对比。变量没对齐时结果里会带 variable_mismatches，markdown 顶部有横幅。",
+        "operationId": "api_eval_compare_api_eval_compare_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "title": "A",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "b",
+            "required": true,
+            "schema": {
+              "title": "B",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "exclude",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Exclude"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Api Eval Compare Api Eval Compare Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Eval Compare",
+        "tags": [
+          "eval"
+        ]
+      }
+    },
+    "/api/eval/jobs": {
+      "get": {
+        "description": "运行索引：新 job.json + 旧 state.json + 标准信封报告，三个来源合并。",
+        "operationId": "api_eval_jobs_api_eval_jobs_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Api Eval Jobs Api Eval Jobs Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Eval Jobs",
+        "tags": [
+          "eval"
+        ]
+      },
+      "post": {
+        "operationId": "api_eval_start_job_api_eval_jobs_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JobStartRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Api Eval Start Job Api Eval Jobs Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Eval Start Job",
+        "tags": [
+          "eval"
+        ]
+      }
+    },
+    "/api/eval/jobs/{run_id}": {
+      "get": {
+        "operationId": "api_eval_job_api_eval_jobs__run_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "events",
+            "required": false,
+            "schema": {
+              "default": 2,
+              "title": "Events",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Api Eval Job Api Eval Jobs  Run Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Eval Job",
+        "tags": [
+          "eval"
+        ]
+      }
+    },
+    "/api/eval/jobs/{run_id}/abort": {
+      "post": {
+        "operationId": "api_eval_abort_job_api_eval_jobs__run_id__abort_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Api Eval Abort Job Api Eval Jobs  Run Id  Abort Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Eval Abort Job",
+        "tags": [
+          "eval"
+        ]
+      }
+    },
+    "/api/eval/jobs/{run_id}/events": {
+      "get": {
+        "description": "增量拉事件。前端拿上一次返回的 offset 原样传回来即可。",
+        "operationId": "api_eval_job_events_api_eval_jobs__run_id__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "title": "Since",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Api Eval Job Events Api Eval Jobs  Run Id  Events Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Eval Job Events",
         "tags": [
           "eval"
         ]

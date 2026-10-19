@@ -172,14 +172,68 @@ def _legacy_state_records(reports_dir: Path) -> list[JobRecord]:
     return out
 
 
+def _looks_like_legacy_run_report(data: Any) -> bool:
+    """2026-10-18 之前的 harbor 报告：顶层只有 `summary` + `trials`。
+
+    `looks_like_run_report` 要的三个键它们一个都没有，于是 13 份真实运行记录
+    （含 README §5.7 引的那一对）全被挡在索引外，新前端够不着自己的基线。
+    判据用 `trials` 而**不是放宽原函数**：对比输出（`harbor_compare_*.json`）
+    既没有 `results` 也没有 `trials`，所以这一条不会把它们放进来；
+    `.state.json` 同理（它没有 `trials`，走的是 `_legacy_state_records`）。
+    原函数不动，Task 8 钉它的那些测试照旧绿。
+    """
+    return isinstance(data, Mapping) and isinstance(data.get("trials"), list)
+
+
+def _record_from_legacy_report(data: Mapping[str, Any], path: Path) -> JobRecord:
+    """旧形状（`summary` + `trials`）→ 运行记录。四条裁定见各行注释，都是"宁缺不假"。"""
+    meta = data.get("meta")
+    meta = meta if isinstance(meta, Mapping) else {}
+    summary = data.get("summary")
+    summary = summary if isinstance(summary, Mapping) else {}
+    variables = summary.get("variables")
+    return JobRecord(
+        run_id=str(data.get("run_id") or path.stem),
+        # 退到 "harbor" 而不是 "unknown"：`trials` / `reward` / `no_reward_file` 就是
+        # harbor 的词汇，而且 `compare.rows_of()` 在同一个情况下的默认值**已经是**
+        # "harbor"（eval/common/compare.py:96）。两处口径必须一致——否则同一份旧报告
+        # 在索引里是 unknown、在对比里是 harbor。**改一处要改两处。**
+        benchmark=str(data.get("benchmark") or "harbor"),
+        argv=[],
+        # 退到 `summary.variables`，取不到就是 `{}`——**绝不合成**。盘上那一对已发表
+        # 报告的 summary 键集不一样（mycode 侧有 variables、opencode 侧没有），
+        # 替没记的那一侧编一份，变量守卫就再也不会对这一对开火，
+        # 等于把已经修好的那次事故重新埋回去
+        params=dict(variables) if isinstance(variables, Mapping) else {},
+        # 旧报告没有 meta，这里几乎总是 "unknown"。**不去 summary.variables 里捞**：
+        # 那一份已经原样进了上面那个 params，在这里再抄一份就有了两个来源
+        git_revision=meta.get("git_revision") or "unknown",
+        status=JobStatus.COMPLETED,
+        pid=None,
+        # 旧报告没有 `generated_at`，就留 None：**不去文件名里解析时间戳**
+        # （`harbor_mycode_final_20261018__025351` 里确实有，但那是 harbor runner 的
+        # 命名约定，jobs.py 不该知道它），也**不用文件 mtime**（复制一次就变）。
+        # 一个看得见的空缺好过一个像真值的假数；run_id 本身就带着日期。
+        # 连带要求：Task 14 的页面要把 None 渲染成"未知"、排序放最后、且不许因为 None 崩
+        started_at=None,
+        finished_at=None,
+        exit_code=None,
+        report_path=str(path),
+        error=None,
+    )
+
+
 def _record_from_report(data: Mapping[str, Any], path: Path) -> JobRecord | None:
     """从一份标准信封报告倒推出运行记录。
 
     harbor 是从 CLI 直接跑的，既没有 job.json 也没有 state.json；只认前两种来源的话，
     运行列表里就永远不会有 harbor，而它恰恰是最贵、最需要被看见的那一个。
+    第二条入口是旧形状（`summary` + `trials`），见 `_looks_like_legacy_run_report`。
     """
     if not looks_like_run_report(data):
-        return None
+        if not _looks_like_legacy_run_report(data):
+            return None
+        return _record_from_legacy_report(data, path)
     meta = data.get("meta") or {}
     generated = data.get("generated_at")
     return JobRecord(

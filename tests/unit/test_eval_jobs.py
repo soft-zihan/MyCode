@@ -1029,3 +1029,120 @@ def test_a_warm_scan_does_not_stat_the_report_files_at_all(reports, monkeypatch)
     assert sorted(r.run_id for r in runs) == sorted(run_ids)
     touched = [p for p in asked if p in report_paths]
     assert touched == [], f"稳态不该再 stat/exists 报告文件，实际问到：{touched}"
+
+
+# ── Task 13：并发扫描 / 旧形状报告 / 跨 root 的缓存剪枝 ──────────────────────
+
+import threading  # noqa: E402  （Task 13 追加段，import 放这里避免改动文件头）
+
+
+def test_concurrent_list_jobs_does_not_raise(reports):
+    """tailer 在事件循环线程上扫，API 在线程池里扫——两者会同时改报告缓存。
+
+    缓存的清理循环原来是 `del _REPORT_RECORDS[key]`，两个调用方删同一个键时
+    后到的那个 KeyError，而这个异常会一路穿到 HTTP 500。
+    """
+    _write_report(reports, "harbor_mycode_final_20261018__025351")
+    errors: list[BaseException] = []
+
+    def scan() -> None:
+        try:
+            for _ in range(20):
+                list_jobs(limit=1000)
+        except BaseException as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=scan) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    assert [r.run_id for r in list_jobs()] == ["harbor_mycode_final_20261018__025351"]
+
+
+def test_legacy_trials_shaped_harbor_reports_are_listed(reports):
+    """旧形状报告（只有 summary + trials）必须进索引：README §5.7 引的那一对就是这个形状，
+    实测它们此前被 `looks_like_run_report` 挡在外面，新前端够不着自己的基线。
+    同时钉住三条"不许"：对比输出不许混进来、没有 variables 的一侧不许被合成、
+    没有 generated_at 就不许编一个时间戳。
+    """
+    legacy = {
+        "summary": {"arm": "opencode", "n_trials": 1, "n_passed": 1, "pass_rate": 1.0},
+        "trials": [{"task_name": "polyglot_cpp_x", "reward": 1.0}],
+    }
+    (reports / "harbor_opencode_final_20261017__232016.json").write_text(
+        json.dumps(legacy), encoding="utf-8")
+    # 对比输出：既没有 results 也没有 trials，必须继续被挡掉
+    (reports / "harbor_compare_final_20261018__034229.json").write_text(
+        json.dumps({"mcnemar_p": 0.0625, "n_paired": 24, "pairs": [],
+                    "mycode_label": "harbor_mycode_final_20261018__025351"}), encoding="utf-8")
+
+    by_id = {rec.run_id: rec for rec in list_jobs(reports_dir=reports)}
+
+    assert "harbor_opencode_final_20261017__232016" in by_id
+    assert "harbor_compare_final_20261018__034229" not in by_id
+    rec = by_id["harbor_opencode_final_20261017__232016"]
+    assert rec.benchmark == "harbor"          # 与 rows_of 的默认值对齐，不是 "unknown"
+    assert rec.params == {}                   # 这一侧真的没记 variables，不许合成
+    assert rec.started_at is None             # 没有 generated_at 就不编时间戳
+    assert rec.finished_at is None
+    assert rec.git_revision == "unknown"
+
+
+def test_legacy_report_keeps_the_variables_it_did_record(reports):
+    """3d 裁定 3 的另一半：记了 `summary.variables` 的那一侧要原样进 params。
+
+    已发表那一对的 mycode 侧**有** variables（8 个键）、opencode 侧没有。
+    前一条测试钉住"没有的不许合成"，这一条钉住"有的不许丢"——丢了的话
+    索引里就看不出这两臂到底控了哪些变量，而 params 是页面上唯一的入口。
+    """
+    variables = {"model": "qwen3.6-27b", "seed": 20261017, "thinking_mode": "off",
+                 "git_revision": "ab6b631", "stage": "final"}
+    (reports / "harbor_mycode_final_20261018__025351.json").write_text(
+        json.dumps({"summary": {"arm": "mycode", "variables": variables},
+                    "trials": [{"task_name": "polyglot_cpp_x", "reward": 1.0}]}),
+        encoding="utf-8")
+
+    rec = list_jobs(reports_dir=reports)[0]
+
+    assert rec.params == variables            # 原样，一个键都不添
+    assert rec.run_id == "harbor_mycode_final_20261018__025351"   # 用文件名主干，不解析时间戳
+    assert rec.started_at is None
+
+
+def test_a_second_reports_dir_does_not_reparse_the_first_but_does_evict_it(reports, monkeypatch):
+    """连续两次用不同的 `reports_dir` 调 `list_jobs`：第二次不会重新解析第一次的条目。
+
+    但只钉到"第二次"是不够的：剪枝是 `set(_REPORT_RECORDS) - seen_paths`，而缓存是
+    **模块全局**的，所以扫第二个 root 时 seen_paths 里没有第一个 root 的路径，
+    第一个 root 的条目被整片踢掉——代价只是推迟到第三次（回到第一个 root 时全部重解析）。
+    Task 13 选的处理方式是"不让它可达"：路由一律不传 `reports_dir=`
+    （看守在 test_eval_api_jobs.py::test_the_jobs_route_scans_only_the_default_reports_dir）。
+    所以这一条把**代价本身**钉住：它真实存在，谁哪天开始按请求传目录，
+    这里就是他会看到的那张账单——tailer 每 0.5s 扫一次，账单每 tick 到一次。
+    """
+    other = reports.parent / "t13w-other-root"
+    other.mkdir()
+    _write_report(reports, "run-a")
+
+    list_jobs()  # 冷一趟，把默认 root 的缓存填满
+    key = str(reports / "run-a.json")
+    assert key in _REPORT_RECORDS
+
+    parsed: list[str] = []
+    real_loads = json.loads
+
+    def counting_loads(text, *a, **kw):
+        parsed.append(text[:40])
+        return real_loads(text, *a, **kw)
+
+    monkeypatch.setattr(json, "loads", counting_loads)
+
+    list_jobs(reports_dir=other)  # 第二个 root：不会当场重新解析第一个 root 的条目
+    assert parsed == [], f"扫第二个 root 时重新解析了报告：{parsed}"
+    assert key not in _REPORT_RECORDS, "缓存没被踢掉——剪枝口径变了？这条测试要跟着改"
+
+    list_jobs()  # 回到默认 root：账单在这里到
+    assert parsed, "回到默认 root 的一趟没有重新解析任何报告——剪枝口径变了？"
