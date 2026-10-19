@@ -175,8 +175,12 @@ def _legacy_state_records(reports_dir: Path) -> list[JobRecord]:
 def _looks_like_legacy_run_report(data: Any) -> bool:
     """2026-10-18 之前的 harbor 报告：顶层只有 `summary` + `trials`。
 
-    `looks_like_run_report` 要的三个键它们一个都没有，于是 13 份真实运行记录
+    `looks_like_run_report` 要的三个键它们一个都没有，于是 12 份真实运行记录
     （含 README §5.7 引的那一对）全被挡在索引外，新前端够不着自己的基线。
+    这个 12 是**某一时点的普查值**、不是不变量（2026-10-19 只读实测：
+    `eval/reports/` 37 份 *.json = 10 份标准形状 + 12 份旧形状 + 15 份两者都不是，
+    15 = 8 份 harbor_compare_* + 7 份 .state.json；被挡掉的 12+15 = 27）。
+    跑批每写一份新报告它就会变，别把它当契约读。
     判据用 `trials` 而**不是放宽原函数**：对比输出（`harbor_compare_*.json`）
     既没有 `results` 也没有 `trials`，所以这一条不会把它们放进来；
     `.state.json` 同理（它没有 `trials`，走的是 `_legacy_state_records`）。

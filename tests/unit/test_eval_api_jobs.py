@@ -140,7 +140,11 @@ def test_harbor_params_default_to_the_aligned_thinking_switch(api):
     assert params["thinking"]["default"] == "default"
     assert params["thinking"]["choices"] == ["default", "on", "off"]
     assert params["arm"]["default"] == "mycode"  # both 要跑 1.5 小时，不该是默认
-    assert params["stage"]["choices"] == ["probe", "final"]
+    # 三档，与 runner 的 STAGE_SIZES 逐键对齐（原简报只给两档，于是 API 表单起不了 full，
+    # 而 full 正是盘上那批 225 题运行的档位——能看见结果、不能复现它）。
+    # default **仍是 probe**：full 是 225 题、单臂一整夜，不该是表单的默认选项
+    assert params["stage"]["choices"] == ["probe", "final", "full"]
+    assert params["stage"]["default"] == "probe"
 
 
 def test_harbor_params_are_real_runner_flags(api):
@@ -150,7 +154,7 @@ def test_harbor_params_are_real_runner_flags(api):
     `build_parser()`（gaia/hle/smoke/loca 都是在 `main()` 里就地构造，没有可导入的单一
     来源）。其余四个的 default 是逐项人工核对 argparse 的，核对结果记在 task-13 报告里。
     """
-    from eval.harbor.runner import build_parser
+    from eval.harbor.runner import STAGE_SIZES, build_parser
 
     actions = {a.dest for a in build_parser()._actions}
     bench = next(b for b in api.get("/api/eval/benchmarks").json()["benchmarks"]
@@ -163,6 +167,17 @@ def test_harbor_params_are_real_runner_flags(api):
     # `--resume-from` / `--run-dir` / `--no-report` / `--config-dir` / `--prewarm-jobs`
     # 是运维动作，**有意**不进表单（前者还是 Task 15 刚加的断点续跑）
     assert "resume_from" not in declared and "run_dir" not in declared
+
+    # `stage` 的取值域必须与 runner 的 STAGE_SIZES **逐键**对齐（CLI 侧是
+    # `choices=sorted(STAGE_SIZES)`，eval/harbor/runner.py:692）。上一条只钉了
+    # "声明的都是真 flag"，钉不住"漏了一档"——而漏档的后果正是 F3 要修的那个：
+    # 表单起不了 --stage full，于是页面能列出这批 225 题的运行、却不能用同样的参数复现它。
+    # 写成活核对而不是钉死三个字面量，是为了 runner 将来加第四档时这里**自动**跟着要改。
+    declared_stage = next(p for p in bench["params"] if p["name"] == "stage")
+    assert sorted(declared_stage["choices"]) == sorted(STAGE_SIZES), (
+        f"harbor 的 stage 取值域与 runner 的 STAGE_SIZES 漂了："
+        f"{sorted(declared_stage['choices'])} != {sorted(STAGE_SIZES)}"
+    )
 
 
 # ── 运行列表 ──
@@ -433,6 +448,22 @@ def test_compare_surfaces_a_real_variable_mismatch(api, reports):
 
     assert {"field": "variables.thinking_mode", "a": "default", "b": "off"} in body["variable_mismatches"]
     assert "变量未对齐" in body["markdown"]
+
+
+def test_compare_drops_the_expected_two_arm_git_revision_mismatch(api, reports):
+    """两臂不是同一秒起跑的，meta.git_revision 必然不同；它不许被报成"变量没对齐"，
+    否则横幅永远挂着、也就永远没人看——这正是 ARM_KEYS 存在的全部理由。
+    钉住路由真的调了 drop_expected_mismatches：把那一行去掉，这条就红（实测）。"""
+    _report(reports, "a", arm="mycode", thinking_mode="default")
+    b = _report(reports, "b", arm="opencode", thinking_mode="default")
+    b["meta"]["git_revision"] = "fffffff"
+    (reports / "b.json").write_text(json.dumps(b), encoding="utf-8")
+
+    body = api.get("/api/eval/compare?a=a&b=b").json()
+
+    fields = [m["field"] for m in body["variable_mismatches"]]
+    assert fields == [], f"meta.git_revision 没被摘掉，横幅会永远挂着：{fields}"
+    assert "变量未对齐" not in body["markdown"]
 
 
 def test_compare_of_a_missing_run_is_a_404(api, reports):

@@ -102,8 +102,16 @@ _LOCA_PARAMS = [
 _HARBOR_PARAMS = [
     {"name": "arm", "type": "choice", "default": "mycode", "choices": ["mycode", "opencode", "both"],
      "help": "跑哪一臂。both 要 1.5 小时以上，所以默认只跑 MyCode"},
-    {"name": "stage", "type": "choice", "default": "probe", "choices": ["probe", "final"],
-     "help": "probe=6 题（探测，约 15 分钟）；final=25 题（正式数据，约 45 分钟）。probe 是 final 的子集"},
+    # choices 三档与 runner 的 STAGE_SIZES 逐键对齐（eval/harbor/runner.py:48，
+    # CLI 侧是 `choices=sorted(STAGE_SIZES)`）。**default 保持 probe**：full 是 225 题，
+    # 一次跑一整夜，不能让它成为表单的默认选项。
+    # 少一档的后果不是"少个选项"，而是**不可复现**：盘上正躺着一批 --stage full 的运行，
+    # 页面能列出它的结果、却不能用同样的参数再起一次（Task 13 修复轮 F3 的由来）。
+    {"name": "stage", "type": "choice", "default": "probe",
+     "choices": ["probe", "final", "full"],
+     "help": "probe=6 题（探测，约 15 分钟）；final=25 题（正式数据，约 45 分钟）；"
+             "full=数据集全部 225 题（aider-polyglot 全量，单臂就要跑一整夜）。"
+             "三批嵌套：同一个 seed 下 full 的前 25 题就是 final、前 6 题就是 probe"},
     {"name": "thinking", "type": "choice", "default": "default", "choices": ["default", "on", "off"],
      "help": "MyCode 臂的思考开关。default=不注入 MYCODE_THINKING、跟随模型默认，"
              "这才是和 opencode 臂对齐的设置（README §5.6 那次假结论就是这里没对齐）"},

@@ -1110,6 +1110,13 @@ def test_legacy_report_keeps_the_variables_it_did_record(reports):
     assert rec.params == variables            # 原样，一个键都不添
     assert rec.run_id == "harbor_mycode_final_20261018__025351"   # 用文件名主干，不解析时间戳
     assert rec.started_at is None
+    # 单一来源：`meta` 里没有就是 "unknown"，**不许**去 summary.variables 里抄第二份
+    # （上面那个 fixture 的 variables 里恰好有 git_revision="ab6b631"，所以这条有判别力：
+    # 把 jobs.py 那行改成 `or (variables or {}).get("git_revision")`，这里就红）。
+    # 抄一份的后果：已发表那一对在索引里一侧显示真版本号、另一侧显示 unknown
+    # （mycode 侧 summary.variables 有、opencode 侧没有），两臂呈现不对称；
+    # 而版本号正是"这次跑批用的是哪份代码"的唯一凭据，来源不明就不该出现。
+    assert rec.git_revision == "unknown"
 
 
 def test_a_second_reports_dir_does_not_reparse_the_first_but_does_evict_it(reports, monkeypatch):
