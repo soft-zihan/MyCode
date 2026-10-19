@@ -1,0 +1,47 @@
+# I3：vLLM 引擎指标 + GPU 指标可观测栈
+#
+# 用法见同目录 README.md。
+#
+# 拓扑（本机实测形态，两个"跑在哪"是关键）：
+#   vLLM               → WSL 里的普通进程，监听 0.0.0.0:8123，暴露 /metrics
+#   nvidia_smi_exporter → WSL 里的普通进程，监听 0.0.0.0:9401（必须能看见 GPU）
+#   Prometheus/Grafana  → Docker Desktop 容器，经 host.docker.internal 抓上面两个
+#
+# **为什么这里没有 dcgm-exporter**（本来是标准答案，也是简历关键词）：
+# 实测 `nvcr.io/nvidia/k8s/dcgm-exporter:latest` 在 RTX 4060 Laptop 上能起、也能看见 GPU，
+# 但日志明确写 `Not collecting DCP metrics: Profiling is not supported for this group of GPUs`，
+# DCGM_FI_PROF_* 全被 skip，`/metrics` 返回 0 行。DCGM 的 profiling 指标在 GeForce 消费卡上
+# 不提供，这是产品分层不是配置问题。所以 GPU 侧退化为 nvidia_smi_exporter.py。
+# 另外 nvcr.io 上 4.2.0-4.4.0 / 4.1.0-4.3.0 / 3.3.9-3.6.0 这些 tag 都不存在，只有 latest。
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: i3-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=3d
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.2.0
+    container_name: i3-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped

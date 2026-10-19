@@ -543,8 +543,10 @@ async def _await_sub_agent_run(agent: "Agent", job: SubAgentJob, sub_agent: "Age
 
     state["input_tokens"] = int(result.get("tokens", {}).get("input", 0))
     state["output_tokens"] = int(result.get("tokens", {}).get("output", 0))
+    state["reasoning_tokens"] = int(result.get("tokens", {}).get("reasoning", 0))
     agent.total_input_tokens += state["input_tokens"]
     agent.total_output_tokens += state["output_tokens"]
+    agent.total_reasoning_tokens += state["reasoning_tokens"]
     state["output_text"] = result.get("text") or "(Sub-agent produced no output)"
     state["summary"] = state["output_text"][:500]
     state["stop_reason"] = result.get("stop_reason")

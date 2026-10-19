@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+
+import pytest
 
 import eval.common.service as service_module
 from eval.common.benchmarks import BenchmarkAdapter
@@ -225,3 +228,34 @@ def test_sync_task_to_dataset_creates_item_run_and_score():
     assert score_kwargs["name"] == "benchmark_correct"
     assert score_kwargs["value"] is True
     assert score_kwargs["trace_id"] == "trace-123"
+
+
+def test_save_state_is_atomic(tmp_path, monkeypatch):
+    """写到一半被打断，不能留下一个截断的 .state.json。
+
+    那个文件现在是三个读者的输入（_legacy_state_records / _orphan_exit_code / UI 的任务列表），
+    而 _legacy_state_records 的 except 不含 UnicodeDecodeError——一个截在多字节字符中间的
+    state 文件能把整个 list_jobs 打挂，运行列表和 MAX_CONCURRENT_JOBS 闸门一起没。
+    """
+    monkeypatch.setattr("eval.common.service.REPORTS_DIR", tmp_path)
+    # create_state 是 EvalService 的方法（不是模块级函数），照本文件既有用法调
+    state = service_module.EvalService().create_state(EvalRunOptions(benchmark="gaia", sample=1))
+    service_module.save_state(state)
+    target = tmp_path / f"{state.run_id}.state.json"
+    before = target.read_text(encoding="utf-8")
+
+    real_replace = os.replace
+
+    def boom(*a, **kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", boom)
+    with pytest.raises(OSError):
+        service_module.save_state(state)
+    monkeypatch.setattr(os, "replace", real_replace)
+
+    # 旧内容完好无损，而不是半个文件
+    assert target.read_text(encoding="utf-8") == before
+    assert json.loads(target.read_text(encoding="utf-8"))["run_id"] == state.run_id
+    # 也不许把临时文件留在 eval/reports 里
+    assert [p.name for p in tmp_path.glob("*.tmp")] == []

@@ -1,0 +1,13 @@
+# AI Infra 本地实验依赖——装在 WSL 侧独立 venv（~/venvs/infra），不进主 requirements.txt。
+# 安装（绕开代理走清华源，代理会把国内镜像也绕到海外出口，实测慢一个数量级）：
+#   python3 -m venv ~/venvs/infra
+#   env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+#     ~/venvs/infra/bin/pip install -r infra/requirements.txt \
+#     -i https://pypi.tuna.tsinghua.edu.cn/simple --retries 10 --timeout 60
+#
+# [bench] extra 是必需的：vllm bench serve 依赖 pandas 等，缺了会报
+# "Please install vllm[bench] for bench support"。
+#
+# 运行注意：vLLM 0.31 启动时会用 flashinfer JIT 编译采样算子，需要 nvcc；
+# 本机 nvcc 不在 PATH，必须设 VLLM_USE_FLASHINFER_SAMPLER=0 否则 EngineCore 起不来。
+vllm[bench]==0.31.0

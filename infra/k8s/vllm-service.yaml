@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  labels:
+    app: vllm
+spec:
+  type: ClusterIP
+  selector:
+    app: vllm
+  ports:
+    - name: http
+      port: 8123
+      targetPort: http
+---
+# MyCode 侧只需要把 base_url 指到这个 Service（集群内 http://vllm:8123/v1），
+# 本机调试时用 port-forward：kubectl port-forward svc/vllm 8123:8123

@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable
 
 from eval.common.benchmarks import get_adapter, report_rows, summarize_results
+from eval.common.events import RUN_ID_ENV, sink_from_env
 from eval.common.langfuse_dataset import dataset_name, sync_task_to_dataset
 from eval.common.models import (
     BenchmarkName,
@@ -41,7 +43,24 @@ def report_md_path(run_id: str) -> Path:
 def save_state(state: EvalRunState) -> Path:
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     path = state_path(state.run_id)
-    path.write_text(json.dumps(state.to_dict(), ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    # 原子写（tmp + os.replace），和 jobs.write_job 一个模式。这个文件每道题前后都写，
+    # 而它同时是三个读者的输入：jobs._legacy_state_records、jobs._orphan_exit_code、
+    # UI 的任务列表。裸 write_text 被 SIGKILL 截在多字节字符中间时，
+    # _legacy_state_records 会抛 UnicodeDecodeError（它的 except 只有 JSONDecodeError/OSError），
+    # 异常穿出 list_jobs → 运行列表和 MAX_CONCURRENT_JOBS 闸门一起没
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(state.to_dict(), ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        # 替换失败也别把临时文件留在 eval/reports 里：那个目录存的是不可再生的
+        # benchmark 数据，多出来的 .tmp 只会让人以为是某次运行的产物。
+        # 清理自己失败不能再抛——那会盖掉真正要报的那个 OSError
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return path
 
 
@@ -112,7 +131,11 @@ class EvalService:
         return detach
 
     def create_state(self, options: EvalRunOptions) -> EvalRunState:
-        run_id = new_run_id(options.benchmark)
+        # 被 start_job 起的子进程：run_id 由父进程定。索引、事件文件、报告文件名三者
+        # 必须同名，否则 finish_job 在 <job.run_id>.json 找不到报告，
+        # 一轮成功的评测会被判成"退出码 0，但报告未落盘"。
+        # CLI 直跑时这个变量不存在，照旧自己造
+        run_id = os.environ.get(RUN_ID_ENV) or new_run_id(options.benchmark)
         state = EvalRunState(
             run_id=run_id,
             benchmark=options.benchmark,
@@ -133,6 +156,13 @@ class EvalService:
 
     async def run(self, state: EvalRunState, options: EvalRunOptions | None = None) -> dict[str, Any]:
         options = options or state.options
+        sink = sink_from_env()
+
+        def _to_sink(payload: dict[str, Any]) -> None:
+            body = {k: v for k, v in payload.items() if k not in ("type", "run_id")}
+            sink.emit(payload.get("type", "eval/log"), **body)
+
+        detach_sink = self.attach_emitter(state.run_id, _to_sink)
         adapter = get_adapter(options.benchmark)
         state.status = "running"
         state.started_at = time.time()
@@ -272,10 +302,19 @@ class EvalService:
                 "report_md_path": state.report_md_path,
                 "error": state.error,
             })
+            # 必须在 run_finished 之后：先关 sink 的话最后这条事件就再也落不了盘
+            detach_sink()
+            close = getattr(sink, "close", None)
+            if close:
+                close()
 
         return state.to_dict()
 
     def write_report(self, state: EvalRunState, options: EvalRunOptions) -> tuple[str, str]:
+        # 延迟 import：jobs.py 在模块级 import 了 service.new_run_id，
+        # 这里再模块级 import jobs 就成了导入环
+        from eval.common.jobs import git_revision
+
         rows = report_rows(state)
         meta = {
             "model": state.model,
@@ -290,6 +329,18 @@ class EvalService:
             "sync_langfuse_dataset": options.sync_langfuse_dataset,
             "langfuse_dataset": dataset_name(options.benchmark) if options.sync_langfuse_dataset else None,
             "status": state.status,
+            "git_revision": git_revision(),
+            "variables": {
+                "model": state.model,
+                "seed": options.seed,
+                "thinking": options.thinking,
+                "thinking_feedback": options.thinking_feedback,
+                "compression_arm": options.compression_arm,
+                "context_window": options.context_window,
+                "execution_mode": options.execution_mode,
+                "level": options.level,
+                "category": options.category,
+            },
         }
         if options.benchmark == "smoke":
             meta["suite"] = options.suite

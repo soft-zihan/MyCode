@@ -515,6 +515,9 @@ class AgentLoop:
         # 子会话压缩/cache 行为可观测（评测臂诊断依赖），展示层按标记自行过滤
         cached_tokens = int(usage.get("cached_tokens") or 0)
         a.total_cached_tokens += cached_tokens
+        details = usage.get("completion_tokens_details") or {}
+        reasoning_tokens = int(details.get("reasoning_tokens") or 0)
+        a.total_reasoning_tokens += reasoning_tokens
         asm = response.get("_assembly_metrics", {})
         a.session.append("stats", {
             "is_sub_agent": a.is_sub_agent,
@@ -522,11 +525,13 @@ class AgentLoop:
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "cached_tokens": cached_tokens,
+            "reasoning_tokens": reasoning_tokens,
             "cache_hit_rate": round(cached_tokens / input_tokens, 3) if input_tokens else 0.0,
             # 累计语义：会话至今总量
             "total_input_tokens": a.total_input_tokens,
             "total_output_tokens": a.total_output_tokens,
             "total_cached_tokens": a.total_cached_tokens,
+            "total_reasoning_tokens": a.total_reasoning_tokens,
             "context_window": a.context_window,
             "effective_window": a.effective_window,
             "estimated_context_tokens": a.estimated_context_tokens,

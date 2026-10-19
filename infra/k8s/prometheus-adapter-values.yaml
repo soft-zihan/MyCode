@@ -1,0 +1,40 @@
+# prometheus-adapter 的规则：把 vLLM 的 Prometheus 指标暴露成 K8s custom metrics API，
+# HPA 才读得到。这是 vllm-hpa.yaml 能工作的前提，不是可选装饰。
+#
+# 部署方式（用 Helm 时把下面 rules 段并进 values.yaml 的 rules.existing）：
+#   helm install prometheus-adapter prometheus-community/prometheus-adapter \
+#     -f infra/k8s/prometheus-adapter-values.yaml
+#
+# 两个易错点：
+#   1. K8s 的 metric 名字里不能带冒号，所以 vllm:num_requests_waiting 必须用
+#      name.as 改名成 vllm_num_requests_waiting，HPA 里引用的是改名后的。
+#   2. seriesFilter 要把 vllm: 前缀的 series 挑出来，否则 adapter 会把整个
+#      Prometheus 的指标都注册一遍，custom metrics API 列表会爆。
+
+rules:
+  # 已有规则全部丢弃，只保留 vLLM 需要的（避免和别的 chart 冲突）
+  existing:
+    - seriesQuery: 'vllm:num_requests_waiting{namespace!="",pod!=""}'
+      seriesFilter: 'vllm:.*'
+      resources:
+        overrides:
+          namespace: { resource: namespace }
+          pod: { resource: pod }
+      name:
+        matches: '^vllm:(.*)$'
+        as: 'vllm_$1'
+      metricsQuery: 'vllm:num_requests_waiting{<<.LabelMatchers>>}'
+    - seriesQuery: 'vllm:kv_cache_usage_perc{namespace!="",pod!=""}'
+      seriesFilter: 'vllm:.*'
+      resources:
+        overrides:
+          namespace: { resource: namespace }
+          pod: { resource: pod }
+      name:
+        # 指标是 0-1 的比例，×100 变成百分数，HPA 阈值才写得直观（见 vllm-hpa.yaml）
+        as: 'vllm_kv_cache_usage_perc'
+      metricsQuery: 'vllm:kv_cache_usage_perc{<<.LabelMatchers>>} * 100'
+
+prometheus:
+  url: http://prometheus-server.monitoring.svc
+  port: 80

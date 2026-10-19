@@ -1,0 +1,63 @@
+# 为什么 HPA 不用 CPU/内存：推理服务的瓶颈在**显存与批队列**，不在 CPU。
+# 本机实测（data/infra/run2）：并发 1→16 时 CPU 基本没变化，而 TTFT 从 80ms 涨到 319ms、
+# KV cache 使用率从 1% 涨到 5%（0.8B）/ 24%（2B）。用 CPU 指标扩容的结果是：
+# 指标一直没到阈值 → 永远不扩容；或者为了触发阈值把副本加上去 → 每个副本的批变小、
+# GPU 利用率更低、TTFT 更差。**扩错了方向比不扩更糟。**
+#
+# 正确的信号是 vLLM 自己吐的排队与 KV 压力：
+#   vllm:num_requests_waiting —— 有多少请求在等（直接对应 TTFT 恶化）
+#   vllm:kv_cache_usage_perc  —— KV 池用了多少（接近 1 就开始抢占 preemption）
+# 这两个指标要经 prometheus-adapter 暴露成 K8s custom metrics API，规则见同目录。
+#
+# maxReplicas 的现实约束：每个副本要独占一张 GPU（resources.limits.nvidia.com/gpu: 1），
+# 所以 maxReplicas 上限 = 集群里的 GPU 数。本机单卡 → 只能到 1，
+# 这份清单在多卡集群上才真正生效；单卡上它的价值是**验证接线正确**而不是验证扩容。
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vllm
+  labels:
+    app: vllm
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vllm
+  minReplicas: 1
+  maxReplicas: 4
+  metrics:
+    # 主信号：平均每副本排队请求数
+    - type: Pods
+      pods:
+        metric:
+          name: vllm_num_requests_waiting
+        target:
+          type: AverageValue
+          # 阈值来自实测批处理曲线：并发 16 时 TTFT 已经恶化 4 倍，
+          # 所以让排队超过 4 就开始扩，别等到用户已经感觉到卡。
+          averageValue: "4"
+    # 兜底信号：KV 池快满了（再满就要抢占重算，比排队更贵）
+    - type: Pods
+      pods:
+        metric:
+          name: vllm_kv_cache_usage_perc
+        target:
+          type: AverageValue
+          averageValue: "80"
+  behavior:
+    scaleUp:
+      # 扩容要快：排队一旦堆起来，TTFT 是立刻恶化的
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+    scaleDown:
+      # 缩容要慢：新副本冷启动要 ~52s（加载权重）且会丢掉全部 prefix cache，
+      # 抖一次缩容的代价远大于多留一个副本几分钟。
+      stabilizationWindowSeconds: 600
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120

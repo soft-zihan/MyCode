@@ -75,6 +75,7 @@ class ContextManager:
         self.agent._last_tool_name = ""
         self.agent.total_input_tokens = 0
         self.agent.total_output_tokens = 0
+        self.agent.total_reasoning_tokens = 0
         self.agent.reset_context_token_estimate()
         print_info("Conversation cleared.")
 

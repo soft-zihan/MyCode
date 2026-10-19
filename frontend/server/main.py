@@ -61,6 +61,22 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[STARTUP] Crash recovery scan failed (non-fatal): {e!r}")
 
+    # 评测执行层：子进程是 detached 的，服务重启杀不掉它们，但重启期间没人转发事件。
+    # 先把「记录说在跑、进程其实没了」的标成 interrupted，再让 tailer 接管还活着的。
+    eval_tailer: asyncio.Task | None = None
+    try:
+        from eval.common.jobs import attach_on_startup
+        from eval.common.tailer import JobTailer
+        from routers.eval import broadcast_eval_event
+
+        repaired = attach_on_startup()
+        if repaired:
+            print(f"[STARTUP] Eval jobs: 标记 {len(repaired)} 个悬挂评测 interrupted: {repaired}")
+        eval_tailer = asyncio.create_task(JobTailer(broadcast_eval_event).run())
+        print("[STARTUP] Eval job tailer started")
+    except Exception as e:
+        print(f"[STARTUP] Eval tailer init failed (non-fatal): {e!r}")
+
     # 可观测性初始化（OTel → Langfuse，失败不阻塞主流程）
     try:
         from agents.observability import init_tracing
@@ -94,6 +110,9 @@ async def lifespan(app: FastAPI):
         traceback.print_exc()
 
     yield
+
+    if eval_tailer is not None:
+        eval_tailer.cancel()
 
     # U6：先优雅收口活跃会话（abort → 限时等待 → 合成 turn/end{shutdown}）
     try:

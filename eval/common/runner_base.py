@@ -19,6 +19,8 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
+from eval.common.schema import normalize_report
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 REPORTS_DIR = PROJECT_ROOT / "eval" / "reports"
 
@@ -215,6 +217,15 @@ async def run_agent_task(
                     },
                 )
 
+            if agent:
+                # run_once 只回 input/output，cache 命中数单独挂在 agent 上。
+                # input 用的是 prompt_tokens 口径（已含 cache），补出 cached 才能
+                # 同时给出「总输入」和「其中缓存」两个数，跟别的 harness 对得上。
+                result["tokens"]["cached"] = agent.total_cached_tokens
+                # reasoning 是 output 的子集。不单列就分不清「可见输出」和「思考」，
+                # 而两臂对比里思考量正是最容易混进结论的变量（见 eval/harbor/README.md §5.6）。
+                result["tokens"]["reasoning"] = agent.total_reasoning_tokens
+
             if agent and agent.session:
                 try:
                     counts = {"tool_folded": 0, "session_folded": 0, "events_hidden": 0}
@@ -261,15 +272,23 @@ def write_reports(
     json_path = out_dir / f"{stem}.json"
     md_path = out_dir / f"{stem}.md"
 
-    report = {
+    # 写盘之前先归一化：五个 benchmark 的行字典在这里收成同一份公共核心 + extra，
+    # 对比层和前端因此不用认 correct / reward / task_name 三套字段
+    report = normalize_report({
         "benchmark": benchmark,
         "run_id": run_id,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "meta": meta,
         "summary": summary,
         "results": results,
-    }
-    json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    })
+    # 原子写（tmp + os.replace）：finish_job 只看"<run_id>.json 在不在"，list_jobs
+    # 现在还会去解析它——写到一半被打断留下的截断文件，既能把失败的一轮判成
+    # COMPLETED，又能让索引每轮抛 JSONDecodeError。.md 那份不用改：它是给人看的，
+    # 截断了不会污染索引或状态机
+    tmp = json_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, json_path)
 
     lines = [
         f"# {benchmark.upper()} 评测报告",
@@ -284,11 +303,13 @@ def write_reports(
         "| # | task_id | 正确 | 耗时(s) | trace_id | 备注 |",
         "|---|---------|------|---------|----------|------|",
     ]
-    for i, r in enumerate(results, 1):
-        mark = "✅" if r.get("correct") else "❌"
+    for i, r in enumerate(report["results"], 1):
+        passed = r.get("passed")
+        mark = "✅" if passed else ("❓" if passed is None else "❌")
+        extra = r.get("extra") or {}
         note = r.get("error") or ""
         if not note:
-            note = f"expected={str(r.get('expected'))[:30]} predicted={str(r.get('predicted'))[:30]}"
+            note = f"expected={str(extra.get('expected'))[:30]} predicted={str(extra.get('predicted'))[:30]}"
         lines.append(
             f"| {i} | `{str(r.get('task_id'))[:12]}` | {mark} | {r.get('duration_s', 0)} | `{str(r.get('trace_id'))[:12]}` | {note[:60]} |"
         )

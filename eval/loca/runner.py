@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
+import statistics
 import subprocess
 import sys
 import time
@@ -30,7 +32,14 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from eval.common.events import RUN_ID_ENV, sink_from_env  # noqa: E402
+# 模块级 import 是刻意的（原来藏在 main() 里、报告落盘前一行才执行）：
+# jobs 一旦 import 不动，就在**启动时**炸，而不是整轮 loca 跑完之后的报告写入时刻——
+# 后者会让 write_reports 永不执行，几十分钟到几小时的不可再生结果全丢。
+# 无循环 import：jobs.py 只用字符串引用 "eval.loca.runner"
+from eval.common.jobs import git_revision  # noqa: E402
 from eval.common.runner_base import REPORTS_DIR, resolve_model_config, write_reports  # noqa: E402
+from eval.common.schema import normalize_row  # noqa: E402
 
 EVAL_WORKSPACES = Path.home() / ".mycode" / "eval_workspaces"
 
@@ -95,6 +104,49 @@ def _summarize(rows: list[dict[str, Any]], total_tasks: int) -> dict[str, Any]:
     }
 
 
+def loca_variables(
+    *,
+    model: str,
+    window: int | None,
+    arm: str,
+    thinking: str | None,
+    seed: int,
+    config_set: str,
+    select: str,
+    max_tool_uses: int | None,
+    parallel: int,
+    timeout: int,
+    loca_commit: str | None,
+    api_base: str | None,
+) -> dict[str, Any]:
+    """这轮的控制变量。对比两次 loca 运行时，守卫校验的就是这一份。
+
+    和 harbor 的 `run_variables` 是同一个用意：报告里没写下"思考是关的"，
+    假结论就能一路活到汇报环节（见 eval/harbor/README.md §5.6）。
+    `api_base` 同理：同一个 model 名走不同网关（本地 vLLM vs 共享网关，
+    或端点被重新部署/换量化）会改变结果，而报告是不可再生的，
+    没记下来就永久丢了。
+
+    **事件流和报告必须都用这一个函数**：原来 `main()` 里有两份手写清单，
+    10 键那份有 api_base 没有 arm/loca_commit，11 键那份反过来——
+    实时 UI 因此看不到压缩臂，而压缩臂正是 loca 消融实验的自变量。
+    """
+    return {
+        "model": model,
+        "window": window,
+        "arm": arm,
+        "thinking": thinking,
+        "seed": seed,
+        "config_set": config_set,
+        "select": select,
+        "max_tool_uses": max_tool_uses,
+        "parallel": parallel,
+        "timeout_s": timeout,
+        "loca_commit": loca_commit,
+        "api_base": api_base,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="LOCA-bench 评测 runner（MyCode scaffold）")
     parser.add_argument("--config-set", default="64k",
@@ -136,7 +188,31 @@ def main() -> None:
     picked = select_indices(len(configurations), args.sample, args.select, args.seed, args.indices)
 
     model, api_base, _ = resolve_model_config(args.model, args.api_base)
-    run_id = f"loca-{args.arm}-{time.strftime('%Y%m%d_%H%M%S')}"  # arm 入 id：并行臂防碰撞 + 报告自归因
+    # 控制变量在这里构造**一次**，事件流（run_started）和报告（meta.variables）共用：
+    # 原来 main() 里有两份手写清单，已经漂到实时 UI 看不见压缩臂。放在这一行之后，
+    # 是因为这里是 model / window / api_base / loca_repo 全部就绪的最早点，
+    # 且必须在 run_started 之前——那条事件就带着 variables。
+    # loca_commit 也只在这里取一次：原来 meta 字面量里相邻两处各调一遍 _loca_commit，
+    # HEAD 若在两次之间被移动，矛盾的恰好是守卫要比的那一维
+    loca_commit = _loca_commit(loca_repo)
+    if loca_commit is None:
+        print(
+            f"[WARN] 取不到 LOCA 仓库 commit（{loca_repo} 可能不是 git 检出，"
+            "例如 tarball 解包目录）；meta.variables.loca_commit 会是 null，"
+            "两轮对比时这一维会被判成\"对齐\"，而实际 commit 可能不同",
+            file=sys.stderr, flush=True,
+        )
+    variables = loca_variables(
+        model=model, window=window, arm=args.arm, thinking=args.thinking,
+        seed=args.seed, config_set=args.config_set, select=args.select,
+        max_tool_uses=args.max_tool_uses, parallel=args.parallel,
+        timeout=args.timeout, loca_commit=loca_commit, api_base=api_base,
+    )
+    # 被 start_job 起起来时 run_id 由父进程定（索引、事件文件、报告文件名三者必须同名，
+    # 否则 finish_job 在 <job.run_id>.json 找不到报告，一轮成功的评测会被判成
+    # "退出码 0，但报告未落盘"）；loca 直接构造 EvalRunState、不走 create_state，
+    # 所以这条约定得自己套。CLI 直跑时环境变量不存在，照旧自己造
+    run_id = os.environ.get(RUN_ID_ENV) or f"loca-{args.arm}-{time.strftime('%Y%m%d_%H%M%S')}"  # arm 入 id：并行臂防碰撞 + 报告自归因
     print(f"[loca] run_id={run_id} set={args.config_set} arm={args.arm} window={window} "
           f"model={model} tasks={len(picked)}/{len(configurations)} select={args.select}")
 
@@ -253,78 +329,146 @@ def main() -> None:
         return row
 
     rows_by_task: dict[str, dict[str, Any]] = {}
-    with ThreadPoolExecutor(max_workers=max(1, args.parallel)) as pool:
-        futures = {pool.submit(run_one, n, idx): idx for n, idx in enumerate(picked, 1)}
-        for fut in as_completed(futures):
-            idx = futures[fut]
-            try:
-                row = fut.result()
-            except Exception as e:
-                row = {
-                    "task_id": f"{args.config_set}-{idx}",
-                    "name": configurations[idx].get("name", f"config_{idx}"),
-                    "index": idx, "reward": None, "passed": False, "duration_s": 0.0,
-                    "tokens": {}, "compression_events": {}, "trace_id": None,
-                    "agent_error": f"runner exception: {type(e).__name__}: {e}",
-                    "eval_error": None, "step_info": None, "task_dir": "",
-                }
-            rows_by_task[row["task_id"]] = row
-            tr = next((t for t in state.tasks if t.task_id == row["task_id"]), None)
-            if tr is not None:
-                tr.status = "passed" if row["passed"] else (
-                    "error" if (row["agent_error"] or row["eval_error"]) else "failed")
-                tr.predicted = f"reward={row['reward']}"
-                tr.passed = row["passed"]
-                tr.duration_s = row["duration_s"]
-                tr.tokens = row["tokens"]
-                tr.trace_id = row["trace_id"]
-                tr.session_id = row.get("session_id")
-                tr.error = row["agent_error"] or row["eval_error"]
-                tr.metadata = {
-                    "reward": row["reward"],
-                    "compression_events": row["compression_events"],
-                    "step_info": row["step_info"],
-                    "index": row["index"],
-                    "task_dir": row["task_dir"],
-                }
-            state.summary = _summarize(list(rows_by_task.values()), len(picked))
-            save_state(state)
+    # sink 只在主线程用：JsonlEventSink 不是线程安全的，而 as_completed 的循环体
+    # 就跑在主线程上——绝不能挪进 run_one（那是 worker 线程）。
+    # CLI 直跑时 sink_from_env() 给 NullSink，行为和改动前完全一致。
+    sink = sink_from_env()
+    # try/finally 兜住整段：中途任何异常（rows_by_task 的 KeyError、write_reports 失败）
+    # 都不该让 feed 悬着不收口。已发的事件每行都 flush 过、丢不了，
+    # 这里保的是「终态事件发不出去时，句柄也要关掉」。
+    try:
+        sink.emit(
+            "eval/run_started",
+            benchmark="loca",
+            arm=args.arm,
+            model=model,
+            total=len(picked),
+            variables=variables,
+        )
+        done = 0
+        durations: list[float] = []
+        with ThreadPoolExecutor(max_workers=max(1, args.parallel)) as pool:
+            futures = {pool.submit(run_one, n, idx): idx for n, idx in enumerate(picked, 1)}
+            for fut in as_completed(futures):
+                idx = futures[fut]
+                try:
+                    row = fut.result()
+                except Exception as e:
+                    row = {
+                        "task_id": f"{args.config_set}-{idx}",
+                        "name": configurations[idx].get("name", f"config_{idx}"),
+                        "index": idx, "reward": None, "passed": False, "duration_s": 0.0,
+                        "tokens": {}, "compression_events": {}, "trace_id": None,
+                        "agent_error": f"runner exception: {type(e).__name__}: {e}",
+                        "eval_error": None, "step_info": None, "task_dir": "",
+                    }
+                rows_by_task[row["task_id"]] = row
+                # 到这里这一题的 row 才定稿（异常兜底那条也已合流），所以事件在这里发
+                done += 1
+                durations.append(row.get("duration_s") or 0.0)
+                # 传进去的必须是**原始** row（rows_by_task 里那种）。normalize_row 有条
+                # 快速路径：带齐 11 个核心键的行不再走 loca 适配器，于是适配器里那条
+                # 「reward is None → passed=None」会被跳过，未判分又变回 failed
+                unified = normalize_row(row, benchmark="loca")
+                sink.emit("eval/task_finished", task_id=row["task_id"], result=unified)
+                remaining = max(0, len(picked) - done)
+                # ETA 用已完成题目的中位耗时估算，不是均值——和 harbor 那份口径一致
+                median = statistics.median(durations) if durations else 0.0
+                sink.emit(
+                    "eval/run_progress",
+                    completed=done,
+                    total=len(picked),
+                    eta_s=round(median * remaining, 1),
+                )
+                tr = next((t for t in state.tasks if t.task_id == row["task_id"]), None)
+                if tr is not None:
+                    # status / passed / error / tokens 四个字段都直接取归一化的结果，
+                    # 不再另写一份派生：原来 status 和 passed 各算一遍，正是 Task 7
+                    # 评审抓到的那个矛盾的成因（未判分那题在 state.json 里
+                    # status="unscored" 却 passed=False，事件流里则是 passed=None；
+                    # 前端两处都读）。这条路可达：loca_eval.json 缺失或没有 reward 键。
+                    # EvalTaskResult.passed 本来就是 bool | None，summary_snapshot 只判
+                    # is True，所以 passed 从"恒布尔"变成"可能 None"不改变任何计数。
+                    # error/tokens 是本轮收进同一来源的：error 与 schema 适配器的规则
+                    # 逐字相同（纯漂移风险），tokens 原来保持原始 2-3 键、报告那份却是
+                    # 补齐的四键——state.json 与报告对同一题给出不同键集，
+                    # 而前端任务列表读的是 state.json。loca 自己的 token 计数
+                    # 读的是原始 row（_summarize），不受这里影响
+                    tr.status = unified["status"]
+                    tr.passed = unified["passed"]
+                    tr.error = unified["error"]
+                    tr.tokens = unified["tokens"]
+                    tr.predicted = f"reward={row['reward']}"
+                    tr.duration_s = row["duration_s"]
+                    tr.trace_id = row["trace_id"]
+                    tr.session_id = row.get("session_id")
+                    tr.metadata = {
+                        "reward": row["reward"],
+                        "compression_events": row["compression_events"],
+                        "step_info": row["step_info"],
+                        "index": row["index"],
+                        "task_dir": row["task_dir"],
+                    }
+                state.summary = _summarize(list(rows_by_task.values()), len(picked))
+                save_state(state)
 
-    rows = [rows_by_task[f"{args.config_set}-{idx}"] for idx in picked]
-    n = len(rows)
-    summary = _summarize(rows, len(picked))
-    total_comp = summary["compression_events_total"]
-    meta = {
-        "benchmark_detail": "LOCA-bench (hkust-nlp)",
-        "config_set": args.config_set,
-        "select": args.select,
-        "seed": args.seed,
-        "indices": picked,
-        "arm": args.arm,
-        "window": window,
-        "model": model,
-        "thinking": args.thinking,
-        "timeout_s": args.timeout,
-        "max_tool_uses": args.max_tool_uses,
-        "loca_repo": str(loca_repo),
-        "loca_commit": _loca_commit(loca_repo),
-        "scaffold": "mycode-agent",
-        "parallel": args.parallel,
-    }
+        rows = [rows_by_task[f"{args.config_set}-{idx}"] for idx in picked]
+        n = len(rows)
+        summary = _summarize(rows, len(picked))
+        total_comp = summary["compression_events_total"]
 
-    # BC-16 触发验证：压缩臂在压力窗口下零触发 = 实验无效信号
-    if args.arm != "truncate" and sum(total_comp.values()) == 0:
-        print("\n⚠️  压缩事件计数为 0——本次运行未触发压缩，消融对比无效（BC-16）。"
-              "检查窗口/环境描述长度组合是否足以越过阈值。", flush=True)
+        meta = {
+            "benchmark_detail": "LOCA-bench (hkust-nlp)",
+            "config_set": args.config_set,
+            "select": args.select,
+            "seed": args.seed,
+            "indices": picked,
+            "arm": args.arm,
+            "window": window,
+            "model": model,
+            "thinking": args.thinking,
+            "timeout_s": args.timeout,
+            "max_tool_uses": args.max_tool_uses,
+            "loca_repo": str(loca_repo),
+            "loca_commit": loca_commit,
+            "scaffold": "mycode-agent",
+            "parallel": args.parallel,
+            "git_revision": git_revision(),
+            "task_ids": [row["task_id"] for row in rows],
+            "variables": variables,
+        }
 
-    json_path, md_path = write_reports("loca", run_id, meta, summary, rows,
-                                       reports_dir=REPORTS_DIR, report_stem=run_id)
-    state.status = "completed"
-    state.finished_at = time.time()
-    state.summary = summary
-    state.report_json_path = str(json_path)
-    state.report_md_path = str(md_path)
-    save_state(state)
+        # BC-16 触发验证：压缩臂在压力窗口下零触发 = 实验无效信号
+        if args.arm != "truncate" and sum(total_comp.values()) == 0:
+            print("\n⚠️  压缩事件计数为 0——本次运行未触发压缩，消融对比无效（BC-16）。"
+                  "检查窗口/环境描述长度组合是否足以越过阈值。", flush=True)
+
+        json_path, md_path = write_reports("loca", run_id, meta, summary, rows,
+                                           reports_dir=REPORTS_DIR, report_stem=run_id)
+        state.status = "completed"
+        state.finished_at = time.time()
+        state.summary = summary
+        state.report_json_path = str(json_path)
+        state.report_md_path = str(md_path)
+        save_state(state)
+        # 先落 state.json 再发 run_finished（和 EvalService 的顺序一致）。
+        # 键名跟 Task 4 的 EvalService 对齐（report_json_path / report_md_path）：
+        # cli.py 读的就是这两个，发 report_path 等于前端拿不到报告链接
+        sink.emit(
+            "eval/run_finished",
+            benchmark="loca",
+            arm=args.arm,
+            status=state.status,
+            summary=summary,
+            report_json_path=str(json_path),
+            report_md_path=str(md_path),
+        )
+    finally:
+        # NullSink 没有 close()：直跑 CLI 时不能因为收尾而 AttributeError。
+        # 必须在 run_finished 之后关，否则最后这条事件落不了盘
+        close = getattr(sink, "close", None)
+        if close:
+            close()
     print(f"[loca] completed {summary['passed']}/{n} pass@1={summary['pass_at_1']:.1%} "
           f"avg_reward={summary['avg_reward']} comp={total_comp}")
     print(f"[loca] report: {json_path}\n[loca]         {md_path}")
