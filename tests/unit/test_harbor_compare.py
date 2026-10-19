@@ -17,6 +17,7 @@ from eval.harbor.compare import (
     drop_expected_mismatches,
     find_latest_report,
     load_report,
+    main,
     pair_tasks,
     passed,
     render_markdown,
@@ -32,6 +33,27 @@ def trial(name: str, reward: float | None, exception: str | None = None, **extra
         "n_output_tokens": extra.get("out", 10),
         "agent_execution_s": extra.get("secs", 30.0),
     }
+
+
+def report_file(
+    tmp_path: Path, arm: str, trials: list[dict], variables: dict | None = None
+) -> Path:
+    """写一份盘上真 harbor 报告形状的文件：控制变量在 `summary.variables`。
+
+    `variables=None` = 这一侧**根本没记**控制变量（README §5.7 那一对的 opencode 臂
+    就是这个形状），与"记了但是空字典"是两件事。文件名主干会被 `main()` 当标签用。
+    """
+    summary: dict = {"arm": arm}
+    if variables is not None:
+        summary["variables"] = variables
+    path = tmp_path / f"{arm}.json"
+    path.write_text(
+        json.dumps(
+            {"benchmark": "harbor", "summary": summary, "trials": trials}, ensure_ascii=False
+        ),
+        encoding="utf-8",
+    )
+    return path
 
 
 # McNemar 精确检验的 5 条测试搬到了 tests/unit/test_eval_compare.py（实现也随之搬到
@@ -309,9 +331,142 @@ def test_the_guard_banner_names_the_side_that_recorded_nothing():
         "meta.model",
         "variables.thinking_mode",
     ]
-    assert "两臂的控制变量不一致" in text
+    # 这句措辞现在来自通用层的 `guard_banner`（Task 12 修复轮 1 的 I-2 把它收拢成一份），
+    # harbor 这边原来自己写着「两臂的控制变量不一致」。**要改这句话就去
+    # `eval/common/compare.py` 的 `guard_banner` 改**，改完这里与通用层那条金标准串
+    # （`test_the_guard_banners_are_above_the_fold`）会一起红——那是有意的：
+    # 安全关键措辞只许有一份，「两臂」这个词只对 harbor 成立，而通用层要服务五个 benchmark。
+    assert "变量未对齐" in text
     # 「既未对齐、又瞎」必须同时说出来，否则读者以为那几项差异是两臂都实测出来的
     assert GUARD_BLIND_WARNING in text
     assert "opencode 一侧没有记录控制变量" in text
     assert "| 未记录 |" in text
     assert "`None`" not in text
+    # 复审 M-3：harbor 的横幅原来比通用层少一句可执行的补救提示。采通用层措辞之后自动补上
+    assert "对齐之后重跑，或者只把它当线索。" in text
+
+
+def test_the_guard_banner_is_the_common_layers_word_for_word(tmp_path):
+    """I-2 的验收核心：**措辞只有一份**，两个渲染器顶部的横幅逐字节相同。
+
+    修复前 `_guard_lines` 的 docstring 声称"措辞全部取自通用层"，实际三句里两句是
+    harbor 自己写的串（「两臂的控制变量不一致」/「下面全是描述性数字…」），通用层
+    另有一份，第三句（补救提示）干脆漏了。这条断言的是 harbor 的 markdown 顶部
+    **逐行等于** `guard_banner` 的返回值：哪天有人又在 harbor 这边拼一份串，
+    两个渲染器一分叉这条就红。
+    """
+    from eval.common.compare import compare_reports, guard_banner
+    from eval.common.compare import render_markdown as generic_markdown
+
+    mine_path = report_file(
+        tmp_path, "mycode", [trial("polyglot_rust_a", 1.0)], {"model": "m", "thinking_mode": "off"}
+    )
+    theirs_path = report_file(tmp_path, "opencode", [trial("polyglot_rust_a", 0.0)])
+    mine, theirs = load_report(mine_path), load_report(theirs_path)
+
+    generic = compare_reports(mine, theirs, labels=("mycode", "opencode"))
+    banner = guard_banner(generic, label_a="mycode", label_b="opencode")
+    assert banner, "夹具该让守卫开火，否则这条什么都没钉住"
+
+    harbor_result = compare_run_reports(
+        mine, theirs, mycode_label="mycode", opencode_label="opencode"
+    )
+    # 先钉夹具：两边的差异清单必须一样，否则"横幅相同"比的就不是同一件事
+    # （`drop_expected_mismatches` 只摘 `meta.git_revision`，这份夹具里没有）
+    assert harbor_result["variable_mismatches"] == generic["variable_mismatches"]
+
+    harbor_lines = render_markdown(harbor_result).splitlines()
+    generic_lines = generic_markdown(generic).splitlines()
+    assert harbor_lines[2 : 2 + len(banner)] == banner
+    assert generic_lines[2 : 2 + len(banner)] == banner
+
+
+def test_the_row_level_result_has_no_variables_seen_and_still_gets_a_banner():
+    """`compare()` 的结果字典里**没有** `variables_seen` 这个键。
+
+    `_harbor_result` 那句 `if "variables_seen" in generic:` 是有意的：行层面那条路
+    不许补一个 `{"a": 0, "b": 0}` 的假值（补了就是把"无从校验"伪装成"校验过但一侧记了
+    0 个"）。所以 `guard_banner` 必须能吃"键缺失"这个形状：判瞎、照样打横幅，
+    不 KeyError、更不沉默。
+    """
+    result = compare([trial("polyglot_go_a", 1.0)], [trial("polyglot_go_a", 0.0)])
+
+    assert "variables_seen" not in result
+    text = render_markdown(result)
+    assert GUARD_BLIND_WARNING in text
+    assert "无从校验控制变量" in text
+    # 行层面一项差异都没比出来，不许谎报"未对齐"（那是"已知不一致"，这里是"未知"）
+    assert "变量未对齐" not in text
+
+
+# ── CLI：stdout 是人跑这条命令唯一一定会读到的输出 ──────────────────
+
+
+CANARY = "MyCode 5/5 vs opencode 0/5，McNemar p=0.0625"
+
+
+def test_main_echoes_the_guard_to_stdout_when_it_fires(tmp_path, capsys):
+    """I-1：守卫开火时，stdout 也必须说——只在 markdown 里说等于没说。
+
+    修复前 `main()` 只 print 一行 `MyCode 5/5 vs opencode 0/5，McNemar p=0.0625 → …`，
+    而这一对正是守卫开火的那一对。那一行读起来就是一条干净的结论，形状和当年被汇报
+    上去的「MyCode 快 1.9×」一模一样——沉默地给出一个看起来可信的结论，
+    是本模块族唯一的严重失效模式。
+    """
+    from eval.common.compare import compare_reports, guard_banner
+
+    mine_path = report_file(
+        tmp_path,
+        "mycode",
+        [trial(f"polyglot_rust_t{i}", 1.0) for i in range(5)],
+        {"model": "m", "thinking_mode": "off"},
+    )
+    theirs_path = report_file(
+        tmp_path, "opencode", [trial(f"polyglot_rust_t{i}", 0.0) for i in range(5)]
+    )
+    out = tmp_path / "o.md"
+
+    assert main(["--mycode", str(mine_path), "--opencode", str(theirs_path), "--out", str(out)]) == 0
+
+    stdout = capsys.readouterr().out.splitlines()
+    generic = compare_reports(
+        load_report(mine_path), load_report(theirs_path), labels=(mine_path.stem, theirs_path.stem)
+    )
+    expected = [
+        line.removeprefix("> ").replace("**", "")
+        for line in guard_banner(generic, label_a=mine_path.stem, label_b=theirs_path.stem)
+        if line.startswith("> ")
+    ]
+    assert expected, "夹具该让守卫开火，否则这条什么都没钉住"
+    # stdout 的守卫提示必须**逐行等于**通用层横幅里那几句（去掉 `> ` 与 markdown 粗体）：
+    # harbor 这边一句都不许自己写。禁词表只在 test_eval_compare.py 存一份，
+    # 那边 `test_the_banner_prose_is_safe_to_echo_to_stdout` 钉的是"这几句里没有胜者措辞"。
+    assert stdout[:-1] == expected
+    assert GUARD_BLIND_WARNING in stdout[1]
+    # 金丝雀那一行必须逐字不变、而且仍是最后一行：实施计划 Step 5 是"重定向后肉眼 Read"、
+    # Task 14 简报 P3 是散文 `Expected:`，两处都按子串核，加行不破它们。
+    assert stdout[-1] == f"{CANARY} → {out}"
+
+
+def test_main_stays_quiet_when_the_guard_did_not_fire(tmp_path, capsys):
+    """反面：变量真比过而且一致时，stdout 只许有金丝雀那一行。
+
+    提示无条件打 = 每次都打 = 噪音 = 等于没有提示。这条钉的是"只在开火时出现"，
+    顺带补上复审 M-4（`main()` 此前零测试覆盖，那正是 I-1 能溜过去的结构性原因）。
+    """
+    variables = {"model": "m", "thinking_mode": "off"}
+    mine_path = report_file(
+        tmp_path, "mycode", [trial(f"polyglot_rust_t{i}", 1.0) for i in range(5)], variables
+    )
+    theirs_path = report_file(
+        tmp_path, "opencode", [trial(f"polyglot_rust_t{i}", 0.0) for i in range(5)], variables
+    )
+    out = tmp_path / "o.md"
+
+    assert main(["--mycode", str(mine_path), "--opencode", str(theirs_path), "--out", str(out)]) == 0
+
+    stdout = capsys.readouterr().out.splitlines()
+    assert stdout == [f"{CANARY} → {out}"]
+    # markdown 里也不许有横幅：守卫没开火却挂着警告，读者就会学会无视它
+    assert "⚠️" not in out.read_text(encoding="utf-8")
+    assert out.with_suffix(".json").exists()  # sidecar 照旧落盘

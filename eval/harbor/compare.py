@@ -10,10 +10,12 @@ harbor 的词汇，而改成 a/b 收益为零。
 
 **变量守卫**：本模块曾经只会算数字、不会问"这两臂的控制变量一样吗"，于是
 "MyCode 快 1.9×"这个假结论（两臂的思考开关根本没对齐）一路活到了汇报环节。
-现在守卫来自通用层，harbor 这一层负责把它渲染出来。注意**行层面的 `compare()`
-拿不到报告，所以无从校验变量**——CLI 走的是 `compare_run_reports()`，两条路的
-区别不是风格问题：走错了守卫就静默失效，而静默失效的守卫在输出上和"校验通过"
-长得一模一样。
+现在守卫来自通用层，harbor 这一层负责把它渲染出来：开火时 markdown 顶部打横幅，
+CLI 的 stdout 也回显同样的几句话——**stdout 那行是人唯一一定会读到的输出，
+只在 markdown 里说等于没说**。措辞两处都取自通用层的 `guard_banner`，一份都不抄。
+注意**行层面的 `compare()` 拿不到报告，所以无从校验变量**——CLI 走的是
+`compare_run_reports()`，两条路的区别不是风格问题：走错了守卫就静默失效，
+而静默失效的守卫在输出上和"校验通过"长得一模一样。
 
 用法::
 
@@ -31,18 +33,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-# `_guard_blind_reason` / `_guard_was_blind` / `_mismatch_cell` 是通用层的私有符号，
-# 这里跨模块 import 它们是**有意的**：这三条决定守卫横幅的措辞，而措辞是安全关键输出
-# （"`None`" 和 "未记录" 是两件事——前者把未知说成已知取值，正是 1.9× 假结论的人眼版）。
-# 在 harbor 这边抄一份就一定会各自漂移。通用层缺的是一个公开的
-# `guard_banner(comparison) -> list[str]`；已经报给控制器，不在本轮私自加。
+# 守卫横幅的措辞只有通用层那一份：`guard_banner` 是它的公开入口，本模块只负责
+# 把 harbor 的词汇（`mycode_label` / `opencode_label`）喂给它。措辞是安全关键输出
+# （"`None`" 和 "未记录" 是两件事——前者把未知说成已知取值，正是 1.9× 假结论的
+# 人眼版），在 harbor 这边抄一份就一定会各自漂移。这里曾经 import 通用层三个私有符号
+# （`_guard_blind_reason` / `_guard_was_blind` / `_mismatch_cell`）自己拼横幅，
+# 结果三句里两句各写了一份、还漏了一句补救提示（Task 12 复审 I-2 / M-3）。
 from eval.common.compare import (
-    GUARD_BLIND_WARNING,
-    _guard_blind_reason,
-    _guard_was_blind,
-    _mismatch_cell,
     compare_reports,
     compare_rows,
+    guard_banner,
     pair_rows,
 )
 from eval.common.schema import normalize_row
@@ -284,43 +284,22 @@ def by_language(pairs: Sequence[dict[str, Any]]) -> dict[str, dict[str, int]]:
 
 
 def _guard_lines(result: Mapping[str, Any]) -> list[str]:
-    """守卫横幅。措辞全部取自通用层——这里是安全关键输出，不许有第二份。"""
-    label_a, label_b = result["mycode_label"], result["opencode_label"]
-    mismatches = result.get("variable_mismatches") or []
-    blind = _guard_was_blind(result)
-    reason = _guard_blind_reason(result, label_a, label_b) if blind else ""
+    """守卫横幅。措辞的唯一来源是通用层的 `guard_banner`——这里**一句都不自己写**。
 
-    if mismatches:
-        # 这段文字里不能出现任何"谁更强"的措辞：变量没对齐时它是唯一一定会被读到的
-        # 地方，写进去就等于自己把守卫拆了。
-        lines = ["> ⚠️ **两臂的控制变量不一致** —— 下面全是描述性数字，不能读成「谁更强」。"]
-        if blind:
-            # 「既未对齐、又瞎」必须同时说出来：只报"未对齐"会让读者以为
-            # 那几项差异是两臂都实测出来的。盘上已发表那一对正是这个形状
-            # （mycode 记了 8 个变量、opencode 一个都没记）。
-            lines.append(f"> {GUARD_BLIND_WARNING}（{reason}）。")
-        lines += [
-            ">",
-            f"| 变量 | {label_a} | {label_b} |",
-            "| --- | --- | --- |",
-        ]
-        # 单元格走通用层的 `_mismatch_cell`：`None` 在这里的意思是**这一侧没记录**，
-        # 不是一个叫 None 的取值。直接印 `None` 会把未知说成已知取值，
-        # 而"没记录"在报告里长得像"两边一样"正是 1.9× 那次假结论的机制。
-        lines += [
-            f"| `{m['field']}` | {_mismatch_cell(m['a'])} | {_mismatch_cell(m['b'])} |"
-            for m in mismatches
-        ]
-        lines.append("")
-        return lines
-    if blind:
-        # 没有 mismatch 也可能是"根本没得比"。沉默的守卫等于没有守卫。
-        return [
-            f"> {GUARD_BLIND_WARNING}（{reason}）。",
-            "> 下面全是描述性数字，不能读成「谁更强」。",
-            "",
-        ]
-    return []
+    留这一层薄壳（而不是让两个调用点直接调 `guard_banner`）只做一件事：把 harbor 的
+    词汇翻成通用层的入参。harbor 的结果字典用的是 `mycode_label` / `opencode_label`、
+    **没有 `labels` 键**，所以两个标签必须显式传。
+
+    守卫没开火（变量真比过而且一致）时返回 `[]`，markdown 与 stdout 都不会有横幅。
+    `variables_seen` 这个键在行层面的结果里**根本不存在**，`guard_banner` 把键缺失判成
+    "瞎"、照样打横幅——所以这里不许给它补一个 `{"a": 0, "b": 0}` 之类的假值
+    （见 `_harbor_result` 里那段注释）。
+    """
+    return guard_banner(
+        result,
+        label_a=result["mycode_label"],
+        label_b=result["opencode_label"],
+    )
 
 
 def render_markdown(result: dict[str, Any]) -> str:
@@ -435,6 +414,23 @@ def main(argv: list[str] | None = None) -> int:
         json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
     )
 
+    # 守卫开火时 stdout 也必须说。下面那行金丝雀是人跑这条命令**唯一一定会读到**的
+    # 输出，而「MyCode 13/20 vs opencode 8/20，McNemar p=0.0625」正是当年「快 1.9×」
+    # 被汇报上去的那种一行式摘要——守卫只写在 markdown 里，等于沉默地给出一个看起来
+    # 可信的结论，那是本模块族唯一的严重失效模式。
+    #
+    # 措辞同样只有通用层那一份：这里回显的就是 `_guard_lines()` 里 `> ` 开头的几句
+    # （stdout 是纯文本，所以去掉引用标记与 markdown 粗体），一句都不自己写。
+    # 差异表不回显——它是 markdown 表格，在纯文本里读不成样子，而金丝雀那行已经
+    # 带着 markdown 的路径。守卫没开火时 `_guard_lines()` 返回 `[]`，一行都不打：
+    # 每次都打的警告是噪音，等于没有警告。
+    #
+    # 只加行、不动下面那行金丝雀：实施计划 Step 5 是"重定向到文件后用 Read 工具肉眼看"、
+    # Task 14 简报 P3 是散文 `Expected:`，两处都不是全行相等断言，而且期望串是实际
+    # stdout 的严格子串（实测见 task-12-round1-report.md）。
+    for line in _guard_lines(result):
+        if line.startswith("> "):
+            print(line.removeprefix("> ").replace("**", ""))
     print(
         "MyCode {mp}/{n} vs opencode {op}/{n}，McNemar p={p} → {out}".format(
             mp=result["mycode_passed"],

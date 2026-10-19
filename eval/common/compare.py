@@ -555,42 +555,73 @@ def _mismatch_cell(value: Any) -> str:
     return "未记录" if value is None else f"`{value}`"
 
 
-def render_markdown(comparison: Mapping[str, Any]) -> str:
-    label_a, label_b = comparison["labels"]["a"], comparison["labels"]["b"]
-    mismatches = comparison.get("variable_mismatches") or []
-    lines = [f"# {label_a} vs {label_b}", ""]
+def guard_banner(comparison: Mapping[str, Any], *, label_a: str, label_b: str) -> list[str]:
+    """守卫横幅。**这几句措辞只有这一份**——`render_markdown` 与 harbor 的 CLI 都调它。
 
-    if mismatches:
-        # 这段文字里不能出现任何胜者措辞：它是"变量未对齐"时唯一一定会被读到的地方，
-        # 写进去就等于自己把守卫拆了。禁词清单（`SUPERLATIVES` / `WINNER_PHRASES`）
-        # 只在 `tests/unit/test_eval_compare.py` 里存一份——那是**真的会被执行**的那份，
-        # 外加下面几条横幅的金标准串断言（多一个字、少一个字都红）。
-        lines.append("> ⚠️ **变量未对齐**——下面所有数字都是描述性的，不构成结论。")
-        if _guard_was_blind(comparison):
-            # 「既未对齐、又瞎」时横幅也得带上"瞎"这件事：横幅是人眼里的唯一提示，
-            # 而 headline 那行在 markdown 正文里、读者可能只扫前几行。
-            # 只报"未对齐"会让人以为那些差异是两臂都实测出来的。
-            lines.append(
-                f"> {GUARD_BLIND_WARNING}"
-                f"（{_guard_blind_reason(comparison, label_a, label_b)}）。"
-            )
-        lines += [
-            "> 对齐之后重跑，或者只把它当线索。",
-            "",
-            "| 变量 | " + label_a + " | " + label_b + " |",
-            "| --- | --- | --- |",
-        ]
-        lines += [
-            f"| `{m['field']}` | {_mismatch_cell(m['a'])} | {_mismatch_cell(m['b'])} |"
-            for m in mismatches
-        ]
-        lines.append("")
-    elif _guard_was_blind(comparison):
-        lines += [
+    返回 markdown 行（带行首的 `> ` 引用标记）；守卫没开火就返回 `[]`：
+    变量真比过而且一致时不打横幅，否则警告永远挂着、而永远挂着的警告等于没有警告。
+
+    **没有 `header=` 参数，这是有意的。** 让调用方自己供给标题串，就等于每个调用方
+    各带一份措辞、duplication 从后门原样回来：Task 12 落地的那一版里
+    `eval/harbor/compare.py` 自己写着「两臂的控制变量不一致」，与这里的「变量未对齐」
+    各自漂移，还漏掉了下面那句可执行的补救提示（复审 M-3）。一句就是一份，不许参数化。
+
+    `label_a` / `label_b` 必须是 kwarg、不能从 `comparison` 里取：harbor 的结果字典
+    用的是 `mycode_label` / `opencode_label`，**没有 `labels` 键**。
+
+    这几行是安全关键输出，被 `tests/unit/test_eval_compare.py` 的金标准串逐字符钉住
+    （`test_the_guard_banners_are_above_the_fold`、
+    `test_an_unaligned_and_blind_comparison_says_both_things`、
+    `test_compare_rows_alone_may_not_claim_a_winner`、
+    `test_one_side_without_variables_is_blind_too`）：改措辞就必须有意识地改那些测试。
+    harbor 的 `main()` 还会把其中 `> ` 开头的那几句回显到 stdout——那是人跑 CLI
+    唯一一定会读到的输出，所以禁词表同样管得到它，
+    `test_the_banner_prose_is_safe_to_echo_to_stdout` 就是钉这一条的。
+    """
+    mismatches = comparison.get("variable_mismatches") or []
+    if not mismatches:
+        if not _guard_was_blind(comparison):
+            return []
+        # 没有 mismatch 也可能是"根本没得比"（`variables_seen` 缺失、或一侧为 0）。
+        # "什么都没校验"和"校验通过"在数据上长得一模一样，沉默的守卫等于没有守卫。
+        return [
             f"> {GUARD_BLIND_WARNING}（{_guard_blind_reason(comparison, label_a, label_b)}）。",
             "> 下面所有数字都是描述性的，不构成结论。",
             "",
         ]
+
+    # 这段文字里不能出现任何胜者措辞：它是"变量未对齐"时唯一一定会被读到的地方，
+    # 写进去就等于自己把守卫拆了。禁词清单（`SUPERLATIVES` / `WINNER_PHRASES`）
+    # 只在 `tests/unit/test_eval_compare.py` 里存一份——那是**真的会被执行**的那份，
+    # 外加下面几条横幅的金标准串断言（多一个字、少一个字都红）。
+    lines = ["> ⚠️ **变量未对齐**——下面所有数字都是描述性的，不构成结论。"]
+    if _guard_was_blind(comparison):
+        # 「既未对齐、又瞎」时横幅也得带上"瞎"这件事：横幅是人眼里的唯一提示，
+        # 而 headline 那行在 markdown 正文里、读者可能只扫前几行。
+        # 只报"未对齐"会让人以为那些差异是两臂都实测出来的。
+        lines.append(
+            f"> {GUARD_BLIND_WARNING}"
+            f"（{_guard_blind_reason(comparison, label_a, label_b)}）。"
+        )
+    lines += [
+        "> 对齐之后重跑，或者只把它当线索。",
+        "",
+        "| 变量 | " + label_a + " | " + label_b + " |",
+        "| --- | --- | --- |",
+    ]
+    lines += [
+        f"| `{m['field']}` | {_mismatch_cell(m['a'])} | {_mismatch_cell(m['b'])} |"
+        for m in mismatches
+    ]
+    lines.append("")
+    return lines
+
+
+def render_markdown(comparison: Mapping[str, Any]) -> str:
+    label_a, label_b = comparison["labels"]["a"], comparison["labels"]["b"]
+    lines = [f"# {label_a} vs {label_b}", ""]
+
+    lines += guard_banner(comparison, label_a=label_a, label_b=label_b)
 
     lines += [
         headline(comparison),

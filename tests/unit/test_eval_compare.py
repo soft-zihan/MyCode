@@ -12,12 +12,14 @@ import json
 import pytest
 
 from eval.common.compare import (
+    GUARD_BLIND_WARNING,
     VariableMismatch,
     _guard_blind_reason,
     _guard_was_blind,
     _label_of,
     compare_reports,
     compare_rows,
+    guard_banner,
     headline,
     load_run,
     mcnemar_exact,
@@ -1089,3 +1091,114 @@ def test_two_arms_may_not_collapse_into_the_same_label():
     # Task 13 的路由走的正是显式 labels=，它得能拿回自己传进去的东西。
     explicit = compare_reports(a, b, labels=("harbor", "harbor"))
     assert explicit["labels"] == {"a": "harbor", "b": "harbor"}
+
+
+# ── Task 12 修复轮 1（I-2）：横幅措辞抽成公开的 `guard_banner`，只此一份 ──
+
+# harbor 那一层原来自己写着「两臂的控制变量不一致」，通用层写着「变量未对齐」——
+# 安全关键措辞有两份，而且已经开始漂移（harbor 少了「对齐之后重跑」那句补救提示）。
+# 抽提是**纯搬移**：下面第一条测试钉住"通用层自己也没有第二份"，
+# harbor 那侧由 `test_harbor_compare.py::test_the_guard_banner_is_the_common_layers_word_for_word`
+# 钉住"两个渲染器逐字节相同"。横幅本身的文字仍由上面几条金标准串逐字符看守，
+# 所以搬错一个字就红——这次抽提是自验证的。
+
+
+def test_render_markdowns_banner_is_guard_banners_output_verbatim():
+    """`render_markdown` 顶部的横幅必须**逐行等于** `guard_banner` 的输出。
+
+    四个形状全过（含"守卫没开火"）。哪天有人把横幅重新内联回 `render_markdown`、
+    或在别处再拼一份，两边一分叉这条就红——那正是 I-2 要防的事。
+    """
+    blind_a = _report([_row("t", True)], run_id="mycode", **ALIGNED)
+    blind_b = _report([_row("t", False)], run_id="opencode", **ALIGNED)
+    blind_a["meta"]["variables"] = {}
+    blind_b["meta"]["variables"] = {}
+    shapes = {
+        "未对齐": compare_reports(
+            _report([_row(f"t{i}", True) for i in range(6)], run_id="mycode", model="m1", **ALIGNED),
+            _report([_row(f"t{i}", False) for i in range(6)], run_id="opencode", model="m2", **ALIGNED),
+        ),
+        "既未对齐又瞎": compare_reports(
+            _legacy_report([_legacy_trial("t", 1.0)],
+                           variables=dict(PUBLISHED_ARM_VARIABLES), arm="mycode"),
+            _legacy_report([_legacy_trial("t", 0.0)], arm="opencode"),
+        ),
+        "只是瞎": compare_reports(blind_a, blind_b),
+        "对齐（守卫不开火）": compare_reports(
+            _report([_row("t", True)], run_id="mycode", **ALIGNED),
+            _report([_row("t", True)], run_id="opencode", **ALIGNED),
+        ),
+    }
+
+    for name, result in shapes.items():
+        label_a, label_b = result["labels"]["a"], result["labels"]["b"]
+        banner = guard_banner(result, label_a=label_a, label_b=label_b)
+        lines = render_markdown(result).splitlines()
+        assert lines[:2] == [f"# {label_a} vs {label_b}", ""], name
+        assert lines[2 : 2 + len(banner)] == banner, name
+        # 横幅之后紧接着就是 headline：中间不许塞东西，否则横幅掉出第一屏
+        assert lines[2 + len(banner)] == headline(result), name
+
+    # 守卫没开火时一个字都不许打：永远挂着的警告等于没有警告
+    aligned = shapes["对齐（守卫不开火）"]
+    assert guard_banner(aligned, label_a=aligned["labels"]["a"], label_b=aligned["labels"]["b"]) == []
+
+
+def test_guard_banner_handles_a_comparison_without_variables_seen():
+    """`variables_seen` 这个键在行层面的结果字典里**根本不存在**（harbor 的 `compare()`
+    就是那个形状，它刻意不补假值）。键缺失必须判瞎、照样打横幅，不许 KeyError、
+    更不许沉默——"什么都没校验"和"校验通过"在数据上长得一模一样。
+    """
+    assert guard_banner({"variable_mismatches": []}, label_a="mycode", label_b="opencode") == [
+        "> ⚠️ 本次对比未经过变量校验（这一层只看得到逐题行、看不到报告，无从校验控制变量）。",
+        "> 下面所有数字都是描述性的，不构成结论。",
+        "",
+    ]
+    # 连 `variable_mismatches` 都没有也得能走（`_guard_was_blind` 读的是 `.get`）
+    assert guard_banner({}, label_a="mycode", label_b="opencode")[0].startswith(
+        f"> {GUARD_BLIND_WARNING}"
+    )
+    # 未对齐 + 键缺失 → 两件事都要说，单元格仍是「未记录」不是 `` `None` ``
+    both = guard_banner(
+        {"variable_mismatches": [{"field": "meta.model", "a": "m1", "b": None}]},
+        label_a="mycode",
+        label_b="opencode",
+    )
+    assert both[0] == "> ⚠️ **变量未对齐**——下面所有数字都是描述性的，不构成结论。"
+    assert both[1] == "> ⚠️ 本次对比未经过变量校验（这一层只看得到逐题行、看不到报告，无从校验控制变量）。"
+    assert "| `meta.model` | `m1` | 未记录 |" in both
+
+
+def test_the_banner_prose_is_safe_to_echo_to_stdout():
+    """harbor 的 CLI 会把横幅里 `> ` 开头的几句原样回显到 stdout（去掉引用标记与粗体）。
+
+    stdout 是人跑 CLI 唯一一定会读到的输出，所以那几句同样不许带任何胜者措辞。
+    禁词表**只在本文件存一份**：harbor 的测试不抄第二份，它钉的是
+    "stdout 的那几行逐行等于横幅里 `> ` 开头的那几句"，于是这条一红、那边跟着红。
+    """
+    result = compare_reports(
+        _legacy_report([_legacy_trial("t", 1.0)],
+                       variables=dict(PUBLISHED_ARM_VARIABLES), arm="mycode"),
+        _legacy_report([_legacy_trial("t", 0.0)], arm="opencode"),
+    )
+    echoed = [
+        line.removeprefix("> ").replace("**", "")
+        for line in guard_banner(result, label_a="mycode", label_b="opencode")
+        if line.startswith("> ")
+    ]
+
+    # 三句：未对齐 + 未经校验（盘上已发表那一对正是这个重叠形状）+ 补救提示
+    assert echoed == [
+        "⚠️ 变量未对齐——下面所有数字都是描述性的，不构成结论。",
+        "⚠️ 本次对比未经过变量校验（opencode 一侧没有记录控制变量）。",
+        "对齐之后重跑，或者只把它当线索。",
+    ]
+    for line in echoed:
+        assert line.strip(), "回显到 stdout 的空行等于没说话"
+        for word in SUPERLATIVES:
+            assert word not in line, f"守卫开火时 stdout 出现了结论性措辞：{word}"
+        for phrase in WINNER_PHRASES:
+            assert phrase not in line, f"守卫开火时 stdout 出现了胜者句式：{phrase}"
+    # 三句里必须有一句明确拒绝下结论（另两句分别是"未对齐"的事实与"守卫瞎了"的事实）
+    assert any("不构成结论" in line for line in echoed), echoed
+    assert any("当线索" in line for line in echoed), echoed
