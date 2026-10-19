@@ -684,3 +684,62 @@ def test_resume_of_an_empty_dir_is_refused_even_though_nothing_would_be_skipped(
         runner.main(
             ["--arm", "opencode", "--resume-from", str(job), "--dataset-dir", str(tmp_path / "nope")]
         )
+
+
+def test_dry_run_with_everything_already_done_never_shells_out_an_empty_command(
+    monkeypatch, tmp_path
+):
+    """`resume_only` 撞 `--dry-run` / `--install-only` 的那条早返回是**承重**的，不是清理。
+
+    `resume_only` 时 `command` 是空列表（初始化之后一直没被赋值），删掉那条早返回就会
+    掉进既有的 `if args.dry_run or args.install_only: subprocess.run(command, ...)`，
+    而 `subprocess.run([])` 是 IndexError。
+
+    触发场景不是假设的：全部题目跑完之后，用 `--dry-run --resume-from <job 目录>`
+    做一次起跑前自检——正是"全都跑完了所以一题都不用跑"那一格。
+
+    变异取证：把 runner.py 里
+    `if resume_only and (args.dry_run or args.install_only): return 0` 这两行注掉，
+    这条必须红。它存活的形状特别容易复现——将来谁把两条 dry-run 早返回合并成一条，
+    就会静默删掉它，而全量测试一条都不会红。
+    """
+    reports = tmp_path / "reports"
+    monkeypatch.setattr(runner, "REPORTS_DIR", reports)
+    monkeypatch.setattr(runner, "git_revision", lambda: "abc1234")
+    monkeypatch.setattr(runner, "needs_docker_group", lambda: False)
+
+    resume_dir = tmp_path / "old-job"
+    _write_trial(resume_dir, "polyglot_cpp_x__1", "polyglot_cpp_x", reward=1.0)
+
+    shelled: list[list[str]] = []
+    monkeypatch.setattr(
+        runner,
+        "subprocess",
+        SimpleNamespace(
+            run=lambda command, **kwargs: shelled.append([str(p) for p in command])
+            or SimpleNamespace(returncode=0)
+        ),
+    )
+
+    args = runner.build_parser().parse_args(
+        _argv(
+            tmp_path / "dataset",
+            resume_dir,
+            jobs=tmp_path / "jobs",
+            configs=tmp_path / "configs",
+            extra=("--dry-run",),
+        )
+    )
+    returncode = runner.run_arm(
+        arm="opencode",
+        tasks=[],  # 一题都不剩 → resume_only
+        args=args,
+        base_url="https://gw.test/v1",
+        api_key="k",
+        settings_env=None,
+    )
+
+    assert returncode == 0
+    assert shelled == []  # 没走到 subprocess.run([])
+    # --dry-run 的既有口径是"不出报告"，续跑这一格不破例
+    assert list(reports.glob("*.json")) == []
