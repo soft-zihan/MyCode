@@ -300,3 +300,8 @@ script.txt
 Janus/
 frontend/.vite/
 /*.png
+
+# 一次性探针、跑批看护脚本与其落盘产物（控制器/子智能体的临时文件，不入库）
+# 根目录只留看门狗正在写的那几个；分析产物统一挪进 .scratch/
+.tmp-*
+.scratch/
