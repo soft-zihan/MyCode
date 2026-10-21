@@ -128,6 +128,63 @@ def test_merge_trials_of_a_single_dir_matches_collect_trials(tmp_path):
     assert merge_trials([tmp_path]) == collect_trials(tmp_path)
 
 
+def test_merge_trials_never_lets_an_unscored_retry_overwrite_a_scored_trial(tmp_path):
+    """补跑时 setup 挂死产出 reward=None，它不能顶掉先前那次有效判分。
+
+    实测形状（2026-10-21 的 225 题基线）：`polyglot_cpp_dnd-character` 在
+    `2026-10-19__13-33-43` 那轮 reward=1.0 跑通了，之后三轮补跑全部
+    AgentSetupTimeoutError（setup 精确卡在 1080-1110s，空机器上也一样），
+    无条件"后者覆盖前者"把一次**通过**盖成了未判分。四道被盖掉的题里丢了一道真通过，
+    opencode 臂因此少算 1 个通过、分母少 4 题。
+
+    这跟 completed_task_names 的口径正好相反：那里写着"一次失败的测量也是一次测量"、
+    不肯把失败当没跑过；这里却是把一次有效测量换成一次"根本没跑起来"。
+    """
+    scored, retried = tmp_path / "a", tmp_path / "b"
+    _write_trial(
+        scored,
+        "polyglot_cpp_x__1",
+        {"task_name": "polyglot_cpp_x", "verifier_result": {"rewards": {"reward": 1.0}}},
+    )
+    _write_trial(
+        retried,
+        "polyglot_cpp_x__2",
+        {
+            "task_name": "polyglot_cpp_x",
+            "exception_info": {"exception_type": "AgentSetupTimeoutError"},
+        },
+    )
+
+    merged = merge_trials([scored, retried])
+
+    assert [t["reward"] for t in merged] == [1.0]
+    assert merged[0]["result_path"].replace("\\", "/").endswith("polyglot_cpp_x__1/result.json")
+
+
+def test_merge_trials_still_prefers_the_later_trial_when_neither_is_scored(tmp_path):
+    """两边都没判分时，仍然后者覆盖前者——上一条不是要反过来偏袒旧目录。
+
+    留着最新那次失败才对：报告里的 exception 要能反映最近一次真实发生的事，
+    否则修好了基础设施也看不出变化。
+    """
+    older, newer = tmp_path / "a", tmp_path / "b"
+    _write_trial(
+        older,
+        "polyglot_java_y__1",
+        {"task_name": "polyglot_java_y", "exception_info": {"exception_type": "AgentSetupTimeoutError"}},
+    )
+    _write_trial(
+        newer,
+        "polyglot_java_y__2",
+        {"task_name": "polyglot_java_y", "exception_info": {"exception_type": "NonZeroAgentExitCodeError"}},
+    )
+
+    merged = merge_trials([older, newer])
+
+    assert [t["reward"] for t in merged] == [None]
+    assert merged[0]["exception_type"] == "NonZeroAgentExitCodeError"
+
+
 # ── agent 配置 ────────────────────────────────────────────────────────
 
 

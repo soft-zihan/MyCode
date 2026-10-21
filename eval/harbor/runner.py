@@ -637,11 +637,20 @@ def merge_trials(run_dirs: Sequence[Path | str]) -> list[dict[str, Any]]:
     用途：某一类题因为环境问题整批废掉（java 题的 Gradle 下载），修好之后只补跑
     那几道，再和之前那份大跑的结果合起来——不必为了 4 道题重跑 50 个 trial。
     覆盖而不是追加，否则同名题会被计两次。
+
+    一个例外：**有判分的不能被没判分的覆盖。** 补跑时 agent 装不进容器
+    （`AgentSetupTimeoutError`）会产出 `reward=None` 的 trial，无条件覆盖等于
+    把一次有效测量换成一次"根本没跑起来"——那正是 `collect_trials` 的 docstring
+    说要避免的互相冒充，方向还反过来：这里丢的是真数据。
+    两边都没判分时仍取后一个，好让报告里的 exception 反映最近一次真实发生的事。
     """
     merged: dict[str, dict[str, Any]] = {}
     for run_dir in run_dirs:
         for trial in collect_trials(run_dir):
             key = trial["task_name"] or trial["trial_name"] or trial["result_path"]
+            previous = merged.get(key)
+            if previous is not None and previous["reward"] is not None and trial["reward"] is None:
+                continue
             merged[key] = trial
     return [merged[key] for key in sorted(merged)]
 
