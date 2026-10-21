@@ -872,9 +872,14 @@ token / 时长均值，以及 **McNemar 精确检验**的双侧 p 值。
 - **镜像构建期没有代理**（1.2 的 drop-in 只管 dockerd 拉镜像），所以 go 题必须靠预热才构建得出来
   （2.7）。预热只是把同一次构建提前做，不改题目内容，两臂共用同一份缓存。
 - harbor 文档（在线版）描述的是比 0.24.0 更新的接口，凡是本文和文档冲突，以本文的源码核实结果为准。
-- **能比和不能比的指标**（细见 2.12）：
-  - 可比：通过率 / reward、`n_input_tokens`（两边都是累计 prompt token，含 cache）、墙钟时长。
-  - **不可比**：`n_output_tokens`（网关的 `completion_tokens` 含 reasoning，opencode 把 reasoning 单列）、
+- **能比和不能比的指标**（细见 2.12；225 题基线上的实测数字见 **6.4**）：
+  - 可比：通过率 / reward、`n_input_tokens`（两边都是累计 prompt token，含 cache）。
+  - **墙钟时长原则上可比、但那一次不可比**：`agent_setup` 直接吃 CPU/IO，
+    所以跑批时机器上还有别的负载（例如 SDD 子智能体）就会把它拉长，
+    而两臂承受的争用程度不同。实测同一条跑批 5.5 → 8.2 → 12.9 分钟/题。
+    要用这一格，必须两臂都在空机器上跑（6.4 第 1 条）。
+  - **不可比**：`n_output_tokens`（网关的 `completion_tokens` 含 reasoning，opencode 把 reasoning 单列，
+    且 harbor 聚合时把 opencode 的 reasoning 丢了 → 只能比「可见 completion」，见 6.4 第 2 条）、
     `n_cache_tokens`（两臂都恒为 0，网关不报 `cached_tokens`）、`cost_usd`（两臂都是 null）。
     所以「省了多少钱」这个说法在本 benchmark 里**给不出证据**，只能说「少用了多少输入 token」。
 - MyCode 臂的 `thinking` / `context_window` 由 runner 从宿主端点配置搬进容器（见 3 节）。
@@ -897,9 +902,11 @@ token / 时长均值，以及 **McNemar 精确检验**的双侧 p 值。
 
 ## 5. 实测结果（2026-10-17，最终数据）
 
-> **看结论请直接跳 5.7**（2026-10-18，变量对齐后重跑 MyCode 臂）。
-> 5.1–5.6 是那一轮的过程记录，包含两次自我推翻（5.3 的 token、5.6 的速度），
-> 数字以 5.7 为准；5.1–5.6 留着是因为「怎么错的」比「错的那个数」有用。
+> **看结论请直接跳第 6 节**（2026-10-22，aider-polyglot **全量 225 题**两臂基线）。
+> 本节是 25 题那一轮：5.7 是它的结论，5.1–5.6 是过程记录，包含两次自我推翻
+> （5.3 的 token、5.6 的速度）。**5.7 的头条数字（13/20 vs 8/20，p = 0.0625）已被第 6 节推翻**
+> ——题量提到 225 之后差异消失（p = 1.0）。留着是因为「怎么错的」比「错的那个数」有用，
+> 而且 5.7 末尾对 token 口径的那段保留意见，在 225 题上被逐字证实了。
 
 ### 5.1 跑了什么
 
@@ -1056,7 +1063,15 @@ opencode 臂没发（全程思考）**。两臂的可见输出量其实差不多
    并且 `payload.thinking_misalignment` 会在「以为思考开着、实际一个思考 token 都没有」时
    直接往 stderr 打警告。
 
-### 5.7 变量对齐后重跑 MyCode 臂（2026-10-18，**结论以这一节为准**）
+### 5.7 变量对齐后重跑 MyCode 臂（2026-10-18，~~结论以这一节为准~~ → **已被第 6 节推翻**）
+
+> ⚠️ 本节的通过率结论（15/24 vs 10/24、13/20 vs 8/20、p = 0.0625、不一致对 5:0）
+> 是 **n = 25** 的结果，2026-10-22 跑满 225 题后差异**完全消失**（113/217 vs 112/217，p = 1.0，
+> 不一致对 24:23）。本节自己也写了「差一次翻面就到 0.05」——那正是小样本的样子，
+> 而 5.5 的可检测下限早就说过 n = 20 只能检出 25pp 的差。**看结论去第 6 节。**
+> 本节仍然有效的部分：5.6 的速度归因（1.9× 几乎全是思考开关的差）、
+> 思考开关的自我消融（同一臂自己跟自己比，净 +3 题、代价生成量 1.9×）、
+> 以及末尾那段 token 口径不对等的保留意见（第 6 节用 225 题证实了它）。
 
 5.6 修完之后只重跑了 MyCode 臂——opencode 那一轮本来就是全程思考，是合格的对照，不用重跑：
 
@@ -1125,7 +1140,8 @@ python 1/1、rust 2/2 —— 5.2 里「go 是 MyCode 唯一明显落后的语言
 净 +3 题，代价是生成量 1.9×、单题时长 1.56×。这条比两臂对比更硬——
 它是**同一个臂自己跟自己比**，没有跨 scaffold 的口径问题。
 
-**token 口径不对等（这一版的已知局限）**：MyCode 的 `n_output_tokens` 取自网关的
+**token 口径不对等（这一版的已知局限；225 题基线已在 6.4 第 2 条查到底并给了实测数字）**：
+MyCode 的 `n_output_tokens` 取自网关的
 `completion_tokens`，**含**思考（同一份数据里 `mycode_reasoning_tokens` 是它的子集）；
 opencode 臂的 `agent_result.metadata` 是 `null`，harbor 没留下它的思考量，
 无法确认它的 `n_output_tokens` 含不含思考。所以「MyCode 输出是 opencode 的 2.17×」**不是结论**。
@@ -1133,3 +1149,232 @@ opencode 臂的 `agent_result.metadata` 是 `null`，harbor 没留下它的思�
 与 opencode 报出的 1 561/题同量级——这和 5.6 里「两臂可见输出差不多（199 vs 178 token/次）」一致。
 要补上这一格，得让 opencode 臂也落一份思考量：harbor 的 opencode adapter 不给，
 只能从容器内 opencode 自己的 session 存储里捞。
+
+---
+
+## 6. 全量 225 题两臂基线（2026-10-22，**结论以这一节为准**）
+
+### 6.1 跑了什么
+
+aider-polyglot **全部 225 题**（6 门语言：cpp 26、go 38、java 47、javascript 49、python 28、rust 29），
+两臂、同一个模型 `qwen3.6-27b`、同一份网关凭据、同一批题目镜像、`seed=20261017`、每题 `k=1`。
+
+| 控制变量 | 两臂取值 |
+| --- | --- |
+| model / provider | `qwen3.6-27b` / openrouter |
+| `--thinking` | `default`（不注入 `MYCODE_THINKING`，跟随网关默认；两臂都真在思考） |
+| seed / stage | `20261017` / `full` |
+| `--n-concurrent` | 2 |
+| `--agent-setup-timeout-multiplier` | 3.0（逐份 `result.json` 的 config 核过，225/225 与 178/178 全是 3.0） |
+
+- MyCode 臂：一次跑完，job 目录 `~/.mycode/harbor_jobs/2026-10-18__22-43-17`，
+  225 个 trial 全有 `result.json`，**223 题判分成功**（117 过），2 题未判分
+  （1 个 `AgentSetupTimeoutError` @2700s、1 个 `VerifierTimeoutError` @1800s）。
+- opencode 臂：被 Windows/WSL 重启打断**四次**，跨 **9 个 job 目录**跑完
+  （`07-18-46`→`13-33-43`→`21-36-26`→`20-52-49`→`21-44-30`→`03-01-10`
+  →`06-29-01`→`08-13-51`→`16-39-41`），**219 题判分成功**（112 过），6 题未判分。
+
+报告与对比（都在 `eval/reports/`）：
+
+```
+harbor_mycode_full_20261021__080949.{json,md}      # MyCode 臂，当前判分口径重出
+harbor_opencode_full_20261022__030529.{json,md}    # opencode 臂，九个目录合并重出
+harbor_compare_full_20261022__034107.{json,md}     # 217 题配对
+harbor_compare_full-nojava_20261022__034107.{json,md}
+```
+
+复现（**不用重跑**，判分口径变了就照 2.8c 重出报告）：
+
+```bash
+J=~/.mycode/harbor_jobs
+.venv/bin/python -m eval.harbor.runner --arm mycode --stage full \
+  --model qwen3.6-27b --seed 20261017 --run-dir $J/2026-10-18__22-43-17
+.venv/bin/python -m eval.harbor.runner --arm opencode --stage full \
+  --model qwen3.6-27b --seed 20261017 \
+  --run-dir $J/2026-10-19__07-18-46  --run-dir $J/2026-10-19__13-33-43 \
+  --run-dir $J/2026-10-19__21-36-26  --run-dir $J/2026-10-20__20-52-49 \
+  --run-dir $J/2026-10-20__21-44-30  --run-dir $J/2026-10-21__03-01-10 \
+  --run-dir $J/2026-10-21__06-29-01  --run-dir $J/2026-10-21__08-13-51 \
+  --run-dir $J/2026-10-21__16-39-41
+.venv/bin/python -m eval.harbor.compare --stage full
+.venv/bin/python -m eval.harbor.compare --stage full --exclude-language java
+```
+
+（`--run-dir` 是**后给的为准**，所以目录必须按时间顺序列。合并规则见 6.5 那条修复：
+有判分的不会被没判分的盖掉。）
+
+### 6.2 结论一句话
+
+> **同模型、变量对齐、225 题 k=1 的口径下，MyCode 与 opencode 的通过率统计上无法区分。**
+> 217 道两臂都有判分的题上 113 vs 112（52.1% vs 51.6%），McNemar 精确双侧 **p = 1.0**，
+> 不一致对 **24 : 23**；剔掉 java 后 170 题 **101 : 101 逐题全平**，p 同样 1.0。
+
+三种口径都摆出来，因为它们指向同一个结论：
+
+| 口径 | MyCode | opencode | p |
+| --- | --- | --- | --- |
+| 两臂都有判分（**217** 题，主口径） | 113 = **52.1%** | 112 = **51.6%** | **1.0** |
+| 剔掉 java（170 题） | 101 = 59.4% | 101 = 59.4% | 1.0 |
+| 未判分一律算失败（225 题） | 117 = 52.0% | 112 = 49.8% | — |
+
+第三个口径那 2.2pp 的差**全部来自 opencode 臂多出的 4 题未判分**（6 vs 2），
+是 agent 装不进容器的基础设施差，不是做题能力差；而 n = 225 的配对设计要检出 2.2pp
+远超其能力（可检测下限见 5.5：n = 225 约 5.8–7.6pp），所以它不构成结论。
+
+按语言（MyCode 过 / opencode 过）：cpp **13:11**、go **19:19**、java **12:11**、
+javascript **36:38**、python **12:12**、rust **21:21** —— 六门全在 ±2 以内，
+没有任何一门出现 5.2 里那种「go 是 MyCode 唯一明显落后的语言」的形状。
+
+**5.7 的头条到此作废**：n = 25 时的 13/20 vs 8/20、不一致对 5:0、p = 0.0625，
+在 n = 225 上变成 24:23、p = 1.0。5.7 自己写过「差一次翻面就到 0.05」，
+那正是小样本的样子——**这一次是 5.4「单题结果是噪声，只有总体通过率有意义」
+和 5.5 的可检测下限一起被证实**：n = 20 只能检出 25pp 的差，测出 5:0 说明不了什么。
+
+### 6.3 归因：不一致的 47 题，两臂的失败形状是**对称**的
+
+对 24 题「只有 MyCode 过」与 23 题「只有 opencode 过」，逐题读失败臂的
+`verifier/test-stdout.txt` 尾 6 行分类（`.scratch/attrib-225.py`，
+分类规则做过阳性对照：三段造出来的编译失败/断言失败/空跑文本都正确触发，
+真数据命中的是 `FAILED aider_polyglot_test` + `Exit code: 1/101` 那一行）：
+
+| 失败臂的失败形状 | opencode 失败（24 题） | MyCode 失败（23 题） |
+| --- | --- | --- |
+| 跑起来了但测试断言失败 | **19** | **20** |
+| 编译/构建不过（`CMake build failed`） | 5 | 3 |
+| 测试根本没跑到 / 其他 | 0 | 0 |
+
+**这个对称性是本次基线最有用的一条结论**：n = 48 的中期数据曾让人以为
+「opencode 特有不擅长满足测试文件写死的接口契约」（当时 7 个 MyCode 独占通过里
+6 个是编译不过），跑满之后**这个类差不存在了**——编译不过是 5 : 3，
+两臂都会犯，只是犯在不同的题上。剩下 89 题两臂都过、81 题两臂都没过，
+配对的 217 题里有 **78% 是同向的**。
+
+诚实边界：分类只到「测试跑没跑起来 / 构建过没过」这一层，**没有**再往下分
+「规则理解错 / 边界条件漏 / 接口签名错」。要做到那一层得逐题读 47 份 diff，
+本轮没做。
+
+### 6.4 三个「看着可比、其实不可比」的指标（都已实测确认）
+
+这一节是本次基线最该被记住的部分：**三个指标都印在 compare 生成的表格里，
+其中两个直接照抄会得出错误结论。**
+
+1. **`duration_s`（96.5s vs 120.2s）——弃用。** 两臂都在 SDD 子智能体活跃期间跑的，
+   且承受的争用程度不同。同一条跑批、同样 `n_concurrent=2`，实测：
+   没有子智能体时 **5.5 分钟/题**，评审在跑时 **8.2**，实现者+复审同时在跑时 **12.9**。
+   瓶颈是 `agent_setup`（每题在全新容器里重装依赖，均值 202.8s、最长 4688s），
+   它直接吃 CPU/IO。**通过率不受影响**（判分是 verifier 跑测试，确定性的）。
+2. **`tokens.output`（3204 vs 1562 = 2.05×）——口径不对等，对齐后是 1.04×。**
+   MyCode 的 `n_output_tokens` 取自网关 `completion_tokens`，**含思考**
+   （`agents/agent.py:413`「output 的子集，不是额外的一份；单独给是为了能算
+   『可见输出 = output − reasoning』」，`model_caller.py:181` 就是
+   `output_visible_tokens = max(0, output_tokens - reasoning_tokens)`）；
+   opencode 的**不含**，这一条直接读 harbor 0.24.0 源码核实
+   （`harbor/agents/installed/opencode.py:379-388`）：
+
+   ```python
+   output_tok    = tokens.get("output", 0) or 0
+   reasoning_tok = tokens.get("reasoning", 0) or 0   # ← 单独一个字段
+   total_output_tokens += output_tok                 # ← 只加 output，不加 reasoning
+   ```
+
+   实测对齐后的数字：
+
+   | | MyCode | opencode | 倍数 |
+   | --- | --- | --- | --- |
+   | `n_output_tokens` 原始（217 题均值） | 3204 | 1562 | **2.05×** |
+   | 其中思考（`mycode_reasoning_tokens`） | 1575（占 **49.2%**） | **拿不到**（见下） | — |
+   | 可见 completion（原始 − 思考） | **1629** | **1562** | **1.04×** |
+   | 只在 89 道两臂都通过的题上 | 1718 | 1484 | 1.16×（原始 2.18×） |
+
+   **所以「MyCode 话多一倍」是单位不一致造成的假象**，两臂可见输出同量级——
+   与 5.6 的「199 vs 178 token/次」和 5.7 的预测一致。
+
+   **opencode 的思考量为什么拿不到**（5.7 当时只写到「metadata 是 null」，这里查到底了）：
+   harbor 确实读了 `reasoning_tok`，但只把它塞进**逐 step** 的
+   `Metrics.extra["reasoning_tokens"]`（`opencode.py:398-403`），
+   而 trial 级的 `FinalMetrics` 只有 `total_prompt/completion/cached/cost/steps`
+   ——**没有 total_reasoning 这一项**，聚合时就丢了。实测本仓库的 trial
+   `result.json` 里 `step_results` 也是 `null`、`agent_result.metadata` 与
+   `rollout_details` 同样是 `null`，所以逐 step 那份也没落盘。
+   容器每题跑完就销毁，opencode 自己的 session 存储随之消失 →
+   **「含思考的总生成量」这一格两臂无法比，只能空着**，
+   除非改 harbor 的 adapter 把 `total_reasoning_tokens` 加进 `FinalMetrics`。
+   取数脚本自带探针自检（`reasoning > 0` 的题数 217/217，
+   若为 0 就说明字段没取到、"对齐后"数字会等于原始数字）。
+3. **判分口径本身也会漂——而且变量守卫抓不到。** mycode 臂的报告最初是
+   `f627034-dirty`（10-18）生成的、opencode 臂是 `9d6fb36-dirty`（10-21）生成的，
+   中间 `NO_REWARD_FILE_EXCEPTIONS` 那条规则落地了：**同一个 `RewardFileNotFoundError`，
+   旧报告记 `passed=False`、新报告记 `None`**。两份报告一比，opencode 有一批
+   「构建不过 = 做错了」的题从分母里溜走，第一版对比因此得出 189 题 p = 0.53。
+   守卫沉默是因为它比的是 `meta.variables`（model/provider/seed/stage/thinking，两臂确实全等），
+   而 `meta.git_revision` 被 `ARM_KEYS` 主动剔除了（两臂各算自己的 revision，必然不同，
+   留着守卫每次都开火）。**剔除是对的，但剔掉之后没有任何东西在看守判分口径。**
+   处置：按 2.8c 用当前代码把**两臂都重出**，本节所有数字都出自重出后的报告。
+
+`tokens.input`（88201 vs 89534，中位数 66430 vs 72358）是**可比**的：
+`payload.py:219-220` 明确两边都是「含 cache 的总输入」。
+两臂均值差 1.5%、中位数 MyCode 反而低 8%。
+`n_cache_tokens` 两臂全是 **0**，所以首页那句「prefix cache 命中率 >96%」
+**在这个 benchmark 里既不能证实也不能证伪**——harbor 这条链路上网关不回传 cache 计数。
+
+### 6.5 这次基线顺带查出来的四个真缺陷
+
+跑满 225 题的价值有一半在这里：这四个都是**只有跑满、并且被打断过很多次**才会露出来的。
+
+1. **`merge_trials` 让「没判分的补跑」盖掉有效判分**（已修，`74c6b8c`）。
+   原本无条件「后面的目录覆盖前面的」，于是补跑时 `AgentSetupTimeoutError` 产出的
+   `reward=None` trial 会顶掉先前真跑出来的结果。实测咬到 **4 道 cpp 题**，
+   其中 `polyglot_cpp_dnd-character` 是 `reward=1.0` 的**通过**被盖成未判分
+   （opencode 臂因此少算 1 个通过、分母少 4 题：`111/206` → `112/219`）。
+   修法：有判分的不能被没判分的覆盖；两边都没判分时仍取后一个
+   （否则报告里的 exception 会停在旧那次，看不出基础设施修好没有）。
+   两条测试，其中钉住新规则的那条**先跑红过**（`assert [None] == [1.0]`）。
+2. **`completed_task_names` 把「没判分」当「已完成」→ 永久跳过。** 这是
+   `runner.py:652-654` 写明的**既定设计**（「重跑失败的题目等于挑数据：一次失败的测量
+   也是一次测量。真要重跑某几道用 `--tasks` 显式点名」），立场是对的，本次三轮补跑
+   用的正是它给的 `--tasks` 逃生口。但后果要记着：**一次装环境挂死会让那道题在
+   `--resume-from` 下永远不再被尝试**，所以补跑必须显式点名，不能指望续跑自己发现。
+3. **`--resume-from` 是单值的**（`runner.py:743-750`，没有 `action="append"`），
+   而看门狗只能取「最后一个 job 目录」。10-20 21:44 那次自动重起因此只看到 4 题已完成、
+   起了 **221 题**，把已经跑完的 174 题重跑一遍，5 小时里真正推进 4 题。
+   眼下用 `.scratch/harbor-merge-resume.sh`（硬链接合并 + 显式列目录 + 跑批活着就拒绝）
+   和看门狗的 `refresh_merge_base()` 绕过，**没根治**。
+4. **一条测试从 Task 13 起一直红，而 main 被推成红的**（已修，`5980fe2`）。
+   `tests/integration/test_api.py::test_eval_benchmarks` 写死
+   `["gaia","hle","smoke"]`，而 `f25314a` 把 loca/harbor 加进了路由的 `BENCHMARKS`。
+   两轮评审都报「全量 1312 passed / 0 failed」，真跑是 `1 failed, 1307 passed`；
+   而「1312」这个条数**复现不出来**（实际收集 1308）。改成对着真源断言
+   `list(BENCHMARK_MODULES)`（`eval/common/jobs.py:507`），复跑 **1308 passed / 0 failed**。
+
+### 6.6 剩下 6 题不再补跑（裁定与依据）
+
+`polyglot_python_beer-song`、`list-ops`、`paasio`、`phone-number`、`robot-name`、
+`polyglot_rust_accumulate`。九轮里每题已试 2–3 次，`agent_setup` **精确卡在
+1080–1110 秒**（= 360s 基准 × 倍率 3 的天花板），而第 3 轮是在**空机器**上跑的
+（SDD 循环全程暂停）——**争用假设到此排除，是挂死不是慢**。再跑第 4 轮没有信息量。
+
+MyCode 臂这 6 题**全有判分**（4 过 2 不过），所以这是一条真实的不对称：
+**在本环境里 MyCode 的 agent 225/225 装得进 setup 预算，opencode 是 219/225。**
+它是 scaffold 的安装开销差，不是做题能力差，写结论时要这么限定。
+
+### 6.7 能写进简历的、和不能写的
+
+**能写**（都有 225 题的数据撑着）：
+
+- 自建了一套可重复的两臂对照 coding-agent 基线：aider-polyglot 全量 225 题 / 6 语言，
+  控制变量对齐（同模型、同 seed、同超时倍率、同并发），断点续跑、
+  判分口径变更后可不重跑而复算，报告带**变量守卫**。
+- 结论是**诚实的负结果**：同模型下 MyCode 与 opencode 通过率统计上无法区分
+  （113/217 vs 112/217，p = 1.0）。能说清「为什么这个负结果可信」
+  （配对设计、可检测下限、失败形状对称、三个不可比指标各自怎么处理）
+  比说「我赢了」更值钱。
+- 一条硬的、跨 scaffold 无关的自我消融仍在 5.7：思考开关对 MyCode 自己
+  净 +3 题、代价生成量 1.9×、单题时长 1.56×。
+
+**不能写**：
+
+- 「pass@1 48.9% vs OpenCode 31.8%」——n = 48 的中期数据，跑满后作废。
+- 「快 1.9×」/「1.86×」——5.6 已归因为思考开关差；225 题上 `duration_s` 因争用不对称直接弃用。
+- 「输出 token 是 opencode 的 2.05×」——含思考 vs 不含思考，对齐后 1.04×（6.4 第 2 条）。
+- 「通过率显著高于 opencode」——p = 1.0，方向都不成立。
+- 「prefix cache 命中率 >96%」在这一节里**不能引用**：本 benchmark 两臂 `n_cache_tokens` 全 0。
