@@ -477,10 +477,17 @@ class _FakeEvalAdapter:
 
 class TestEvalAPI:
     def test_eval_benchmarks(self, api):
+        from eval.common.jobs import BENCHMARK_MODULES
+
         r = api.get("/api/eval/benchmarks")
         assert r.status_code == 200
         ids = [item["id"] for item in r.json()["benchmarks"]]
-        assert ids == ["gaia", "hle", "smoke"]
+        # 对着"后端真能起跑的那份清单"断言，不要写死字面量：
+        # 这里原本写的是 ["gaia","hle","smoke"]，Task 13（f25314a）把 loca/harbor
+        # 加进路由的 BENCHMARKS 时没人改它，于是这条测试从那时起一直红到
+        # 2026-10-22 才被发现——中间两轮评审都报了"全量通过"。
+        # 比字面量强在：两份清单各自维护，漂了就会在这里红，而加第六个 benchmark 不会。
+        assert ids == list(BENCHMARK_MODULES)
 
     def test_start_and_inspect_fake_eval_run(self, api, tmp_path, monkeypatch):
         import time
