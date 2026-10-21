@@ -374,8 +374,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="LANG",
-        help="把某语言的题整组剔出统计，可重复。java 题在本环境里两臂都必然失败（README 第 4 节），"
-        "剔掉才看得出真正测到的那部分",
+        help="把某语言的题整组剔出统计，可重复。留着这个开关是为了跟 java 修好之前的批次对齐"
+        "（那时 java 题因 JVM 不读 HTTPS_PROXY 而两臂全灭，见 README 第 4 节）；"
+        "修好之后就别再剔了——225 题基线上 java 是 12:11，剔掉反而丢掉七分之一样本",
     )
     return parser
 
