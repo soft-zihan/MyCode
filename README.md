@@ -3,17 +3,19 @@
 [![CI](https://github.com/soft-zihan/MyCode/actions/workflows/ci.yml/badge.svg)](https://github.com/soft-zihan/MyCode/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-编译式自进化的可观测 Coding Agent，支持任意 OpenAI 兼容端点。
+2w+行核心代码有完整评测体系的 RSI Coding Agent，支持任意 OpenAI 兼容端点。
 
 核心特点：
 
-* **Event-Sourcing 架构**：append-only 事件日志为唯一数据源（JSONL/SQLite 双后端，统一 Protocol 抽象，双份测试），对话、压缩、rewind/fork、崩溃恢复（Torn Tail 修复 + write-ahead claim + 启动 interrupted 扫描，覆盖子会话）、wiki 知识提取、前端重建全部派生于 Event；索引降低 message 构造开销，checkpoint + tail replay 快速冷启动，前端懒加载分页，WebSocket 单连接多路复用，断连续传，交互和可视化良好。
-* **上下文工程**：上下文组装时系统提示词冻结，易变更内容后置，长任务 prefix cache 命中率平均**高于96%**. **双层可逆无感压缩**，工具折叠（可逆、按 key 取回）→ 会话折叠（hidden agent 编译会话笔记带校验 + 项目知识回写 wiki）渐进升级；压缩前编辑内容可查询，(跨)会话内容可检索。 LOCA-128k×100k 压力窗四臂消融（qwen3.6-27b）：**Pass@1 66.7%，高于仅工具折叠  20.0pp、朴素截断33.4pp、仅会话折叠 13.4pp**. steer 消息支持排队/插入。task_list 列表渐进式披露。
+* **Event-Sourcing 架构**：append-only 事件日志为唯一数据源（JSONL/SQLite 双后端），对话、压缩、rewind/fork、崩溃恢复（Torn Tail 修复 + write-ahead claim + 启动 interrupted 扫描，覆盖子会话）、wiki 知识提取、前端重建全部派生于 Event；索引降低 message 构造开销，checkpoint + tail replay 快速冷启动，前端懒加载分页，WebSocket 单连接多路复用，断连续传，交互和可视化良好。
+* **上下文工程**：上下文组装时系统提示词冻结，易变更内容后置，长任务 prefix cache 命中率平均**高于96%**. **双层可逆无感压缩**，工具折叠（可逆、按 key 取回）→ 会话折叠（hidden agent 编译会话笔记带校验 + 项目知识回写 wiki）渐进升级；压缩前编辑内容可查询，(跨)会话内容可检索。 LOCA-128k×80k 压力窗四臂消融：**Pass@1 66.7%，高于朴素截断 33.4pp、仅工具折叠 20.0pp、仅会话折叠 13.4pp**. steer 消息支持 turn/step 间插入。
 * **LLM-wiki 自进化**：从 Event 中自动提取会话笔记、结构化 memory. 写入前预检索去重 + 8 信号加权评分，元索引 + Embedding + bm25 混合召回 + drop-rung ladder；**高频 workflow pattern 编译为 skill**，验证门禁严格门控。
 * **Git 快照机制**：独立 git 仓库+ alternates 机制共享原项目 objects 节省空间；git tree 对象捕获文件状态，文件编辑三阶段回退（stage → commit → clear），wiki 可差分编译、版本可追溯。
-* **多 Agent 协同**：主 Agent 根据模式隔离工具，子 Agent 可自定义（独立 Tools+MCP+Skills 分担上下文压力，**前台阻塞可转后台，可二次调用**），后台 hidden Agent 防阻塞，模型配置差异化.
-* **工具系统**：ToolRegister（链式披露、出错重试、超时保护、先读后写、权限检查、完整保护、防注入） + MCP（Stdio + Streamable HTTP） 工具输出定界符防御间接提示注入。
-* **全链路观测和评估**：OTel + Langfuse 搭建 Trace，建立单元测试和端到端评估回归，覆盖 Agent Loop、Wiki 编译和召回、Skill 生成等，实现修改效果可观测、可验证，badcase 可定位、可修复。
+* **task_list 与 plan**：spec 驱动 plan 模式，**审批通过转换为 task_list**，任务进度可见、状态转换、内容渐进式披露。
+* **工具系统与多 Agent 协同**：ToolRegister（链式披露、出错重试、超时保护、先读后写、权限检查、完整保护、防注入） + MCP（Stdio + Streamable HTTP） 。主 Agent 根据模式隔离工具，子 Agent 可自定义（独立 Tools+MCP+Skills，**前台阻塞可转后台，可二次调用**），后台 hidden Agent 防阻塞，模型配置差异化.
+* **全链路观测和评估**：OTel + Langfuse 搭建全链路 Trace，观测指标覆盖 token 成本、上下文组成、压缩效果等。建立单元测试，借助 harbor 搭建 Coding Agent 基线测试和端到端评估回归，支持灵活配置、断点续跑、报告生成，评估环节覆盖 Agent Loop、Wiki 编译和召回、Skill 生成等，实现版本迭代效果可观测、可验证，badcase 可定位、可修复。在 aider-polyglot (225题)上 qwen3.6-27B pass@1 为 56.1% vs OpenCode 53.4%.
+
+  * 当前版本产品缺陷：无云服务和订阅，无大量数据。
 
 ## 架构
 
