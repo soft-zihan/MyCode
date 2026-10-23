@@ -75,7 +75,7 @@ export function CloudPanel({ cwd }: CloudPanelProps) {
   };
 
   return (
-    <div className="px-2 py-1.5 bg-sky-50/60 border-y border-sky-100 space-y-1.5">
+    <div className="space-y-1.5">
       <div className="flex items-center gap-1">
         <Cloud className="w-3 h-3 text-sky-600 flex-shrink-0" />
         <span className="text-[10px] font-medium text-sky-800 uppercase tracking-wide">Cloud</span>

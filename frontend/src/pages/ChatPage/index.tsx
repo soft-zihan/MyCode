@@ -9,7 +9,8 @@ import type { SubAgentNode } from '../../components/chat/nodes';
 import { RewindDialog } from '../../components/chat/RewindDialog';
 import { FileTree } from './components/FileTree';
 import { FileViewer } from './components/FileViewer';
-import { SessionsPanel } from './components/SessionsPanel';
+import { SessionsPanel, DirectoryPicker } from './components/SessionsPanel';
+import { StatusBar } from './components/StatusBar';
 import { ContextPanel } from '../../components/agent/ContextPanel';
 import { QuestionDialog } from '../../components/agent/QuestionDialog';
 import { ApprovalBar } from '../../components/agent/ApprovalBar';
@@ -23,7 +24,7 @@ import { useChat } from './hooks/useChat';
 import { Composer } from '../../components/chat/Composer';
 import { PermissionSelect } from '../../components/chat/PermissionSelect';
 import { AutoApproveToggle } from '../../components/chat/AutoApproveToggle';
-import { fetchWorkspaceTree, WorkspaceNode } from '../../api/client';
+import { fetchWorkspaceTree, WorkspaceNode, registerProject } from '../../api/client';
 
 const formatTokens = (tokens: number): string => {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
@@ -38,6 +39,8 @@ const RIGHT_SIDEBAR_WIDTH_KEY = 'right-sidebar-width';
 
 export default function ChatPage() {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  // 状态栏的「打开别的目录…」：与 SessionsPanel 的 New Project 共用同一个选择器组件
+  const [showDirPicker, setShowDirPicker] = useState(false);
   const [changesSelectedFile, setChangesSelectedFile] = useState<string | null>(null);
   const [rightSidebarOpen, setRightSidebarOpen] = useState(true);
   const [rightTab, setRightTab] = useState<'files' | 'control'>('files');
@@ -186,9 +189,13 @@ export default function ChatPage() {
     />
   );
 
+  // 状态栏显示「当前在哪干活」：有会话时是会话的 cwd，没有时回退上次用过的目录
+    const statusCwd = currentCwd || localStorage.getItem('lastCwd');
+
   return (
     <PageLayout sidebarContent={sidebarContent}>
-      <div className="h-full flex">
+      <div className="h-full flex flex-col">
+      <div className="flex-1 flex overflow-hidden">
         {/* Main Chat Area */}
         <div className="flex-1 flex flex-col bg-white min-w-0">
           {/* Chat Header */}
@@ -637,6 +644,30 @@ export default function ChatPage() {
           );
         })()}
       </div>
+
+      {/* 底部状态栏：工作区 / 执行目标 / 分支，与 Qoder、VS Code 同一位置同一形状 */}
+      <StatusBar
+        cwd={statusCwd}
+        onSwitchCwd={handleNewSession}
+        onOpenFolder={() => setShowDirPicker(true)}
+      />
+      </div>
+
+      {showDirPicker && (
+        <DirectoryPicker
+          onSelect={async (path) => {
+            setShowDirPicker(false);
+            try {
+              await registerProject(path);
+            } catch (err) {
+              alert(err instanceof Error ? err.message : 'Failed to register project');
+              return;
+            }
+            handleNewSession(path);
+          }}
+          onCancel={() => setShowDirPicker(false)}
+        />
+      )}
     </PageLayout>
   );
 }
