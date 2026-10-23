@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # My Code launcher — 从任意目录启动，工作区为当前文件夹。
 # 用法：mycode [options] [prompt]   或   MyCode [options] [prompt]
-# 安装：运行  ./scripts/install-mycode.sh
+#       mycode <子命令>             见下面那张表
+# 安装：Unix 跑 ./scripts/install-mycode.sh；Windows 跑 scripts/install-mycode.ps1
 
 # 定位项目根目录（本脚本所在目录）。
 # 通过符号链接启动时 BASH_SOURCE 指向链接位置，需先解析到真实路径。
@@ -15,6 +16,48 @@ while [ -L "$SOURCE" ]; do
   esac
 done
 SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+
+# ── 子命令 ────────────────────────────────────────────────────────────────────
+# 起停 web 服务与云端集群。这些词单独出现时不可能是有意义的 prompt，
+# 所以按子命令处理；其余一切照旧交给 agent（`mycode 修一下登录` 仍然是 one-shot）。
+usage() {
+  cat <<'EOF'
+mycode — 启动器
+
+子命令：
+  start            起前后端（前端为 Vite dev server）  → http://localhost:8090
+  prod             生产模式：构建前端并由后端托管 dist  → http://localhost:5555
+  stop | restart | status
+  install          把 mycode 装进 PATH（Unix: /usr/local/bin）
+
+云端（本机 kind 集群，跑在 WSL 里）：
+  cloud-up         一条命令走完从开机到能用（幂等，可反复跑）
+  cloud-status     只看现状：节点/Pod/ArgoCD/镜像/浏览器那条路通不通
+  cloud-down --yes 拆集群（不可逆，PVC 里的会话数据一起没）
+
+agent：
+  mycode                        交互式 REPL，工作区为当前目录
+  mycode [options] [prompt]     one-shot；全部选项见 mycode --help
+EOF
+}
+
+case "${1:-}" in
+  start|stop|restart|status|prod)
+    exec "$SCRIPT_DIR/start.sh" "$1"
+    ;;
+  cloud-up|cloud-status|cloud-down)
+    sub="${1#cloud-}"           # up | status | down
+    shift
+    exec "$SCRIPT_DIR/scripts/cloud-up.sh" "$sub" "$@"
+    ;;
+  install)
+    exec "$SCRIPT_DIR/scripts/install-mycode.sh"
+    ;;
+  help)
+    usage
+    exit 0
+    ;;
+esac
 
 # 优先用项目自带 venv 的 python（探测哪个装了依赖），回退到 python3。
 # 探测 openai：它是 requirements.txt 的第一项，任何可用环境必然装了它。

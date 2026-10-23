@@ -121,6 +121,9 @@ wait_ready() {
 
 do_start() {
     log "===== 启动服务 ====="
+    # 在 WSL 里从 Windows 侧调进来时，不钉住发行版的话这些服务活不过本次命令返回
+    # （deploy/README.md §8.3）。不在 WSL 里时它自己就是 no-op。
+    "$PROJECT_ROOT/scripts/pin-wsl.sh"
     start_backend
     start_frontend
     wait_ready "$BACKEND_PORT"  "后端"
@@ -157,6 +160,7 @@ do_restart() {
 # dev server 无压缩、带 HMR 开销、且固定绑 0.0.0.0，只适合本地开发。
 do_prod() {
     log "===== 生产模式（后端托管构建产物）====="
+    "$PROJECT_ROOT/scripts/pin-wsl.sh"
     if [[ ! -d "$PROJECT_ROOT/frontend/dist" ]]; then
         log "未发现 frontend/dist，先构建前端 ..."
         (cd "$PROJECT_ROOT/frontend" && npm run build)
