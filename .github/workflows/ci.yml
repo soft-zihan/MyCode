@@ -99,6 +99,22 @@ jobs:
             bash -n "$f" || exit 1
           done
 
+      # 执行位必须记在**索引**里，不能靠工作树：Windows 上 core.fileMode=false，git 一律按
+      # 100644 记录新文件，工作树的 +x 传不进去；而 WSL 的 drvfs 又把 /mnt/d 下的文件默认
+      # 当成可执行——两头一凑就是「本地全绿，CI 与任何新克隆 Permission denied」。
+      # 2026-10-24 实测踩到（exit 126），所以在这里钉死。
+      - name: Every tracked shell script is executable in the index
+        run: |
+          bad=0
+          for f in $(git ls-files '*.sh' mycode mycode-web install.sh); do
+            mode=$(git ls-files -s "$f" | cut -d' ' -f1)
+            if [ "$mode" != "100755" ]; then
+              echo "::error file=$f::索引里是 $mode，新克隆出来跑不动。修：git update-index --chmod=+x $f"
+              bad=1
+            fi
+          done
+          exit $bad
+
       # 端侧安装包清单的防腐烂门禁。清单里的路径被改名或删掉时，tar 只会在
       # 发版那一刻报一句 "Cannot stat: No such file or directory"——而那一刻通常
       # 正急着发版。这里把它提前到每个 PR：--check 只比对路径存在性，不装 node、不出包。
