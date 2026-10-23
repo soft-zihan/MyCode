@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
-import { ChevronRight, Folder, Clock, Plus, Pencil, Trash2, X, ChevronDown, GitBranch } from 'lucide-react';
+import { ChevronRight, Folder, Clock, Plus, Pencil, Trash2, X, ChevronDown, GitBranch, Cloud } from 'lucide-react';
+import { BranchSwitcher } from './BranchSwitcher';
+import { CloudPanel } from './CloudPanel';
 import {
   fetchSessions, deleteSession, Session,
   fetchDirectories, DirectoryList,
@@ -146,6 +148,9 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
   // U11 worktree：undefined = 非 git 项目（不显示 worktree 入口）
   const [worktreesByProject, setWorktreesByProject] = useState<Record<string, WorktreeEntry[] | undefined>>({});
   const [expandedWorktrees, setExpandedWorktrees] = useState<Set<string>>(new Set());
+  // 云端执行目标面板：与 worktree 面板同一形状（每个项目独立展开），
+  // 但只在展开时才拉数据——探活要走网络，首屏不该为它买单。
+  const [expandedCloud, setExpandedCloud] = useState<Set<string>>(new Set());
 
   const allProjections = useSessionStore(() => sessionStore.getAllProjections());
 
@@ -226,6 +231,15 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
 
   const toggleWorktreePanel = (cwd: string) => {
     setExpandedWorktrees(prev => {
+      const next = new Set(prev);
+      if (next.has(cwd)) next.delete(cwd);
+      else next.add(cwd);
+      return next;
+    });
+  };
+
+  const toggleCloudPanel = (cwd: string) => {
+    setExpandedCloud(prev => {
       const next = new Set(prev);
       if (next.has(cwd)) next.delete(cwd);
       else next.add(cwd);
@@ -396,6 +410,7 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
                   </div>
                 </div>
                 <div className="flex items-center gap-0.5" onClick={e => e.stopPropagation()}>
+                  <BranchSwitcher cwd={cwd} />
                   <button
                     onClick={() => onNewSession?.(cwd)}
                     className="p-0.5 hover:bg-gray-200 rounded text-gray-500 transition-colors"
@@ -421,6 +436,17 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
                       )}
                     </button>
                   )}
+                  <button
+                    onClick={() => toggleCloudPanel(cwd)}
+                    className={`p-0.5 rounded transition-colors ${
+                      expandedCloud.has(cwd)
+                        ? 'bg-sky-200 text-sky-800'
+                        : 'hover:bg-gray-200 text-gray-500'
+                    }`}
+                    title="Cloud (K8s) target"
+                  >
+                    <Cloud className="w-3 h-3" />
+                  </button>
                   <button
                     onClick={async (e) => {
                       e.stopPropagation();
@@ -487,6 +513,9 @@ export function SessionsPanel({ onSessionSelect, onNewSession, currentSessionId,
                     <Plus className="w-3 h-3 mr-0.5" /> New worktree
                   </button>
                 </div>
+              )}
+              {!isCollapsed && expandedCloud.has(cwd) && (
+                <CloudPanel cwd={cwd} />
               )}
               {!isCollapsed && projectSessions.map(session => (
                 <div

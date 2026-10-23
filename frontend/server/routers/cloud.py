@@ -34,6 +34,8 @@ from pydantic import BaseModel
 
 from agents.config import config_path
 
+from .workspace_import import WorkspaceEntry
+
 router = APIRouter(tags=["cloud"])
 
 URL_ENV = "MYCODE_CLOUD_URL"
@@ -82,15 +84,12 @@ class CloudStatus(BaseModel):
     error: Optional[str] = None
 
 
-class CloudProjectList(BaseModel):
-    url: str
-    projects: list[dict[str, Any]]
-
-
 class CloudWorkspaceList(BaseModel):
     url: str
     root: str
-    workspaces: list[dict[str, Any]]
+    # 用 workspace_import 的 WorkspaceEntry 而不是 list[dict]：dict[str, Any] 在
+    # OpenAPI 里是 additionalProperties，生成的 TS 类型是 unknown，前端一个字段都取不到。
+    workspaces: list[WorkspaceEntry]
 
 
 class CloudImportRequest(BaseModel):
@@ -176,19 +175,14 @@ async def _forward(method: str, path: str, payload: dict[str, Any] | None = None
     return r.json()
 
 
-@router.get("/api/cloud/projects", response_model=CloudProjectList)
-async def api_cloud_projects() -> CloudProjectList:
-    url, _, _ = cloud_config()
-    data = await _forward("GET", "/api/projects")
-    return CloudProjectList(url=url, projects=data if isinstance(data, list) else [])
-
-
 @router.get("/api/cloud/workspaces", response_model=CloudWorkspaceList)
 async def api_cloud_workspaces() -> CloudWorkspaceList:
     url, _, _ = cloud_config()
     data = await _forward("GET", "/api/workspace/imports")
     return CloudWorkspaceList(
-        url=url, root=str(data.get("root") or ""), workspaces=data.get("workspaces") or []
+        url=url,
+        root=str(data.get("root") or ""),
+        workspaces=[WorkspaceEntry(**w) for w in (data.get("workspaces") or [])],
     )
 
 

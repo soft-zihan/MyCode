@@ -54,10 +54,6 @@ class _FakeCloud(http.server.BaseHTTPRequestHandler):
             if not self._authorized():
                 return self._send(401, {"detail": "unauthorized"})
             return self._send(200, {"version": _FakeCloud.version})
-        if self.path == "/api/projects":
-            if not self._authorized():
-                return self._send(401, {"detail": "unauthorized"})
-            return self._send(200, [{"cwd": "/home/app/.mycode/workspaces/demo", "name": "demo"}])
         if self.path == "/api/workspace/imports":
             if not self._authorized():
                 return self._send(401, {"detail": "unauthorized"})
@@ -199,11 +195,6 @@ class TestStatus:
 
 
 class TestForward:
-    def test_projects(self, client):
-        r = client.get("/api/cloud/projects")
-        assert r.status_code == 200
-        assert r.json()["projects"][0]["name"] == "demo"
-
     def test_workspaces(self, client):
         r = client.get("/api/cloud/workspaces")
         assert r.status_code == 200
@@ -230,12 +221,12 @@ class TestForward:
 
     def test_unauthorized_is_mapped(self, client):
         _FakeCloud.token = "sek"
-        r = client.get("/api/cloud/projects")
+        r = client.get("/api/cloud/workspaces")
         assert r.status_code == 401
 
     def test_unreachable_is_502(self, client, monkeypatch):
         monkeypatch.setenv(cr.URL_ENV, "http://no-such-host.invalid")
-        r = client.get("/api/cloud/projects")
+        r = client.get("/api/cloud/workspaces")
         assert r.status_code == 502
         assert "连不上云端实例" in r.json()["detail"]
 
@@ -246,5 +237,5 @@ class TestForward:
         # 正好把「connect 超时必须显式设短」这件事测出来（.invalid 走 DNS 失败，测不到）。
         monkeypatch.setenv(cr.URL_ENV, "http://127.0.0.1:1")
         started = time.perf_counter()
-        assert client.get("/api/cloud/projects").status_code == 502
+        assert client.get("/api/cloud/workspaces").status_code == 502
         assert time.perf_counter() - started < 20

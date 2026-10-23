@@ -247,23 +247,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/cloud/projects": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Api Cloud Projects */
-        get: operations["api_cloud_projects_api_cloud_projects_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/cloud/status": {
         parameters: {
             query?: never;
@@ -2136,15 +2119,6 @@ export interface components {
             /** Url */
             url: string;
         };
-        /** CloudProjectList */
-        CloudProjectList: {
-            /** Projects */
-            projects: {
-                [key: string]: unknown;
-            }[];
-            /** Url */
-            url: string;
-        };
         /** CloudStatus */
         CloudStatus: {
             /** Auth Required */
@@ -2171,9 +2145,7 @@ export interface components {
             /** Url */
             url: string;
             /** Workspaces */
-            workspaces: {
-                [key: string]: unknown;
-            }[];
+            workspaces: components["schemas"]["WorkspaceEntry"][];
         };
         /** ConfigUpdate */
         ConfigUpdate: {
@@ -3286,26 +3258,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    api_cloud_projects_api_cloud_projects_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CloudProjectList"];
                 };
             };
         };

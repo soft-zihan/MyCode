@@ -387,6 +387,15 @@ curl -H 'Host: mycode.local' http://127.0.0.1:18080/api/health
 
 **规避**：跑 `start.sh` 前后别指望容器还活着；port-forward 用 5556 而不是 5555。
 
+> **2026-10-24 复测：当前环境里复现不出来。** 控制面 Pod 确实在自己 netns 里听 5555
+> （`kubectl exec ... cat /proc/net/tcp` 第一行 `00000000:15B3` = 0.0.0.0:5555，LISTEN），
+> 但宿主的 `lsof -i -P -n | grep -c ':5555'` 是 **0**，`sudo` 跑也是 0——宿主 lsof 只看得到
+> 自己 netns 的 socket，以及 `docker-proxy` 那些**发布到宿主**的端口（8080/8443）。
+> 所以 `kill_port` 匹配不到 Pod，`wait_ready`/`status` 也不会被 Pod 骗到。
+> 上面那段记录保留：它是在别的条件下观察到的（`docker run -p 5555:5555` 这类把端口发布到
+> 宿主的情形会真的撞上），只是「Pod 里的 uvicorn」这条路径在当前 kind + WSL 组合下不成立。
+> **判据**：怀疑 `start.sh` 杀了容器时，先 `sudo lsof -i -P -n | grep <port>` 看它到底能不能看见。
+
 ### 8.2 `pkill -f` 会匹配到执行它的那个 shell 自己
 
 要杀后台进程：模式必须避开自己命令行里会出现的字符串，或者先 `pgrep` 拿 pid 再 `kill <pid>`。

@@ -173,6 +173,79 @@ export async function removeWorktree(directory: string, force = false): Promise<
   }
 }
 
+// ── Git 分支（契约单源：类型来自 openapi 生成的 schema.d.ts）─────────────────
+export type BranchEntry = components['schemas']['BranchEntry'];
+export type BranchListResponse = components['schemas']['BranchListResponse'];
+
+export class BranchCheckoutError extends Error {
+  dirty: boolean;
+  constructor(message: string, dirty: boolean) {
+    super(message);
+    this.dirty = dirty;
+  }
+}
+
+// 第二个参数是「先 git fetch --prune 再列」，不是全局 fetch——名字避开全局那个 fetch，
+// 否则函数体内再调 fetch() 就变成递归了。
+export async function fetchBranches(cwd: string, refreshRemote = false): Promise<BranchListResponse> {
+  const res = await fetch(
+    `${API_BASE}/projects/${encodeURIComponent(cwd)}/branches${refreshRemote ? '?fetch=true' : ''}`
+  );
+  if (!res.ok) throw new Error('Failed to fetch branches');
+  return res.json();
+}
+
+export async function checkoutBranch(cwd: string, ref: string): Promise<BranchListResponse> {
+  const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(cwd)}/checkout`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ref })
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    // dirty 单独带出来：前端据此提示「先去提交」，而不是笼统一句「切换失败」
+    throw new BranchCheckoutError(data?.detail || 'Failed to checkout branch', data?.dirty === true);
+  }
+  return res.json();
+}
+
+// ── 云端实例（K8s 里那份同一个后端）─────────────────────────────────────────
+export type CloudStatus = components['schemas']['CloudStatus'];
+export type CloudImportResponse = components['schemas']['CloudImportResponse'];
+export type CloudWorkspaceList = components['schemas']['CloudWorkspaceList'];
+
+export async function fetchCloudStatus(): Promise<CloudStatus> {
+  const res = await fetch(`${API_BASE}/cloud/status`);
+  if (!res.ok) throw new Error('Failed to fetch cloud status');
+  return res.json();
+}
+
+export async function fetchCloudWorkspaces(): Promise<CloudWorkspaceList> {
+  const res = await fetch(`${API_BASE}/cloud/workspaces`);
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data?.detail || 'Failed to fetch cloud workspaces');
+  }
+  return res.json();
+}
+
+export interface CloudPushRequest {
+  repo_url: string;
+  ref?: string | null;
+  name?: string | null;
+}
+
+export async function pushProjectToCloud(req: CloudPushRequest): Promise<CloudImportResponse> {
+  const res = await fetch(`${API_BASE}/cloud/workspaces`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req)
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.detail || `Failed to push to cloud (HTTP ${res.status})`);
+  return data;
+}
+
 export async function updateSessionName(id: string, name: string): Promise<void> {
   console.log('[API] updateSessionName:', { id, name });
   const res = await fetch(`${API_BASE}/sessions/${id}`, {

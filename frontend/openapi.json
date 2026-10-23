@@ -473,28 +473,6 @@
         "title": "CloudImportResponse",
         "type": "object"
       },
-      "CloudProjectList": {
-        "properties": {
-          "projects": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "title": "Projects",
-            "type": "array"
-          },
-          "url": {
-            "title": "Url",
-            "type": "string"
-          }
-        },
-        "required": [
-          "url",
-          "projects"
-        ],
-        "title": "CloudProjectList",
-        "type": "object"
-      },
       "CloudStatus": {
         "properties": {
           "auth_required": {
@@ -573,8 +551,7 @@
           },
           "workspaces": {
             "items": {
-              "additionalProperties": true,
-              "type": "object"
+              "$ref": "#/components/schemas/WorkspaceEntry"
             },
             "title": "Workspaces",
             "type": "array"
@@ -2906,27 +2883,6 @@
         "summary": "Api Chat Stream",
         "tags": [
           "chat"
-        ]
-      }
-    },
-    "/api/cloud/projects": {
-      "get": {
-        "operationId": "api_cloud_projects_api_cloud_projects_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CloudProjectList"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Api Cloud Projects",
-        "tags": [
-          "cloud"
         ]
       }
     },
