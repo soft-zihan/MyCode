@@ -174,6 +174,109 @@
         "title": "BadCaseResponse",
         "type": "object"
       },
+      "BranchEntry": {
+        "properties": {
+          "current": {
+            "default": false,
+            "title": "Current",
+            "type": "boolean"
+          },
+          "head": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "kind"
+        ],
+        "title": "BranchEntry",
+        "type": "object"
+      },
+      "BranchListResponse": {
+        "properties": {
+          "branches": {
+            "items": {
+              "$ref": "#/components/schemas/BranchEntry"
+            },
+            "title": "Branches",
+            "type": "array"
+          },
+          "current": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current"
+          },
+          "detached": {
+            "default": false,
+            "title": "Detached",
+            "type": "boolean"
+          },
+          "dirty": {
+            "default": false,
+            "title": "Dirty",
+            "type": "boolean"
+          },
+          "fetch_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fetch Error"
+          },
+          "git": {
+            "title": "Git",
+            "type": "boolean"
+          },
+          "project": {
+            "title": "Project",
+            "type": "string"
+          },
+          "remote_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remote Url"
+          }
+        },
+        "required": [
+          "project",
+          "git",
+          "branches"
+        ],
+        "title": "BranchListResponse",
+        "type": "object"
+      },
       "ChatMessage": {
         "properties": {
           "context_files": {
@@ -254,6 +357,235 @@
           "message"
         ],
         "title": "ChatMessage",
+        "type": "object"
+      },
+      "CheckoutRequest": {
+        "properties": {
+          "ref": {
+            "title": "Ref",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ref"
+        ],
+        "title": "CheckoutRequest",
+        "type": "object"
+      },
+      "CloudImportRequest": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ref"
+          },
+          "repo_url": {
+            "title": "Repo Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_url"
+        ],
+        "title": "CloudImportRequest",
+        "type": "object"
+      },
+      "CloudImportResponse": {
+        "properties": {
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch"
+          },
+          "created": {
+            "title": "Created",
+            "type": "boolean"
+          },
+          "directory": {
+            "title": "Directory",
+            "type": "string"
+          },
+          "head": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ref"
+          },
+          "repo_url": {
+            "title": "Repo Url",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "directory",
+          "name",
+          "repo_url",
+          "created"
+        ],
+        "title": "CloudImportResponse",
+        "type": "object"
+      },
+      "CloudProjectList": {
+        "properties": {
+          "projects": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Projects",
+            "type": "array"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "projects"
+        ],
+        "title": "CloudProjectList",
+        "type": "object"
+      },
+      "CloudStatus": {
+        "properties": {
+          "auth_required": {
+            "title": "Auth Required",
+            "type": "boolean"
+          },
+          "authenticated": {
+            "title": "Authenticated",
+            "type": "boolean"
+          },
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "latency_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latency Ms"
+          },
+          "reachable": {
+            "title": "Reachable",
+            "type": "boolean"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "required": [
+          "url",
+          "configured",
+          "reachable",
+          "auth_required",
+          "authenticated"
+        ],
+        "title": "CloudStatus",
+        "type": "object"
+      },
+      "CloudWorkspaceList": {
+        "properties": {
+          "root": {
+            "title": "Root",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          },
+          "workspaces": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Workspaces",
+            "type": "array"
+          }
+        },
+        "required": [
+          "url",
+          "root",
+          "workspaces"
+        ],
+        "title": "CloudWorkspaceList",
         "type": "object"
       },
       "ConfigUpdate": {
@@ -752,6 +1084,102 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "ImportRequest": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ref"
+          },
+          "repo_url": {
+            "title": "Repo Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_url"
+        ],
+        "title": "ImportRequest",
+        "type": "object"
+      },
+      "ImportResponse": {
+        "properties": {
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch"
+          },
+          "created": {
+            "title": "Created",
+            "type": "boolean"
+          },
+          "directory": {
+            "title": "Directory",
+            "type": "string"
+          },
+          "head": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ref"
+          },
+          "repo_url": {
+            "title": "Repo Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "directory",
+          "name",
+          "repo_url",
+          "created"
+        ],
+        "title": "ImportResponse",
         "type": "object"
       },
       "JobStartRequest": {
@@ -1479,6 +1907,72 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "WorkspaceEntry": {
+        "properties": {
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch"
+          },
+          "directory": {
+            "title": "Directory",
+            "type": "string"
+          },
+          "git": {
+            "title": "Git",
+            "type": "boolean"
+          },
+          "head": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "directory",
+          "git"
+        ],
+        "title": "WorkspaceEntry",
+        "type": "object"
+      },
+      "WorkspaceListResponse": {
+        "properties": {
+          "root": {
+            "title": "Root",
+            "type": "string"
+          },
+          "workspaces": {
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceEntry"
+            },
+            "title": "Workspaces",
+            "type": "array"
+          }
+        },
+        "required": [
+          "root",
+          "workspaces"
+        ],
+        "title": "WorkspaceListResponse",
         "type": "object"
       },
       "WorktreeCreateRequest": {
@@ -2412,6 +2906,108 @@
         "summary": "Api Chat Stream",
         "tags": [
           "chat"
+        ]
+      }
+    },
+    "/api/cloud/projects": {
+      "get": {
+        "operationId": "api_cloud_projects_api_cloud_projects_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudProjectList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Api Cloud Projects",
+        "tags": [
+          "cloud"
+        ]
+      }
+    },
+    "/api/cloud/status": {
+      "get": {
+        "operationId": "api_cloud_status_api_cloud_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Api Cloud Status",
+        "tags": [
+          "cloud"
+        ]
+      }
+    },
+    "/api/cloud/workspaces": {
+      "get": {
+        "operationId": "api_cloud_workspaces_api_cloud_workspaces_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudWorkspaceList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Api Cloud Workspaces",
+        "tags": [
+          "cloud"
+        ]
+      },
+      "post": {
+        "operationId": "api_cloud_import_api_cloud_workspaces_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CloudImportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CloudImportResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Cloud Import",
+        "tags": [
+          "cloud"
         ]
       }
     },
@@ -4123,6 +4719,110 @@
         "summary": "Api Update Project",
         "tags": [
           "projects"
+        ]
+      }
+    },
+    "/api/projects/{cwd}/branches": {
+      "get": {
+        "operationId": "api_list_branches_api_projects__cwd__branches_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cwd",
+            "required": true,
+            "schema": {
+              "title": "Cwd",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fetch",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Fetch",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BranchListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api List Branches",
+        "tags": [
+          "branches"
+        ]
+      }
+    },
+    "/api/projects/{cwd}/checkout": {
+      "post": {
+        "operationId": "api_checkout_branch_api_projects__cwd__checkout_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cwd",
+            "required": true,
+            "schema": {
+              "title": "Cwd",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckoutRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BranchListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Checkout Branch",
+        "tags": [
+          "branches"
         ]
       }
     },
@@ -6698,6 +7398,68 @@
         "summary": "Api Workspace Write File",
         "tags": [
           "workspace"
+        ]
+      }
+    },
+    "/api/workspace/import": {
+      "post": {
+        "operationId": "api_import_workspace_api_workspace_import_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Api Import Workspace",
+        "tags": [
+          "workspace-import"
+        ]
+      }
+    },
+    "/api/workspace/imports": {
+      "get": {
+        "operationId": "api_list_imported_workspaces_api_workspace_imports_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Api List Imported Workspaces",
+        "tags": [
+          "workspace-import"
         ]
       }
     },

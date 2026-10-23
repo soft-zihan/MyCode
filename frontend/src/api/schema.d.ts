@@ -247,6 +247,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/cloud/projects": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Api Cloud Projects */
+        get: operations["api_cloud_projects_api_cloud_projects_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cloud/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Api Cloud Status */
+        get: operations["api_cloud_status_api_cloud_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cloud/workspaces": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Api Cloud Workspaces */
+        get: operations["api_cloud_workspaces_api_cloud_workspaces_get"];
+        put?: never;
+        /** Api Cloud Import */
+        post: operations["api_cloud_import_api_cloud_workspaces_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/config": {
         parameters: {
             query?: never;
@@ -899,6 +951,40 @@ export interface paths {
          * @description 删除 project（不删除其下的 session）。
          */
         delete: operations["api_delete_project_api_projects__cwd__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/projects/{cwd}/branches": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Api List Branches */
+        get: operations["api_list_branches_api_projects__cwd__branches_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/projects/{cwd}/checkout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Api Checkout Branch */
+        post: operations["api_checkout_branch_api_projects__cwd__checkout_post"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1794,6 +1880,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/workspace/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Api Import Workspace */
+        post: operations["api_import_workspace_api_workspace_import_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspace/imports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Api List Imported Workspaces */
+        get: operations["api_list_imported_workspaces_api_workspace_imports_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/workspace/move": {
         parameters: {
             query?: never;
@@ -1927,6 +2047,45 @@ export interface components {
             /** Updated At */
             updated_at: number;
         };
+        /** BranchEntry */
+        BranchEntry: {
+            /**
+             * Current
+             * @default false
+             */
+            current: boolean;
+            /** Head */
+            head?: string | null;
+            /** Kind */
+            kind: string;
+            /** Name */
+            name: string;
+        };
+        /** BranchListResponse */
+        BranchListResponse: {
+            /** Branches */
+            branches: components["schemas"]["BranchEntry"][];
+            /** Current */
+            current?: string | null;
+            /**
+             * Detached
+             * @default false
+             */
+            detached: boolean;
+            /**
+             * Dirty
+             * @default false
+             */
+            dirty: boolean;
+            /** Fetch Error */
+            fetch_error?: string | null;
+            /** Git */
+            git: boolean;
+            /** Project */
+            project: string;
+            /** Remote Url */
+            remote_url?: string | null;
+        };
         /** ChatMessage */
         ChatMessage: {
             /** Context Files */
@@ -1943,6 +2102,78 @@ export interface components {
             session_id?: string | null;
             /** Thinking */
             thinking?: boolean | null;
+        };
+        /** CheckoutRequest */
+        CheckoutRequest: {
+            /** Ref */
+            ref: string;
+        };
+        /** CloudImportRequest */
+        CloudImportRequest: {
+            /** Name */
+            name?: string | null;
+            /** Ref */
+            ref?: string | null;
+            /** Repo Url */
+            repo_url: string;
+        };
+        /** CloudImportResponse */
+        CloudImportResponse: {
+            /** Branch */
+            branch?: string | null;
+            /** Created */
+            created: boolean;
+            /** Directory */
+            directory: string;
+            /** Head */
+            head?: string | null;
+            /** Name */
+            name: string;
+            /** Ref */
+            ref?: string | null;
+            /** Repo Url */
+            repo_url: string;
+            /** Url */
+            url: string;
+        };
+        /** CloudProjectList */
+        CloudProjectList: {
+            /** Projects */
+            projects: {
+                [key: string]: unknown;
+            }[];
+            /** Url */
+            url: string;
+        };
+        /** CloudStatus */
+        CloudStatus: {
+            /** Auth Required */
+            auth_required: boolean;
+            /** Authenticated */
+            authenticated: boolean;
+            /** Configured */
+            configured: boolean;
+            /** Error */
+            error?: string | null;
+            /** Latency Ms */
+            latency_ms?: number | null;
+            /** Reachable */
+            reachable: boolean;
+            /** Url */
+            url: string;
+            /** Version */
+            version?: string | null;
+        };
+        /** CloudWorkspaceList */
+        CloudWorkspaceList: {
+            /** Root */
+            root: string;
+            /** Url */
+            url: string;
+            /** Workspaces */
+            workspaces: {
+                [key: string]: unknown;
+            }[];
         };
         /** ConfigUpdate */
         ConfigUpdate: {
@@ -2156,6 +2387,32 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** ImportRequest */
+        ImportRequest: {
+            /** Name */
+            name?: string | null;
+            /** Ref */
+            ref?: string | null;
+            /** Repo Url */
+            repo_url: string;
+        };
+        /** ImportResponse */
+        ImportResponse: {
+            /** Branch */
+            branch?: string | null;
+            /** Created */
+            created: boolean;
+            /** Directory */
+            directory: string;
+            /** Head */
+            head?: string | null;
+            /** Name */
+            name: string;
+            /** Ref */
+            ref?: string | null;
+            /** Repo Url */
+            repo_url: string;
         };
         /** JobStartRequest */
         JobStartRequest: {
@@ -2414,6 +2671,26 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
+        };
+        /** WorkspaceEntry */
+        WorkspaceEntry: {
+            /** Branch */
+            branch?: string | null;
+            /** Directory */
+            directory: string;
+            /** Git */
+            git: boolean;
+            /** Head */
+            head?: string | null;
+            /** Name */
+            name: string;
+        };
+        /** WorkspaceListResponse */
+        WorkspaceListResponse: {
+            /** Root */
+            root: string;
+            /** Workspaces */
+            workspaces: components["schemas"]["WorkspaceEntry"][];
         };
         /** WorktreeCreateRequest */
         WorktreeCreateRequest: {
@@ -3000,6 +3277,99 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    api_cloud_projects_api_cloud_projects_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CloudProjectList"];
+                };
+            };
+        };
+    };
+    api_cloud_status_api_cloud_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CloudStatus"];
+                };
+            };
+        };
+    };
+    api_cloud_workspaces_api_cloud_workspaces_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CloudWorkspaceList"];
+                };
+            };
+        };
+    };
+    api_cloud_import_api_cloud_workspaces_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CloudImportRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CloudImportResponse"];
                 };
             };
             /** @description Validation Error */
@@ -4305,6 +4675,74 @@ export interface operations {
                     "application/json": {
                         [key: string]: boolean;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    api_list_branches_api_projects__cwd__branches_get: {
+        parameters: {
+            query?: {
+                fetch?: boolean;
+            };
+            header?: never;
+            path: {
+                cwd: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BranchListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    api_checkout_branch_api_projects__cwd__checkout_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                cwd: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CheckoutRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BranchListResponse"];
                 };
             };
             /** @description Validation Error */
@@ -6139,6 +6577,59 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    api_import_workspace_api_workspace_import_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImportRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    api_list_imported_workspaces_api_workspace_imports_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceListResponse"];
                 };
             };
         };
