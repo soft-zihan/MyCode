@@ -118,7 +118,11 @@ for i in $(seq 1 24); do
 done
 
 log "等 node Ready（Cilium 装好后才会转 Ready）"
-kubectl wait --for=condition=Ready node --all --timeout=300s
+# 超时给到 15 分钟，别照抄文档里的 300s。本机到 quay.io 的**吞吐**很差（延迟正常）：
+# 实测 cilium:v1.20.3 单个镜像 247MB 拉了 7m47s ≈ 0.55 MB/s，300s 必然超时。
+# 超时的后果很隐蔽——脚本 exit 1，但节点其实几分钟后就 Ready 了，
+# 于是「集群看着是好的，只有 ingress-nginx 莫名其妙没装」。
+kubectl wait --for=condition=Ready node --all --timeout=900s
 
 if [ "$(kubectl -n ingress-nginx get deploy ingress-nginx-controller \
         -o jsonpath='{.status.availableReplicas}' 2>/dev/null)" = "1" ]; then

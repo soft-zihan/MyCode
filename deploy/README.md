@@ -137,6 +137,56 @@ docker exec mycode-control-plane sh -c 'tr "\0" "\n" < /proc/$(pidof containerd)
 并用 `imagePullPolicy=IfNotPresent` 阻止 kubelet 再去外网拉。
 两个脚本都能独立重跑，不依赖对方已经 load 过。
 
+⚠️ **`kind load` 会失败**：它内部带 `--all-platforms`，而宿主 docker 29 用 containerd image store、
+本地不一定有全部平台的 blob，于是报 `ctr: content digest sha256:...: not found`
+（`quay.io/cilium/operator-generic` 实测就是这样）。
+**改用 `scripts/preload-image.sh`**——它做同一件事，但走手工
+`docker save | ctr images import --digests`：只导入本地实际有的内容，
+且 `--digests` 保留 repo digest（Pod spec 里钉了 `@sha256:` 时这是必需的，
+否则导进去的镜像对不上 spec 要的 digest，kubelet 照样去外网拉）。
+
+### 1.6 Pod 的出网能力与「宿主代理够不着」问题（2026-10-23 实测矩阵）
+
+这一节决定 ArgoCD 能不能用 GitHub 当源，**换机器必须重测**。
+
+| 从哪儿 | 到哪儿 | 结果 |
+|---|---|---|
+| Pod | `github.com:443` | **超时**（DNS 能解析出 `20.205.243.166`，TCP 连不上） |
+| Pod | `api.github.com` | **200 / 0.6s** ← 同一时刻是通的，所以不是"集群没网" |
+| Pod | `ghcr.io/v2/` | 401 / 1.5s（API 通） |
+| Pod | ghcr 的 blob CDN `185.199.111.154:443` | **`connection reset by peer`** |
+| kind 节点（host netns） | `github.com:443` | 超时 |
+| kind 节点 | `api.github.com` | 200 / 5.7s |
+| WSL 宿主，**不带**代理 | `github.com` | DNS 解析就超时 |
+| WSL 宿主，**带**代理 | `github.com` | 200；`git ls-remote` 成功 |
+| Pod | 宿主代理 `192.168.64.1:7897` | **connection refused**（代理只绑 127.0.0.1） |
+
+两条结论：
+
+1. **`api.github.com` 通而 `github.com` 不通**，所以「`gh` 命令能用」完全不能推出「集群能 clone」。
+   ArgoCD 的 repo-server 是在 **Pod 里** clone 的，走的是 `github.com` 的 smart-http 端点，正好是不通的那个。
+2. **宿主代理绑在 loopback，Pod 够不着**——这是唯一的堵点，而不是"没有代理可用"。
+
+**解法：`scripts/host-proxy-relay.sh`。** 它在 kind 网桥的网关地址（`192.168.64.1`）上开一个
+TCP 转发口（默认 7899），转到宿主的 `127.0.0.1:7897`。开了之后实测：
+
+```
+Pod -x http://192.168.64.1:7899 → github.com                    200 / 1.8s
+Pod -x http://192.168.64.1:7899 → .../info/refs?service=git-upload-pack   200 / 587 bytes
+```
+
+第二条就是 git clone 真正打的请求，拿到 refs 广告说明 clone 能成。
+`scripts/argocd-bootstrap.sh` 会自动起这个转发并给 `argocd-repo-server` 注入
+`HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`（用 strategic merge patch，`env` 的合并键是 `name`，
+所以重跑不会堆出三份）。
+
+⚠️ **`NO_PROXY` 必须覆盖集群内所有地址**（`.svc`、`.svc.cluster.local`、`10.0.0.0/8` 等），
+否则 repo-server 连自己的 apiserver 与 redis 也会被塞给代理，
+表现为 Application 一直 `Unknown` 而日志里全是代理连接错误——这个症状会把人往"仓库权限"方向带。
+
+⚠️ 转发进程活在被 WSL 拆发行版的那条规则下（§8.3），发行版被拆它就没了：
+开工先钉住发行版，或者重新 `./scripts/host-proxy-relay.sh start`。
+
 ---
 
 ## 2. 起集群
@@ -307,7 +357,7 @@ curl -H 'Host: mycode.local' http://127.0.0.1:18080/api/health
 
 ---
 
-## 8. 两个会咬人的坑
+## 8. 四个会咬人的坑
 
 ### 8.1 `start.sh` 会顺手杀掉集群里的 Pod 进程
 
@@ -324,6 +374,98 @@ curl -H 'Host: mycode.local' http://127.0.0.1:18080/api/health
 
 要杀后台进程：模式必须避开自己命令行里会出现的字符串，或者先 `pgrep` 拿 pid 再 `kill <pid>`。
 本项目一个会话里被这条咬过三次。
+
+### 8.3 WSL 发行版会被拆掉，dockerd 与 kind 节点跟着一起死（本批最贵的一个坑）
+
+**根因**：本机的 docker 是**原生装在 WSL 发行版里的**（`/usr/bin/dockerd -H fd://`，`docker context` 里的
+`desktop-linux` 是 Docker Desktop 的、那个发行版处于 Stopped）。而 **WSL2 会在发行版内没有前台进程时把它整个关掉**。
+从 Windows 侧跑 `wsl -e bash -lc '...'`：命令启动 → 发行版被唤醒 → systemd 拉起 docker.service →
+docker 按 `on-failure` 把 kind 节点容器启起来 → 命令退出 → **发行版被拆 → dockerd 死 → 节点容器全停**。
+下一条命令再来一遍。集群的寿命等于单条命令的寿命。
+
+**一行就能确诊**（在 WSL 里）：
+
+```bash
+systemctl status docker --no-pager | head -6 ; cat /proc/uptime
+```
+
+看到 `Active: activating (start) since ...; 7s ago` 且 `/proc/uptime` 只有几十秒 —— 发行版刚开机，
+dockerd PID 是个三位数（实测 509）。**集群没坏，是地基每几十秒被抽走一次。**
+
+**修法：钉一个常驻进程把发行版留住。**
+
+```bash
+wsl -e bash -c 'setsid nohup sleep infinity >/dev/null 2>&1 </dev/null &'
+```
+
+钉住之后 `uptime` 会持续增长、`systemctl is-active docker` 从 `activating` 变 `active`、
+`docker ps` 里节点的 `Up` 时长开始正常累加。**这一步没做，后面所有的 bootstrap 与验证都是白跑**
+（本批为此浪费了一整轮 10 分钟的集群重建）。
+
+**症状链**（不知道根因时你会按这个顺序被带偏，实测走过的弯路）：
+
+1. `kubectl` 报 `Error from server (Forbidden): pods is forbidden: User "kubernetes-admin" cannot list resource "pods"`
+   —— 但 `kubectl auth can-i list pods -n mycode` 回 `yes`，而且同一个命令过一会儿又能跑。
+   **这不是 RBAC 配错**：apiserver 每次随发行版重启，重启后十几秒内 RBAC informer 还没同步完，授权一律拒。
+   `kubectl get pods` 报 Forbidden 而 `-o wide` 正常，看着像某种诡异权限规则，其实只是抖动窗口撞上了不同请求。
+   **别去翻 RBAC，先数 apiserver 的重启次数。**
+2. Pod 状态一片 `Unknown`，事件里刷 `Pod sandbox changed, it will be killed and re-created`；
+   `RESTARTS` 涨到 10+，然后**突然归零**——归零是容器被重建（而非重启）的指纹。
+3. `docker events` 里只有 `start`、**一条 `die` 都没有**，而 `docker inspect` 的 `State.FinishedAt` 有值、
+   `RestartCount=0`。事件流随 daemon 一起没了 ＝ daemon 重启过，不是容器崩了。
+4. 有时 control-plane 容器直接 exit 1，`docker logs` 打出
+   `INFO: detected IPv4 address:`（**空**）+ `ERROR: have an old IPv4 address but no current IPv4 address (!)`，
+   `docker network inspect kind` 的 `Containers` 里根本没有这个节点。这是第 3 层的连带损伤，不是独立故障。
+
+**为什么钉住之后还要重建集群**：kind 节点的 IP 由 docker IPAM 在容器启动时分配，
+每轮重启都可能**互换**（实测 control-plane 在 `.2`/`.3` 之间来回）。而这个 IP 被三处钉死：
+apiserver 服务证书的 SAN、Cilium 的 `k8sServiceHost`（bootstrap 按当时的 InternalIP 算出来写进 helm values）、
+kubelet 的 `--node-ip`。IP 一漂，Cilium 连不上 apiserver，节点永远 NotReady。手工逐个改不如重来：
+
+```bash
+kind delete cluster --name mycode
+./scripts/k8s-bootstrap.sh          # 重新解析 InternalIP，证书与 Cilium 配置一起重生
+kubectl apply -k deploy/base && ./scripts/k8s-secret.sh && kubectl apply -k deploy/kind
+```
+
+**通用判据**：`kubectl` 的每一次抽风都只是在转述控制面的抽风，控制面的抽风又只是在转述宿主的抽风。
+排查顺序永远是 **`/proc/uptime` → `docker ps` 的 `Up` 时长 → 节点内 kubelet → 集群内对象**，
+反过来做会在 RBAC 和 CNI 上浪费一小时。
+
+### 8.4 一次没有超时的 IPv6 拉取能把整个 containerd 卡死
+
+**症状**：节点上一批 Pod 卡在 `ContainerCreating`，`journalctl -u containerd` 的最后一行时间戳
+**十几分钟不动**，同时有 Pod 卡在 `Terminating` 四十分钟删不掉。
+看着像"镜像源慢"，实际是 containerd 已经**不响应**了。
+
+**根因**：`quay.io` 会返回 AAAA 记录，containerd 选了 IPv6 地址去连，
+而 WSL2 **没有 IPv6 默认路由**——这条 TCP read 就那么挂着，`read: connection timed out`
+要等内核自己的超时（实测约 5 分钟一次），期间整个拉取流水线停摆。
+kubelet 默认 `serializeImagePulls: true`，所以**一个挂死的拉取会堵住该节点上所有镜像拉取**，
+连带 ingress-nginx、业务镜像全都排在后面动不了。
+
+```
+level=error msg="PullImage \"quay.io/cilium/operator-generic:v1.20.3@sha256:efdd8d89…\" failed"
+  error="… failed to copy: read tcp [fc00:f853:ccd:e793::3]:39344->[2600:140f:5e00:38::17df:2aeb]:443:
+  read: connection timed out"
+```
+
+**修法**：
+
+```bash
+docker exec mycode-worker systemctl restart containerd   # shim 会保住正在跑的容器
+./scripts/preload-image.sh <那些拉不动的镜像>              # 宿主拉好再塞进节点
+kubectl -n <ns> delete pod <卡住的 pod>                     # 让 kubelet 重新 sync
+```
+
+实测重启 containerd 后 3 分钟内全集群 Pod 归位（`非Running` 计数从 4 掉到 0）。
+
+**两个由此定下的做法**：
+
+1. **导入镜像不会打断已在飞行中的拉取。** `preload-image.sh` 把镜像塞进 containerd 之后，
+   kubelet 那个挂死的 pull 请求仍占着串行队列——必须**删掉 Pod** 让它重新发起 sync，
+   新 sync 才会看到镜像已在本地。这一步漏了会以为"导入了没用"。
+2. **能预载就预载，别让节点自己去 quay.io / ghcr.io 拉。** 见 §1.5 与 §1.6。
 
 ---
 
