@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 把 B1 的每一条声明变成可重跑的证据。9 条断言，全过才算 B1 部署验收通过。
+# 把 B1 的每一条声明变成可重跑的证据。10 条断言，全过才算 B1 部署验收通过。
 #
 # 为什么做成脚本而不是手敲命令：简历上的每条数字与每个「我做了 X」的说法都要能
 # 当场重跑一遍。手敲命令的证据是一次性的，脚本的证据是可复核的。
@@ -28,6 +28,31 @@ exec > >(tee -a "$LOG") 2>&1
 fail() { echo "FAIL: $1"; exit 1; }
 pass() { echo "PASS: $1"; }
 ex() { kubectl -n "$NS" exec deploy/control-plane -- "$@"; }
+
+# --- ArgoCD 自动同步的临时开关 -------------------------------------------------
+# 断言 7 要手改 Deployment 的 readiness 路径、并让这个改后的状态**保持** 30 秒，
+# 而 ArgoCD 的 selfHeal 会在几秒内把它改回 Git 声明值——于是永远观察不到「端点被摘空」。
+# 那不是探针失效，恰恰说明 GitOps 在正常工作（gitops-probe 断言 3 验的就是这件事）。
+# 两条断言天然互斥，所以这里临时关掉自动同步、验完再打开。
+# 用 trap EXIT 兜底：中途 fail 退出也必须把自动同步还回去，否则集群从此不再自愈，
+# 而下一个人看到的会是「ArgoCD 怎么不干活了」。
+ARGO_APP=""
+if kubectl -n argocd get application mycode >/dev/null 2>&1; then ARGO_APP=mycode; fi
+
+argocd_auto_off() {
+  [ -n "$ARGO_APP" ] || return 0
+  echo "（临时关闭 ArgoCD 自动同步：否则 selfHeal 会立刻把手改的探针改回去）"
+  kubectl -n argocd patch application "$ARGO_APP" --type=merge \
+    -p '{"spec":{"syncPolicy":{"automated":null}}}' >/dev/null
+}
+
+argocd_auto_on() {
+  [ -n "$ARGO_APP" ] || return 0
+  kubectl -n argocd patch application "$ARGO_APP" --type=merge \
+    -p '{"spec":{"syncPolicy":{"automated":{"prune":true,"selfHeal":true}}}}' >/dev/null
+  echo "（已恢复 ArgoCD 自动同步：prune + selfHeal）"
+}
+trap argocd_auto_on EXIT
 
 echo "=== 断言 1：Pod Ready，并记录冷启动 ==="
 kubectl -n "$NS" wait --for=condition=Ready pod -l "$SEL" --timeout=300s || fail "Pod 未 Ready"
@@ -90,8 +115,9 @@ wait $PF 2>/dev/null || true
 pass "Ingress → Service → Pod 全链路通（HTTP 200）"
 
 echo "=== 断言 7：readiness 失败会把 Pod 从 Service 端点摘掉 ==="
+argocd_auto_off
 BEFORE=$(kubectl -n "$NS" get endpoints control-plane -o jsonpath='{.subsets[*].addresses[*].ip}')
-[ -n "$BEFORE" ] || fail "改探针前 endpoints 就是空的，无法证明摘除"
+[ -n "$BEFORE" ] || { argocd_auto_on; fail "改探针前 endpoints 就是空的，无法证明摘除"; }
 kubectl -n "$NS" patch deploy control-plane --type=json \
   -p='[{"op":"replace","path":"/spec/template/spec/containers/0/readinessProbe/httpGet/path","value":"/api/definitely-broken"}]' >/dev/null
 sleep 30
@@ -99,6 +125,7 @@ AFTER=$(kubectl -n "$NS" get endpoints control-plane -o jsonpath='{.subsets[*].a
 # 还原（strategy 是 Recreate，patch 会重建 Pod）
 kubectl -n "$NS" patch deploy control-plane --type=json \
   -p='[{"op":"replace","path":"/spec/template/spec/containers/0/readinessProbe/httpGet/path","value":"/api/health"}]' >/dev/null
+argocd_auto_on
 [ -z "$AFTER" ] || fail "readiness 打到坏路径后 endpoints 仍有地址（$AFTER），说明探针没在起作用"
 pass "readiness 失败 → endpoints 被摘空（改前=$BEFORE 改后=空）"
 kubectl -n "$NS" rollout status deploy/control-plane --timeout=300s
@@ -149,6 +176,36 @@ kubectl delete ns np-cross --wait=false >/dev/null 2>&1 || true
   || fail "跨 namespace 直连仍拿到 HTTP $CODE——control-plane-ingress 策略没生效"
 pass "跨 namespace 直连被拒（只放行 ingress-nginx）"
 
+echo "=== 断言 10：用户实际走的那条路——宿主 hostPort（不是 port-forward）==="
+# 断言 6 走的是 kubectl port-forward，它**绕过了 hostPort**。这两条路可以一条通一条不通：
+# extraPortMappings 是按节点声明的（只在 control-plane 那个节点容器上），而 ingress-nginx
+# controller 用 hostPort——落在哪个节点，80/443 就绑在哪个节点。2026-10-23 真出现过
+# 「断言 6 绿、浏览器 localhost:8080 却 connection reset」，因为 controller 被调度到了
+# worker（上游 manifest 的 nodeSelector 只有 kubernetes.io/os: linux，两个节点都匹配）。
+# 修法见 scripts/k8s-bootstrap.sh 里的 ingress-ready 标签 + nodeSelector patch。
+# 教训：验收脚本必须覆盖用户真正走的那条路，不能只覆盖最容易测通的那条。
+HOSTPORT="${HOSTPORT:-8080}"
+ING_NODE=$(kubectl -n ingress-nginx get pod -l app.kubernetes.io/component=controller \
+  -o jsonpath='{.items[0].spec.nodeName}')
+echo "ingress-nginx controller 跑在：${ING_NODE:-（取不到）}"
+
+HP_CODE=$(curl -sS -m 15 --noproxy '*' -H "$HOST_HEADER" \
+  -o /dev/null -w '%{http_code}' "http://localhost:${HOSTPORT}/api/health" 2>/dev/null || true)
+HP_CODE="${HP_CODE//[^0-9]/}"; HP_CODE="${HP_CODE:-000}"
+echo "宿主 localhost:${HOSTPORT}/api/health → HTTP $HP_CODE"
+[ "$HP_CODE" = "200" ] \
+  || fail "宿主 hostPort 这条路不通（HTTP $HP_CODE）——先看 controller 与 extraPortMappings 是否同节点"
+
+# 前端也要真能加载：index.html 回 200 只说明静态文件在，资源 404 的话页面是白屏。
+IDX=$(curl -sS -m 15 --noproxy '*' -H "$HOST_HEADER" "http://localhost:${HOSTPORT}/" 2>/dev/null || true)
+ASSET=$(printf '%s' "$IDX" | grep -oE 'src="[^"]+\.js"' | head -1 | sed -E 's/src="([^"]+)"/\1/')
+[ -n "$ASSET" ] || fail "index.html 里没有 js 资源引用——前端可能没打进镜像"
+A_OUT=$(curl -sS -m 25 --noproxy '*' -H "$HOST_HEADER" -o /dev/null -w '%{http_code} %{size_download}' \
+  "http://localhost:${HOSTPORT}${ASSET}" 2>/dev/null || true)
+echo "前端资源 $ASSET → HTTP ${A_OUT% *} / ${A_OUT#* } 字节"
+[ "${A_OUT% *}" = "200" ] || fail "前端资源加载失败（$A_OUT）"
+pass "宿主 hostPort 全通：/api/health 200、前端 js 资源 200"
+
 echo
-echo "=== B1 部署验收：9 条断言全过 ==="
+echo "=== B1 部署验收：10 条断言全过 ==="
 echo "证据日志：$LOG"
