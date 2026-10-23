@@ -104,20 +104,26 @@ pass "readiness 失败 → endpoints 被摘空（改前=$BEFORE 改后=空）"
 kubectl -n "$NS" rollout status deploy/control-plane --timeout=300s
 
 echo "=== 断言 8：PVC 跨 Pod 重建存活 ==="
-# 必须重新解析 Pod 名：断言 7 patch 了两次 Deployment，而 strategy 是 **Recreate**
-# （RWO PVC 不能多副本挂同一块盘），每次 patch 都会换掉 Pod。断言 1 记下来的
-# $POD 到这里已经不存在了，直接 delete 会报 pods "..." not found。
-POD=$(kubectl -n "$NS" get pod -l "$SEL" -o jsonpath='{.items[0].metadata.name}')
-[ -n "$POD" ] || fail "取不到当前 control-plane Pod 名"
-echo "当前 POD=$POD"
+# 按 label 删，不要先解析 Pod 名再按名删。断言 7 会 patch 两次 Deployment，而 strategy
+# 是 **Recreate**（RWO PVC 不能让多副本挂同一块盘），所以存在「旧 Pod 已进 Terminating、
+# 新 Pod 还没建出来」的窗口：那一刻 `get pod -l` 返回的正是即将消失的旧名字，
+# 按它 delete 会撞 NotFound，再被 set -e 打死（2026-10-23 实测就是这么红的）。
 STAMP="probe-$(date +%s)"
 ex sh -c "mkdir -p /home/app/.mycode/sessions && echo $STAMP > /home/app/.mycode/sessions/PVC_PROBE"
-kubectl -n "$NS" delete pod "$POD" --wait=false >/dev/null
+BEFORE=$(kubectl -n "$NS" get pod -l "$SEL" -o jsonpath='{.items[*].metadata.name}')
+[ -n "$BEFORE" ] || fail "取不到当前 control-plane Pod 名"
+kubectl -n "$NS" delete pod -l "$SEL" --ignore-not-found --wait=false >/dev/null
+kubectl -n "$NS" rollout status deploy/control-plane --timeout=300s >/dev/null
 kubectl -n "$NS" wait --for=condition=Ready pod -l "$SEL" --timeout=300s
+AFTER=$(kubectl -n "$NS" get pod -l "$SEL" -o jsonpath='{.items[*].metadata.name}')
+echo "重建前 POD=$BEFORE"
+echo "重建后 POD=$AFTER"
+# 没有这一条，断言可能空过：Pod 压根没被换掉时，PVC 内容当然还在。
+[ "$BEFORE" != "$AFTER" ] || fail "Pod 名没变——这条断言并没有真的重建 Pod，结果不算数"
 GOT=$(ex cat /home/app/.mycode/sessions/PVC_PROBE)
 [ "$GOT" = "$STAMP" ] || fail "Pod 重建后 PVC 内容丢失（期望 $STAMP，实际 $GOT）"
 ex rm -f /home/app/.mycode/sessions/PVC_PROBE
-pass "Pod 重建后 PVC 内容仍在（$STAMP）"
+pass "Pod 真的被换了（$BEFORE → $AFTER），且 PVC 内容仍在（$STAMP）"
 
 echo "=== 断言 9：NetworkPolicy 在真实负载上拒绝跨 namespace 直连 ==="
 # 探针镜像先在宿主拉再 kind load：kind 节点不继承宿主 daemon.json 的 registry-mirrors，
