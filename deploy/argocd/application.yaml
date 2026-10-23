@@ -1,0 +1,32 @@
+# repoURL 与 targetRevision 由 scripts/argocd-bootstrap.sh 用 envsubst 注入，
+# 避免仓库地址在两个地方各写一份。
+#
+# 这个文件刻意**不放进** deploy/base 或 deploy/kind 的 kustomization：
+# ArgoCD 管的是 deploy/kind，而管 ArgoCD 自己的 Application 不能被 ArgoCD 管，
+# 否则就是先有鸡还是先有蛋。
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mycode
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: ${REPO_URL}
+    targetRevision: ${TARGET_REVISION}
+    path: deploy/kind
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: mycode
+  syncPolicy:
+    automated:
+      prune: true       # Git 里删掉的资源，集群里也删——否则漂移会单向累积
+      selfHeal: true    # 有人 kubectl 手改集群，ArgoCD 会改回 Git 声明的状态
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 2m
