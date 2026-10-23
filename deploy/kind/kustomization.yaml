@@ -11,4 +11,4 @@ resources:
 images:
   - name: ghcr.io/soft-zihan/mycode
     newName: ghcr.io/soft-zihan/mycode
-    newTag: sha-be01a833cc4a0f91ed2a54f62dc0490dff743c52
+    newTag: sha-164f3341a17e8674b16dad15da4110236629ed62
