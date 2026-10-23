@@ -85,8 +85,22 @@ jobs:
       # 因为 runner 上只有 kubectl 没有独立的 kustomize 二进制。
       # newTag 在 deploy/kind/kustomization.yaml 里只出现一次且缩进固定为 4 空格——
       # tests/unit/test_deploy_assets.py 有一条断言专门守这个格式，改坏了测试会红。
+      # 回写前先看远端：同一个 SHA 可能触发两个 run（实测发生过，2026-10-23
+      # 一次 push 生出两个 push run）。concurrency 只是让它们排队，不会让第二个
+      # 知道自己无事可做——它照样 sed、照样 commit，然后 push 被 non-fast-forward
+      # 拒掉，整个 run 红。所以幂等性得由这一步自己保证。
       - name: 回写 deploy/kind 的镜像 tag
+        id: pin
         run: |
+          git fetch --quiet origin "$GITHUB_REF_NAME"
+          REMOTE_TAG=$(git show "FETCH_HEAD:deploy/kind/kustomization.yaml" \
+            | sed -n 's|^    newTag: ||p')
+          if [ "$REMOTE_TAG" = "$TAG" ]; then
+            echo "远端已 pin 到 $TAG，无需回写"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
           cd deploy/kind
           sed -i "s|^    newTag: .*|    newTag: ${TAG}|" kustomization.yaml
           grep -n "newTag:" kustomization.yaml
@@ -94,6 +108,7 @@ jobs:
           kubectl kustomize . | grep "image:"
 
       - uses: stefanzweifel/git-auto-commit-action@b863ae1933cb653a53c021fe36dbb774e1fb9403  # v5
+        if: steps.pin.outputs.changed == 'true'
         with:
           # [skip ci] 是必需的：否则这次提交会再触发一轮 ci.yml 与本 workflow，
           # 形成回写循环。
