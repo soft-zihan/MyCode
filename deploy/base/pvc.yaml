@@ -1,0 +1,16 @@
+# 会话事件（JSONL + projcache）是唯一数据源，必须跨 Pod 重建存活。
+# 不写 storageClassName：用集群默认（kind 上是 local-path）。
+# RWO 而非 RWX：B1 是单副本，而 RWO 直接决定了 Deployment 必须用
+# strategy: Recreate（两个 Pod 不能同时挂同一个 RWO 卷）。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mycode-data
+  namespace: mycode
+  labels:
+    app.kubernetes.io/name: mycode
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi

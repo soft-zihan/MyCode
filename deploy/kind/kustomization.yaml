@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../base
+
+# 下面的 newTag 是 CI 唯一会回写的一行（.github/workflows/release-image.yml 用
+# sed 匹配 `^    newTag: `）。缩进与「恰好出现一次」都由
+# tests/unit/test_deploy_assets.py 守着——多一处或缩进变了，sed 会静默改错地方，
+# 集群于是跑着一个 Git 里查不到的版本。
+images:
+  - name: ghcr.io/soft-zihan/mycode
+    newName: ghcr.io/soft-zihan/mycode
+    newTag: b1-local

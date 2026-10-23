@@ -1,0 +1,21 @@
+# B1 只给控制面做最小策略：默认拒绝 ingress，只放行来自 ingress-nginx 的流量。
+# 沙箱那套 default-deny egress + FQDN 白名单是 B2 的事（要用 Cilium 的 toFQDNs，
+# 标准 NetworkPolicy 只能按 IP/CIDR 匹配，做不到域名白名单）。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: control-plane-ingress
+  namespace: mycode
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: control-plane
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 5555

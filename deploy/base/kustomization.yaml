@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# namespace transformer 是兜底：各资源已显式写了 namespace，这里再统一一次，
+# 免得日后新增资源忘写。Namespace 自身是 cluster-scoped，kustomize 不会给它加。
+namespace: mycode
+
+resources:
+  - namespace.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+  - networkpolicy.yaml
+
+# 刻意不在 base 里放 images transformer：镜像 tag 由 deploy/kind 的 overlay 决定，
+# 而那一行是 CI 唯一会改动的地方。两处都能改 tag 的话，迟早出现「以为改了其实没改」。

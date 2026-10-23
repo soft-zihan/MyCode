@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mycode
+  namespace: mycode
+  annotations:
+    # MyCode 的事件流是单条 WebSocket 长连接，nginx ingress 默认 60s 读写超时
+    # 会把它掐断——前端表现为「跑着跑着事件不再更新」。这不是防御性配置。
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # main.py 里 uvicorn 的 ws_max_size 是 10MB，ingress 默认 1m 会先拦住
+    nginx.ingress.kubernetes.io/proxy-body-size: "16m"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: mycode.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: control-plane
+                port:
+                  number: 80

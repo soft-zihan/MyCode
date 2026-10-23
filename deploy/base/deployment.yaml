@@ -1,0 +1,108 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-plane
+  namespace: mycode
+  labels:
+    app.kubernetes.io/name: mycode
+    app.kubernetes.io/component: control-plane
+spec:
+  # 单副本：状态在 RWO PVC 上，多副本会争同一个卷。多副本是 C 批的事，
+  # 前提是把会话后端换成 PostgreSQL 让控制面无状态。
+  replicas: 1
+  # 必须 Recreate 而不是 RollingUpdate：RWO 卷不能被两个 Pod 同时挂载，
+  # 滚动更新时新 Pod 会一直卡在 Multi-Attach error 上。
+  # 这个限制本身就是 C 批要做无状态化的动机。
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mycode
+      app.kubernetes.io/component: control-plane
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mycode
+        app.kubernetes.io/component: control-plane
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001          # PVC 里的文件要能被 10001 写，靠它 chgrp
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: control-plane
+          # deploy/kind 的 overlay 会用 images transformer 覆盖 tag；
+          # CI 回写的就是那一行。这里绝不用 latest（ArgoCD 会认为无变化而不同步）。
+          image: ghcr.io/soft-zihan/mycode:b1-local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 5555
+          env:
+            - name: MYCODE_HOST
+              value: "0.0.0.0"          # auth.py 默认绑 127.0.0.1，Service 会转不进来
+            - name: MYCODE_CONFIG_PATH
+              value: /etc/mycode/config.json
+            - name: MYCODE_SESSION_BACKEND
+              value: jsonl
+            - name: MYCODE_TRACING
+              value: "0"                # B1 不接 Langfuse；要接就改 1 并补两个 key 的 env
+            - name: XDG_CACHE_HOME
+              value: /tmp/.cache        # 只读根下，第三方库的缓存要有地方落
+            - name: MYCODE_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mycode-secrets
+                  key: auth-token
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          # startupProbe 给足预算：lifespan 里有崩溃恢复扫描与 MCP 连接（最长 30s 超时）
+          startupProbe:
+            httpGet: { path: /api/health, port: 5555 }
+            periodSeconds: 2
+            failureThreshold: 45        # 预算 90s
+          livenessProbe:
+            httpGet: { path: /api/health, port: 5555 }
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /api/health, port: 5555 }
+            periodSeconds: 5
+            failureThreshold: 2
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { cpu: "1", memory: 1Gi, ephemeral-storage: 1Gi }
+          volumeMounts:
+            - name: config
+              mountPath: /etc/mycode
+              readOnly: true
+            # HOME 整体给 emptyDir：写路径是散落且硬编码的——.mycode（session.py:524）、
+            # .my-code（config.py:21 / tools/executor.py）、.agents/skills
+            # （skills/skills.py:107）、CLI history（cli/history.py:66）都直接
+            # Path.home()/...。逐个挂卷迟早漏一个，而只读根之下漏一个就是
+            # 运行期 PermissionError。
+            - name: home
+              mountPath: /home/app
+            # PVC 嵌套挂在 HOME 之下：kubelet 按路径深度排序挂载（先父后子），
+            # 所以会话目录能持久，而 HOME 其余部分仍是可丢弃的 emptyDir。
+            - name: data
+              mountPath: /home/app/.mycode
+            - name: tmp
+              mountPath: /tmp                   # PYTHONPYCACHEPREFIX 指到这里
+      volumes:
+        - name: config
+          secret:
+            secretName: mycode-config
+        - name: home
+          emptyDir: {}
+        - name: data
+          persistentVolumeClaim:
+            claimName: mycode-data
+        - name: tmp
+          emptyDir: {}
