@@ -50,6 +50,32 @@
 - macOS / Linux
 - `lsof`（`start.sh` 用它做端口探活与清理；精简的 Linux 容器镜像常缺，需自行安装）
 
+## 云端部署
+
+同一套代码有两种部署形态：单机模式（`./start.sh`，控制面进程内跑 agent loop）与
+云端模式（控制面退化成网关，任务在 Kubernetes 沙箱里跑）。**单机模式不受云端那套影响，照旧。**
+
+容器化与 Kubernetes 部署的细节全部在 [`deploy/README.md`](deploy/README.md)
+（含本机网络约束、四个会咬人的坑、已知边界）。最短路径：
+
+```bash
+./scripts/k8s-bootstrap.sh        # kind 集群 + Cilium（toFQDNs 要用）+ ingress-nginx
+kubectl apply -k deploy/base      # 先建 namespace，Secret 才有地方放
+./scripts/k8s-secret.sh           # 从 ~/.my-code/config.json 生成 Secret（不入库）
+kubectl apply -k deploy/kind      # 部署控制面
+./scripts/argocd-bootstrap.sh     # ArgoCD + 指向 deploy/kind 的 Application
+```
+
+三个 `verify/*.sh` 把每一条声明变成可重跑的证据，共 **17 条断言**：
+`netpol-probe.sh`（4 条，NetworkPolicy 双向生效性）、`deploy-probe.sh`（10 条，
+非 root / 只读根 / CapEff 全 0 / Secret 注入 / Ingress 全链路 / readiness 摘端点 /
+PVC 跨重建存活 / 跨 namespace 拒绝 / 宿主 hostPort 与前端资源真能加载）、
+`gitops-probe.sh`（3 条，Synced+Healthy / 集群 tag 与 Git 一致 / 手改被 selfHeal 改回）。
+
+CI/CD：push → GitHub Actions 多阶段构建 → 推 GHCR（tag = git SHA，不用 `latest`）
+→ CI 自己把新 tag 回写进 `deploy/kind/kustomization.yaml` → ArgoCD 自动同步。
+回滚就是 `git revert` 那个 pin 提交。见 `.github/workflows/release-image.yml`。
+
 ## 安装
 
 ```bash
