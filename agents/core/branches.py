@@ -79,14 +79,23 @@ def _run_git(args: list[str], cwd: Path, timeout: int = 120) -> tuple[int, str, 
     # GIT_TERMINAL_PROMPT=0：这段代码跑在 web 后端里，没有 TTY 可问密码。
     # 不设的话，一个要认证的私有远端会让 fetch 挂在那儿等输入，直到 timeout 才回来。
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-    proc = subprocess.run(
-        ["git", *args],
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=env,
-    )
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+    except FileNotFoundError:
+        # git 不在 PATH 里。返回非零 rc 而不是让异常冒到路由层变成 500：
+        # list_branches 会因此降级成 git=False（UI 直接隐藏入口），checkout 会抛
+        # BranchError 带一句人话——两者都比一个 traceback 有用。
+        return 127, "", "git 不可用（没装，或不在 PATH 里）"
+    except subprocess.TimeoutExpired:
+        # fetch 打到不可达的远端时会走满 timeout。同上，转成人话而不是 500。
+        return 124, "", f"git {' '.join(args)} 超过 {timeout}s 未返回"
     return proc.returncode, proc.stdout, proc.stderr
 
 

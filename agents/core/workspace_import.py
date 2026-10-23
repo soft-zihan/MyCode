@@ -157,14 +157,21 @@ def git_base_args(proxy: str | None = None) -> list[str]:
 
 def _run(args: list[str], cwd: Path | None = None, timeout: int = FETCH_TIMEOUT) -> tuple[int, str, str]:
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-    proc = subprocess.run(
-        args,
-        cwd=str(cwd) if cwd else None,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=env,
-    )
+    try:
+        proc = subprocess.run(
+            args,
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+    except FileNotFoundError:
+        # 镜像里没装 git 时就是这条路。返回非零 rc，让调用方拼成一句能看懂的
+        # 「克隆失败：git 不可用」，而不是把一个 traceback 变成 HTTP 500。
+        return 127, "", "git 不可用（没装，或不在 PATH 里）"
+    except subprocess.TimeoutExpired:
+        return 124, "", f"git 超过 {timeout}s 未返回（远端不可达？代理没配？）"
     return proc.returncode, proc.stdout, proc.stderr
 
 

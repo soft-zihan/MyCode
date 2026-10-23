@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 把 B1 的每一条声明变成可重跑的证据。10 条断言，全过才算 B1 部署验收通过。
+# 把 B1 的每一条声明变成可重跑的证据。11 条断言，全过才算 B1 部署验收通过。
 #
 # 为什么做成脚本而不是手敲命令：简历上的每条数字与每个「我做了 X」的说法都要能
 # 当场重跑一遍。手敲命令的证据是一次性的，脚本的证据是可复核的。
@@ -207,5 +207,30 @@ echo "前端资源 $ASSET → HTTP ${A_OUT% *} / ${A_OUT#* } 字节"
 pass "宿主 hostPort 全通：/api/health 200、前端 js 资源 200"
 
 echo
-echo "=== B1 部署验收：10 条断言全过 ==="
+echo "=== 断言 11：浏览器**真正**发的那个请求——不带 Host 头 ==="
+# 断言 10 带了 `Host: mycode.local`，而浏览器发不出来这个头（它只会发
+# `Host: localhost:8080`）。所以断言 10 绿不代表用户能打开页面：加兜底规则之前，
+# 这条路实测是 404（落到 ingress-nginx 的默认后端），唯一的出路是改 Windows 的 hosts，
+# 而改 hosts 要管理员权限，是「从开机到能用」里唯一没法自动化的一步。
+# deploy/base/ingress.yaml 里那条不写 host 的规则就是为它加的，这条断言守着它。
+NP_CODE=$(curl -sS -m 15 --noproxy '*' \
+  -o /dev/null -w '%{http_code}' "http://localhost:${HOSTPORT}/api/health" 2>/dev/null || true)
+NP_CODE="${NP_CODE//[^0-9]/}"; NP_CODE="${NP_CODE:-000}"
+echo "不带 Host 头 → /api/health HTTP $NP_CODE"
+if [ "$NP_CODE" = 404 ]; then
+  fail "404 = 连上了 ingress 但没规则命中 Host=localhost，集群里跑的是加兜底规则之前的 Ingress"
+fi
+[ "$NP_CODE" = 200 ] || fail "浏览器那条路不通（HTTP $NP_CODE）"
+
+NP_IDX=$(curl -sS -m 15 --noproxy '*' "http://localhost:${HOSTPORT}/" 2>/dev/null || true)
+NP_ASSET=$(printf '%s' "$NP_IDX" | grep -oE 'src="[^"]+\.js"' | head -1 | sed -E 's/src="([^"]+)"/\1/')
+[ -n "$NP_ASSET" ] || fail "不带 Host 头时 index.html 里没有 js 资源引用"
+NP_A=$(curl -sS -m 25 --noproxy '*' -o /dev/null -w '%{http_code}' \
+  "http://localhost:${HOSTPORT}${NP_ASSET}" 2>/dev/null || true)
+NP_A="${NP_A//[^0-9]/}"; NP_A="${NP_A:-000}"
+[ "$NP_A" = 200 ] || fail "不带 Host 头时前端资源加载失败（HTTP $NP_A）"
+pass "不用改 Windows hosts：http://localhost:${HOSTPORT} 直接可用（health 200、js 资源 200）"
+
+echo
+echo "=== B1 部署验收：11 条断言全过 ==="
 echo "证据日志：$LOG"

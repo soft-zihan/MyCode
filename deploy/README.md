@@ -5,6 +5,49 @@
 
 ---
 
+## 一键：从零到能用
+
+装好下面 §0 的前置之后，**一条命令**（在 WSL 里）：
+
+```bash
+./scripts/cloud-up.sh up
+```
+
+在 Windows 终端里则是（先跑一次 `scripts\install-mycode.ps1` 把 `mycode` 装进用户 PATH）：
+
+```
+mycode cloud-up        # 装/修集群
+mycode cloud-status    # 只看现状，不改任何东西
+mycode cloud-down --yes
+mycode start           # 只起本地前后端，不碰集群
+```
+
+`up` 按依赖顺序做完这些事，**每步都幂等**——「第一次装」和「重启后又跑一次」是同一条命令：
+
+| 步 | 做什么 | 幂等靠什么 |
+|---|---|---|
+| 0 | 钉住 WSL 发行版（§8.3，不做这步集群活不过本次命令） | `scripts/pin-wsl.sh` 的 pidfile |
+| 1 | kind 集群 + Cilium + ingress-nginx | `k8s-bootstrap.sh` 自己判断已存在 |
+| 2 | 宿主代理转发（§1.6，Pod 出网唯一的路） | relay 的 pidfile + 端口占用检查 |
+| 3 | namespace + ConfigMap `mycode-net`（git 专用代理） | `create --dry-run=client \| apply` |
+| 4 | Secret（模型 api_key + 访问令牌，§3） | 同上 |
+| 5 | 预载应用镜像（§1.2，节点自己拉 ghcr 会 reset） | `preload-image.sh` 按精确镜像名跳过 |
+| 6 | 部署并等就绪 | `apply -k deploy/kind` + `rollout status` |
+| 7 | ArgoCD 接管（GitOps） | `argocd-bootstrap.sh` |
+
+镜像名从 `kubectl kustomize deploy/kind` 的渲染结果里抽，不写死在脚本里：
+`deploy/kind` 的 `newTag` 是 CI 唯一会回写的那一行，写死就会在 CI 推新镜像后还在预载旧的。
+
+跑完会把云端地址与访问令牌写进 `~/.my-code/cloud.json`（权限 600，在 `$HOME` 下、不在仓库里）。
+本地后端的 `frontend/server/routers/cloud.py` 从这里读，所以前端那个「云端」面板
+不需要用户再手填地址和 token。
+
+`down` 必须显式 `--yes`：拆集群不可逆，PVC 里的会话数据一起没。
+
+下面各节是这条命令背后每一步的细节与踩坑记录——复现失败时按它排查。
+
+---
+
 ## 0. 前置
 
 | 项 | 要求 | 怎么确认 |
@@ -311,49 +354,54 @@ kubectl -n mycode rollout status deploy/control-plane --timeout=180s
 
 ## 6. 浏览器访问
 
-`deploy/base/ingress.yaml` 的 host 是 `mycode.local`，ingress-nginx 走 hostPort，宿主映射到 **8080/8443**。
+**直接开 <http://localhost:8080>。不用改 hosts，也不用 port-forward。**
 
-⚠️ **方式 A 能用的前提是 controller 跑在 control-plane 节点上**：`extraPortMappings`
+ingress-nginx 走 hostPort，kind 的 `extraPortMappings` 把宿主 8080/8443 映射进去。
+`deploy/base/ingress.yaml` 有两条规则：一条 `host: mycode.local`，一条**不写 host** 的兜底。
+兜底那条是关键——浏览器发的是 `Host: localhost:8080`，只有命名 host 的规则不匹配它，
+请求会落到 ingress-nginx 的默认后端。加兜底规则之前实测：
+
+```
+curl http://localhost:8080/api/health                        → 404
+curl -H 'Host: mycode.local' http://localhost:8080/api/health → 200
+```
+
+而浏览器发不出自定义 Host 头，所以过去唯一的出路是改 Windows 的 hosts——那需要管理员
+权限，是「从开机到能用」8 步里唯一没法自动化的一步，去掉它一键启动才成立。
+现在（加了兜底规则之后实测）：
+
+```
+GET http://localhost:8080/api/health   → 200  {"status":"ok"}
+GET http://localhost:8080/             → 200  text/html
+GET http://localhost:8080/assets/index-*.js → 200  text/javascript
+```
+
+⚠️ **前提是 controller 跑在 control-plane 节点上**：`extraPortMappings`
 是**按节点**声明的（只在 `mycode-control-plane` 那个容器上），而 controller 用 hostPort——
 它落在哪个节点，80/443 就绑在哪个节点。上游 manifest 的 `nodeSelector` 只有
 `kubernetes.io/os: linux`，两个节点都匹配，调度器会挑 worker，于是宿主 `localhost:8080`
-是 `connection reset by peer`，而**集群内 port-forward 一切正常**（方式 B/C 都通）——
+是 `connection reset by peer`，而**集群内 port-forward 一切正常**——
 这个组合极容易误判成 CNI 或 Ingress 规则坏了。
 
 `scripts/k8s-bootstrap.sh` 已经处理：给 control-plane 打 `ingress-ready=true` 标签，
 再 patch controller 的 `nodeSelector`（manifest 本来就 tolerate 了 control-plane 的
-NoSchedule 污点，所以只缺这一个 selector）。实测之后：
+NoSchedule 污点，所以只缺这一个 selector）。
 
-```
-GET http://localhost:8080/api/health   → 200  {"status":"ok"}
-GET http://localhost:8080/             → 200  text/html, 418 B
-GET http://localhost:8080/assets/index-DH9LBTtN.js → 200  text/javascript, 1163804 B
-```
+**判据**：`404` 是 ingress 规则没命中 Host（看 `kubectl -n mycode get ingress -o yaml`
+里那条不写 host 的规则在不在）；`connection reset` 才是 controller 落错节点
+（`kubectl -n ingress-nginx get pod -o wide`）。两者的修法完全不同，别混。
+`verify/deploy-probe.sh` 的断言 10 与 11 分别守这两条路（10 带 Host 头，11 不带）。
 
-**方式 A（改 hosts）**：Windows 侧以管理员身份编辑 `C:\Windows\System32\drivers\etc\hosts`，加一行
-
-```
-127.0.0.1 mycode.local
-```
-
-然后开 <http://mycode.local:8080>。
-
-**方式 B（不改 hosts）**：
+**兜底方式（Ingress 那条路整体不通时）**：
 
 ```bash
-kubectl -n mycode port-forward svc/control-plane 5556:80
+kubectl -n mycode port-forward svc/control-plane 5556:80     # 开 http://localhost:5556
 ```
 
-开 <http://localhost:5556>。（**别用 5555**，见下面的坑。）
+**别用 5555**，见 §8.1。
 
-**方式 C（走 Ingress 但用 Host 头，不改 hosts）**：
-
-```bash
-kubectl -n ingress-nginx port-forward svc/ingress-nginx-controller 18080:80
-curl -H 'Host: mycode.local' http://127.0.0.1:18080/api/health
-```
-
-`verify/deploy-probe.sh` 的断言 6 就是用方式 C 验全链路的。
+`verify/deploy-probe.sh` 的断言 6 走的是第三条路：port-forward 到 ingress-nginx 的
+Service 再带 `Host: mycode.local`，用它验证「Ingress 规则 → Service → Pod」这段链路本身。
 
 ---
 

@@ -111,5 +111,13 @@ docker exec "$CID" sh -c 'mkdir -p /home/app/.agents/skills /home/app/.my-code &
   || fail "HOME 下有不可写位置"
 pass "HOME 下 .agents / .my-code / 顶层均可写"
 
+# 8. git 在镜像里，且工作区根可写——「把项目推到云端」靠 Pod 自己 clone
+#    （POST /api/workspace/import），分支切换与 worktree 也都 shell out 到 git。
+#    python:3.12-slim 不带 git，而本地开发机上早就有了，所以这个缺失只在云端暴露
+#    （2026-10-24 实测：本地全绿，云端调 import 直接 FileNotFoundError）。
+docker exec "$CID" git --version >/dev/null 2>&1 || fail "镜像里没有 git，云端导入/分支切换会死"
+docker exec "$CID" sh -c 'mkdir -p /home/app/.mycode/workspaces/.probe && rmdir /home/app/.mycode/workspaces/.probe'   || fail "/home/app/.mycode/workspaces 不可写"
+pass "git 可用，云端工作区根可写"
+
 echo "=== 冒烟全部通过 ===" | tee -a "$LOG"
 echo "台账：IMAGE_SIZE_MB / BUILD_SECONDS / READY_AFTER 见 $LOG"

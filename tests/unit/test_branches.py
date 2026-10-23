@@ -101,6 +101,17 @@ class TestList:
         assert info.git is True and info.branches
         assert info.fetch_error
 
+    def test_missing_git_degrades_not_500(self, git_project, tmp_path, monkeypatch):
+        # 镜像里没装 git 时（python:3.12-slim 就不带），异常冒到路由层会变成 500，
+        # 前端只看到一个没有理由的红。降级成 git=False 让 UI 直接隐藏入口。
+        empty = tmp_path / "emptybin"
+        empty.mkdir()
+        monkeypatch.setenv("PATH", str(empty))
+        info = br.list_branches(str(git_project))
+        assert info.git is False and info.branches == []
+        with pytest.raises(br.BranchError):
+            br.checkout(str(git_project), "main")
+
     def test_detached_head_has_no_current_branch(self, git_project):
         head = _git(["rev-parse", "HEAD"], git_project).stdout.strip()
         _git(["checkout", "-q", head], git_project)

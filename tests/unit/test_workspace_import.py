@@ -221,6 +221,15 @@ class TestImport:
         with pytest.raises(wi.WorkspaceImportError):
             wi.import_workspace(str(src))
 
+    def test_missing_git_reports_clearly(self, http_repo, ws_root, tmp_path, monkeypatch):
+        # python:3.12-slim 不带 git。缺它时不能吐 traceback（HTTP 500），
+        # 得说一句人能照着修的话——2026-10-24 云端就是这么失败的。
+        empty = tmp_path / "emptybin"
+        empty.mkdir()
+        monkeypatch.setenv("PATH", str(empty))
+        with pytest.raises(wi.WorkspaceImportError, match="git 不可用"):
+            wi.import_workspace(http_repo)
+
     def test_proxy_env_is_picked_up(self, http_repo, ws_root, monkeypatch):
         # 指向一个解析不出来的代理主机：克隆必须因此失败，这就证明代理真被 git 吃进去了。
         # 不用「没人监听的本地端口」——本机 WSL 连关闭的端口是超时不是拒绝，

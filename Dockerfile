@@ -34,6 +34,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# git 是**运行期**依赖，不是构建期工具：/api/workspace/import 要在 Pod 里 clone 仓库
+# （前端「把项目推到云端」那一步），分支切换与 worktree 也都 shell out 到 git。
+# python:3.12-slim 不带它，而本地开发机上 git 早就装好了——所以这个缺失只在云端暴露：
+# 2026-10-24 实测，本地一切正常，云端实例调 /api/workspace/import 直接 FileNotFoundError。
+# ca-certificates 一并装：git 走 https 克隆要有根证书。
+# 放在 COPY requirements.txt 之前：apt 这层几乎不变，requirements 一改就不该击穿它。
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt ./
 # 两个细节都是为了不让构建期的缓存变成镜像里的死重量：
 #
