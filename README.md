@@ -66,17 +66,35 @@ kubectl apply -k deploy/kind      # 部署控制面
 ./scripts/argocd-bootstrap.sh     # ArgoCD + 指向 deploy/kind 的 Application
 ```
 
-三个 `verify/*.sh` 把每一条声明变成可重跑的证据，共 **17 条断言**：
-`netpol-probe.sh`（4 条，NetworkPolicy 双向生效性）、`deploy-probe.sh`（10 条，
+三个 `verify/*.sh` 把每一条声明变成可重跑的证据，共 **18 条断言**：
+`netpol-probe.sh`（4 条，NetworkPolicy 双向生效性）、`deploy-probe.sh`（11 条，
 非 root / 只读根 / CapEff 全 0 / Secret 注入 / Ingress 全链路 / readiness 摘端点 /
-PVC 跨重建存活 / 跨 namespace 拒绝 / 宿主 hostPort 与前端资源真能加载）、
+PVC 跨重建存活 / 跨 namespace 拒绝 / 宿主 hostPort 与前端资源真能加载 /
+浏览器不改 hosts 直接打开 `localhost:8080`）、
 `gitops-probe.sh`（3 条，Synced+Healthy / 集群 tag 与 Git 一致 / 手改被 selfHeal 改回）。
+另有 `scripts/container-smoke.sh`（8 条，镜像层，不需要集群）。
 
 CI/CD：push → GitHub Actions 多阶段构建 → 推 GHCR（tag = git SHA，不用 `latest`）
 → CI 自己把新 tag 回写进 `deploy/kind/kustomization.yaml` → ArgoCD 自动同步。
 回滚就是 `git revert` 那个 pin 提交。见 `.github/workflows/release-image.yml`。
 
 ## 安装
+
+只想用、不打算改代码的话，从 [Releases](https://github.com/soft-zihan/MyCode/releases)
+下载安装包更省事——包里自带前端构建产物，不需要 node：
+
+```bash
+tar xzf mycode-1.0.0-client.tar.gz
+cd mycode-1.0.0
+./scripts/install-client.sh    # 建 venv、装依赖、把 mycode 链进 ~/.local/bin
+mycode prod                    # Web UI → http://localhost:5555
+```
+
+端与云是同一个 commit 的两种产物，版本号只有一条线（根目录 `VERSION`），发布节奏不同：
+云端每次 push 都出镜像，端侧只在打 `v*` tag 时出安装包。完整说明见
+[`deploy/README.md` §10 发布模型（端 / 云）](deploy/README.md#10-发布模型端--云)。
+
+要开发就从源码装：
 
 ```bash
 git clone https://github.com/soft-zihan/MyCode.git

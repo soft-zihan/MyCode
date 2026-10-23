@@ -14,6 +14,8 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+# scripts/make-client-bundle.sh 的默认输出目录（端侧安装包 tar.gz）
+dist-release/
 downloads/
 eggs/
 .eggs/

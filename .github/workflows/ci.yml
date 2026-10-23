@@ -98,3 +98,9 @@ jobs:
             [ -f "$f" ] || continue
             bash -n "$f" || exit 1
           done
+
+      # 端侧安装包清单的防腐烂门禁。清单里的路径被改名或删掉时，tar 只会在
+      # 发版那一刻报一句 "Cannot stat: No such file or directory"——而那一刻通常
+      # 正急着发版。这里把它提前到每个 PR：--check 只比对路径存在性，不装 node、不出包。
+      - name: Client bundle manifest still resolves
+        run: ./scripts/make-client-bundle.sh --check

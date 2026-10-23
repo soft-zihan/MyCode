@@ -327,6 +327,9 @@ kubectl -n mycode rollout status deploy/control-plane --timeout=180s
 自动回写 `deploy/kind/kustomization.yaml` 的 `newTag` → ArgoCD 检测到 Git 变化自动同步。
 回滚 = `git revert` 那次回写提交。
 
+这一条说的是**云侧**的发版节奏（持续、无人参与）。端侧安装包怎么发、两边为什么必须同
+commit，见 §10。
+
 镜像 tag 的两个约定，都是硬理由：
 - **base 里不写 `images` transformer**，tag 只在 `deploy/kind` 决定——这样 CI 只有一个地方要改。
 - **绝不用 `latest`**：① ArgoCD 比对的是 Git 内容，`latest` 不变则它认为「无变化」而永不同步；
@@ -337,9 +340,10 @@ kubectl -n mycode rollout status deploy/control-plane --timeout=180s
 ## 5. 验证
 
 ```bash
-./verify/netpol-probe.sh    # 4 条断言：证明 NetworkPolicy 在本机集群真的被执行
-./verify/deploy-probe.sh    # 10 条断言：B1 部署验收
-./scripts/container-smoke.sh  # 7 条断言：镜像层（不需要集群）
+./scripts/container-smoke.sh  # 8 条断言：镜像层（不需要集群）
+./verify/netpol-probe.sh      # 4 条断言：证明 NetworkPolicy 在本机集群真的被执行
+./verify/deploy-probe.sh      # 11 条断言：B1 部署验收
+./verify/gitops-probe.sh      # 3 条断言：ArgoCD 真的在按 Git 收敛（手改集群会被自动改回来）
 ```
 
 证据落在 `verify/logs/*.log`（已 gitignore）。
@@ -552,3 +556,103 @@ docker volume rm mycode-try-data      # 可选，删本地试跑容器留下的�
 ```
 
 `kind delete cluster` 不动宿主上的镜像与 buildkit 缓存，重建集群时不用重新拉基础镜像。
+
+---
+
+## 10. 发布模型（端 / 云）
+
+MyCode 有**两种产物、一条版本线、两种节奏**。
+
+| | 云（控制面镜像） | 端（安装包） |
+|---|---|---|
+| 产物 | `ghcr.io/soft-zihan/mycode:sha-<commit>` | `mycode-<版本>-client.tar.gz` |
+| 谁触发 | 每次 push 到 main，自动 | 人打 `v*` tag |
+| 谁消费 | ArgoCD 自动同步进集群（§4） | 用户下载后跑 `install-client.sh` |
+| 节奏 | 持续（一个 commit 一版） | 偶尔（想发才发） |
+| workflow | `release-image.yml` | `release-client.yml` |
+| 版本号 | commit SHA | 根目录 `VERSION` 文件 |
+
+版本号只有一条线：`agents/version.py` 读 `VERSION`，`mycode --version` 与
+`GET /api/version` 答的都是它。
+
+### 10.1 为什么不拆成两条版本线
+
+「云 Agent 提供云服务、端 Agent 是单体客户端，是否应该分开发布？」——
+**发布节奏分开，版本号不分开。**
+
+对照 Codex 的做法：CLI 走 npm 的 `@openai/codex`（近乎连续的 semver）+ GitHub Release
+变更日志 + `codex upgrade`；云端是**不带版本号**的 SaaS，变更日志按日期记。云端可发布的
+单位其实是「环境」（容器 + 仓库某个 branch/SHA 的检出 + setup 脚本），只有
+Unpublished / Published 两态。端与云的交接靠 **git（分支 / SHA）**，不靠运行时的版本号
+配对——这正是两边节奏可以不同的前提。
+
+MyCode 比 Codex 多一条约束：**本地后端会在运行时把 `/api/cloud/*` 转发给云端实例**
+（`frontend/server/routers/cloud.py`），转发用的是同一个仓库里的接口契约
+（`frontend/openapi.json`）。所以端与云**必须同 commit**，否则「把项目推到云端」这类跨端
+调用会在字段层面对不上。这也是 `release-client.yml` 在 Release 说明里点名对应镜像 tag
+（同一个 commit 的 `sha-…`）的原因——让人一眼看到这一版端配哪一版云。
+
+刻意**没有**做的两件事（都是 YAGNI）：构建期把 SHA 戳进产物、运行时检测端云漂移。
+同 commit 这个约束靠发版流程保证就够了，加运行时检测只是多一处会误报的地方。
+
+### 10.2 怎么发一版端侧
+
+```bash
+# 1. 版本号 +1 并提交（VERSION 是唯一来源）
+echo "1.1.0" > VERSION
+git commit -am "chore(release): 1.1.0"
+git push                     # 云侧：这一次 push 就出了镜像并被 ArgoCD 接走
+
+# 2. 等 CI 绿——发版作业不跑测试，tag 的门禁就是那个 commit 的 ci.yml
+gh run list --workflow ci.yml --limit 1
+
+# 3. 打 tag，端侧发版自动跑
+git tag v1.1.0
+git push origin v1.1.0
+```
+
+`release-client.yml` 会先校验 **tag 必须等于 `v$(VERSION)`**，不一致直接红：放过去的话
+Release 标题写 v1.1.0 而 `mycode --version` 答 1.0.0，端云从此对不上号。
+重跑同一个 tag 是安全的（Release 已存在时改成覆盖资产而不是失败）。
+
+### 10.3 安装包里有什么
+
+清单是 `scripts/make-client-bundle.sh` 里的 `BUNDLE_PATHS`，**刻意与 Dockerfile 运行层的
+COPY 对齐**：两边差一条路径，症状就是「仓库里跑得通、装上就 ImportError」，而且只在客户端
+暴露。两道门禁守着它——`tests/unit/test_client_release.py` 直接拿 Dockerfile 的运行层去比
+这份清单，ci.yml 每个 PR 还跑一次 `make-client-bundle.sh --check`（路径被改名或删掉时立刻红，
+而不是等到发版那天 tar 报一句 `Cannot stat`）。
+
+与镜像的差异只有三类，都来自「客户端用 `mycode`/`start.sh` 启动、容器直接跑 `main.py`」：
+`start.sh`、`scripts/pin-wsl.sh`、`requirements.txt` + 两个安装脚本。
+
+与镜像相同的取舍：**不含 `eval/`**（`main.py` 对它的导入在 try/except 里且标注 non-fatal，
+服务照常起，只是评测端点不可用）。源码、测试、评测、设计文档也都不进包。
+
+因此这两个子命令在安装包里不可用，会直接说清楚而不是抛一堆无关的错：
+`mycode start`（要 `frontend/src` 与 node_modules，Vite dev server 起不来）、
+`mycode cloud-*`（要 `deploy/`）。客户端起 Web UI 用 `mycode prod`——包里自带前端产物，
+不需要 node。
+
+### 10.4 装
+
+Linux / macOS / WSL（需要 Python ≥ 3.11）：
+
+```bash
+tar xzf mycode-1.1.0-client.tar.gz
+cd mycode-1.1.0
+./scripts/install-client.sh          # 建 .venv、装依赖、把 mycode 链进 ~/.local/bin
+mycode prod                          # Web UI → http://localhost:5555
+mycode 修一下登录                     # one-shot；mycode --help 看全部选项
+```
+
+`INSTALL_DIR` 与 `PYTHON` 都可覆盖：
+`INSTALL_DIR=/usr/local/bin PYTHON=python3.12 ./scripts/install-client.sh`
+
+Windows 端不出安装包产物，走源码：`git clone` 之后跑 `scripts\install-mycode.ps1`
+（它生成 `%USERPROFILE%\.mycode\mycode.cmd` 并把该目录加进用户 PATH）。
+
+2026-10-24 本机实测过一遍完整链路：打包 812KB / 212 个条目 → 解压 → 装进临时前缀 →
+用包内 venv 起 ASGI 应用，`/api/health`、`/api/version`（答 1.0.0）、`/api/projects`、
+`/api/cloud/status`（连上了在跑的云端实例：reachable + authenticated）、SPA 首页与
+1.18MB 的 JS 资产全部 200。

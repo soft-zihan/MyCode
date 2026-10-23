@@ -38,14 +38,31 @@ mycode — 启动器
 agent：
   mycode                        交互式 REPL，工作区为当前目录
   mycode [options] [prompt]     one-shot；全部选项见 mycode --help
+  mycode --version              版本号（端与云必须同 commit，见 deploy/README.md §10）
 EOF
 }
 
+# 安装包里只有运行期文件：没有 frontend/src 与 node_modules（Vite dev server 起不来），
+# 也没有 deploy/（云端 bring-up 无从下手）。这两类子命令只在源码仓库里可用——
+# 直接说清楚，比让 npm 或 kubectl 抛一堆与安装包无关的错好。
+require_repo() {
+  if [ ! -e "$SCRIPT_DIR/$2" ]; then
+    echo "mycode $1 只在源码仓库里可用（安装包里没有 $2）" >&2
+    echo "仓库：https://github.com/soft-zihan/MyCode" >&2
+    exit 1
+  fi
+}
+
 case "${1:-}" in
-  start|stop|restart|status|prod)
+  start)
+    require_repo start frontend/package.json
+    exec "$SCRIPT_DIR/start.sh" "$1"
+    ;;
+  stop|restart|status|prod)
     exec "$SCRIPT_DIR/start.sh" "$1"
     ;;
   cloud-up|cloud-status|cloud-down)
+    require_repo "$1" deploy/kind/kustomization.yaml
     sub="${1#cloud-}"           # up | status | down
     shift
     exec "$SCRIPT_DIR/scripts/cloud-up.sh" "$sub" "$@"

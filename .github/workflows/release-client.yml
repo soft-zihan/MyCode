@@ -1,0 +1,117 @@
+name: release-client
+
+# 端侧发版：只在推 v* tag 时跑，产出一个可安装的 tar.gz 挂到 GitHub Release。
+#
+# 与 release-image.yml 的分工（完整版见 deploy/README.md「发布模型（端 / 云）」）：
+#   云 = 镜像，每次 push 都出，SHA tag，ArgoCD 自动跟进      → 持续
+#   端 = 安装包，只在打 tag 时出，人下载安装                   → 偶尔
+# 两者是同一个 commit 的两种产物，版本号只有一条线（根目录 VERSION 文件）。
+#
+# 刻意**不在这里跑测试**：tag 应当从 CI 已经绿了的 main 上打，那个 commit 的
+# ci.yml 就是它的门禁；这里再跑一遍只是把发布时间拉长五分钟。
+on:
+  push:
+    tags: ['v*']
+
+# 不 cancel-in-progress（与 release-image.yml 同理）：这个作业要往 Release 上传资产，
+# 中途取消会留下「有 tag、没有安装包」的半成品发布。
+concurrency:
+  group: release-client-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # 建 GitHub Release 并上传资产
+
+jobs:
+  bundle-and-release:
+    # GitHub 托管 runner：本仓库 public，self-hosted 会让任何 fork 有机会在你的机器上跑代码
+    runs-on: ubuntu-latest
+    steps:
+      # action 一律 pin 到 commit SHA 而不是浮动 tag，理由与 release-image.yml 里那段相同
+      # （本作业持有 contents:write，被投毒的浮动 tag 就能改你的 Release）。
+      # pin 于 2026-10-24：
+      #   actions/checkout@v4     11d5960a326750d5838078e36cf38b85af677262
+      #   actions/setup-node@v4   49933ea5288caeca8642d1e84afbd3f7d6820020
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          # 22 的理由与 ci.yml、Dockerfile 里那条注释相同（undici 要 Node ≥ 20.19）
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # 版本号只有一条线，所以 tag 必须等于 v$(VERSION)。放过不一致的代价是：
+      # Release 标题写 v1.2.0，而 `mycode --version` / GET /api/version 答 1.1.0
+      # （agents/version.py 读的就是这个文件），客户端与云端从此对不上号。
+      - name: 校验 tag 与 VERSION 一致
+        run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          if [ "v$VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag 是 $GITHUB_REF_NAME，但 VERSION 文件写的是 $VERSION"
+            echo "先把 VERSION 改成 ${GITHUB_REF_NAME#v} 并提交，再重新打 tag。"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: 构建前端产物
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: 打安装包
+        run: ./scripts/make-client-bundle.sh dist-release
+
+      - name: 建 / 更新 GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="$GITHUB_REF_NAME"
+          ASSET="dist-release/mycode-$VERSION-client.tar.gz"
+          IMAGE_TAG="sha-$GITHUB_SHA"
+
+          # 用引号 heredoc（<<'EOF'）：正文里有 markdown 代码围栏，
+          # 不加引号的话反引号会被 bash 当命令替换执行。动态部分走占位符 + sed。
+          cat > notes.md <<'EOF'
+          ## 安装（Linux / macOS / WSL，需要 Python ≥ 3.11）
+
+          ```bash
+          tar xzf mycode-@VERSION@-client.tar.gz
+          cd mycode-@VERSION@
+          ./scripts/install-client.sh    # 建 venv、装依赖、把 mycode 链进 ~/.local/bin
+          ```
+
+          装完在任意目录：
+
+          - `mycode` 开交互式会话；`mycode 修一下登录` 是 one-shot；`mycode --help` 看全部选项
+          - `mycode prod` 起 Web UI → http://localhost:5555（包内自带前端产物，不需要 node）
+          - `mycode stop` 停服务
+
+          ## 对应的云端镜像
+
+          同一个 commit 出的镜像是 `ghcr.io/soft-zihan/mycode:@IMAGE_TAG@`，
+          自建 Kubernetes 集群里的 ArgoCD 会自动跟进到它。
+
+          端与云**必须同 commit**：本地后端会把 `/api/cloud/*` 转发给云端实例，
+          两边的接口契约（`frontend/openapi.json`）不允许错位。
+
+          ## 发布模型
+
+          一条版本线、两种产物、两种节奏：云端每次 push 都出镜像（持续），
+          端侧只在打 tag 时出安装包（偶尔）。细节见仓库 `deploy/README.md`
+          的「发布模型（端 / 云）」。
+          EOF
+          sed -i "s|@VERSION@|$VERSION|g; s|@IMAGE_TAG@|$IMAGE_TAG|g" notes.md
+
+          # 重跑同一个 tag 时 Release 已存在，gh release create 会直接失败——
+          # 换成 upload --clobber 覆盖资产，让「重跑」永远是安全操作。
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，覆盖资产"
+            gh release upload "$TAG" "$ASSET" --clobber
+          else
+            gh release create "$TAG" "$ASSET" \
+              --title "MyCode $TAG" \
+              --notes-file notes.md
+          fi
+          gh release view "$TAG" --json url,assets --jq '.url, (.assets[].name)'

@@ -46,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-cost", type=float, default=None, help="Max USD spend")
     parser.add_argument("--max-turns", type=int, default=None, help="Max agentic turns")
     parser.add_argument("--trace", action="store_true", help="Show trace status")
+    parser.add_argument("--version", "-V", action="store_true", help="Show version and exit")
     parser.add_argument("--help", "-h", action="store_true", help="Show help")
     return parser.parse_args()
 
@@ -419,6 +420,15 @@ async def run_one_shot(agent: Agent, prompt: str) -> None:
 
 def main() -> None:
     args = parse_args()
+
+    # 排在 .env 加载与 tracing 初始化之前：报个版本不该有副作用，
+    # 也不该等 MCP / Langfuse 那几秒。端云必须同 commit（deploy/README.md §10），
+    # 所以「我装的是哪一版」得能随时问到。
+    if args.version:
+        from .version import __version__
+        print(__version__)
+        sys.exit(0)
+
     _load_env_file()
 
     from .observability import init_tracing
@@ -442,6 +452,7 @@ Options:
   --max-cost USD      Max USD spend
   --max-turns N       Max agentic turns
   --trace             Show trace status
+  --version, -V       Show version and exit
   --help, -h          Show help
 """)
         sys.exit(0)
