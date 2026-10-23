@@ -1,0 +1,104 @@
+name: release-image
+
+# 只在 push 时跑：回写 tag 需要 contents:write，fork 来的 PR 拿不到可写 token；
+# 给未合并的 PR 构建镜像也没有意义。
+on:
+  push:
+    branches: [main, feature/cloud-deployment]
+  workflow_dispatch:
+
+# 刻意不 cancel-in-progress（与 ci.yml 相反）：本 workflow 会提交代码，
+# 互相取消会让 tag 回写乱序，出现「集群跑着一个 Git 里查不到的版本」。
+concurrency:
+  group: release-image-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write    # 回写 deploy/kind/kustomization.yaml
+  packages: write    # 推 GHCR
+
+env:
+  IMAGE: ghcr.io/soft-zihan/mycode
+
+jobs:
+  build-push-pin:
+    # 必须用 GitHub 托管的 runner：本仓库是 public，self-hosted runner 会让
+    # 任何 fork PR 有机会在你的机器上执行任意代码。
+    runs-on: ubuntu-latest
+    steps:
+      # 所有 action 都 pin 到 commit SHA 而不是浮动 tag（@v4 这种）：
+      # 上游被投毒时浮动 tag 会让你跟着中招，这是真实发生过的供应链攻击面。
+      # pin 于 2026-10-23，对应关系（要升级就重新解析并重新验证）：
+      #   actions/checkout@v4                        11d5960a326750d5838078e36cf38b85af677262
+      #   docker/setup-buildx-action@v3              8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      #   docker/login-action@v3                     c94ce9fb468520275223c153574b00df6fe4bcc9
+      #   docker/metadata-action@v5                  c299e40c65443455700f0fdfc63efafe5b349051
+      #   docker/build-push-action@v6                10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+      #   stefanzweifel/git-auto-commit-action@v5    b863ae1933cb653a53c021fe36dbb774e1fb9403
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # SHA tag 是 ArgoCD 能感知变化的前提；分支 tag 只是给人看的 convenience。
+      - name: 计算 tag
+        run: |
+          echo "TAG=sha-${GITHUB_SHA}" >> "$GITHUB_ENV"
+          echo "BRANCH_TAG=${GITHUB_REF_NAME//\//-}" >> "$GITHUB_ENV"
+
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051  # v5
+        id: meta
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=${{ env.TAG }}
+            type=raw,value=${{ env.BRANCH_TAG }}
+
+      - name: 记录构建起点（用于 CI_BUILD_SECONDS 台账）
+        run: echo "T0=$(date +%s)" >> "$GITHUB_ENV"
+
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        id: build
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # gha 缓存让「只改了后端代码」的构建跳过 npm ci 与 pip install 两层，
+          # 这是构建时长的主要变量。
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 记录台账数字
+        run: |
+          echo "CI_BUILD_SECONDS=$(( $(date +%s) - T0 ))" | tee -a ci-metrics.txt
+          echo "IMAGE_DIGEST=${{ steps.build.outputs.digest }}" | tee -a ci-metrics.txt
+          docker buildx imagetools inspect "${IMAGE}:${TAG}" \
+            --format '{{json .Image}}' | head -c 600 | tee -a ci-metrics.txt
+
+      # 回写 tag：这是 GitOps 的「CD 触发器」。用 sed 而不是 kustomize edit，
+      # 因为 runner 上只有 kubectl 没有独立的 kustomize 二进制。
+      # newTag 在 deploy/kind/kustomization.yaml 里只出现一次且缩进固定为 4 空格——
+      # tests/unit/test_deploy_assets.py 有一条断言专门守这个格式，改坏了测试会红。
+      - name: 回写 deploy/kind 的镜像 tag
+        run: |
+          cd deploy/kind
+          sed -i "s|^    newTag: .*|    newTag: ${TAG}|" kustomization.yaml
+          grep -n "newTag:" kustomization.yaml
+          # 改完立刻验证 overlay 仍能渲染出合法 YAML，别让坏文件被提交回去
+          kubectl kustomize . | grep "image:"
+
+      - uses: stefanzweifel/git-auto-commit-action@b863ae1933cb653a53c021fe36dbb774e1fb9403  # v5
+        with:
+          # [skip ci] 是必需的：否则这次提交会再触发一轮 ci.yml 与本 workflow，
+          # 形成回写循环。
+          commit_message: "chore(deploy): pin image to ${{ env.TAG }} [skip ci]"
+          file_pattern: deploy/kind/kustomization.yaml
+          branch: ${{ github.ref_name }}
+          commit_user_name: mycode-ci[bot]
+          commit_user_email: 41898282+github-actions[bot]@users.noreply.github.com
