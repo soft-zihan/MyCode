@@ -1,0 +1,29 @@
+# 本机 kind 集群：1 control-plane + 1 worker。
+# 不做 2 worker —— 宿主只有 5 vCPU / 12GB，而多节点亲和性/污点属 SRE 岗考点，
+# 后端校招不问，不值这份内存。
+#
+# 注意：kind 的多 worker 共享同一宿主内核与网卡，故障不隔离，
+# 所以本项目不宣称「高可用」（见 deploy/README.md 的已知边界）。
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  # 必须关掉 kindnet，否则 Cilium 装上去会和它抢 iptables/eBPF 规则。
+  # 代价：装完 Cilium 之前 node 会一直 NotReady，这是预期现象不是故障。
+  # 选 Cilium 而不是 Calico 的决定性理由：B2 的沙箱要按**域名**放行模型端点，
+  # 标准 NetworkPolicy 只能按 IP/CIDR 匹配，只有 Cilium 的 toFQDNs 做得到。
+  disableDefaultCNI: true
+  podSubnet: 10.244.0.0/16
+  serviceSubnet: 10.96.0.0/16
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      # 宿主 8080/8443 → 集群内 ingress-nginx 的 hostPort 80/443。
+      # 不用宿主 80/443：Windows 有端口保留段（netsh interface ipv4 show
+      # excludedportrange protocol=tcp 可查），且 IIS 等常占用。
+      - containerPort: 80
+        hostPort: 8080
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 8443
+        protocol: TCP
+  - role: worker
