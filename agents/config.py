@@ -1,6 +1,6 @@
 """JSON 配置管理模块。
 
-配置文件位置：~/.my-code/config.json
+配置文件位置：~/.my-code/config.json，可用 MYCODE_CONFIG_PATH 重定向。
 """
 
 from __future__ import annotations
@@ -17,7 +17,15 @@ DEFAULT_AUTO_COMPACT_THRESHOLD = 0.80
 
 
 def config_path() -> Path:
-    """配置文件路径：~/.my-code/config.json"""
+    """配置文件路径：默认 ~/.my-code/config.json，可用 MYCODE_CONFIG_PATH 重定向。
+
+    重定向是容器部署的前提：云端把整份 config.json 从 K8s Secret 挂到只读路径，
+    镜像里没有也不该有 ~/.my-code。与 session_dir() 的 MYCODE_SESSION_DIR 同一模式
+    （含「空白值回退默认」这条，否则一个空 env 会把配置指到进程 CWD）。
+    """
+    override = os.environ.get("MYCODE_CONFIG_PATH", "").strip()
+    if override:
+        return Path(override)
     return Path.home() / ".my-code" / "config.json"
 
 
