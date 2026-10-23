@@ -295,7 +295,7 @@ kubectl -n mycode rollout status deploy/control-plane --timeout=180s
 
 ```bash
 ./verify/netpol-probe.sh    # 4 条断言：证明 NetworkPolicy 在本机集群真的被执行
-./verify/deploy-probe.sh    # 9 条断言：B1 部署验收
+./verify/deploy-probe.sh    # 10 条断言：B1 部署验收
 ./scripts/container-smoke.sh  # 7 条断言：镜像层（不需要集群）
 ```
 
@@ -312,6 +312,23 @@ kubectl -n mycode rollout status deploy/control-plane --timeout=180s
 ## 6. 浏览器访问
 
 `deploy/base/ingress.yaml` 的 host 是 `mycode.local`，ingress-nginx 走 hostPort，宿主映射到 **8080/8443**。
+
+⚠️ **方式 A 能用的前提是 controller 跑在 control-plane 节点上**：`extraPortMappings`
+是**按节点**声明的（只在 `mycode-control-plane` 那个容器上），而 controller 用 hostPort——
+它落在哪个节点，80/443 就绑在哪个节点。上游 manifest 的 `nodeSelector` 只有
+`kubernetes.io/os: linux`，两个节点都匹配，调度器会挑 worker，于是宿主 `localhost:8080`
+是 `connection reset by peer`，而**集群内 port-forward 一切正常**（方式 B/C 都通）——
+这个组合极容易误判成 CNI 或 Ingress 规则坏了。
+
+`scripts/k8s-bootstrap.sh` 已经处理：给 control-plane 打 `ingress-ready=true` 标签，
+再 patch controller 的 `nodeSelector`（manifest 本来就 tolerate 了 control-plane 的
+NoSchedule 污点，所以只缺这一个 selector）。实测之后：
+
+```
+GET http://localhost:8080/api/health   → 200  {"status":"ok"}
+GET http://localhost:8080/             → 200  text/html, 418 B
+GET http://localhost:8080/assets/index-DH9LBTtN.js → 200  text/javascript, 1163804 B
+```
 
 **方式 A（改 hosts）**：Windows 侧以管理员身份编辑 `C:\Windows\System32\drivers\etc\hosts`，加一行
 

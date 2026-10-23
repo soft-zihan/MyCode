@@ -162,6 +162,21 @@ else
   log "manifest $(wc -l < "$MANIFEST_FILE") 行 → $MANIFEST_FILE"
   kubectl apply -f "$MANIFEST_FILE" >/dev/null
 fi
+
+# 把 controller 钉在 control-plane 节点上。deploy/kind-cluster.yaml 的 extraPortMappings
+# （宿主 8080 → 容器 80）只声明在 control-plane 那个节点容器上，而 controller 用的是
+# **hostPort**——它落在哪个节点，端口就绑在哪个节点。上游 manifest 的 nodeSelector 只有
+# `kubernetes.io/os: linux`，两个节点都匹配，调度器会挑 worker，于是宿主的
+# `localhost:8080` 打过去是 connection reset（2026-10-23 实测，
+# 而集群内 port-forward 一切正常，所以很容易误判成"CNI 坏了"）。
+# manifest 本身已经 tolerate 了 control-plane 的 NoSchedule 污点，所以只缺一个 nodeSelector。
+# 用 patch 而不是 sed 改 YAML：结构化改动不会因为上游换缩进而静默失效；
+# --type=merge 对 map 是合并语义，`kubernetes.io/os: linux` 会保留。
+log "把 ingress-nginx controller 钉到 ${CLUSTER}-control-plane（hostPort 要与 extraPortMappings 同节点）"
+kubectl label node "${CLUSTER}-control-plane" ingress-ready=true --overwrite >/dev/null
+kubectl -n ingress-nginx patch deploy ingress-nginx-controller --type=merge \
+  -p '{"spec":{"template":{"spec":{"nodeSelector":{"ingress-ready":"true"}}}}}' >/dev/null
+kubectl -n ingress-nginx rollout status deploy/ingress-nginx-controller --timeout=300s
 kubectl -n ingress-nginx wait --for=condition=Available deploy/ingress-nginx-controller --timeout=300s
 
 log "=== 集群就绪 ==="
