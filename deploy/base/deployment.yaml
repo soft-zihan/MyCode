@@ -48,10 +48,28 @@ spec:
               value: /etc/mycode/config.json
             - name: MYCODE_SESSION_BACKEND
               value: jsonl
+            # project 注册表默认落在 ~/.my-code/projects，而 HOME 是 emptyDir——
+            # Pod 一重启，「云端有哪些项目」就全忘了（文件还在 PVC 上，列表却空了）。
+            # 指到 PVC 挂载点之下，注册表与导入的工作区一起持久。
+            - name: MYCODE_PROJECTS_DIR
+              value: /home/app/.mycode/projects
             - name: MYCODE_TRACING
               value: "0"                # B1 不接 Langfuse；要接就改 1 并补两个 key 的 env
             - name: XDG_CACHE_HOME
               value: /tmp/.cache        # 只读根下，第三方库的缓存要有地方落
+            # 只有 git 走代理，不用全局 HTTPS_PROXY：Pod 直连 github.com:443 会超时，
+            # 必须经宿主代理转发口出去（deploy/README.md §1.6 的四条对照实测）。
+            # 但模型端点当前是直连可达的，全局代理会把所有出站都改道、平白多一个故障面，
+            # 所以这里只把代理交给 git（agents/core/workspace_import.py 用
+            # `git -c http.proxy=` 消费它）。网关地址是**每台机器不同的**，
+            # 因此不写死在 base 里，由 scripts/cloud-up.sh 建 ConfigMap mycode-net 提供；
+            # optional: true 让没建 ConfigMap 的环境（本地 dev、CI）照常渲染与启动。
+            - name: MYCODE_GIT_PROXY
+              valueFrom:
+                configMapKeyRef:
+                  name: mycode-net
+                  key: git-proxy
+                  optional: true
             - name: MYCODE_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:

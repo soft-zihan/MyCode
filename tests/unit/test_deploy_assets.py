@@ -156,6 +156,24 @@ def test_ingress_body_size_covers_ws_max_size():
     assert raw.endswith("m") and int(raw[:-1]) >= 16, f"proxy-body-size={raw} 小于 uvicorn 的 10MB ws_max_size"
 
 
+def test_ingress_has_hostless_fallback_rule():
+    """必须有一条**不写 host** 的兜底规则，否则浏览器打不开。
+
+    宿主浏览器发的是 `Host: localhost:8080`，而只有 `host: mycode.local` 的规则
+    不匹配它，请求会落到 ingress-nginx 的默认后端（实测 404）。浏览器发不出自定义
+    Host 头，所以唯一的替代方案是改 Windows 的 hosts——那需要管理员权限，
+    是「从开机到能用」里唯一没法自动化的一步，也就谈不上一键启动。
+    """
+    rules = _load("ingress.yaml")["spec"]["rules"]
+    hostless = [r for r in rules if "host" not in r]
+    assert len(hostless) == 1, f"要有且只有一条不写 host 的兜底规则，实际 {len(hostless)} 条"
+    backends = {
+        (p["backend"]["service"]["name"], p["backend"]["service"]["port"]["number"])
+        for r in rules for p in r["http"]["paths"]
+    }
+    assert backends == {("control-plane", 80)}, f"兜底规则指到了别的后端：{backends}"
+
+
 # ── 配置与存储的挂载方式 ───────────────────────────────────────────
 
 def test_config_mounted_from_secret_readonly(deployment):
@@ -172,6 +190,36 @@ def test_config_mounted_from_secret_readonly(deployment):
 def test_config_path_env_points_at_mount(deployment):
     env = {e["name"]: e for e in _container(deployment).get("env", [])}
     assert env["MYCODE_CONFIG_PATH"]["value"] == f"{CONFIG_MOUNT}/config.json"
+
+
+def test_projects_dir_is_on_pvc(deployment):
+    """project 注册表默认落 ~/.my-code/projects，而 HOME 是 emptyDir——Pod 一重启，
+    「云端有哪些项目」就全忘了：导入的代码还在 PVC 上，列表却空了。"""
+    env = {e["name"]: e for e in _container(deployment).get("env", [])}
+    assert "MYCODE_PROJECTS_DIR" in env, "注册表会落进 emptyDir，Pod 重建后云端项目列表清空"
+    value = env["MYCODE_PROJECTS_DIR"]["value"]
+    assert value.startswith(SESSION_MOUNT + "/"), \
+        f"{value} 不在 PVC 挂载点 {SESSION_MOUNT} 之下，等于没持久化"
+
+
+def test_git_proxy_comes_from_optional_configmap(deployment):
+    """Pod 直连 github.com:443 会超时，git 必须走宿主代理转发口。但那个网关地址
+    **每台机器都不同**，所以不能写死在 base 里；optional 则保证没建 ConfigMap 的
+    环境（本地 dev、CI 的 kustomize build）照常渲染与启动。"""
+    env = {e["name"]: e for e in _container(deployment).get("env", [])}
+    ref = env["MYCODE_GIT_PROXY"].get("valueFrom", {}).get("configMapKeyRef")
+    assert ref, "MYCODE_GIT_PROXY 必须来自 configMapKeyRef，不能是写死的 value"
+    assert ref.get("optional") is True, \
+        "少了 optional，没建 mycode-net 的环境会直接 CreateContainerConfigError 起不来"
+    assert (ref["name"], ref["key"]) == ("mycode-net", "git-proxy")
+
+
+def test_no_global_proxy_env(deployment):
+    """只给 git 走代理，不设全局 HTTPS_PROXY：模型端点当前是直连可达的，
+    全局改道会把所有出站都塞进那个转发口，平白多一个故障面（deploy/README.md §1.6）。"""
+    names = {e["name"] for e in _container(deployment).get("env", [])}
+    leaked = names & {"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"}
+    assert not leaked, f"Pod 里设了全局代理 {sorted(leaked)}，模型端点的出站会被一起改道"
 
 
 def test_session_dir_is_on_pvc(deployment):

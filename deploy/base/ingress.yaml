@@ -23,3 +23,17 @@ spec:
                 name: control-plane
                 port:
                   number: 80
+    # 不写 host 的兜底规则：匹配任意 Host，于是宿主浏览器直接开
+    # http://localhost:8080 就通，不用改 Windows 的 hosts（改 hosts 要管理员权限，
+    # 是「从开机到能用」里唯一没法自动化的一步，去掉它才谈得上一键启动）。
+    # 实测过没有这条时：curl localhost:8080/api/health → 404（nginx 默认后端），
+    # 加 Host: mycode.local → 200。浏览器发不出自定义 Host 头，所以必须兜底。
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: control-plane
+                port:
+                  number: 80
