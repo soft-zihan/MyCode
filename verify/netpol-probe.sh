@@ -10,6 +10,12 @@
 # 只测后半段没有意义——一个网络本来就全断的集群也会「通过」。
 set -euo pipefail
 
+# 清空代理：本脚本的 curl 都跑在集群内的探针 Pod 里、不经宿主代理，但 docker pull
+# 与 kubectl 会读这些变量。宿主的 HTTP_PROXY 指向 Windows 侧的 127.0.0.1:7897，
+# 在别的上下文里会造成假 502（详见 verify/deploy-probe.sh 顶部的同一段说明）。
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
+export NO_PROXY='*' no_proxy='*'
+
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
 mkdir -p verify/logs

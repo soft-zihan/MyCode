@@ -27,8 +27,12 @@ docker 29.1.3 / kind v0.33.0 / kubectl v1.37.1 / helm v3.22.1。
   `2a03:2880:...:face:b00c:...`（Meta 的 IPv6 段），即 **DNS 被污染**，直连不可用。
 - 直连 docker.io 与走本机代理（`127.0.0.1:7897`）的**吞吐都只有 ~185 KB/s**，
   900MB 的 `kindest/node` 要 80 分钟——所以必须换国内源。
-- `quay.io` / `ghcr.io` / `registry.k8s.io` 都健康（`/v2/` 返回 401，0.26–0.83s），
-  所以 Cilium、ArgoCD、ingress-nginx 的镜像**不需要**特殊处理。
+- `quay.io` 与 `ghcr.io` 健康（`/v2/` 返回 401，0.78–0.83s），且**节点内可直连**
+  （quay.io 走 AWS CloudFront），所以 Cilium、ArgoCD 的镜像不需要特殊处理。
+- ⚠️ **`registry.k8s.io` 是陷阱**：`/v2/` 也返回 401（0.26s，看着最健康），
+  但真拉镜像时它会 **302 跳到 `asia-east1-docker.pkg.dev`（Google Artifact Registry）**，
+  而本机到 Google 是 `dial tcp 142.250.157.82:443: i/o timeout`。
+  **`/v2/` 探活通 ≠ 能拉镜像**，这条把我骗了一轮。ingress-nginx 的镜像因此必须换源，见 1.2。
 
 ### 1.1 各镜像源实测结论（这一张表是反复试出来的，别再逐个盲试）
 
@@ -108,7 +112,7 @@ docker exec mycode-control-plane sh -c 'tr "\0" "\n" < /proc/$(pidof containerd)
 看着像「WSL2 没有 IPv6 默认路由所以拉不动」，但 `getent ahostsv4 quay.io` 能正常返回
 `34.192.167.37`。**别被 AAAA 记录优先这条线索带跑**——我在这儿浪费了一轮。
 
-### 1.4 两条必须记住的教训
+### 1.4 三条必须记住的教训
 
 1. **`docker image inspect` 成功 ≠ 镜像是好的。** `docker.melikeme.cn` 吐的是 HTML，
    daemon 却建了个 **Size=0B** 的镜像记录，`inspect` 照样返回 0。拿这种镜像去 `kind create`
@@ -118,6 +122,20 @@ docker exec mycode-control-plane sh -c 'tr "\0" "\n" < /proc/$(pidof containerd)
    所以 `verify/*.sh` 里用到的 docker.io 探针镜像必须**宿主拉好再 `kind load`**——
    脚本已经内置了这一步。没有去改节点内 containerd 的 registry 配置：
    containerd 2.x 已移除 `registry.mirrors`、改用 `hosts.toml`，跨版本易碎，而 `kind load` 与版本无关。
+3. **换镜像源就必须同时摘掉上游的 `@sha256:` digest 钉。**
+   ingress-nginx 的官方 manifest 把镜像写成 `registry.k8s.io/...:v1.15.1@sha256:594ceea7…`，
+   那是 **registry.k8s.io 的多架构 index digest**；华为源给的是平台专属 manifest 的 digest
+   （实测 `1442d220…`），两者不同。
+   症状极隐蔽：镜像明明已经在 containerd 里（`crictl pull` 回 `Image is up to date`），
+   kubelet 却一直 `Back-off pulling image`——因为它要的那个 digest 谁都没有。
+   代价是不再按内容寻址、改为信任镜像源的 tag。**本地集群可接受，生产要用真源 + digest。**
+
+### 1.5 探针镜像与 `kind load`
+
+`verify/netpol-probe.sh` 与 `verify/deploy-probe.sh` 会自己把 docker.io 的探针镜像
+（`nginx:1.27-alpine`、`curlimages/curl:8.10.1`）宿主拉好再 `kind load` 进两个节点，
+并用 `imagePullPolicy=IfNotPresent` 阻止 kubelet 再去外网拉。
+两个脚本都能独立重跑，不依赖对方已经 load 过。
 
 ---
 

@@ -6,6 +6,14 @@
 # UTF-16 乱码，必须落盘再读。
 set -euo pipefail
 
+# 清空代理：下面的 curl 全打在 127.0.0.1 上。宿主 HTTP_PROXY 指向 Windows 侧的
+# 127.0.0.1:7897 时，curl 会把请求交给代理，代理再从 Windows 侧绕回来——
+# 靠 WSL2 的 localhostForwarding 碰巧能通，但那是运气不是设计，而且失败时代理会回
+# 一个带 `Proxy-Connection` 头的假 502，把排查带偏（详见 verify/deploy-probe.sh 顶部）。
+# docker build/pull 不受影响：那些走 dockerd 自己的代理配置，不看 shell 环境。
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
+export NO_PROXY='*' no_proxy='*'
+
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
 mkdir -p logs

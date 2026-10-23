@@ -41,6 +41,9 @@ NODE_IMAGE="${NODE_IMAGE:-kindest/node:v1.37.0}"
 # controller-v1.15.1 = 2026-10-23 `gh api repos/kubernetes/ingress-nginx/releases/latest`。
 INGRESS_VERSION="${INGRESS_VERSION:-controller-v1.15.1}"
 INGRESS_MANIFEST="https://raw.githubusercontent.com/kubernetes/ingress-nginx/${INGRESS_VERSION}/deploy/static/provider/kind/deploy.yaml"
+# registry.k8s.io 的国内可达镜像前缀（理由见下面装 ingress-nginx 那段的注释）。
+# 用 ${VAR-default} 而不是 ${VAR:-default}，这样 `export K8S_REGISTRY_MIRROR=` 能显式关掉改写。
+K8S_REGISTRY_MIRROR="${K8S_REGISTRY_MIRROR-swr.cn-north-4.myhuaweicloud.com/ddn-k8s}"
 
 log() { echo "[bootstrap] $*"; }
 
@@ -117,8 +120,9 @@ done
 log "等 node Ready（Cilium 装好后才会转 Ready）"
 kubectl wait --for=condition=Ready node --all --timeout=300s
 
-if kubectl -n ingress-nginx get deploy ingress-nginx-controller >/dev/null 2>&1; then
-  log "ingress-nginx 已装，跳过"
+if [ "$(kubectl -n ingress-nginx get deploy ingress-nginx-controller \
+        -o jsonpath='{.status.availableReplicas}' 2>/dev/null)" = "1" ]; then
+  log "ingress-nginx 已就绪，跳过"
 else
   log "装 ingress-nginx（kind 专用 manifest，controller 走 hostPort，不需要 LB provider）"
   # 先用 curl 下载再 apply，不让 kubectl 自己去 fetch URL：
@@ -128,7 +132,30 @@ else
   MANIFEST_FILE="verify/logs/ingress-nginx-${INGRESS_VERSION}.yaml"
   curl -fsSL --retry 3 -o "$MANIFEST_FILE" "$INGRESS_MANIFEST" \
     || { echo "下载 ingress manifest 失败：$INGRESS_MANIFEST（检查宿主代理是否可用）"; exit 1; }
-  log "manifest 已下载 $(wc -l < "$MANIFEST_FILE") 行 → $MANIFEST_FILE"
+
+  # registry.k8s.io 会 302 跳到 asia-east1-docker.pkg.dev（Google Artifact Registry），
+  # 而本机到 Google 是 `dial tcp 142.250.157.82:443: i/o timeout`，节点内根本拉不动
+  # （quay.io 能用是因为它走 AWS CloudFront，不是 Google）。
+  # 改写成华为 SWR 的 ddn-k8s 镜像路径：节点可直连、实测 5.6MB/s。
+  # 换机器时若 registry.k8s.io 可直连，`export K8S_REGISTRY_MIRROR=` 即可关掉这次改写。
+  if [ -n "$K8S_REGISTRY_MIRROR" ]; then
+    sed -i "s#image: registry.k8s.io/#image: ${K8S_REGISTRY_MIRROR}/registry.k8s.io/#g" "$MANIFEST_FILE"
+    # 还必须摘掉上游的 @sha256 digest 钉：那是 registry.k8s.io 的**多架构 index digest**，
+    # 镜像源给的是平台专属 manifest 的 digest，两者不同。留着钉的后果很隐蔽——
+    # containerd 里镜像明明已经存在（`crictl pull` 回 "Image is up to date"），
+    # kubelet 却一直 `Back-off pulling image`，因为它要的那个 digest 谁都没有。
+    # 实测：钉的是 01038e7d…，华为源实际是 1442d220…。
+    # 代价是不再按内容寻址、改为信任镜像源的 tag——本地集群可接受，生产要用真源 + digest。
+    sed -i -E "s#(image: ${K8S_REGISTRY_MIRROR//./\\.}/registry\.k8s\.io/[^ \"']+)(@sha256:[0-9a-f]+)#\1#g" "$MANIFEST_FILE"
+    log "registry.k8s.io → ${K8S_REGISTRY_MIRROR}/registry.k8s.io（并摘掉 digest 钉）"
+  fi
+
+  # admission webhook 是 Job，而 Job 的 spec.template 不可变——改镜像后 apply 会失败，
+  # 所以重跑前先把旧 Job 删掉。
+  kubectl -n ingress-nginx delete job -l app.kubernetes.io/component=admission-webhook \
+    --ignore-not-found >/dev/null 2>&1 || true
+
+  log "manifest $(wc -l < "$MANIFEST_FILE") 行 → $MANIFEST_FILE"
   kubectl apply -f "$MANIFEST_FILE" >/dev/null
 fi
 kubectl -n ingress-nginx wait --for=condition=Available deploy/ingress-nginx-controller --timeout=300s
