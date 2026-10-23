@@ -1,0 +1,48 @@
+# 构建上下文裁剪。两类目的：
+#   1) 体积 —— .venv 与 node_modules 是几百 MB，每次 build 都要传给 daemon
+#   2) 泄漏 —— mindmap/ 与 deliverables/ 里有本地文档与求职材料，
+#      打进镜像层就是永久留在层历史里，删也删不掉
+#
+# 刻意**不**排除 scripts/ 与 verify/：B2 的沙箱镜像要 COPY scripts/sandbox-entrypoint.sh，
+# 现在排除等于给未来埋一个「为什么 COPY 不到」的坑。它们体积可忽略。
+
+# 版本控制与 CI
+.git
+.github
+.gitattributes
+
+# 依赖与构建产物（前端 dist 在镜像内重新构建，不用宿主的那份）
+.venv
+.venv-1
+**/node_modules
+frontend/dist
+**/__pycache__
+**/*.pyc
+
+# 测试与评测：运行期不需要。
+# eval/ 尤其要排除——frontend/server/main.py 对 eval.common 的导入在 try/except
+# 里且标注 non-fatal，裁掉它服务照常起，只是云端不提供评测端点（刻意如此）。
+tests
+eval
+.pytest_cache
+.coveragerc
+pytest.ini
+mycode-eval-skill
+
+# 本地文档与求职材料
+mindmap
+docs
+deliverables
+.superpowers
+*.pdf
+
+# 运行期产物与本地密钥
+logs
+.env
+.env.*
+!.env.example
+.mcp.json
+
+# 一次性文件
+.tmp-chunk.md
+_a1.txt
