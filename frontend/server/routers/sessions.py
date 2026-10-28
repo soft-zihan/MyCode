@@ -376,32 +376,49 @@ async def generate_session_title(message: str) -> str:
 
 @router.post("/api/sessions/{session_id}/abort")
 async def api_abort_session(session_id: str) -> dict[str, Any]:
-    """取消正在进行的 turn
-    
-    参考 deepseek-harness 的设计：
-    1. 设置 abort 标志
-    2. 等待当前 step 完成（由 agent_loop 检查 abort 标志）
-    3. 清理 inbox（待处理的消息）
-    4. 记录 cancel 事件
+    """取消正在进行的 turn。
+
+    1. 设置 abort 标志并 cancel 当前 task
+    2. **等事件流承认它真的停了**（turn 收尾事件落盘）才记 cancel
+    3. 等不到就如实记 confirmed=false
+
+    第 2、3 步是这里唯一的重点：abort() 只是设标志 + cancel task，模型请求、工具、
+    子进程还要一会儿才真的收尾，其间仍会往事件流追加事件。HTTP 返回了属于**传输结果**，
+    不等于**执行结果**；过去这里立刻就写 turn/cancel，等于让日志先宣布「已停止」，
+    而崩溃恢复正是按这份日志判断现场的。
+
+    confirmed 覆盖到哪：turn 收尾事件已落盘，且 abort() 已把这一轮在飞的前台命令
+    整树杀掉（同步工具跑在线程里，cancel 打不断，必须显式杀进程组）。
+    **不覆盖**已经发生的外部副作用（写出去的文件、已发出的 API 调用）——那部分由
+    工具重放策略在派生期如实告诉模型（agents/core/dangling_tool_calls.py）。
     """
     from agents.session_manager import get_session_manager
+    from agents.core.cancel_settlement import wait_for_turn_settlement
+
     sm = get_session_manager()
     
-    # 使用session_manager来abort
     agent = sm.get_agent(session_id)
     session = sm.get(session_id)
     
     if agent and session:
         try:
+            was_running = agent.is_processing
+            seq_before = session.seq
             agent.abort()
-            
-            # 记录 cancel 事件到 session
+            # 本来就没在跑，「已停止」平凡为真，不必白等一个超时
+            confirmed = (not was_running) or await wait_for_turn_settlement(session, seq_before)
+
             session.append("turn/cancel", {
                 "reason": "user_abort",
                 "turn": agent._current_turn,
+                "confirmed": confirmed,
             })
             
-            return {"success": True, "message": "Abort requested"}
+            return {
+                "success": True,
+                "message": "Abort confirmed" if confirmed else "Abort requested; stop not confirmed",
+                "confirmed": confirmed,
+            }
         except Exception as e:
             return {"success": False, "message": f"Abort failed: {e}"}
     

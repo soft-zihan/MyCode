@@ -68,6 +68,13 @@ INTERNAL_EVENT_TYPES = frozenset({
 
 ALL_KNOWN_EVENT_TYPES = PUBLIC_EVENT_TYPES | INTERNAL_EVENT_TYPES
 
+# turn 的收尾事件：出现任一条即代表这个 turn 不再运行。
+# 两处消费必须同源——崩溃恢复（session_crash_recovery）用它判定「哪个 turn 悬挂着」、
+# 取消回执（cancel_settlement）用它判定「用户点的停止是否真的生效」。
+# 各写一份的话，迟早一边认了新增的收尾事件、另一边不认，于是同一个会话
+# 在一处算停了、在另一处算还在跑。
+TURN_CLOSER_TYPES = frozenset({"turn/end", "turn/cancel"})
+
 
 def is_public_event(event_type: str) -> bool:
     """事件是否允许推上公开通道（WS 广播）。"""

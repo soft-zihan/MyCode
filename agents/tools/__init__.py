@@ -31,6 +31,7 @@ from agents.tools.registry import (
      TOOL_EXECUTION_MODES,
      _truncate_result,
 )
+from agents.tools.runtime import set_command_owner
 
 from agents.tools.file_tools import (
     read_file,
@@ -151,6 +152,11 @@ async def _call_tool_handler(name: str, handler: Any, inp: dict) -> str:
         result = await handler(inp)
     else:
         print_info(f"[DEBUG] execute_tool: calling asyncio.to_thread for {name}")
+        # 登记 owner（= 派发这次调用的 task）：同步工具跑在线程里，asyncio 取消
+        # 打不断它，中止时得靠 runtime.kill_inflight_commands 按 owner 杀进程组。
+        # 必须在 to_thread 之前设——to_thread 拷贝当前 context，线程里才读得到。
+        task = asyncio.current_task()
+        set_command_owner(id(task) if task is not None else None)
         result = await asyncio.to_thread(handler, inp)
     print_info(f"[DEBUG] execute_tool: handler done for {name}, took {time.time()-t0:.2f}s")
     return _truncate_result(result)

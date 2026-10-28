@@ -22,7 +22,8 @@ from agents.core.session import session_dir, Session, get_session_backend
 from agents.session_manager import get_session_manager
 
 # 闭合 turn 的事件集合（D4 一致性：abort 端点写 turn/cancel，同样终结 running）
-_TURN_CLOSER_TYPES = ("turn/end", "turn/cancel")
+# 定义在 event_types 里与取消回执共用一份，理由见那里的注释。
+from agents.core.event_types import TURN_CLOSER_TYPES as _TURN_CLOSER_TYPES
 
 
 @dataclass

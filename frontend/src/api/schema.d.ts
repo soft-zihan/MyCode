@@ -1102,13 +1102,21 @@ export interface paths {
         put?: never;
         /**
          * Api Abort Session
-         * @description 取消正在进行的 turn
+         * @description 取消正在进行的 turn。
          *
-         *     参考 deepseek-harness 的设计：
-         *     1. 设置 abort 标志
-         *     2. 等待当前 step 完成（由 agent_loop 检查 abort 标志）
-         *     3. 清理 inbox（待处理的消息）
-         *     4. 记录 cancel 事件
+         *     1. 设置 abort 标志并 cancel 当前 task
+         *     2. **等事件流承认它真的停了**（turn 收尾事件落盘）才记 cancel
+         *     3. 等不到就如实记 confirmed=false
+         *
+         *     第 2、3 步是这里唯一的重点：abort() 只是设标志 + cancel task，模型请求、工具、
+         *     子进程还要一会儿才真的收尾，其间仍会往事件流追加事件。HTTP 返回了属于**传输结果**，
+         *     不等于**执行结果**；过去这里立刻就写 turn/cancel，等于让日志先宣布「已停止」，
+         *     而崩溃恢复正是按这份日志判断现场的。
+         *
+         *     confirmed 覆盖到哪：turn 收尾事件已落盘，且 abort() 已把这一轮在飞的前台命令
+         *     整树杀掉（同步工具跑在线程里，cancel 打不断，必须显式杀进程组）。
+         *     **不覆盖**已经发生的外部副作用（写出去的文件、已发出的 API 调用）——那部分由
+         *     工具重放策略在派生期如实告诉模型（agents/core/dangling_tool_calls.py）。
          */
         post: operations["api_abort_session_api_sessions__session_id__abort_post"];
         delete?: never;

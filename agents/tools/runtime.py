@@ -9,10 +9,75 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
+import threading
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Protocol
 from agents.core.workspace import get_workspace
+
+# ── 在飞命令登记表 ────────────────────────────────────────────────────────────
+# 为什么需要它：run_shell 是**同步**函数，经 asyncio.to_thread 跑在线程里，
+# 而 asyncio 取消打不断线程。用户点「停止」时 agent.abort() 只能 cancel 那个 task：
+# turn 会闭合、事件流会写 turn/end{aborted}，**命令却继续跑到自己结束或超时**
+# （2026-10-28 实测：abort 返回后 1.5s，sleep 30 仍存活）。命令又是
+# start_new_session=True 起的独立进程组，所以连父进程的进程组信号都打不到它。
+#
+# 按 owner 分组是为了并发子 Agent：中止一个不能顺手杀掉另一个正在跑的命令。
+# owner = 派发这次工具调用的那个 asyncio task 的 id（见 _call_tool_handler）。
+_COMMAND_OWNER: ContextVar[int | None] = ContextVar("mycode_command_owner", default=None)
+_INFLIGHT_COMMANDS: dict[int, list[subprocess.Popen]] = {}
+_INFLIGHT_LOCK = threading.Lock()
+
+
+def set_command_owner(owner: int | None) -> None:
+    """登记「本上下文里起的命令属于谁」。
+
+    必须在 to_thread **之前**调用：to_thread 会拷贝当前 context，线程里才读得到。
+    """
+    _COMMAND_OWNER.set(owner)
+
+
+def kill_inflight_commands(owner: int) -> int:
+    """把 owner 名下正在跑的前台命令整树杀掉，返回杀掉的条数。
+
+    杀不到（已退出/无权限）不算失败——目标是「别再跑了」，不是「必须由我杀死」。
+    """
+    with _INFLIGHT_LOCK:
+        procs = list(_INFLIGHT_COMMANDS.get(owner, ()))
+    killed = 0
+    for proc in procs:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+            killed += 1
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                proc.kill()
+                killed += 1
+            except OSError:
+                pass
+    return killed
+
+
+def _register_inflight(proc: subprocess.Popen, owner: int | None) -> None:
+    if owner is None:
+        return
+    with _INFLIGHT_LOCK:
+        _INFLIGHT_COMMANDS.setdefault(owner, []).append(proc)
+
+
+def _unregister_inflight(proc: subprocess.Popen, owner: int | None) -> None:
+    if owner is None:
+        return
+    with _INFLIGHT_LOCK:
+        procs = _INFLIGHT_COMMANDS.get(owner)
+        if not procs:
+            return
+        if proc in procs:
+            procs.remove(proc)
+        if not procs:
+            _INFLIGHT_COMMANDS.pop(owner, None)
 
 
 class Runtime(Protocol):
@@ -72,6 +137,8 @@ class LocalRuntime:
             cwd=str(get_workspace()),
             start_new_session=True,
         )
+        owner = _COMMAND_OWNER.get()
+        _register_inflight(proc, owner)
         try:
             stdout, stderr = proc.communicate(timeout=timeout_s)
             return proc.returncode, stdout, stderr
@@ -82,6 +149,8 @@ class LocalRuntime:
                 proc.kill()
             proc.communicate()  # 收尸，避免僵尸
             raise
+        finally:
+            _unregister_inflight(proc, owner)
     
     def list_files(self, base: str, pattern: str) -> list[str]:
         import os

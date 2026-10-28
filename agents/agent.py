@@ -28,6 +28,7 @@ from agents.core.text_sanitization import safe_utf8_text
 from agents.core.turn_runner import TurnRunner
 from agents.core.session import Session
 from agents.tools import ToolDef, tool_definitions
+from agents.tools.runtime import kill_inflight_commands
 # 模块级而非延迟 import：tests/unit/test_import_hygiene.py 冻结了「agents/ 内零
 # 函数级 agents import」（M4 依赖治理，豁免表为空），其自身指引是解环而不是延迟。
 # 依赖方向早已存在（上一行 from agents.tools import ...，agents/core/prompt_runtime.py
@@ -310,6 +311,11 @@ class Agent:
     def abort(self) -> None:
         self._aborted = True
         self._abort_event.set()
+        # 先杀在飞的命令，再 cancel task。顺序是有理由的：同步工具（run_shell）跑在
+        # 线程里，cancel 打不断线程，命令会一直跑到自己结束或超时——2026-10-28 实测
+        # abort 返回后 sleep 30 仍存活。按 owner=这一轮的 task 杀，不误伤并发子 Agent。
+        if self._current_task is not None:
+            kill_inflight_commands(id(self._current_task))
         if self._auto_wake_task and not self._auto_wake_task.done():
             self._auto_wake_task.cancel()
         if self._current_task and not self._current_task.done():
