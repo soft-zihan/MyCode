@@ -21,6 +21,18 @@ EDIT_TOOLS = {"write_file", "edit_file", "skill_create", "remember", "ask_user",
 
 CONCURRENCY_SAFE_TOOLS = {"read_file", "outline_file", "list_files", "grep_search", "web_search", "shell_status"}
 
+# 重放策略：进程被硬杀（kill -9 / OOM / Pod 驱逐）时，一次「已发出、结果没落盘」的
+# 工具调用能不能按原参数重跑。判据只有一条——**同参数重跑是否收敛到同一状态、
+# 且不产生额外的外部副作用**。
+#
+# 与 READ_TOOLS 不是一回事：READ_TOOLS 说的是「要不要用户批准」。compact_context
+# 只读但会改会话（再压一次就再少一段），所以它不在这里；write_file 需要批准，
+# 但同参数重写收敛到同一份内容，所以它在这里。
+#
+# 缺省 unsafe：没登记的工具（含所有 MCP 工具）一律按「可能已部分执行」处理，
+# 由 agents/core/dangling_tool_calls.py 在派生期把这个事实告诉模型。
+REPLAY_SAFE_TOOLS = (READ_TOOLS - {"compact_context"}) | {"write_file"}
+
 MAX_RESULT_CHARS = 50000
 
 

@@ -12,6 +12,7 @@ import time
 
 from .session_backend import SessionBackend
 from .session_backend_jsonl import JsonlSessionBackend
+from .dangling_tool_calls import ensure_call_outputs_present
 
 logger = logging.getLogger(__name__)
 
@@ -401,7 +402,9 @@ class Session:
                 file=sys.stderr,
             )
         
-        return list(self._derived_messages)
+        # 硬杀留下的悬挂 tool_call 在这里补齐（理由见 dangling_tool_calls 的模块注释）。
+        # 只作用于返回值、不动 _derived_messages，增量派生的记账与 prefix cache 都不受影响。
+        return ensure_call_outputs_present(self._derived_messages, self._log)
     
     def _derive_messages(self, event: dict[str, Any]) -> list[dict[str, Any]]:
         """从单个事件派生 LLM 消息列表。"""
