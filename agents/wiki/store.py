@@ -26,6 +26,7 @@ from typing import Any, Generator
 from agents.core.frontmatter import parse_frontmatter, format_frontmatter
 from agents.core.snapshot_service import SnapshotService
 from agents.core.workspace import get_workspace
+from agents.core import state_root
 from agents.observability.trace import trace_span
 from agents.wiki.evolution.normalise_meta import infer_facets
 
@@ -168,8 +169,7 @@ def _attach_snapshot_checkpoint(
 ) -> None:
     """捕获快照并把 checkpoint_id 写回 frontmatter；失败仅告警不阻断写入。"""
     try:
-        snapshots_dir = Path.home() / ".mycode" / "snapshots"
-        svc = SnapshotService(str(get_workspace()), str(snapshots_dir))
+        svc = SnapshotService(str(get_workspace()), str(state_root.snapshots_dir()))
 
         def _capture():
             return asyncio.run(svc.capture(session_id="wiki", label=f"wiki:{wiki_type}/{filename}"))

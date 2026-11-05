@@ -9,6 +9,7 @@ from typing import Any
 
 from agents.core.workspace import get_workspace
 from agents.core.frontmatter import format_frontmatter, parse_frontmatter
+from agents.core import state_root
 from agents.observability.trace import trace_event
 from agents._utils import safe_skill_slug as _safe_skill_slug, utc_now as _utc_now, read_json as _read_json, write_json as _write_json
 
@@ -208,7 +209,7 @@ def resolve_skill_file(skill_name: str, *, target: str = "active", active_dir: s
             return found
 
     if target in ("user", "active"):
-        found = _find_skill_file_by_name(Path.home() / ".mycode" / "skills", skill_name)
+        found = _find_skill_file_by_name(state_root.skills_dir(), skill_name)
         if found:
             return found
 
@@ -218,7 +219,7 @@ def resolve_skill_file(skill_name: str, *, target: str = "active", active_dir: s
 def _skills_root(target: str) -> Path:
     target = (target or "project").strip().lower()
     if target == "user":
-        return Path.home() / ".mycode" / "skills"
+        return state_root.skills_dir()
     return get_workspace() / ".mycode" / "skills"
 
 

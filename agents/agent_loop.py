@@ -13,6 +13,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from agents.core.model_caller import ModelCaller
+from agents.core import state_root
 from agents.core.text_sanitization import safe_utf8_text
 from agents.plan.plan_tool_executor import (
     PLAN_APPROVAL_SUPERSEDED,
@@ -423,8 +424,6 @@ class AgentLoop:
 
     async def _prepare_turn(self, user_message: str | None) -> None:
         """准备轮次：清理消息、重置状态、创建快照。None=自动唤醒轮（U3b）。"""
-        from pathlib import Path
-        
         a = self._agent
         clean_message = safe_utf8_text(user_message).strip() if user_message is not None else ""
         
@@ -436,8 +435,7 @@ class AgentLoop:
             cwd = a.session.projections.get("cwd")
             if cwd:
                 try:
-                    snapshot_dir = Path.home() / ".mycode" / "snapshots"
-                    svc = SnapshotService(cwd, snapshot_dir)
+                    svc = SnapshotService(cwd, state_root.snapshots_dir())
                     snapshot = await svc.capture(
                         session_id=a.session.id,
                         label=f"Before: {clean_message[:50]}" if user_message is not None else "Before: [auto-wake]",

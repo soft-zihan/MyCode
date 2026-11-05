@@ -44,15 +44,25 @@ spec:
           env:
             - name: MYCODE_HOST
               value: "0.0.0.0"          # auth.py 默认绑 127.0.0.1，Service 会转不进来
+            # 全局状态根：~/.mycode/* 与 ~/.my-code/* 的解析统一收到这一个挂载点之下
+            # （agents/core/state_root.py）。存算分离的那一刀就在这里——状态不落容器，
+            # 计算（镜像）可以随便换。PVC 挂载点恰好等于数据区的历史默认，所以对已有的
+            # 会话/工作区/快照/agent 定义一个字节都不动；真正被搬进 PVC 的是原先散在
+            # emptyDir 上的配置区路径（projects 注册表、超大工具结果的溢出文件）——
+            # 后者是改进：模型看到的「Full output saved to <path>」在 Pod 重建后仍然有效。
+            # 代价是溢出文件从此不再有 Pod 生命周期兜底的清理，和会话事件一样只能靠
+            # 5Gi 配额逼出人工清理；两者是同一类风险，没有引入新的种类。
+            - name: MYCODE_HOME
+              value: /home/app/.mycode
             - name: MYCODE_CONFIG_PATH
               value: /etc/mycode/config.json
             - name: MYCODE_SESSION_BACKEND
               value: jsonl
-            # project 注册表默认落在 ~/.my-code/projects，而 HOME 是 emptyDir——
-            # Pod 一重启，「云端有哪些项目」就全忘了（文件还在 PVC 上，列表却空了）。
-            # 指到 PVC 挂载点之下，注册表与导入的工作区一起持久。
-            - name: MYCODE_PROJECTS_DIR
-              value: /home/app/.mycode/projects
+            # 派生产物要显式挡在 MYCODE_HOME 之外：venv 里的脚本把 shebang 写死成绝对
+            # 路径，跟着 PVC 活过镜像升级之后，基底 Python 一换就是一堆看不懂的启动失败，
+            # 而且它会无上限地吃 PVC 配额。钉回 emptyDir 等于保持今天的行为不变。
+            - name: MYCODE_SKILL_VENV
+              value: /home/app/.my-code/skill-venv
             - name: MYCODE_TRACING
               value: "0"                # B1 不接 Langfuse；要接就改 1 并补两个 key 的 env
             - name: XDG_CACHE_HOME
@@ -100,15 +110,16 @@ spec:
             - name: config
               mountPath: /etc/mycode
               readOnly: true
-            # HOME 整体给 emptyDir：写路径是散落且硬编码的——.mycode（session.py:524）、
-            # .my-code（config.py:21 / tools/executor.py）、.agents/skills
-            # （skills/skills.py:107）、CLI history（cli/history.py:66）都直接
-            # Path.home()/...。逐个挂卷迟早漏一个，而只读根之下漏一个就是
-            # 运行期 PermissionError。
+            # HOME 整体给 emptyDir：MYCODE_HOME 已经收编了 .mycode / .my-code 两个根，
+            # 但仍有两条写路径不归它管——用户级 agent skills（skills/skills.py:108 的
+            # ~/.agents/skills）和 CLI 输入历史（cli/history.py:66 的 ~/.MYCODE_history.json）
+            # 是直接 Path.home()/...，本来就该跟着用户主目录而不是全局状态根。
+            # 逐个挂卷迟早漏一个，而只读根之下漏一个就是运行期 PermissionError。
             - name: home
               mountPath: /home/app
             # PVC 嵌套挂在 HOME 之下：kubelet 按路径深度排序挂载（先父后子），
-            # 所以会话目录能持久，而 HOME 其余部分仍是可丢弃的 emptyDir。
+            # 所以 MYCODE_HOME 指向的整个全局状态区能持久，而 HOME 其余部分
+            # （.agents/skills、CLI 历史、skill-venv）仍是可丢弃的 emptyDir。
             - name: data
               mountPath: /home/app/.mycode
             - name: tmp

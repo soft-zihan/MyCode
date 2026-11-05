@@ -11,6 +11,7 @@ from typing import Any
 
 from agents.core.agent_mode import BUILTIN_HIDDEN_AGENTS
 from agents.core.frontmatter import format_frontmatter
+from agents.core import state_root
 
 
 @dataclass
@@ -118,7 +119,7 @@ def _collect_hidden_agent_prompts() -> list[PromptInfo]:
     优先级：用户 override (~/.mycode/agents/<name>.md) > 提示词文件 > agent_mode.py 内置。
     """
     prompts: list[PromptInfo] = []
-    user_agents_dir = Path.home() / ".mycode" / "agents"
+    user_agents_dir = state_root.agents_dir()
 
     for name, config in BUILTIN_HIDDEN_AGENTS.items():
         override_path = user_agents_dir / f"{name}.md"
@@ -185,7 +186,7 @@ def save_prompt(name: str, content: str) -> bool:
     
     if prompt.source == "builtin":
         # Hidden agent 提示词保存到用户目录
-        user_agents_dir = Path.home() / ".mycode" / "agents"
+        user_agents_dir = state_root.agents_dir()
         user_agents_dir.mkdir(parents=True, exist_ok=True)
         
         # 提取 agent name

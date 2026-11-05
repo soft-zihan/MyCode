@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import state_root
+
 
 class WorktreeError(Exception):
     """worktree 操作失败。force_required=True 表示脏目录需显式 force。"""
@@ -74,17 +76,13 @@ _DIRTY_RE = re.compile(r"contains modified or untracked files|is dirty", re.IGNO
 
 
 def _worktree_home() -> Path:
-    override = os.environ.get("MYCODE_WORKTREE_HOME", "").strip()
-    if override:
-        return Path(override)
-    return Path.home() / ".mycode" / "worktree"
+    """worktree 根。可用 MYCODE_WORKTREE_HOME 或 MYCODE_HOME 重定向。"""
+    return state_root.worktree_home()
 
 
 def _manifest_path() -> Path:
-    override = os.environ.get("MYCODE_WORKTREE_MANIFEST", "").strip()
-    if override:
-        return Path(override)
-    return _worktree_home() / "worktrees.json"
+    """清单默认是 worktree 根的兄弟文件，所以重定向根之后它跟着走。"""
+    return state_root.worktree_manifest_path()
 
 
 def _atomic_write_json(path: Path, data: Any) -> None:

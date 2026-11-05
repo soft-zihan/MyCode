@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import re
 import time
-from pathlib import Path
+
+from agents.core import state_root
 
 
 def persist_large_result(tool_name: str, result: str) -> str:
@@ -28,7 +29,7 @@ def persist_large_result(tool_name: str, result: str) -> str:
     if len(result.encode()) <= THRESHOLD:
         return result
 
-    d = Path.home() / ".my-code" / "tool-results"
+    d = state_root.tool_results_dir()
     d.mkdir(parents=True, exist_ok=True)
     filename = f"{int(time.time() * 1000)}-{tool_name}.txt"
     filepath = d / filename

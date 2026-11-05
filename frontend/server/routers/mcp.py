@@ -8,18 +8,22 @@ from typing import Any
 
 from fastapi import APIRouter
 
+from agents.core import state_root
+
 router = APIRouter(tags=["mcp"])
 
 project_root = Path(__file__).parent.parent.parent.parent
-_config_path = Path.home() / ".mycode" / "config" / "disabled_mcp_servers.json"
 
 
 @router.get("/api/config/disabled-mcp-servers")
 def api_get_disabled_mcp_servers() -> list[str]:
     """Get list of disabled MCP server names."""
-    if _config_path.exists():
+    # 这里原本是个模块级常量 `_config_path = Path.home() / ...`，import 时就求值了，
+    # 进程起来后再设 MYCODE_HOME 完全不生效。改成用时解析。
+    config_path = state_root.disabled_mcp_path()
+    if config_path.exists():
         try:
-            return json.loads(_config_path.read_text())
+            return json.loads(config_path.read_text())
         except Exception:
             pass
     return []
@@ -28,8 +32,9 @@ def api_get_disabled_mcp_servers() -> list[str]:
 @router.put("/api/config/disabled-mcp-servers")
 def api_set_disabled_mcp_servers(servers: list[str]) -> dict[str, str]:
     """Save list of disabled MCP server names."""
-    _config_path.parent.mkdir(parents=True, exist_ok=True)
-    _config_path.write_text(json.dumps(servers))
+    config_path = state_root.disabled_mcp_path()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(servers))
     return {"status": "ok"}
 
 

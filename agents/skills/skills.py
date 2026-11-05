@@ -10,6 +10,7 @@ from typing import Any
 
 from agents.core.workspace import get_workspace
 from agents.core.frontmatter import parse_frontmatter
+from agents.core import state_root
 from .skill_file_ops import (
     create_skill_file,
     evolve_skill_file,
@@ -101,7 +102,7 @@ def discover_skills() -> list[SkillDefinition]:
 
     skills: dict[str,SkillDefinition] = {}
     # 用户级 skills 优先级最高：~/.mycode/skills/<name>/SKILL.md
-    user_dir = Path.home() / ".mycode" / "skills"
+    user_dir = state_root.skills_dir()
     _load_skills_from_dir(user_dir, "user", skills)
     # 用户级 skills（agents 目录）：~/.agents/skills/<name>/SKILL.md
     agents_dir = Path.home() / ".agents" / "skills"

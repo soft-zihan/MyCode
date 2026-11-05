@@ -15,6 +15,7 @@ from typing import Any
 
 from agents.wiki.store import WikiEntry
 from agents.config import get_embedding_config
+from agents.core import state_root
 
 
 # 兜底零向量/缓存元信息用默认维度；真实维度以 API 返回向量为准
@@ -43,7 +44,7 @@ def get_cache_dir() -> Path:
     放全局（~/.mycode/embed-cache）使评测 wipe / 工作区清理不再导致
     全量冷启动——冷 embed 串行 + ollama 重试曾把召回推到 94s（预算 20s）。
     """
-    d = Path.home() / ".mycode" / "embed-cache"
+    d = state_root.embed_cache_dir()
     d.mkdir(parents=True, exist_ok=True)
     return d
 

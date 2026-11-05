@@ -89,8 +89,10 @@ async def lifespan(app: FastAPI):
         print(f"[STARTUP] Observability init failed (non-fatal): {e}")
 
     # Load disabled servers from config
+    from agents.core import state_root
+
     disabled_servers = set()
-    config_path = Path.home() / ".mycode" / "config" / "disabled_mcp_servers.json"
+    config_path = state_root.disabled_mcp_path()
     if config_path.exists():
         try:
             disabled_servers = set(json.loads(config_path.read_text()))

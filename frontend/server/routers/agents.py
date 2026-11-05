@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from agents.core.subagent import get_sub_agent_config, _discover_custom_agents, get_available_agent_types, get_agent_model_ref_env, reset_agent_cache
 from agents.core.workspace import get_workspace
+from agents.core import state_root
 from agents.core.agent_mode import BUILTIN_HIDDEN_AGENTS
 from agents.tools.registry import tool_definitions
 
@@ -108,7 +109,7 @@ def api_list_agents() -> list[dict[str, Any]]:
         is_custom = name in custom_agents
         custom_config = custom_agents.get(name, {})
         
-        has_override = (Path.home() / ".mycode" / "agents" / f"{name}.md").exists()
+        has_override = (state_root.agents_dir() / f"{name}.md").exists()
         
         # Load prompt for primary agents
         prompt_path = _PROMPTS_DIR / "subagent" / f"{name}.txt"
@@ -136,7 +137,7 @@ def api_list_agents() -> list[dict[str, Any]]:
         is_custom = name in custom_agents
         custom_config = custom_agents.get(name, {})
         
-        has_override = (Path.home() / ".mycode" / "agents" / f"{name}.md").exists()
+        has_override = (state_root.agents_dir() / f"{name}.md").exists()
         
         agents.append({
             "name": name,
@@ -145,7 +146,7 @@ def api_list_agents() -> list[dict[str, Any]]:
             "is_custom": is_custom,
             "has_override": has_override,
             "allowed_tools": custom_config.get("allowed_tools"),
-            "has_system_prompt": bool(custom_config.get("system_prompt")) or (Path.home() / ".mycode" / "agents" / f"{name}.md").exists(),
+            "has_system_prompt": bool(custom_config.get("system_prompt")) or (state_root.agents_dir() / f"{name}.md").exists(),
             "category": "sub",
         })
     
@@ -155,7 +156,7 @@ def api_list_agents() -> list[dict[str, Any]]:
         is_custom = name in custom_agents
         custom_config = custom_agents.get(name, {})
         
-        has_override = (Path.home() / ".mycode" / "agents" / f"{name}.md").exists()
+        has_override = (state_root.agents_dir() / f"{name}.md").exists()
         
         agents.append({
             "name": name,
@@ -204,7 +205,7 @@ def api_get_agent(agent_name: str) -> dict[str, Any]:
                 system_prompt = prompt_path.read_text(encoding="utf-8")
             
             # Check for override
-            override_path = Path.home() / ".mycode" / "agents" / f"{agent_name}.md"
+            override_path = state_root.agents_dir() / f"{agent_name}.md"
             if override_path.exists():
                 from agents.core.frontmatter import parse_frontmatter
                 raw = override_path.read_text()
@@ -222,7 +223,7 @@ def api_get_agent(agent_name: str) -> dict[str, Any]:
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"Agent not found: {e}")
     
-    has_override = (Path.home() / ".mycode" / "agents" / f"{agent_name}.md").exists()
+    has_override = (state_root.agents_dir() / f"{agent_name}.md").exists()
     
     # Determine category
     if agent_name in primary_names:
@@ -258,7 +259,7 @@ def api_get_agent_prompt(agent_name: str) -> dict[str, Any]:
     hidden_config = BUILTIN_HIDDEN_AGENTS.get(agent_name)
     if hidden_config:
         # Check for override
-        override_path = Path.home() / ".mycode" / "agents" / f"{agent_name}.md"
+        override_path = state_root.agents_dir() / f"{agent_name}.md"
         if override_path.exists():
             from agents.core.frontmatter import parse_frontmatter
             raw = override_path.read_text()
@@ -270,7 +271,7 @@ def api_get_agent_prompt(agent_name: str) -> dict[str, Any]:
     primary_names = {"build", "plan"}
     if agent_name in primary_names:
         # Check for override first
-        override_path = Path.home() / ".mycode" / "agents" / f"{agent_name}.md"
+        override_path = state_root.agents_dir() / f"{agent_name}.md"
         if override_path.exists():
             from agents.core.frontmatter import parse_frontmatter
             raw = override_path.read_text()
@@ -300,7 +301,7 @@ def api_update_agent_prompt(agent_name: str, data: PromptUpdate) -> dict[str, An
     import frontmatter
     
     # All agents can be overridden via ~/.mycode/agents/{name}.md
-    agents_dir = Path.home() / ".mycode" / "agents"
+    agents_dir = state_root.agents_dir()
     agents_dir.mkdir(parents=True, exist_ok=True)
     agent_file = agents_dir / f"{agent_name}.md"
     
@@ -356,7 +357,7 @@ def api_create_custom_agent(data: CustomAgentCreate) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=f"Agent name '{data.name}' is reserved.")
     
     # Create agent file in user's home directory
-    agents_dir = Path.home() / ".mycode" / "agents"
+    agents_dir = state_root.agents_dir()
     agents_dir.mkdir(parents=True, exist_ok=True)
     agent_file = agents_dir / f"{data.name}.md"
     
@@ -393,7 +394,7 @@ def api_update_custom_agent(agent_name: str, data: CustomAgentUpdate) -> dict[st
     
     # Find the agent file
     agent_file = None
-    for base_dir in [Path.home() / ".mycode" / "agents", get_workspace() / ".mycode" / "agents"]:
+    for base_dir in [state_root.agents_dir(), get_workspace() / ".mycode" / "agents"]:
         path = base_dir / f"{agent_name}.md"
         if path.exists():
             agent_file = path
@@ -434,7 +435,7 @@ def api_delete_custom_agent(agent_name: str) -> dict[str, Any]:
     builtin_names = {"build", "plan", "explore", "general"} | set(BUILTIN_HIDDEN_AGENTS.keys())
     
     if agent_name in builtin_names:
-        override_file = Path.home() / ".mycode" / "agents" / f"{agent_name}.md"
+        override_file = state_root.agents_dir() / f"{agent_name}.md"
         if override_file.exists():
             try:
                 override_file.unlink()
@@ -448,7 +449,7 @@ def api_delete_custom_agent(agent_name: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"Custom agent '{agent_name}' not found.")
     
     # Find and delete the agent file
-    for base_dir in [Path.home() / ".mycode" / "agents", get_workspace() / ".mycode" / "agents"]:
+    for base_dir in [state_root.agents_dir(), get_workspace() / ".mycode" / "agents"]:
         agent_file = base_dir / f"{agent_name}.md"
         if agent_file.exists():
             try:

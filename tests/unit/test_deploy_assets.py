@@ -192,14 +192,27 @@ def test_config_path_env_points_at_mount(deployment):
     assert env["MYCODE_CONFIG_PATH"]["value"] == f"{CONFIG_MOUNT}/config.json"
 
 
-def test_projects_dir_is_on_pvc(deployment):
-    """project 注册表默认落 ~/.my-code/projects，而 HOME 是 emptyDir——Pod 一重启，
-    「云端有哪些项目」就全忘了：导入的代码还在 PVC 上，列表却空了。"""
-    env = {e["name"]: e for e in _container(deployment).get("env", [])}
-    assert "MYCODE_PROJECTS_DIR" in env, "注册表会落进 emptyDir，Pod 重建后云端项目列表清空"
-    value = env["MYCODE_PROJECTS_DIR"]["value"]
-    assert value.startswith(SESSION_MOUNT + "/"), \
-        f"{value} 不在 PVC 挂载点 {SESSION_MOUNT} 之下，等于没持久化"
+def test_global_state_root_is_on_pvc(deployment):
+    """全部全局状态从 MYCODE_HOME 这一个根解析（agents/core/state_root.py）：会话事件、
+    导入的工作区、快照、项目注册表、agent/skill 定义、超大工具结果的溢出文件。
+    根落在 emptyDir 上就等于 Pod 一重建，「云端有哪些项目、跑过哪些会话」全忘了——
+    代码还在卷上，列表却是空的。这条替代了从前单独钉 MYCODE_PROJECTS_DIR 的做法。"""
+    env = {e["name"]: e.get("value") for e in _container(deployment).get("env", [])}
+    assert env.get("MYCODE_HOME") == SESSION_MOUNT, (
+        f"MYCODE_HOME={env.get('MYCODE_HOME')!r} 不是 PVC 挂载点 {SESSION_MOUNT}"
+    )
+
+
+def test_derived_artifacts_stay_off_pvc(deployment):
+    """venv 是派生产物，必须显式挡在 MYCODE_HOME 之外：脚本里的 shebang 写死了绝对路径，
+    跟着 PVC 活过镜像升级之后基底 Python 一换就是一堆看不懂的启动失败，
+    而且它会无上限地吃 PVC 配额。"""
+    env = {e["name"]: e.get("value") for e in _container(deployment).get("env", [])}
+    venv = env.get("MYCODE_SKILL_VENV")
+    assert venv, "缺 MYCODE_SKILL_VENV，venv 会被 MYCODE_HOME 一起收进 PVC"
+    assert not (venv == SESSION_MOUNT or venv.startswith(SESSION_MOUNT + "/")), (
+        f"{venv} 在 PVC 挂载点之下，派生产物不该跨镜像升级存活"
+    )
 
 
 def test_git_proxy_comes_from_optional_configmap(deployment):
@@ -232,10 +245,10 @@ def test_session_dir_is_on_pvc(deployment):
 
 
 def test_home_is_on_writable_volume(deployment):
-    """HOME 整体必须是可写卷。写路径是散落且硬编码的：.mycode（session.py:524）、
-    .my-code（config.py:21 / tools/executor.py）、.agents/skills（skills/skills.py:107）、
-    CLI history（cli/history.py:66）都直接 Path.home()/...。逐个挂卷迟早漏一个，
-    而只读根之下漏一个就是运行期 PermissionError。"""
+    """HOME 整体必须是可写卷。MYCODE_HOME 收编了 .mycode / .my-code 两个根，但仍有
+    两条写路径不归它管：用户级 agent skills（skills/skills.py:108 的 ~/.agents/skills）
+    和 CLI 输入历史（cli/history.py:66 的 ~/.MYCODE_history.json）直接 Path.home()/...。
+    逐个挂卷迟早漏一个，而只读根之下漏一个就是运行期 PermissionError。"""
     mounts = {m["mountPath"]: m["name"] for m in _container(deployment)["volumeMounts"]}
     vols = {v["name"]: v for v in _pod(deployment)["volumes"]}
     assert "/home/app" in mounts, "HOME 没挂卷，只读根下任何 Path.home() 写入都会失败"

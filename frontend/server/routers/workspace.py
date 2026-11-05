@@ -250,8 +250,10 @@ def api_workspace_file(path: str, cwd: Optional[str] = None) -> dict[str, Any]:
     
     # 如果文件不存在，检查是否是 hidden agent 的 override 文件
     if not file_path.exists():
-        # 检查是否在 ~/.mycode/agents/ 目录下
-        user_agents_dir = Path.home() / ".mycode" / "agents"
+        # 检查是否在全局 agents 目录下
+        from agents.core import state_root
+
+        user_agents_dir = state_root.agents_dir()
         if str(file_path.parent) == str(user_agents_dir) and file_path.suffix == ".md":
             # 从 prompt_registry 获取初始内容
             try:

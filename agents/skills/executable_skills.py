@@ -12,24 +12,21 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from agents.observability.trace import trace_span
+from agents.core import state_root
 
 
 # ── 配置 ───────────────────────────────────────────────────────────────────────
 
 
 def get_kernel_venv_path() -> Path:
-    """获取 skill 隔离 venv 路径。"""
-    override = os.environ.get("MYCODE_SKILL_VENV", "").strip()
-    if override:
-        return Path(override)
-    return Path.home() / ".my-code" / "skill-venv"
+    """获取 skill 隔离 venv 路径。可用 MYCODE_SKILL_VENV 或 MYCODE_HOME 重定向。"""
+    return state_root.skill_venv_dir()
 
 
 def get_python_executable() -> str:

@@ -14,6 +14,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from agents.core import state_root
+
 
 class BadCaseSource(str, Enum):
     """Bad case 来源。"""
@@ -67,7 +69,7 @@ class BadCase:
 
 def _db_path() -> Path:
     """获取数据库路径。"""
-    db_dir = Path.home() / ".mycode" / "db"
+    db_dir = state_root.db_dir()
     db_dir.mkdir(parents=True, exist_ok=True)
     return db_dir / "bad_cases.db"
 

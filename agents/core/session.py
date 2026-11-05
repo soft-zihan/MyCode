@@ -13,6 +13,7 @@ import time
 from .session_backend import SessionBackend
 from .session_backend_jsonl import JsonlSessionBackend
 from .dangling_tool_calls import ensure_call_outputs_present
+from . import state_root
 
 logger = logging.getLogger(__name__)
 
@@ -519,12 +520,9 @@ def derive_messages_from_event(
 
 
 def session_dir() -> Path:
-    """会话存储目录。默认 ~/.mycode/sessions/，
-    可用 MYCODE_SESSION_DIR 环境变量重定向（测试用，避免污染真实目录）。"""
-    override = os.environ.get("MYCODE_SESSION_DIR", "").strip()
-    if override:
-        return Path(override)
-    return Path.home() / ".mycode" / "sessions"
+    """会话存储目录。默认 ~/.mycode/sessions/，可用 MYCODE_SESSION_DIR 或
+    MYCODE_HOME 重定向（测试用，避免污染真实目录；解析优先级见 agents.core.state_root）。"""
+    return state_root.session_dir()
 
 
 def _ensure_dir() -> None:

@@ -169,6 +169,7 @@ cp .env.example .env
 
 | 变量                                          | 默认                         | 说明                              |
 | ----------------------------------------------- | ------------------------------ | ----------------------------------- |
+| `MYCODE_HOME`                                 | 空（`~/.mycode` 与 `~/.my-code`） | 全局状态根：会话、工作区、快照、项目注册表、agent/skill 定义、日志、工具结果溢出全部收进这一个目录。容器里指向持久卷挂载点。分项旋钮（`MYCODE_CONFIG_PATH` / `MYCODE_SESSION_DIR` / `MYCODE_PROJECTS_DIR` / `MYCODE_SKILL_VENV` 等）优先级高于它 |
 | `MYCODE_TRACING`                              | `1`（经 `start.sh`）         | Langfuse tracing 开关；直接跑后端时默认关 |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | 空                           | Langfuse 密钥（不填则仅本地日志） |
 | `LANGFUSE_BASE_URL`                           | `https://cloud.langfuse.com` | Langfuse 服务地址                 |

@@ -12,6 +12,7 @@ from agents._utils import (
     stable_hash as _stable_hash,
 )
 from agents.core.workspace import get_workspace
+from agents.core import state_root
 from .skill_file_ops import get_evolution_dir
 from agents.observability.trace import trace_event
 
@@ -174,7 +175,7 @@ def _find_active_skill_path(skill_name: str) -> Path | None:
     if project_path.is_file():
         return project_path
 
-    user_path = Path.home() / ".mycode" / "skills" / skill_name / "SKILL.md"
+    user_path = state_root.skills_dir() / skill_name / "SKILL.md"
     if user_path.is_file():
         return user_path
 

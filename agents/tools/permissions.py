@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from agents.core.workspace import get_workspace
+from agents.core import state_root
 from agents.tools.paths import resolve_tool_path
 from agents.tools.registry import READ_TOOLS, EDIT_TOOLS
 from agents.observability.trace import trace_span
@@ -121,7 +122,7 @@ def load_permission_rules() -> dict:
     allow: list[dict] = []
     deny: list[dict] = []
 
-    user_settings = _load_settings(Path.home() / ".mycode" / "settings.json")
+    user_settings = _load_settings(state_root.settings_path())
     project_settings = _load_settings(get_workspace() / ".mycode" / "settings.json")
 
     for settings in [user_settings, project_settings]:

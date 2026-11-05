@@ -42,6 +42,7 @@ from typing import Any
 import httpx
 
 from agents.core.workspace import get_workspace
+from agents.core import state_root
 from agents.logging import print_error, print_info
 from agents.observability.trace import trace_span
 from agents.version import __version__
@@ -601,7 +602,7 @@ class McpManager:
         merged: dict[str, dict] = {}
 
         # 1. 全局配置：~/.mycode/settings.json
-        global_path = Path.home() / ".mycode" / "settings.json"
+        global_path = state_root.settings_path()
         self._merge_config_file(global_path, merged)
 
         # 2. 当前项目配置：<cwd>/.mycode/settings.json

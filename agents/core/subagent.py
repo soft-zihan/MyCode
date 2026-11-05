@@ -9,6 +9,7 @@ from pathlib import Path
 
 from agents.core.workspace import get_workspace
 from agents.core.frontmatter import parse_frontmatter
+from agents.core import state_root
 from agents.tools import tool_definitions, ToolDef
 
 
@@ -98,7 +99,7 @@ def _discover_custom_agents() -> dict[str, dict]:
 
     agents: dict[str, dict] = {}
     # User-level (lower priority)
-    _load_agents_from_dir(Path.home() / ".mycode" / "agents", agents)
+    _load_agents_from_dir(state_root.agents_dir(), agents)
     # Project-level (higher priority, overwrites)
     _load_agents_from_dir(workspace / ".mycode" / "agents", agents)
 

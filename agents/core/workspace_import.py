@@ -28,6 +28,7 @@ from typing import Any
 
 from .branches import BranchError, checkout as checkout_branch
 from .project import register_project
+from . import state_root
 
 WORKSPACES_ENV = "MYCODE_WORKSPACES_DIR"
 GIT_PROXY_ENV = "MYCODE_GIT_PROXY"
@@ -77,11 +78,9 @@ def workspace_root() -> Path:
     默认 `~/.mycode/workspaces`，与 worktree 的 `~/.mycode/worktree/` 同属全局数据区。
     在 Pod 里 `~/.mycode` 正是 PVC 的挂载点（deploy/base/deployment.yaml），
     所以导入的代码跨 Pod 重建存活；`~/.my-code`（带横线，配置区）是 emptyDir，不能用。
+    可用 MYCODE_WORKSPACES_DIR 或 MYCODE_HOME 重定向（优先级见 agents.core.state_root）。
     """
-    override = os.environ.get(WORKSPACES_ENV, "").strip()
-    if override:
-        return Path(override)
-    return Path.home() / ".mycode" / "workspaces"
+    return state_root.workspaces_dir()
 
 
 def git_proxy() -> str | None:

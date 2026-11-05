@@ -19,6 +19,7 @@ from agents.tools.result import ToolExecutionResult
 from agents.wiki.store import get_wiki_dir
 from agents.core.context_events import collect_hidden_seqs
 from agents.core.snapshot_service import SnapshotService
+from agents.core import state_root
 from agents.core.subagent_runner import execute_agent_tool, execute_subagent_cancel_tool
 from agents.logging import print_info, print_error
 from agents.observability.trace import trace_span
@@ -516,11 +517,8 @@ class ToolDispatcher:
 
     async def _execute_git_diff_before_last_compress_tool(self, inp: dict) -> str:
         """执行 git_diff_before_last_compress 工具。"""
-        from pathlib import Path
-
         session_id = self.agent.session_id
-        snapshots_dir = Path.home() / ".mycode" / "snapshots"
-        svc = SnapshotService(self.agent.workspace, str(snapshots_dir))
+        svc = SnapshotService(self.agent.workspace, str(state_root.snapshots_dir()))
 
         # 获取当前 session 的所有 snapshot
         snapshots = await svc.list(session_id=session_id)
@@ -556,14 +554,11 @@ class ToolDispatcher:
 
     async def _execute_git_diff_session_tool(self, inp: dict) -> str:
         """执行 git_diff_session 工具。"""
-        from pathlib import Path
-
         session_id = str(inp.get("session_id") or "").strip()
         if not session_id:
             return "Error: session_id is required."
 
-        snapshots_dir = Path.home() / ".mycode" / "snapshots"
-        svc = SnapshotService(self.agent.workspace, str(snapshots_dir))
+        svc = SnapshotService(self.agent.workspace, str(state_root.snapshots_dir()))
 
         # 获取指定 session 的所有 snapshot
         snapshots = await svc.list(session_id=session_id)

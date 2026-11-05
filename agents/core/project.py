@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 import time
 
 from .worktree import prune_project_worktrees
+from . import state_root
 
 
 @dataclass
@@ -49,11 +50,9 @@ class Project:
 
 
 def _projects_dir() -> Path:
-    """Project 存储目录。"""
-    override = os.environ.get("MYCODE_PROJECTS_DIR", "").strip()
-    if override:
-        return Path(override)
-    return Path.home() / ".my-code" / "projects"
+    """Project 存储目录。默认 ~/.my-code/projects，可用 MYCODE_PROJECTS_DIR 或
+    MYCODE_HOME 重定向。"""
+    return state_root.projects_dir()
 
 
 def _projects_file() -> Path:

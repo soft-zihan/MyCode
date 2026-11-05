@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from agents.config import DEFAULT_CONTEXT_WINDOW
 from agents.core.workspace import workspace_scope
 from agents.core.session import list_sessions, delete_session, session_dir
+from agents.core import state_root
 
 router = APIRouter(tags=["sessions"])
 
@@ -39,7 +40,7 @@ class FrontendLogRequest(BaseModel):
 @router.post("/api/frontend-log")
 def api_frontend_log(data: FrontendLogRequest) -> dict[str, Any]:
     """接收前端日志并保存到文件"""
-    log_dir = Path.home() / ".mycode" / "logs"
+    log_dir = state_root.logs_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "frontend.log"
     
@@ -1223,7 +1224,7 @@ async def api_session_file_changes(session_id: str) -> dict[str, Any]:
     if not cwd:
         return {"files": [], "total": 0}
 
-    snapshot_dir = Path.home() / ".mycode" / "snapshots"
+    snapshot_dir = state_root.snapshots_dir()
     snapshot_service = SnapshotService(cwd, snapshot_dir)
     git_repo = GitRepositoryManager(cwd, snapshot_dir)
 

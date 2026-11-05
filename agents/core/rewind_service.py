@@ -22,8 +22,8 @@ from typing import Any
 
 from agents.core.session import get_session_backend
 from agents.core.snapshot_service import SnapshotService
+from agents.core import state_root
 
-SNAPSHOT_DIR = Path.home() / ".mycode" / "snapshots"
 PLAN_TTL_S = 15 * 60
 
 
@@ -66,9 +66,20 @@ class RewindPlan:
 class RewindService:
     """对话+文件原子回退。plans 保存在内存（stage→commit 间隔短，15 分钟过期）。"""
 
-    def __init__(self, snapshot_dir: str | Path = SNAPSHOT_DIR):
-        self.snapshot_dir = Path(snapshot_dir)
+    def __init__(self, snapshot_dir: str | Path | None = None):
+        # None = 跟随全局状态根，且每次用时解析。不能在 import 期或构造期冻结：
+        # 运行时重定向契约要求 MYCODE_HOME 对整个进程生命周期有效（见
+        # session_backend_jsonl.py:21）。原来这里是模块级常量 SNAPSHOT_DIR 兼作
+        # 默认参数——两处都在 import 时求值，进程起来之后再 setenv 完全不生效，
+        # 而 get_rewind_service() 又是单例，等于把路径钉死在第一次 import 那一刻。
+        self._snapshot_dir = Path(snapshot_dir) if snapshot_dir is not None else None
         self._plans: dict[str, RewindPlan] = {}
+
+    @property
+    def snapshot_dir(self) -> Path:
+        if self._snapshot_dir is not None:
+            return self._snapshot_dir
+        return state_root.snapshots_dir()
 
     def _generate_plan_id(self) -> str:
         return f"rewind_{int(time.time())}_{secrets.token_hex(4)}"
