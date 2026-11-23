@@ -19,6 +19,9 @@ class WebSocketManager {
   private listeners = new Set<EventListener>();
   private messageQueue: any[] = [];
   private shouldReconnect = true;
+  // 服务端的订阅是**按连接**存的，重连后是空的。这里记住订阅过哪些会话，
+  // onopen 时重放——否则断线重连后会话事件静默断流。
+  private subscribedSessions = new Set<string>();
   
   /**
    * Connect to WebSocket server.
@@ -50,6 +53,11 @@ class WebSocketManager {
       while (this.messageQueue.length > 0) {
         const msg = this.messageQueue.shift();
         this.send(msg);
+      }
+
+      // 重放订阅：新连接在服务端是空订阅，只收全局事件
+      for (const sessionId of this.subscribedSessions) {
+        this.send({ type: 'subscribe', session_id: sessionId });
       }
     };
     
@@ -128,6 +136,7 @@ class WebSocketManager {
    * Subscribe to a specific session.
    */
   subscribeSession(sessionId: string): void {
+    this.subscribedSessions.add(sessionId);
     this.send({ type: 'subscribe', session_id: sessionId });
   }
   
@@ -135,6 +144,7 @@ class WebSocketManager {
    * Unsubscribe from a specific session.
    */
   unsubscribeSession(sessionId: string): void {
+    this.subscribedSessions.delete(sessionId);
     this.send({ type: 'unsubscribe', session_id: sessionId });
   }
   

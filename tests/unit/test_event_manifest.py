@@ -100,6 +100,8 @@ class TestBroadcastFilter:
                 sent.append(payload["type"])
 
         subscriber = ws.Subscriber(FakeWebSocket())
+        # 会话事件要显式订阅才发（空订阅只收全局事件），这里测的是公开面白名单
+        subscriber.subscribed_sessions.add("s1")
         monkeypatch.setattr(ws, "_subscribers", [subscriber])
 
         async def run():

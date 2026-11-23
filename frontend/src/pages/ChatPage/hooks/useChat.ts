@@ -146,6 +146,12 @@ export function useChat() {
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
   }, [currentSessionId]);
+
+  // 会话事件必须显式订阅：服务端空订阅只发全局事件（防多任务串台）。
+  // 打开已有会话、刷新页面都走这里；断线重连由 WebSocketManager 重放订阅补上。
+  useEffect(() => {
+    if (sessionId) wsManager.subscribeSession(sessionId);
+  }, [sessionId]);
   
   const { snapshot: chatSnapshot, handleSSEEvent: handleNodeEvent, addUserMessage, resetNodes, loadSessionEvents, prependSessionEvents } = useChatNodes();
   

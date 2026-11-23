@@ -24,7 +24,9 @@ class Subscriber:
     def __init__(self, websocket: WebSocket) -> None:
         self.id = uuid.uuid4().hex
         self.websocket = websocket
-        self.subscribed_sessions: set[str] = set()  # empty = subscribe to all
+        # 空 = 只收全局事件。改前是「空 = 收全部」，单人多任务并发时
+        # 打开任务 A 的页面会收到任务 B 的事件（安全修复，不是功能增强）。
+        self.subscribed_sessions: set[str] = set()
 
 
 # Global list of active subscribers
@@ -126,11 +128,11 @@ def broadcast_event(event: dict[str, Any], target_session_id: str | None = None)
     print(f"[WS] broadcast: {event_type} session={session_id[:8] if session_id else 'N/A'} target={filter_session_id[:8] if filter_session_id else 'all'} to {len(_subscribers)} subscribers")
     
     for subscriber in _subscribers[:]:  # copy list to avoid concurrent modification
-        # Global events and unsubscribed clients receive all matching traffic.
+        # 全局事件发所有人；会话事件只发显式订阅者。
         should_send = (
             is_global_event or
-            not subscriber.subscribed_sessions or
-            filter_session_id in subscriber.subscribed_sessions
+            (bool(subscriber.subscribed_sessions) and
+             filter_session_id in subscriber.subscribed_sessions)
         )
         
         if should_send:
