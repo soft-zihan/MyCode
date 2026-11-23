@@ -42,7 +42,14 @@ done
 
 echo "=== 构建 $IMAGE ===" | tee -a "$LOG"
 T0=$(date +%s)
-docker build -t "$IMAGE" . 2>&1 | tail -25 | tee -a "$LOG"
+# 全量 plain 进度单独落盘：`| tail -25` 会把进度缓冲到构建结束，卡住时看不到卡在哪一步
+# （实测被 syntax 指令的 registry 往返卡住十几分钟，日志里只有一行「构建」）。
+BUILD_LOG="logs/.container-build.log"
+if ! docker build --progress=plain -t "$IMAGE" . > "$BUILD_LOG" 2>&1; then
+  tail -40 "$BUILD_LOG" | tee -a "$LOG"
+  fail "docker build 失败，全文见 $BUILD_LOG"
+fi
+tail -25 "$BUILD_LOG" | tee -a "$LOG"
 BUILD_SECONDS=$(( $(date +%s) - T0 ))
 echo "BUILD_SECONDS=$BUILD_SECONDS" | tee -a "$LOG"
 
@@ -97,7 +104,11 @@ pass "runAsUser=10001"
 
 # 5. eval/ 确实被裁掉，且服务没因此崩（main.py 里那段导入是 non-fatal try）
 docker exec "$CID" test ! -e /app/eval || fail "eval/ 不该在镜像里"
-docker logs "$CID" 2>&1 | grep -q "Eval tailer init failed" \
+# 先落盘再 grep：`docker logs | grep -q` 在 pipefail 下会被 grep 提前退出触发的
+# SIGPIPE 判成失败（实测偶发），而运行日志本身也是排查启动问题的第一手材料。
+RUN_LOG="logs/.container-run.log"
+docker logs "$CID" > "$RUN_LOG" 2>&1
+grep -q "Eval tailer init failed" "$RUN_LOG" \
   || fail "没看到预期的 eval non-fatal 日志——可能 COPY 多了，也可能日志被吞"
 pass "eval/ 已裁掉且是非致命的"
 
@@ -118,6 +129,30 @@ pass "HOME 下 .agents / .my-code / 顶层均可写"
 docker exec "$CID" git --version >/dev/null 2>&1 || fail "镜像里没有 git，云端导入/分支切换会死"
 docker exec "$CID" sh -c 'mkdir -p /home/app/.mycode/workspaces/.probe && rmdir /home/app/.mycode/workspaces/.probe'   || fail "/home/app/.mycode/workspaces 不可写"
 pass "git 可用，云端工作区根可写"
+
+# 9. 目标仓库的工具链：agent 要能跑别人仓库的 npm test 才谈得上自证。
+#    python:3.12-slim 只带 python，node/npm 缺失只在云端暴露（同 git 那条教训）。
+docker exec "$CID" node --version >/dev/null 2>&1 || fail "镜像里没有 node，云端跑不了前端仓库的测试"
+docker exec "$CID" npm --version >/dev/null 2>&1 || fail "镜像里没有 npm"
+pass "node/npm 可用"
+
+# 10. 只读根 + 非 root 下 pip/npm 仍装得动：靠 PIP_USER 与 npm prefix 指到可写挂载点，
+#     而不是放开 readOnlyRootFilesystem。这条断言就是「不为干活降安全档」的证据。
+docker exec "$CID" sh -c 'test "$PIP_USER" = "1"' || fail "PIP_USER 不是 1，pip 会往只读的系统 site-packages 写"
+docker exec "$CID" sh -c 'test "$npm_config_prefix" = "/home/app/.npm-global"' || fail "npm prefix 没指到可写点"
+docker exec "$CID" sh -c 'pip install --quiet --no-input six >/dev/null 2>&1 && python -c "import six"' \
+  || fail "非 root + 只读根下 pip install 失败"
+pass "PIP_USER/npm prefix 生效，非 root 能装包"
+
+# 11. npm 真装一个包并跑通（不是只看 --version）：prefix 可写 + PATH 命中才算数。
+#     必须带 -g：不带 -g 是往 CWD（/app，root 所有）写 node_modules，非 root 必然
+#     EACCES——而那正是镜像该有的行为。agent 的真实姿势是在可写工作区里局部装，
+#     那条由 verify/cloud-usable-probe.sh 的断言 4 在集群里覆盖。
+NPM_OUT=$(docker exec "$CID" sh -c 'mkdir -p /home/app/.npm-global && npm install -g --silent --no-fund --no-audit left-pad@1.3.0 && node -e "require(\"/home/app/.npm-global/lib/node_modules/left-pad\"); console.log(1)"' 2>&1) || {
+  echo "$NPM_OUT" | tail -20 | tee -a "$LOG"
+  fail "npm 全局安装或 node 执行失败"
+}
+pass "npm 安装 + node 执行端到端通"
 
 echo "=== 冒烟全部通过 ===" | tee -a "$LOG"
 echo "台账：IMAGE_SIZE_MB / BUILD_SECONDS / READY_AFTER 见 $LOG"

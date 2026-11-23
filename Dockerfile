@@ -1,4 +1,7 @@
-# syntax=docker/dockerfile:1
+# 刻意不写 `# syntax=docker/dockerfile:1`：那行会让 BuildKit 每次构建都去
+# docker.io 解析一次前端镜像的 digest，而本机直连 docker.io 只有 ~10KB/s，
+# 实测卡在 "resolve image config for docker.io/docker/dockerfile:1" 十几分钟不动。
+# Docker 23+ 的内置前端已原生支持下面用到的 RUN --mount=type=cache，不需要它。
 
 # ── 阶段 1：构建前端 ────────────────────────────────────────────────
 # Node 必须 22：jsdom 30 依赖的 undici 会调 webidl.util.markAsUncloneable，
@@ -40,8 +43,11 @@ WORKDIR /app
 # 2026-10-24 实测，本地一切正常，云端实例调 /api/workspace/import 直接 FileNotFoundError。
 # ca-certificates 一并装：git 走 https 克隆要有根证书。
 # 放在 COPY requirements.txt 之前：apt 这层几乎不变，requirements 一改就不该击穿它。
+# nodejs/npm 是**目标仓库**的工具链，不是构建期工具：沙箱 Job 里的 agent 要能跑
+# 前端仓库的 npm test 才谈得上自证。Debian bookworm 的 node 是 18.x，够跑绝大多数
+# 仓库的测试；要 22 的仓库由 agent 自己在沙箱里装（下面 PIP_USER/npm prefix 已给出可写落点）。
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git ca-certificates \
+ && apt-get install -y --no-install-recommends git ca-certificates nodejs npm \
  && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
@@ -81,6 +87,17 @@ RUN groupadd --gid 10001 app \
       --shell /usr/sbin/nologin app \
  && mkdir -p /home/app/.mycode/sessions /home/app/.my-code /tmp/pycache /tmp/.cache \
  && chown -R 10001:10001 /home/app /tmp/pycache /tmp/.cache
+
+# 这三项刻意放在 pip install 与 useradd **之后**：
+#   - PIP_USER=1 若在构建期生效，requirements 会装进 root 的 ~/.local，
+#     运行用户 10001 根本看不到，服务起不来。
+#   - PATH 去掉了 /usr/sbin，groupadd/useradd 就找不到了。
+# 只读根 + 非 root 下系统 site-packages 与 /usr/lib/node_modules 都写不了，
+# 所以把安装目标改到 HOME（Pod 里是 emptyDir）而不是放开只读根——沙箱因此能与
+# 控制面保持同一档加固。PATH 前置这两个 bin，装完的命令才找得到。
+ENV PIP_USER=1 \
+    npm_config_prefix=/home/app/.npm-global \
+    PATH=/home/app/.local/bin:/home/app/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 
 USER 10001
 EXPOSE 5555
