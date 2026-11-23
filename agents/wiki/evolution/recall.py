@@ -1,8 +1,18 @@
-"""Recall — 语义搜索 + Drop-Rung Ladder + 加权评分。
+"""Recall — 语义搜索 + 三级降级 + 加权评分。
 
 参考：projects/llm-wiki-memory/scripts/lib/recall.mjs + wiki-search.mjs
 核心：embedding cosine similarity 语义搜索，fallback 到关键词匹配。
 借鉴 ows：多信号加权评分，结果可解释。
+
+降级链（不是「逐级放宽过滤」——score_threshold 只在 _score_candidate_entries
+里用一次，没有放宽重试）：
+  1. embedding cosine + score_candidate 的 8 信号加权评分；
+  2. ColdBudget 抽不到额度、或 embed_text 抛异常时退关键词 F1，分别打 0.5/0.3 折；
+  3. 编排层（wiki_manager.select_relevant_wiki_entries）：hybrid_recall 空/异常
+     → side_query LLM 选 → LLM 空返回 → _keyword_fallback_select 确定性兜底。
+同分带重排见 priority_rerank.rerank_within_bands（band 内按 P0<P1<P2<P3）。
+仓库里真正的两级 drop-rung ladder 在 store.update_wiki_index：元索引超预算时
+先去最冷条目的 description，仍超则整行移出索引（条目不动、回热自动 unprune）。
 """
 
 from __future__ import annotations
@@ -16,10 +26,6 @@ from agents.wiki.store import list_wiki_entries, WikiEntry
 from agents.wiki.evolution.embedding import embed_text, embed_text_for_leaf, cosine_similarity, ColdBudget, EmbeddingCache
 from agents.wiki.evolution.priority_rerank import rerank_within_bands
 from agents.wiki.evolution.settings import get_setting, get_setting as _get_setting
-
-
-LESSON_ATOM_TYPE = "self_improvement"
-KNOWLEDGE_CROSSREF_ATOM_TYPES = ["bug_root_cause", "feedback_rule"]
 
 
 @dataclass
@@ -40,14 +46,6 @@ DEFAULT_WEIGHTS = {
     "keyword_weak": 8,
     "high_applied_count": 10,
 }
-
-
-def _dedup_key(entry: WikiEntry) -> str:
-    return entry.rel_path
-
-
-def _rank_of(entry: WikiEntry) -> float:
-    return float(entry.meta.get("score", entry.meta.get("applied_count", "0")))
 
 
 def _keyword_relevance(query: str, entry: WikiEntry) -> float:
@@ -335,50 +333,3 @@ async def hybrid_recall(
             span.add_metadata(**metadata)
         
         return result
-
-
-def recall_lessons(
-    query: str = "",
-    project_module: str | None = None,
-    area: str | None = None,
-    language: str | None = None,
-    task_type: str | None = None,
-    error_pattern: str | None = None,
-    tags: list[str] | None = None,
-    include_knowledge: bool = True,
-    score_threshold: float | None = None,
-    max_results: int = 5,
-) -> dict[str, Any]:
-    """关键词 recall（同步 fallback）。"""
-    if score_threshold is None:
-        score_threshold = float(get_setting("recall.scoreThreshold", 0.12))
-    entries = list_wiki_entries(LESSON_ATOM_TYPE)
-
-    results: list[tuple[WikiEntry, float]] = []
-    for entry in entries:
-        match = True
-        if project_module and entry.meta.get("project_module") != project_module:
-            match = False
-        if area and entry.meta.get("area") != area:
-            match = False
-        if language and entry.meta.get("language") != language:
-            match = False
-        if task_type and entry.meta.get("task_type") != task_type:
-            match = False
-        if error_pattern and entry.meta.get("error_pattern") != error_pattern:
-            match = False
-
-        if match:
-            relevance = _keyword_relevance(query, entry)
-            if relevance > 0:
-                results.append((entry, relevance))
-
-    results.sort(key=lambda x: -x[1])
-    records = [entry for entry, _ in results[:max_results]]
-
-    return {
-        "query": query,
-        "lesson_hits": len(records),
-        "total_records": len(records),
-        "records": records,
-    }
