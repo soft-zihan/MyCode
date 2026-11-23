@@ -111,6 +111,36 @@ def _resolve_api_config(cli_api_base: str | None) -> tuple[str | None, str | Non
     return None, None
 
 
+def _resolve_from_config(model: str) -> tuple[str, str | None, str | None]:
+    """env 里没凭据时读 config.json 的端点。
+
+    沙箱 Job 只挂得到 config.json（模型密钥内联在里面），工作区里没有 .env，
+    所以只认 env 的 CLI 在云端必然「API key is required」。
+    """
+    from .config import get_endpoint_by_model, load_config
+
+    endpoint = get_endpoint_by_model(model)
+    if endpoint is None:
+        cfg = load_config()
+        endpoint = cfg.endpoints.get(cfg.routing.get("primary", "")) or next(
+            iter(cfg.endpoints.values()), None
+        )
+    if endpoint is None or not endpoint.api_key:
+        return model, None, None
+    return endpoint.model or model, endpoint.base_url or None, endpoint.api_key
+
+
+def _resolve_runtime_config(
+    cli_model: str | None, cli_api_base: str | None
+) -> tuple[str, str | None, str | None]:
+    model = _resolve_model(cli_model)
+    base, key = _resolve_api_config(cli_api_base)
+    if key:
+        return model, base, key
+    model, cfg_base, cfg_key = _resolve_from_config(model)
+    return model, _clean_env(cli_api_base) or cfg_base, cfg_key
+
+
 _AT_REF_RE = re.compile(r"@([\w./~-][\w./~\-]*)")
 _AT_REF_MAX_BYTES = 32 * 1024
 
@@ -458,8 +488,7 @@ Options:
         sys.exit(0)
 
     permission_mode = _resolve_permission_mode(args)
-    model = _resolve_model(args.model)
-    resolved_api_base, resolved_api_key = _resolve_api_config(args.api_base)
+    model, resolved_api_base, resolved_api_key = _resolve_runtime_config(args.model, args.api_base)
 
     if args.trace:
         from .observability.trace import tracing_enabled
@@ -469,7 +498,8 @@ Options:
         print_error(
             "API key is required.\n"
             "  Set APIKEY (+ optional API) in .env,\n"
-            "  or use OPENAI_API_KEY / OPENAI_BASE_URL."
+            "  use OPENAI_API_KEY / OPENAI_BASE_URL,\n"
+            "  or configure a model endpoint in config.json."
         )
         sys.exit(1)
 
