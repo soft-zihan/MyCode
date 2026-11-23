@@ -11,7 +11,7 @@ resources:
 images:
   - name: ghcr.io/soft-zihan/mycode
     newName: ghcr.io/soft-zihan/mycode
-    newTag: sha-e4565c75b0ee07ce0b8be93232d2a82ae9200f1c
+    newTag: sha-e2bd65ce4c02eec0459aad6639e54eab62141e56
 
 # images transformer 只改 image 字段，不改 env。沙箱镜像是从 MYCODE_SANDBOX_IMAGE
 # 这个 env 读的，不同步就会出现「控制面升级了、沙箱还跑旧 commit」——端云不同版本
