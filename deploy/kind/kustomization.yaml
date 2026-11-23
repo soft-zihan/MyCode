@@ -12,3 +12,18 @@ images:
   - name: ghcr.io/soft-zihan/mycode
     newName: ghcr.io/soft-zihan/mycode
     newTag: sha-e4565c75b0ee07ce0b8be93232d2a82ae9200f1c
+
+# images transformer 只改 image 字段，不改 env。沙箱镜像是从 MYCODE_SANDBOX_IMAGE
+# 这个 env 读的，不同步就会出现「控制面升级了、沙箱还跑旧 commit」——端云不同版本
+# 是最难查的一类故障，所以在这里把 image 值复制进那个 env。
+replacements:
+  - source:
+      kind: Deployment
+      name: control-plane
+      fieldPath: spec.template.spec.containers.0.image
+    targets:
+      - select:
+          kind: Deployment
+          name: control-plane
+        fieldPaths:
+          - spec.template.spec.containers.0.env.[name=MYCODE_SANDBOX_IMAGE].value

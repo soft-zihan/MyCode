@@ -1,0 +1,57 @@
+# 沙箱出网：默认拒绝，只按域名放行。标准 NetworkPolicy 只能按 IP/CIDR 匹配，
+# 做不到域名白名单——这是 B1 选 Cilium 而非 Calico 的决定性理由
+# （deploy/kind-cluster.yaml 注释），这里兑现它。
+#
+# ⚠️ A 批的 agent 阶段**有网**（要装依赖），比 Codex 的「agent 阶段默认断网」弱一档。
+# 因为 A 批没有独立 builder，setup_command 与 agent 在同一个 Pod 里跑，而网络策略
+# 是 Pod 级的、无法按容器区分。B 批拆成 builder Job + agent Job 时才收回这一档。
+#
+# ⚠️ 换模型端点要手改下面标了「模型端点」的那几行。刻意不让控制面动态渲染：
+# 那需要给控制面授 ciliumnetworkpolicies 写权限，与 rbac.yaml 的最小权限矛盾，
+# 也破坏 ArgoCD GitOps（策略必须留在 git 里）。
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: sandbox-egress
+  namespace: mycode
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: sandbox
+  egress:
+    # DNS：没有它任何域名都解析不出来，白名单等于全拒
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchPattern: "*"
+    # 包管理器 + GitHub（clone/push 由控制面做，但 agent 可能自己 fetch 依赖）
+    - toFQDNs:
+        - matchName: registry.npmjs.org
+        - matchName: pypi.org
+        - matchName: files.pythonhosted.org
+        - matchName: github.com
+        - matchName: objects.githubusercontent.com
+        - matchName: codeload.github.com
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+    # 模型端点 ← 换网关就改这几行。取自本机 config.json 里实际在用的 base_url
+    # （2026-11-23 实测：model.cherygpt.com ×4、api.openai.com、api.siliconflow.cn）
+    - toFQDNs:
+        - matchName: model.cherygpt.com
+        - matchName: api.openai.com
+        - matchName: api.siliconflow.cn
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
