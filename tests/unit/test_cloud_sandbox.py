@@ -85,6 +85,16 @@ def test_agents_package_importable_from_repo_cwd():
     assert env["PYTHONPATH"] == "/app"
 
 
+def test_agent_runs_image_code_not_the_cloned_repos():
+    """`python -m` 把 CWD 插在 sys.path[0]，仓库自带 agents/ 就会盖掉镜像里那份。
+
+    实测：拿 MyCode 自己当目标仓库时，沙箱执行的是克隆出来的旧代码，
+    镜像里的修复一行都没生效。-P 去掉 CWD 那一项，PYTHONPATH=/app 才说话。
+    """
+    c = sb.render_job(_task(), image="img:tag")["spec"]["template"]["spec"]["containers"][0]
+    assert "python -P -m agents.main" in c["command"][-1]
+
+
 def test_sandbox_gets_model_config_readonly():
     """沙箱里的 agent 要调模型，就得拿到 config.json（api_key 内联在里面）。
 

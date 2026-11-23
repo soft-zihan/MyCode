@@ -67,7 +67,10 @@ def render_job(
     setup = task.setup_command.strip()
     prefix = f"{setup} && " if setup else ""
     # prompt 只经 env 传，绝不拼进 shell 字符串：任务描述是用户输入，拼进去就是命令注入。
-    script = f'{prefix}exec python -m agents.main --yolo "$MYCODE_TASK_PROMPT"'
+    # -P 是必须的：`python -m` 把 CWD 插在 sys.path[0]，而 CWD 是克隆出来的目标仓库。
+    # 仓库自带 agents/ 包（拿 MyCode 自己当目标就会）时，那份旧代码会盖掉镜像里的运行时，
+    # 镜像里的修复一行都不生效。-P 去掉 CWD 那一项，PYTHONPATH=/app 才说话。
+    script = f'{prefix}exec python -P -m agents.main --yolo "$MYCODE_TASK_PROMPT"'
     labels = {**SANDBOX_LABELS, "mycode.cloud/task-id": task.id}
     return {
         "apiVersion": "batch/v1",
