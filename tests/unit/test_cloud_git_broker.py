@@ -59,10 +59,26 @@ def test_clean_repo_passes(tmp_path):
     gb.assert_no_token_leak(tmp_path, "ghp_secret_value")   # 不抛
 
 
-def test_land_without_token_raises(tmp_path):
+def test_land_without_token_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(gb, "_git", lambda *a, **kw: (0, " M f\n", ""))
     t = CloudTask(id="x", repo_url="https://github.com/o/r", prompt="p")
-    with pytest.raises(gb.GitBrokerError):
+    with pytest.raises(gb.GitBrokerError, match="PAT"):
         gb.land_task(t, tmp_path)
+
+
+def test_land_no_changes_needs_no_token(tmp_path, monkeypatch):
+    """没改动就不需要 PAT：只读任务（问一句、看一眼）不该被凭据卡死。"""
+    monkeypatch.setattr(gb, "_git", lambda *a, **kw: (0, "", ""))
+    t = CloudTask(id="x", repo_url="https://github.com/o/r", prompt="p")
+    got = gb.land_task(t, tmp_path)
+    assert got == {"branch": "", "pr_url": "", "mergeable": None, "no_changes": True}
+
+
+def test_fail_message_readable_without_token():
+    """空 token 不能进 str.replace：那会把每个字符之间都塞上 ***。"""
+    msg = str(gb._fail("查改动", "", "not a git repository", ""))
+    assert "not a git repository" in msg
+    assert "***" not in msg
 
 
 def test_repo_slug_parsing():

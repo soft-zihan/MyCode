@@ -102,8 +102,10 @@ def _git(args: list[str], cwd: Path, timeout: int, env: dict[str, str] | None = 
 
 def _fail(step: str, out: str, err: str, token: str) -> GitBrokerError:
     detail = (err or out).strip()[:300] or "无输出"
-    # 错误串会进 task.json 再上前端，token 万一走进 stderr 也不能跟着出去
-    return GitBrokerError(f"{step}失败：{detail.replace(token, '***')}")
+    # 错误串会进 task.json 再上前端，token 万一走进 stderr 也不能跟着出去。
+    # 空串不能进 replace：str.replace("", "***") 会在每个字符之间都插一遍。
+    safe = detail.replace(token, "***") if token else detail
+    return GitBrokerError(f"{step}失败：{safe}")
 
 
 def _push(workspace: Path, branch: str, token: str) -> None:
@@ -162,15 +164,15 @@ def _existing_pr(slug: str, branch: str, headers: dict[str, str]) -> dict[str, A
 def land_task(task: CloudTask, workspace: Path) -> dict[str, Any]:
     """把沙箱改出来的工作区变成一个 PR。每步失败都抛人话 GitBrokerError。"""
     token = read_token()
+    # 先看有没有改动，再要凭据：只读任务（问一句、看一眼）没 PAT 也该走完落地。
+    rc, out, err = _git(["status", "--porcelain"], workspace, GIT_TIMEOUT)
+    if rc != 0:
+        raise _fail("查改动", out, err, token or "")
+    if not out.strip():
+        return {"branch": "", "pr_url": "", "mergeable": None, "no_changes": True}
     if token is None:
         raise GitBrokerError("未配置 GitHub PAT，无法落地（先跑 mycode cloud token <PAT>）")
     assert_no_token_leak(workspace, token)
-
-    rc, out, err = _git(["status", "--porcelain"], workspace, GIT_TIMEOUT)
-    if rc != 0:
-        raise _fail("查改动", out, err, token)
-    if not out.strip():
-        return {"branch": "", "pr_url": "", "mergeable": None, "no_changes": True}
 
     branch = f"mycode/{task.id}"
     rc, out, err = _git(["checkout", "-b", branch], workspace, GIT_TIMEOUT)
