@@ -211,8 +211,10 @@ def job_phase(job: dict | None) -> str:
     if job is None:
         return "NotFound"
     st = job.get("status") or {}
+    # FailureTarget 与 Failed 都算：k8s 1.31+ 先写前者，等 Pod 收干净才写后者，
+    # 实测差 31s。只认 Failed 会在这个窗口里把超时误判成普通失败。
     for cond in st.get("conditions") or []:
-        if cond.get("type") == "Failed" and cond.get("status") == "True":
+        if cond.get("status") == "True" and cond.get("type") in ("Failed", "FailureTarget"):
             return "DeadlineExceeded" if cond.get("reason") == "DeadlineExceeded" else "Failed"
     if st.get("succeeded"):
         return "Succeeded"

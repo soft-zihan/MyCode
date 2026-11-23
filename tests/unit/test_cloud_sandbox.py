@@ -139,6 +139,14 @@ def test_resources_come_from_settings():
     ({"status": {"succeeded": 1}}, "Succeeded"),
     ({"status": {"failed": 1}}, "Failed"),
     ({"status": {"conditions": [{"type": "Failed", "status": "True", "reason": "DeadlineExceeded"}]}}, "DeadlineExceeded"),
+    # k8s 1.31+ 先写 FailureTarget，等 Pod 真的收干净才写 Failed。实测这两条差 31s，
+    # 而任务在 FailureTarget 之后 1s 就被判了终态——只认 Failed 会把超时误判成普通失败。
+    ({"status": {"failed": 1, "conditions": [
+        {"type": "FailureTarget", "status": "True", "reason": "DeadlineExceeded"}]}}, "DeadlineExceeded"),
+    ({"status": {"failed": 1, "conditions": [
+        {"type": "FailureTarget", "status": "True", "reason": "BackoffLimitExceeded"}]}}, "Failed"),
+    ({"status": {"active": 1, "conditions": [
+        {"type": "FailureTarget", "status": "False", "reason": "DeadlineExceeded"}]}}, "Running"),
 ])
 def test_job_phase(job, expected):
     assert sb.job_phase(job) == expected
