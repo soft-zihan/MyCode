@@ -7,13 +7,8 @@
 2. 云端 token 由后端持有、转发时加 Authorization 头，前端只看到结果，
    不需要把它塞进 localStorage 再随每个请求发出去。
 
-配置来源（优先级从高到低）：
-
-- 环境变量 `MYCODE_CLOUD_URL` / `MYCODE_CLOUD_TOKEN`
-- `<config.json 同目录>/cloud.json`：`{"url": "...", "token": "..."}`。
-  `scripts/cloud-up.sh` 装完集群会写这个文件，所以「一键起云端」之后
-  前端的云端面板不需要用户再手填地址和 token。
-- 缺省 `http://localhost:8080`（kind 的 extraPortMappings 把 ingress 映到宿主 8080）
+配置三源解析（env → cloud.json → 缺省 localhost:8080）在
+`agents/core/cloud_client.py`，与 `mycode cloud` CLI 共用一份。
 
 ⚠️ 所有出站都 `trust_env=False`：本机常驻 HTTP(S)_PROXY，而云端地址是 localhost。
 让 httpx 读环境代理的话，请求会被交给 Windows 侧的代理再绕回来，失败时还会回一个
@@ -22,55 +17,25 @@
 
 from __future__ import annotations
 
-import json
-import os
 import time
-from pathlib import Path
 from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from agents.config import config_path
+from agents.core.cloud_client import DEFAULT_URL, TOKEN_ENV, URL_ENV, cloud_config
 
 from .workspace_import import WorkspaceEntry
 
 router = APIRouter(tags=["cloud"])
 
-URL_ENV = "MYCODE_CLOUD_URL"
-TOKEN_ENV = "MYCODE_CLOUD_TOKEN"
-DEFAULT_URL = "http://localhost:8080"
 PROBE_TIMEOUT = 6.0
 # 读超时要给足（云端克隆一个大仓库可能要几分钟，比 workspace_import.CLONE_TIMEOUT
 # 稍长，否则本地先断、云端还在跑，用户看到「失败」而实际成功了）；
 # 但**连接**超时必须短。实测过：把两者合成一个 620s 的总超时之后，
 # 云端地址不可达时这个请求会挂住十分钟才回来——连不上是立刻就该知道的事。
 FORWARD_TIMEOUT = httpx.Timeout(connect=5.0, read=620.0, write=60.0, pool=5.0)
-
-
-def _cloud_file() -> Path:
-    return config_path().parent / "cloud.json"
-
-
-def cloud_config() -> tuple[str, str | None, bool]:
-    """返回 (url, token, configured)。configured=False 表示 env 与 cloud.json 都没配。"""
-    url = os.environ.get(URL_ENV, "").strip()
-    token = os.environ.get(TOKEN_ENV, "").strip() or None
-    configured = bool(url or token)
-
-    path = _cloud_file()
-    if path.is_file():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            data = {}
-        if isinstance(data, dict):
-            configured = True
-            url = url or str(data.get("url") or "").strip()
-            token = token or (str(data.get("token") or "").strip() or None)
-
-    return (url or DEFAULT_URL).rstrip("/"), token, configured
 
 
 class CloudStatus(BaseModel):

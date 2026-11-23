@@ -1521,6 +1521,40 @@
         "title": "SteerRequest",
         "type": "object"
       },
+      "TaskCreate": {
+        "properties": {
+          "prompt": {
+            "title": "Prompt",
+            "type": "string"
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ref"
+          },
+          "repo_url": {
+            "title": "Repo Url",
+            "type": "string"
+          },
+          "setup_command": {
+            "default": "",
+            "title": "Setup Command",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_url",
+          "prompt"
+        ],
+        "title": "TaskCreate",
+        "type": "object"
+      },
       "TaskCreateRequest": {
         "properties": {
           "acceptance": {
@@ -1588,7 +1622,7 @@
           },
           "tasks": {
             "items": {
-              "$ref": "#/components/schemas/TaskOut"
+              "$ref": "#/components/schemas/routers__events__TaskOut"
             },
             "title": "Tasks",
             "type": "array"
@@ -1598,76 +1632,6 @@
           "tasks"
         ],
         "title": "TaskListResponse",
-        "type": "object"
-      },
-      "TaskOut": {
-        "properties": {
-          "acceptance": {
-            "title": "Acceptance",
-            "type": "string"
-          },
-          "content": {
-            "title": "Content",
-            "type": "string"
-          },
-          "created_at": {
-            "title": "Created At",
-            "type": "string"
-          },
-          "detail": {
-            "title": "Detail",
-            "type": "string"
-          },
-          "detail_origin_seq": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Detail Origin Seq"
-          },
-          "error": {
-            "title": "Error",
-            "type": "string"
-          },
-          "id": {
-            "title": "Id",
-            "type": "integer"
-          },
-          "started_seq": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Started Seq"
-          },
-          "status": {
-            "title": "Status",
-            "type": "string"
-          },
-          "updated_at": {
-            "title": "Updated At",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "content",
-          "status",
-          "created_at",
-          "updated_at",
-          "detail",
-          "acceptance",
-          "error"
-        ],
-        "title": "TaskOut",
         "type": "object"
       },
       "TaskUpdateRequest": {
@@ -1815,6 +1779,32 @@
           "reason"
         ],
         "title": "ThumbsDownRequest",
+        "type": "object"
+      },
+      "TokenIn": {
+        "properties": {
+          "token": {
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "title": "TokenIn",
+        "type": "object"
+      },
+      "TokenOut": {
+        "properties": {
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "configured"
+        ],
+        "title": "TokenOut",
         "type": "object"
       },
       "UpdateBadCaseRequest": {
@@ -2113,6 +2103,171 @@
           "content"
         ],
         "title": "WriteFileRequest",
+        "type": "object"
+      },
+      "routers__cloud_tasks__TaskOut": {
+        "properties": {
+          "branch": {
+            "title": "Branch",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "error": {
+            "title": "Error",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "job_name": {
+            "title": "Job Name",
+            "type": "string"
+          },
+          "mergeable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mergeable"
+          },
+          "pr_url": {
+            "title": "Pr Url",
+            "type": "string"
+          },
+          "prompt": {
+            "title": "Prompt",
+            "type": "string"
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ref"
+          },
+          "repo_url": {
+            "title": "Repo Url",
+            "type": "string"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "setup_command": {
+            "title": "Setup Command",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          },
+          "workspace_name": {
+            "title": "Workspace Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "repo_url",
+          "prompt",
+          "setup_command",
+          "status",
+          "job_name",
+          "session_id",
+          "workspace_name",
+          "branch",
+          "pr_url",
+          "error",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "TaskOut",
+        "type": "object"
+      },
+      "routers__events__TaskOut": {
+        "properties": {
+          "acceptance": {
+            "title": "Acceptance",
+            "type": "string"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "detail_origin_seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail Origin Seq"
+          },
+          "error": {
+            "title": "Error",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "started_seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started Seq"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "content",
+          "status",
+          "created_at",
+          "updated_at",
+          "detail",
+          "acceptance",
+          "error"
+        ],
+        "title": "TaskOut",
         "type": "object"
       }
     }
@@ -2886,6 +3041,90 @@
         ]
       }
     },
+    "/api/cloud/git-token": {
+      "get": {
+        "operationId": "get_token_api_cloud_git_token_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Token",
+        "tags": [
+          "cloud"
+        ]
+      },
+      "put": {
+        "operationId": "set_token_api_cloud_git_token_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Token",
+        "tags": [
+          "cloud"
+        ]
+      }
+    },
+    "/api/cloud/prune": {
+      "post": {
+        "description": "清终态任务的工作区与 Job。活跃任务的工作区绝不动。",
+        "operationId": "prune_api_cloud_prune_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Prune Api Cloud Prune Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Prune",
+        "tags": [
+          "cloud"
+        ]
+      }
+    },
     "/api/cloud/status": {
       "get": {
         "operationId": "api_cloud_status_api_cloud_status_get",
@@ -2902,6 +3141,228 @@
           }
         },
         "summary": "Api Cloud Status",
+        "tags": [
+          "cloud"
+        ]
+      }
+    },
+    "/api/cloud/tasks": {
+      "get": {
+        "operationId": "list_tasks_api_cloud_tasks_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/routers__cloud_tasks__TaskOut"
+                  },
+                  "title": "Response List Tasks Api Cloud Tasks Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Tasks",
+        "tags": [
+          "cloud"
+        ]
+      },
+      "post": {
+        "operationId": "create_task_api_cloud_tasks_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/routers__cloud_tasks__TaskOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Task",
+        "tags": [
+          "cloud"
+        ]
+      }
+    },
+    "/api/cloud/tasks/{task_id}": {
+      "delete": {
+        "operationId": "cancel_task_api_cloud_tasks__task_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/routers__cloud_tasks__TaskOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Task",
+        "tags": [
+          "cloud"
+        ]
+      },
+      "get": {
+        "operationId": "get_task_api_cloud_tasks__task_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/routers__cloud_tasks__TaskOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Task",
+        "tags": [
+          "cloud"
+        ]
+      }
+    },
+    "/api/cloud/tasks/{task_id}/events": {
+      "get": {
+        "operationId": "task_events_api_cloud_tasks__task_id__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Task Events Api Cloud Tasks  Task Id  Events Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Task Events",
         "tags": [
           "cloud"
         ]
@@ -6915,7 +7376,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TaskOut"
+                  "$ref": "#/components/schemas/routers__events__TaskOut"
                 }
               }
             },
@@ -7027,7 +7488,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TaskOut"
+                  "$ref": "#/components/schemas/routers__events__TaskOut"
                 }
               }
             },

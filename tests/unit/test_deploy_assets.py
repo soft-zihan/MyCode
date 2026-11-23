@@ -332,3 +332,76 @@ def test_no_api_key_value_anywhere_under_deploy():
                 if key == "api_key" and isinstance(value, str) and value.strip():
                     offenders.append(f"{path.relative_to(DEPLOY)}: api_key={value[:6]}…")
     assert not offenders, f"deploy/ 下出现疑似真实密钥：{offenders}"
+
+
+# ── A 批：沙箱 RBAC 与出网白名单 ────────────────────────────────────
+
+def _rbac_docs() -> list[dict]:
+    return list(yaml.safe_load_all((BASE / "rbac.yaml").read_text(encoding="utf-8")))
+
+
+def _sandbox_netpol() -> dict:
+    return yaml.safe_load((BASE / "sandbox-networkpolicy.yaml").read_text(encoding="utf-8"))
+
+
+def test_control_plane_sa_name_agrees_across_three_files():
+    """SA 定义、RoleBinding 的 subject、Deployment 的 serviceAccountName 必须是
+    同一个名字。任一处漂了，控制面就退回 default SA 的零权限，表现为建 Job 403，
+    而三份 manifest 各自看起来都对。"""
+    docs = _rbac_docs()
+    sa = next(d for d in docs if d["kind"] == "ServiceAccount")
+    binding = next(d for d in docs if d["kind"] == "RoleBinding")
+    assert sa["metadata"]["name"] == "mycode-control-plane"
+    assert binding["subjects"] == [{"kind": "ServiceAccount",
+                                   "name": sa["metadata"]["name"], "namespace": "mycode"}]
+    assert binding["roleRef"]["name"] == "mycode-sandbox-manager"
+    assert _pod(_load("deployment.yaml")).get("serviceAccountName") == sa["metadata"]["name"]
+
+
+def test_sandbox_role_is_namespaced_and_least_privilege():
+    docs = _rbac_docs()
+    role = next(d for d in docs if d["kind"] == "Role")
+    assert role["metadata"]["namespace"] == "mycode"
+    assert not any(d["kind"] in ("ClusterRole", "ClusterRoleBinding") for d in docs)
+    granted = {(r, v) for rule in role["rules"] for r in rule["resources"] for v in rule["verbs"]}
+    assert ("jobs", "create") in granted and ("jobs", "delete") in granted
+    assert ("pods/log", "get") in granted          # tailer 要读沙箱日志
+    for resource in ("secrets", "deployments", "configmaps", "serviceaccounts", "roles"):
+        assert not any(r == resource for r, _ in granted), f"控制面不该拿到 {resource}"
+    for rule in role["rules"]:
+        for key in ("apiGroups", "resources", "verbs"):
+            assert "*" not in rule.get(key, []), f"{key} 里出现通配符，最小权限作废"
+
+
+def test_egress_policy_is_cilium_and_selects_the_real_sandbox_labels():
+    """① 必须是 CiliumNetworkPolicy：标准 NetworkPolicy 表达不了域名白名单，
+    换过去等于白名单静默失效。② endpointSelector 必须与 render_job 真打上的标签
+    一致：选不中任何 Pod 时策略根本不生效，沙箱就是全通——而 YAML 看着没毛病。"""
+    from frontend.server.cloud.sandbox import SANDBOX_LABELS
+
+    pol = _sandbox_netpol()
+    assert pol["kind"] == "CiliumNetworkPolicy"
+    assert pol["spec"]["endpointSelector"]["matchLabels"] == {
+        "app.kubernetes.io/component": SANDBOX_LABELS["app.kubernetes.io/component"]
+    }
+
+
+def test_every_egress_rule_is_port_limited_and_not_world():
+    """没有 toPorts 的规则放行所有端口；toEntities: world 或 0.0.0.0/0 让整个
+    白名单作废。这两样都是「看着有策略、其实全通」的典型写法。"""
+    for rule in _sandbox_netpol()["spec"]["egress"]:
+        assert rule.get("toPorts"), f"egress 规则没限端口：{rule}"
+        assert "toEntities" not in rule, "toEntities 会绕过域名白名单"
+        assert "0.0.0.0/0" not in rule.get("toCIDR", [])
+        ports = {p["port"] for tp in rule["toPorts"] for p in tp["ports"]}
+        assert ports <= {"443", "53"}, f"放行了非 443/53 的端口：{ports}"
+
+
+def test_dns_and_registries_stay_allowed():
+    """DNS 不放行则白名单等于全拒（功能坏，不是安全降级）；包管理器不放行则
+    agent 装不了依赖。这条守的是「策略别严到把活干不成」那一侧。"""
+    egress = _sandbox_netpol()["spec"]["egress"]
+    fqdns = {f["matchName"] for rule in egress for f in rule.get("toFQDNs", [])}
+    for name in ("registry.npmjs.org", "pypi.org", "files.pythonhosted.org", "github.com"):
+        assert name in fqdns, f"{name} 不在白名单里，沙箱装不了依赖"
+    assert any(rule.get("toEndpoints") for rule in egress), "没有 DNS 放行规则，域名全解析不出来"

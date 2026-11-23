@@ -54,6 +54,14 @@ def test_security_context_is_full_strength():
     assert c["seccompProfile"]["type"] == "RuntimeDefault"
 
 
+def test_sandbox_does_not_borrow_the_control_plane_sa():
+    """沙箱用 default SA（零权限）。把控制面那个能建/删 Job 的 SA 给它，
+    跑着不可信代码的进程就能删掉别人的任务。"""
+    spec = sb.render_job(_task(), image="img:tag")["spec"]["template"]["spec"]
+    assert "serviceAccountName" not in spec
+    assert spec.get("serviceAccount") in (None, "default")
+
+
 def test_no_retry_and_deadline():
     spec = sb.render_job(_task(), image="img:tag", deadline_s=900)["spec"]
     assert spec["backoffLimit"] == 0            # 重试会重复烧 token

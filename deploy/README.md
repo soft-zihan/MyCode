@@ -656,3 +656,126 @@ Windows 端不出安装包产物，走源码：`git clone` 之后跑 `scripts\in
 用包内 venv 起 ASGI 应用，`/api/health`、`/api/version`（答 1.0.0）、`/api/projects`、
 `/api/cloud/status`（连上了在跑的云端实例：reachable + authenticated）、SPA 首页与
 1.18MB 的 JS 资产全部 200。
+
+---
+
+## 11. 云端任务：一次性沙箱 Job（A 批）
+
+B1 把整个后端搬进了集群，但 agent 仍然跑在**常驻的控制面 Pod 里**——改的是控制面自己的
+文件系统，跑完什么也不留下。A 批加的是「提一个任务 → 起一个一次性 Job → 在隔离沙箱里
+改目标仓库 → 结果落地成 PR」这条链。
+
+### 11.1 怎么用
+
+```bash
+mycode cloud exec --repo https://github.com/owner/repo "把 README 里的安装步骤补全"
+mycode cloud list                     # id / 状态 / 仓库 / PR
+mycode cloud logs <任务id>            # 状态、错误、会话事件
+mycode cloud prune                    # 不加 --yes 只打印将被删的清单
+mycode cloud prune --yes
+```
+
+地址与访问令牌走三源解析（`MYCODE_CLOUD_URL`/`MYCODE_CLOUD_TOKEN` → `~/.my-code/cloud.json`
+→ 缺省 `http://localhost:8080`），`mycode cloud-up` 已经把第二项写好了，所以不需要再手填。
+
+**A 批的入口只有 CLI 与 REST，浏览器里没有任务表单。** 沙箱的会话文件落在
+`cloud_tasks/<id>/sessions/`，控制面的 session_manager 扫的是自己的 sessions 根，
+所以这些会话既不出现在会话列表里、也不能用 `?session=` 打开；看过程只能
+`mycode cloud logs <id>` 或 `GET /api/cloud/tasks/{id}/events`。浏览器任务表单在 B 批。
+
+落地成 PR 需要一枚有 `repo` scope 的 GitHub PAT：
+
+```bash
+curl -X PUT http://localhost:8080/api/cloud/git-token \
+  -H "Authorization: Bearer <访问令牌>" -H 'Content-Type: application/json' \
+  -d '{"token":"ghp_..."}'
+```
+
+没配 PAT 时任务照样跑，只是最后一步落地会失败并把原因写进任务的 `error`；
+**没有改动的任务不需要 PAT**（`git status` 为空就直接成功）。
+
+### 11.2 沙箱规格与并发
+
+| 项 | 值 | 为什么 |
+|---|---|---|
+| Job `backoffLimit` | 0 | 重试会重复烧模型 token，失败就是失败 |
+| `activeDeadlineSeconds` | 1800（`MYCODE_SANDBOX_DEADLINE`） | 超时后**仍然走落地**，有价值的半成品不该丢 |
+| `ttlSecondsAfterFinished` | 86400 | 留一天给人查日志，之后 K8s 自己收 |
+| CPU / 内存 | 1 core / 2Gi（`MYCODE_SANDBOX_CPU`/`_MEMORY`） | 宿主 5 vCPU / 11.7GiB |
+| 并发上限 | 1（`MYCODE_CLOUD_MAX_CONCURRENCY`） | RWO 卷把沙箱钉在单节点，多了只是排队抢 IO |
+| 磁盘闸 | PVC 剩余 < 512Mi 直接拒绝提任务 | 撑爆 PVC 会连带控制面一起写不进会话 |
+
+准入是**先进先出**：`list_tasks` 给前端是倒序（最新在前），reconcile 反过来按 `created_at`
+升序放行，否则连提几个任务时先提的那个会饿死。
+
+### 11.3 隔离靠 subPath，不是靠再建一块盘
+
+沙箱只挂 PVC 的两个子目录：`cloud_tasks/<id>` → `~/.mycode`、`workspaces/<name>` → `~/workspace`。
+控制面挂整个 PVC，所以两边看的是**同一份文件**（同节点同卷），不需要额外传补丁。
+沙箱因此够不到 PVC 根的 Git PAT，也看不到别的任务目录。
+
+只读根 + 非 root 10001 + drop ALL + seccomp RuntimeDefault 五项与控制面**同一档**，
+没有为了「能装包」而放开只读根：`PIP_USER=1` 与 `npm_config_prefix` 把安装目标改到
+HOME（emptyDir，可写），`/tmp` 也是 emptyDir。
+
+沙箱里**有**模型凭据（`mycode-config` Secret 挂到 `/etc/mycode`，`api_key` 内联在
+config.json 里，拆不开），**没有**访问令牌（只在控制面 env）与 Git PAT（PVC 根）。
+这是 A 批的诚实边界：单用户、自己的 key。B 批的凭据代理才会把模型 key 也移出沙箱。
+
+### 11.4 换模型端点要手改网络策略那一行
+
+出网白名单是 `deploy/base/sandbox-networkpolicy.yaml` 里的 CiliumNetworkPolicy
+（标准 NetworkPolicy 匹配不了域名，这是 B1 选 Cilium 而不是 Calico 的原因）。
+当前放行：`registry.npmjs.org`、`pypi.org`、`files.pythonhosted.org`、`github.com`、
+`objects.githubusercontent.com`、`codeload.github.com`，以及模型端点
+`model.cherygpt.com`、`api.openai.com`、`api.siliconflow.cn`，全部 443/TCP，DNS 放行。
+
+**换网关就要改这一行**，否则沙箱里的 agent 连不上模型，表现为任务失败而控制面一切正常。
+
+比 Codex 弱一档的地方要说清楚：**A 批的 agent 阶段是有网的**（白名单内），
+Codex 默认把 agent 阶段的网络整个关掉、只留 setup 阶段。买回这一档在 B 批。
+
+### 11.5 运维代价
+
+- **PAT 是明文 0600 存在 PVC 根**。刻意没引 cryptography 做 Fernet：主密钥本身也要放在
+  同一个 Pod 能读的 Secret 里，对「能读 PVC 的人」这个真实威胁几乎不加防护；真正挡住
+  沙箱的是 subPath 隔离。多租户（C 批）必须换 per-user 加密 + OAuth。
+- **每个任务克隆一份独立工作区**，PVC 只有 5Gi。`mycode cloud prune` 只删终态任务的工作区，
+  活跃任务的绝不动。长期跑要定期 prune，否则磁盘闸会开始拒任务。
+- **服务重启打断落地**的任务会被标 failed 并放掉并发位（分支可能已经建好了，去仓库看一眼）。
+  不装作能续跑，但也不能让一条僵尸任务永久占住唯一的位子。
+- Job 的 `setup_command` 是**用户提供的 shell 字符串**（与 Codex 的 setup script 同形状），
+  它不是可信输入；prompt 走 env 传，绝不拼进 shell。
+
+### 11.6 验收
+
+```bash
+./verify/cloud-usable-probe.sh
+```
+
+12 条断言：RBAC 最小权限（能建 Job、读不到 Secret、改不了 Deployment）、任务真跑完、
+沙箱内 npm/node 自证、只读根未降档、token 不进沙箱、出网白名单内外对照、并发准入、
+超时仍走落地、取消真删 Job、prune 真降占用。其中**PR 落地那一条需要 PAT**，
+没有就如实打印「未跑」，不算通过。
+
+最近一次实测（2026-11-23，本机 kind + 本机镜像 `mycode/control-plane:b1`）：
+**11 条 PASS、断言 8 未跑（没配 PAT）**，探针退出码 0，日志 `logs/probe-final3.log`。
+prune 那条清掉 22 个终态工作区，PVC 占用 221 → 10 MiB。
+
+### 11.7 拿本机镜像做实证时的三个坑（都踩过）
+
+CI 推的镜像每个 commit 一个 tag，所以 GitOps 那条路不会遇到这些；本机反复构建同一个
+tag 时全都会遇到：
+
+1. **ArgoCD 自愈会把本机镜像改回 Git 里的 tag。** 部署前先
+   `kubectl -n argocd patch application mycode --type=merge -p '{"spec":{"syncPolicy":{"automated":null}}}'`，
+   验完再开回来。探针为了改 `MYCODE_SANDBOX_DEADLINE` 也要临时关自动同步，它的收尾 trap
+   **按进来时的原样还**（原来是关的就还关着），不会顺手把自愈打开——否则下一轮探针跑的
+   就是 Git 里的旧镜像，看起来像「修复没生效」。
+2. **同 tag 换内容，`kubectl apply` 认为没变化，不会重启。** 预载完必须
+   `kubectl -n mycode rollout restart deploy/control-plane`，否则跑的还是旧代码——
+   表现为「明明改了却没生效」。判断办法：`kubectl exec ... -- grep -c <新符号> <文件>`。
+3. **`Recreate` 策略下，一个卡在拉镜像的旧 Pod 会挡住整个滚动更新。** 旧 Pod
+   `Terminating` 但节点上 `crictl pods`/`crictl ps -a` 都查不到它时，说明 kubelet 卡在
+   拉取里出不来，`kubectl delete pod --grace-period=0 --force` 收尾即可（没有运行中的
+   容器会漏掉）。有容器在跑时不能这么干。

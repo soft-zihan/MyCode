@@ -29,6 +29,7 @@ from routers import (
     branches_router,
     workspace_import_router,
     cloud_router,
+    cloud_tasks_router,
     websocket_router,
     eval_router,
     bad_cases_router,
@@ -80,6 +81,22 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[STARTUP] Eval tailer init failed (non-fatal): {e!r}")
 
+    # 云端沙箱 reconcile：准入 → 查 Job → tail 事件 → 落地。
+    # 没配 MYCODE_SANDBOX_IMAGE（本地开发、CI）时 sandbox_settings 会抛，
+    # 这里 non-fatal 跳过，服务照常起。
+    cloud_reconciler: asyncio.Task | None = None
+    try:
+        from frontend.server.cloud.reconciler import CloudReconciler
+        from frontend.server.cloud.sandbox import sandbox_settings
+
+        cloud_settings = sandbox_settings()
+        cloud_reconciler = asyncio.create_task(
+            CloudReconciler(max_concurrency=cloud_settings["max_concurrency"]).run()
+        )
+        print("[STARTUP] Cloud reconciler started")
+    except Exception as e:
+        print(f"[STARTUP] Cloud reconciler init failed (non-fatal): {e!r}")
+
     # 可观测性初始化（OTel → Langfuse，失败不阻塞主流程）
     try:
         from agents.observability import init_tracing
@@ -118,6 +135,9 @@ async def lifespan(app: FastAPI):
 
     if eval_tailer is not None:
         eval_tailer.cancel()
+
+    if cloud_reconciler is not None:
+        cloud_reconciler.cancel()
 
     # U6：先优雅收口活跃会话（abort → 限时等待 → 合成 turn/end{shutdown}）
     try:
@@ -177,6 +197,7 @@ app.include_router(worktrees_router)
 app.include_router(branches_router)
 app.include_router(workspace_import_router)
 app.include_router(cloud_router)
+app.include_router(cloud_tasks_router)
 app.include_router(projects_router)
 app.include_router(websocket_router)
 app.include_router(eval_router)

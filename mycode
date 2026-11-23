@@ -34,6 +34,7 @@ mycode — 启动器
   cloud-up         一条命令走完从开机到能用（幂等，可反复跑）
   cloud-status     只看现状：节点/Pod/ArgoCD/镜像/浏览器那条路通不通
   cloud-down --yes 拆集群（不可逆，PVC 里的会话数据一起没）
+  cloud exec|list|logs|prune   云端任务：提任务 / 看列表 / 看日志 / 清终态
 
 agent：
   mycode                        交互式 REPL，工作区为当前目录
@@ -88,4 +89,12 @@ done
 
 # 让 agents 包可导入（无论从哪里启动），但工作区保持为当前目录
 export PYTHONPATH="$SCRIPT_DIR${PYTHONPATH:+:$PYTHONPATH}"
+
+# 云端任务子命令。与 cloud-up/status/down 分开：那三个是集群 bring-up（bash 脚本），
+# 这个是任务 API 客户端（python），安装包里也该能用。
+if [ "${1:-}" = "cloud" ]; then
+  shift
+  exec "$PY" -m agents.cloud_cli "$@"
+fi
+
 exec "$PY" -m agents.main "$@"

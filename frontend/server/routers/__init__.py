@@ -11,6 +11,7 @@ from .worktrees import router as worktrees_router
 from .branches import router as branches_router
 from .workspace_import import router as workspace_import_router
 from .cloud import router as cloud_router
+from .cloud_tasks import router as cloud_tasks_router
 from .websocket import router as websocket_router
 from .eval import router as eval_router
 from .bad_cases import router as bad_cases_router
@@ -33,6 +34,7 @@ __all__ = [
     "branches_router",
     "workspace_import_router",
     "cloud_router",
+    "cloud_tasks_router",
     "websocket_router",
     "eval_router",
     "bad_cases_router",

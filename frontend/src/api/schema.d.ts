@@ -247,6 +247,44 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/cloud/git-token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Token */
+        get: operations["get_token_api_cloud_git_token_get"];
+        /** Set Token */
+        put: operations["set_token_api_cloud_git_token_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cloud/prune": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Prune
+         * @description 清终态任务的工作区与 Job。活跃任务的工作区绝不动。
+         */
+        post: operations["prune_api_cloud_prune_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/cloud/status": {
         parameters: {
             query?: never;
@@ -256,6 +294,59 @@ export interface paths {
         };
         /** Api Cloud Status */
         get: operations["api_cloud_status_api_cloud_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cloud/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Tasks */
+        get: operations["list_tasks_api_cloud_tasks_get"];
+        put?: never;
+        /** Create Task */
+        post: operations["create_task_api_cloud_tasks_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cloud/tasks/{task_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Task */
+        get: operations["get_task_api_cloud_tasks__task_id__get"];
+        put?: never;
+        post?: never;
+        /** Cancel Task */
+        delete: operations["cancel_task_api_cloud_tasks__task_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cloud/tasks/{task_id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Task Events */
+        get: operations["task_events_api_cloud_tasks__task_id__events_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2537,6 +2628,20 @@ export interface components {
             /** Message */
             message: string;
         };
+        /** TaskCreate */
+        TaskCreate: {
+            /** Prompt */
+            prompt: string;
+            /** Ref */
+            ref?: string | null;
+            /** Repo Url */
+            repo_url: string;
+            /**
+             * Setup Command
+             * @default
+             */
+            setup_command: string;
+        };
         /** TaskCreateRequest */
         TaskCreateRequest: {
             /**
@@ -2569,30 +2674,7 @@ export interface components {
             /** Focus Id */
             focus_id?: number | null;
             /** Tasks */
-            tasks: components["schemas"]["TaskOut"][];
-        };
-        /** TaskOut */
-        TaskOut: {
-            /** Acceptance */
-            acceptance: string;
-            /** Content */
-            content: string;
-            /** Created At */
-            created_at: string;
-            /** Detail */
-            detail: string;
-            /** Detail Origin Seq */
-            detail_origin_seq?: number | null;
-            /** Error */
-            error: string;
-            /** Id */
-            id: number;
-            /** Started Seq */
-            started_seq?: number | null;
-            /** Status */
-            status: string;
-            /** Updated At */
-            updated_at: string;
+            tasks: components["schemas"]["routers__events__TaskOut"][];
         };
         /** TaskUpdateRequest */
         TaskUpdateRequest: {
@@ -2628,6 +2710,16 @@ export interface components {
             tool_name?: string | null;
             /** Turn Number */
             turn_number: number;
+        };
+        /** TokenIn */
+        TokenIn: {
+            /** Token */
+            token: string;
+        };
+        /** TokenOut */
+        TokenOut: {
+            /** Configured */
+            configured: boolean;
         };
         /**
          * UpdateBadCaseRequest
@@ -2718,6 +2810,62 @@ export interface components {
             cwd?: string | null;
             /** Path */
             path: string;
+        };
+        /** TaskOut */
+        routers__cloud_tasks__TaskOut: {
+            /** Branch */
+            branch: string;
+            /** Created At */
+            created_at: string;
+            /** Error */
+            error: string;
+            /** Id */
+            id: string;
+            /** Job Name */
+            job_name: string;
+            /** Mergeable */
+            mergeable?: boolean | null;
+            /** Pr Url */
+            pr_url: string;
+            /** Prompt */
+            prompt: string;
+            /** Ref */
+            ref?: string | null;
+            /** Repo Url */
+            repo_url: string;
+            /** Session Id */
+            session_id: string;
+            /** Setup Command */
+            setup_command: string;
+            /** Status */
+            status: string;
+            /** Updated At */
+            updated_at: string;
+            /** Workspace Name */
+            workspace_name: string;
+        };
+        /** TaskOut */
+        routers__events__TaskOut: {
+            /** Acceptance */
+            acceptance: string;
+            /** Content */
+            content: string;
+            /** Created At */
+            created_at: string;
+            /** Detail */
+            detail: string;
+            /** Detail Origin Seq */
+            detail_origin_seq?: number | null;
+            /** Error */
+            error: string;
+            /** Id */
+            id: number;
+            /** Started Seq */
+            started_seq?: number | null;
+            /** Status */
+            status: string;
+            /** Updated At */
+            updated_at: string;
         };
     };
     responses: never;
@@ -3270,6 +3418,81 @@ export interface operations {
             };
         };
     };
+    get_token_api_cloud_git_token_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenOut"];
+                };
+            };
+        };
+    };
+    set_token_api_cloud_git_token_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TokenIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    prune_api_cloud_prune_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
     api_cloud_status_api_cloud_status_get: {
         parameters: {
             query?: never;
@@ -3286,6 +3509,167 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CloudStatus"];
+                };
+            };
+        };
+    };
+    list_tasks_api_cloud_tasks_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["routers__cloud_tasks__TaskOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_task_api_cloud_tasks_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TaskCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["routers__cloud_tasks__TaskOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_task_api_cloud_tasks__task_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["routers__cloud_tasks__TaskOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_task_api_cloud_tasks__task_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["routers__cloud_tasks__TaskOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    task_events_api_cloud_tasks__task_id__events_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -6233,7 +6617,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TaskOut"];
+                    "application/json": components["schemas"]["routers__events__TaskOut"];
                 };
             };
             /** @description Validation Error */
@@ -6301,7 +6685,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TaskOut"];
+                    "application/json": components["schemas"]["routers__events__TaskOut"];
                 };
             };
             /** @description Validation Error */
