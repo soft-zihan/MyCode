@@ -132,6 +132,16 @@ def skill_venv_dir() -> Path:
     return _resolve("skill-venv", env="MYCODE_SKILL_VENV", legacy_root=".my-code")
 
 
+def cloud_tasks_dir() -> Path:
+    """云端任务记录。每个任务目录同时是沙箱 Job 的 subPath 挂载源。"""
+    return _resolve("cloud_tasks")
+
+
+def cloud_git_token_path() -> Path:
+    """Git PAT。在状态根而不是 cloud_tasks_dir() 里：沙箱只挂得到子目录，够不到根。"""
+    return _resolve("cloud_git_token")
+
+
 def disabled_mcp_path() -> Path:
     """被停用的 MCP server 名单。
 

@@ -1,0 +1,39 @@
+# 控制面要能建沙箱 Job。B1 没有任何 RBAC，用的是 default SA（零权限），
+# 所以就算写了 Job 清单也建不出来（API 403）。
+# 最小权限：只给 batch/jobs 与 pods 的读+建+删，**不给 secrets 任何权限**
+# （PAT 走 PVC 文件，不走 Secret 写入），不给 deployments，不给 cluster 级资源。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mycode-control-plane
+  namespace: mycode
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mycode-sandbox-manager
+  namespace: mycode
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mycode-sandbox-manager
+  namespace: mycode
+subjects:
+  - kind: ServiceAccount
+    name: mycode-control-plane
+    namespace: mycode
+roleRef:
+  kind: Role
+  name: mycode-sandbox-manager
+  apiGroup: rbac.authorization.k8s.io

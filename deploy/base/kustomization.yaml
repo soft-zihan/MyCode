@@ -8,10 +8,12 @@ namespace: mycode
 resources:
   - namespace.yaml
   - pvc.yaml
+  - rbac.yaml
   - deployment.yaml
   - service.yaml
   - ingress.yaml
   - networkpolicy.yaml
+  - sandbox-networkpolicy.yaml
 
 # 刻意不在 base 里放 images transformer：镜像 tag 由 deploy/kind 的 overlay 决定，
 # 而那一行是 CI 唯一会改动的地方。两处都能改 tag 的话，迟早出现「以为改了其实没改」。

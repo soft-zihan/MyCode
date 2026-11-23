@@ -25,6 +25,8 @@ spec:
         app.kubernetes.io/name: mycode
         app.kubernetes.io/component: control-plane
     spec:
+      # 建沙箱 Job 需要权限；default SA 是零权限（见 rbac.yaml）
+      serviceAccountName: mycode-control-plane
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -85,6 +87,18 @@ spec:
                 secretKeyRef:
                   name: mycode-secrets
                   key: auth-token
+            # 沙箱与控制面同镜像同 tag：由 deploy/kind 的 images transformer +
+            # replacement 统一覆盖，保证端云同 commit。不靠控制面自省自己的 tag。
+            - name: MYCODE_SANDBOX_IMAGE
+              value: "ghcr.io/soft-zihan/mycode:b1-local"
+            - name: MYCODE_CLOUD_MAX_CONCURRENCY
+              value: "1"        # 宿主 5 vCPU / 12GB，且 RWO 卷把沙箱钉在单节点
+            - name: MYCODE_SANDBOX_CPU
+              value: "1"
+            - name: MYCODE_SANDBOX_MEMORY
+              value: "2Gi"
+            - name: MYCODE_SANDBOX_DEADLINE
+              value: "1800"
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false

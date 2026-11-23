@@ -66,6 +66,8 @@ def test_legacy_defaults_when_home_unset():
     assert state_root.settings_path() == home / ".mycode" / "settings.json"
     assert state_root.embed_cache_dir() == home / ".mycode" / "embed-cache"
     assert state_root.logs_dir() == home / ".mycode" / "logs"
+    assert state_root.cloud_tasks_dir() == home / ".mycode" / "cloud_tasks"
+    assert state_root.cloud_git_token_path() == home / ".mycode" / "cloud_git_token"
     assert state_root.disabled_mcp_path() == (
         home / ".mycode" / "config" / "disabled_mcp_servers.json"
     )
@@ -95,6 +97,8 @@ def test_mycode_home_collapses_both_roots(tmp_path, monkeypatch):
     assert state_root.settings_path() == root / "settings.json"
     assert state_root.embed_cache_dir() == root / "embed-cache"
     assert state_root.logs_dir() == root / "logs"
+    assert state_root.cloud_tasks_dir() == root / "cloud_tasks"
+    assert state_root.cloud_git_token_path() == root / "cloud_git_token"
     # 历史上多套了一层 config/，收进根之后保留这层，不迁移旧文件
     assert state_root.disabled_mcp_path() == root / "config" / "disabled_mcp_servers.json"
 
@@ -116,6 +120,8 @@ def test_mycode_home_collapses_both_roots(tmp_path, monkeypatch):
         state_root.settings_path(),
         state_root.embed_cache_dir(),
         state_root.logs_dir(),
+        state_root.cloud_tasks_dir(),
+        state_root.cloud_git_token_path(),
         state_root.disabled_mcp_path(),
         state_root.config_path(),
         state_root.projects_dir(),
