@@ -20,6 +20,9 @@
 - 打包Windows/MacOS/Linus系统下安装包
 - 开新分支添加 Personal Agent.（doing）
 
+## 界面预览
+![1795574335635](image/README/1795574335635.png)
+
 ## 架构
 
 ```
